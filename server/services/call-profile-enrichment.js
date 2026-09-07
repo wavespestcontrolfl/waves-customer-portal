@@ -70,17 +70,23 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
 
   try {
     if (accessNotes || pets) {
-      const existing = await db('property_preferences').where({ customer_id: customerId }).first();
-      const codes = extractCodes(accessNotes);
-      if (!existing) {
-        await db('property_preferences').insert({
-          customer_id: customerId,
-          ...Object.fromEntries(Object.entries(codes).filter(([, v]) => v)),
-          ...(petDetailsFrom(pets) ? { pet_details: petDetailsFrom(pets) } : {}),
-          ...(accessNotes ? { access_notes: appendWithProvenance(null, String(accessNotes).slice(0, 800), callCreatedAt) } : {}),
-        });
-        applied.push('property_preferences_created');
-      } else {
+      // Same customer preference lock every preference writer holds (portal
+      // saves, merges, SMS capture): the row read below is then current, not
+      // a snapshot a concurrent writer can invalidate before this update.
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+        const existing = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().first();
+        const codes = extractCodes(accessNotes);
+        if (!existing) {
+          await trx('property_preferences').insert({
+            customer_id: customerId,
+            ...Object.fromEntries(Object.entries(codes).filter(([, v]) => v)),
+            ...(petDetailsFrom(pets) ? { pet_details: petDetailsFrom(pets) } : {}),
+            ...(accessNotes ? { access_notes: appendWithProvenance(null, String(accessNotes).slice(0, 800), callCreatedAt) } : {}),
+          });
+          applied.push('property_preferences_created');
+          return;
+        }
         const updates = {};
         // Fill-only-when-empty for structured fields — admin edits win forever.
         for (const [col, val] of Object.entries(codes)) {
@@ -101,10 +107,10 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
           if (appended !== existing.access_notes) updates.access_notes = appended;
         }
         if (Object.keys(updates).length) {
-          await db('property_preferences').where({ customer_id: customerId }).update({ ...updates, updated_at: new Date() });
+          await trx('property_preferences').where({ customer_id: customerId }).update({ ...updates, updated_at: new Date() });
           applied.push(...Object.keys(updates));
         }
-      }
+      });
     }
 
     // Internal color → customers.internal_notes (append-only, provenance-tagged).

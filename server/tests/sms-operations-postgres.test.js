@@ -231,6 +231,45 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await listOpenCommitments(mockPg)).toEqual([]);
   });
 
+  test('media metadata never reaches the extraction prompt', async () => {
+    await mockPg('sms_log').where({ id: message.id }).update({ metadata: JSON.stringify({
+      media: [{ url: 'https://api.twilio.com/2010-04-01/Accounts/AC0/Messages/MM0/Media/ME0', key: 'sms-media/abc.jpg' }],
+    }) });
+    const extract = jest.fn().mockResolvedValue({ obligations: [], facts: [], dropped: 0 });
+    await runSmsOperationalActions({ conn: mockPg, extract });
+    expect(extract).toHaveBeenCalledTimes(1);
+    const { message: current, history } = extract.mock.calls[0][0];
+    expect(current).not.toHaveProperty('metadata');
+    expect(JSON.stringify([current, ...history])).not.toContain('sms-media');
+  });
+
+  test('call-profile enrichment cannot overwrite a value written under the shared preference lock', async () => {
+    const gates = require('../config/feature-gates').gates;
+    gates.callProfileEnrichment = true;
+    try {
+      const { enrichFromCall } = require('../services/call-profile-enrichment');
+      let lockTaken;
+      const locked = new Promise((resolve) => { lockTaken = resolve; });
+      const held = mockPg.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(message.customer_id)]);
+        lockTaken();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await trx('property_preferences').insert({ customer_id: message.customer_id, access_notes: 'Use the side gate.' });
+      });
+      await locked;
+      const enriched = enrichFromCall({ customerId: message.customer_id, callCreatedAt: '2026-09-06T00:00:00Z',
+        extraction: { property: { access_notes: 'front gate code is 4545' } } });
+      await Promise.all([held, enriched]);
+      const prefs = await mockPg('property_preferences').where({ customer_id: message.customer_id });
+      expect(prefs).toHaveLength(1);
+      expect(prefs[0].access_notes).toContain('Use the side gate.');
+      expect(prefs[0].access_notes).toContain('[call 2026-09-06] front gate code is 4545');
+      expect(prefs[0].property_gate_code).toBe('4545');
+    } finally {
+      gates.callProfileEnrichment = false;
+    }
+  });
+
   test('a failed critical audit rolls back profile, commitment and processed marker together', async () => {
     await mockPg.schema.renameTable('audit_log', 'audit_log_unavailable');
     try {

@@ -50,6 +50,14 @@ describe('SMS operational evidence and ownership', () => {
     expect(result).toMatchObject({ obligations: [], dropped: 1 });
   });
 
+  test.each(["can't", 'cannot', "won't", "shouldn't", 'unable to', 'can’t', 'won’t'])('negated %s action requires review', (negation) => {
+    const message = source(`I ${negation} schedule a visit`);
+    const result = groundExtraction(extracted([obligation(message.message_body, {
+      kind: 'schedule_visit', description: 'schedule a visit',
+    })]), { message, properties });
+    expect(result).toMatchObject({ obligations: [], dropped: 1 });
+  });
+
   test('customer promises stay customer-owned, with no staff callback invented', () => {
     const message = source("I'll send photos tomorrow");
     const result = groundExtraction(extracted([
@@ -162,13 +170,16 @@ describe('SMS operational evidence and ownership', () => {
     'The dogs stay inside. However, could they escape',
     'Where is the irrigation controller', 'Do we leave the gate open',
     'The controller is outside\nIs it beside the garage',
+    'May we park in the driveway', 'Please can we park in the driveway',
+    'Ok to park in the driveway', 'Mind if we park in the driveway',
   ])('unpunctuated and Unicode questions require review: %s', (quote) => {
     expect(groundExtraction(extracted([], [fact({ field: 'pet_details', quote, value: quote })]), {
       message: source(quote), properties,
     })).toEqual({ obligations: [], facts: [], dropped: 1 });
   });
 
-  test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A'])('missing access code remains empty: %s', (value) => {
+  test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A', 'same as last time', 'the usual',
+    'on the fridge'])('missing or relational access code remains empty: %s', (value) => {
     const quote = `Lockbox code is ${value}`;
     const item = fact({ field: 'lockbox_code', quote, value });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
@@ -181,6 +192,12 @@ describe('SMS operational evidence and ownership', () => {
     expect(await extractSmsOperations({ message: source('Keep the pets inside. '.repeat(30)), properties }))
       .toMatchObject({ facts: [], dropped: 1 });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('a single alphabetic token is still a code', () => {
+    const message = source('Lockbox code is ABCD');
+    expect(groundExtraction(extracted([], [fact({ field: 'lockbox_code', quote: message.message_body, value: 'ABCD' })]),
+      { message, properties }).facts.map((f) => f.value)).toEqual(['ABCD']);
   });
 
   test('preserves access-code symbols and case exactly as supplied', () => {
@@ -419,6 +436,8 @@ describe('profile safeguards independent of model labels', () => {
     'Gate is broken right now, use the front door.',
     'Use the side door during our renovation.',
     'Leave the package by the pool through Sept 3rd.',
+    'For our upcoming service, park on the street.',
+    'Before your visit, please close the gate.',
   ])('holds a durable-labelled temporary instruction: %s', (quote) => {
     expect(factVerdict(fact({ field: 'access_notes', quote, value: quote }), {
       properties, senderIsPrimary: true,
