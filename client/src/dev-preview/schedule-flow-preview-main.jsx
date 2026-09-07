@@ -41,7 +41,7 @@ const availability = {
   rangeTo: etDateString(addETDays(now, 13)),
 };
 const payload = {
-  state: flow === 'reservice' ? 'eligible' : 'reschedulable',
+  state: flow === 'reservice' ? 'bookable' : 'reschedulable',
   customerFirstName: 'Jordan',
   service: { type: 'Quarterly Pest Control' },
   isRecurring: true,
