@@ -148,12 +148,12 @@ async function proposeFact(trx, message, fact, current) {
   const sameFact = prior.filter((proposal) => proposal.field === fact.field
     && proposal.evidence?.after_hash === hashSensitiveValue(fact.value));
   const existing = sameFact.find((proposal) => proposal.status !== 'pending') || sameFact[0]
-    || await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).first('id', 'status');
+    || await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).forUpdate().first('id', 'status');
   if (existing) return { id: existing.status === 'pending' ? existing.id : null, created: false };
-  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
+  const retired = await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
     notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
   const proposal = await upsertSensitiveProposal(input, { trx });
-  return { id: proposal.id, created: proposal.inserted };
+  return { id: proposal.id, created: proposal.inserted, retired_proposal_ids: retired.map((row) => row.id).sort() };
 }
 
 async function applyFacts(trx, message, facts, context) {
@@ -179,7 +179,8 @@ async function applyFacts(trx, message, facts, context) {
       const proposal = await proposeFact(trx, message, fact, persistedCurrent);
       const proposalId = proposal.id;
       outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId,
-        proposal_created: proposal.created });
+        proposal_created: proposal.created,
+        ...(proposal.retired_proposal_ids?.length ? { retired_proposal_ids: proposal.retired_proposal_ids } : {}) });
       continue;
     }
     // A newer distinct pending proposal for this typed field (the extraction
@@ -316,29 +317,11 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
           property_ambiguous: !propertyId, customer_id: customer.id, source_at: message.created_at },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
-    let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
-    if (replay) {
-      // Bind the actual locked decisions, including private values, to the
-      // operator's preview without exposing them. Fresh proposal UUIDs vary
-      // across rollback; preserved proposal identities must still match.
-      analysis.preview_hash = hashSensitiveValue({ purpose: 'sms-profile-replay', version: VERSION,
-        source: SOURCE_COLUMNS.map((column) => [column, live[column] ?? null]),
-        facts: facts.map(({ proposal_id, ...fact }) => ({ ...fact,
-          proposal_id: fact.proposal_created ? null : proposal_id ?? null })), dropped: extracted.dropped });
-      const previewAuthorized = [matchedContext.dryRun, matchedContext.previewHash === analysis.preview_hash].some(Boolean);
-      if (!previewAuthorized) {
-        throw Object.assign(new Error('sms_profile_replay_preview_changed'), { code: 'SMS_REPLAY_PREVIEW_CHANGED' });
-      }
-      await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.profile.replayed',
-        resource_type: 'sms_log', resource_id: message.id,
-        metadata: { initiated_by: 'operator', extractor_version: VERSION, preview_hash: analysis.preview_hash,
-          outcomes: facts.map(({ field, outcome, proposal_id }) => ({ field, outcome, proposal_id })) } });
-      analysis = { ...live.operational_analysis, replay: analysis };
-    }
-    await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
-    await recordExtractionAttempt({ ...receipt, status: 'ok', proposal_count: facts.length + obligations.length });
+    // The existing notifier writes only through trx. Preview rolls this back
+    // with the proposals, while execution hashes the same dedupe decision.
     const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome));
-    if (!matchedContext.dryRun && exceptions.length + extracted.dropped) {
+    let notification = null;
+    if (exceptions.length + extracted.dropped) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
         'Part of this message needs an evidence, property, timing, or existing-value check. Open the customer profile to review the source conversation.',
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
@@ -347,7 +330,34 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
             fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
             reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif.id) throw new Error('sms_operations_bell_not_persisted');
+      notification = notif.deduped
+        ? { action: 'preserve_notification', notification_id: notif.id }
+        : { action: 'create_notification' };
     }
+    let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
+    if (replay) {
+      // Bind the actual locked decisions, including private values, to the
+      // operator's preview without exposing them. Fresh proposal UUIDs vary
+      // across rollback; preserved and retired proposal identities must still match.
+      analysis.preview_hash = hashSensitiveValue({ purpose: 'sms-profile-replay', version: VERSION,
+        source: SOURCE_COLUMNS.map((column) => [column, live[column] ?? null]),
+        facts: facts.map((fact) => ({ field: fact.field, value: fact.value, quote: fact.quote,
+          duration: fact.duration, property_id: fact.property_id, outcome: fact.outcome,
+          proposal_created: fact.proposal_created, retired_proposal_ids: fact.retired_proposal_ids,
+          proposal_id: fact.proposal_created ? null : fact.proposal_id ?? null })), dropped: extracted.dropped, notification });
+      const previewAuthorized = [matchedContext.dryRun, matchedContext.previewHash === analysis.preview_hash].some(Boolean);
+      if (!previewAuthorized) {
+        throw Object.assign(new Error('sms_profile_replay_preview_changed'), { code: 'SMS_REPLAY_PREVIEW_CHANGED' });
+      }
+      analysis.notification = notification;
+      await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.profile.replayed',
+        resource_type: 'sms_log', resource_id: message.id,
+        metadata: { initiated_by: 'operator', extractor_version: VERSION, preview_hash: analysis.preview_hash,
+          outcomes: facts.map(({ field, outcome, proposal_id }) => ({ field, outcome, proposal_id })) } });
+      analysis = { ...live.operational_analysis, replay: analysis };
+    }
+    await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
+    await recordExtractionAttempt({ ...receipt, status: 'ok', proposal_count: facts.length + obligations.length });
     return { recorded: obligations.length, applied: facts.filter((f) => f.outcome === 'applied').length,
       proposed: facts.filter((f) => f.outcome === 'proposed').length,
       preserved: facts.filter((f) => f.outcome === 'previously_applied').length };
@@ -597,9 +607,11 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
         const outcomes = simulated.operational_analysis.replay.facts.map((fact) => ({
           field: fact.field, action: fact.outcome === 'proposed'
             ? (fact.proposal_created ? 'create_proposal' : 'preserve_pending') : fact.outcome,
+          ...(fact.retired_proposal_ids?.length ? { retired_proposal_ids: fact.retired_proposal_ids } : {}),
         }));
         return { dry_run: true, sms_log_id: smsLogId, preview_hash: simulated.operational_analysis.replay.preview_hash, ...outcome,
-          unverified_count: simulated.operational_analysis.replay.dropped, outcomes };
+          unverified_count: simulated.operational_analysis.replay.dropped, outcomes,
+          ...(simulated.operational_analysis.replay.notification ? { notification: simulated.operational_analysis.replay.notification } : {}) };
       } finally {
         await preview.rollback();
       }

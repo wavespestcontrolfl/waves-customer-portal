@@ -244,6 +244,84 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await replaySmsProfile({ ...args, previewHash })).toMatchObject({ proposed: 1 });
   });
 
+  test('replay previews exception bells transactionally and rejects changed notification dedupe', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const notifier = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [], dropped: 1 }) };
+    const preview = await replaySmsProfile(args);
+    expect(preview).toMatchObject({ dry_run: true, notification: { action: 'create_notification' } });
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis).not.toHaveProperty('replay');
+    const [existing] = await mockPg('notifications').insert({ recipient_type: 'admin', category: 'alert',
+      title: 'Synthetic exception', metadata: JSON.stringify({ dedupeKey: `sms-property-instructions:${message.id}` }) }).returning('*');
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toEqual({ skipped: 'preview_changed' });
+    const refreshed = await replaySmsProfile(args);
+    expect(refreshed.notification).toEqual({ action: 'preserve_notification', notification_id: existing.id });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: refreshed.preview_hash })).toMatchObject({ applied: 0, proposed: 0 });
+    expect(await mockPg('notifications')).toHaveLength(1);
+    expect((await mockPg('sms_log').first()).operational_analysis.replay.notification).toEqual(refreshed.notification);
+  });
+
+  test('executing an exception preview creates exactly its one previewed bell', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const notifier = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [], dropped: 1 }) };
+    const preview = await replaySmsProfile(args);
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toMatchObject({ applied: 0, proposed: 0 });
+    expect(await mockPg('notifications')).toHaveLength(1);
+    expect((await mockPg('sms_log').first()).operational_analysis.replay.notification).toEqual(preview.notification);
+  });
+
+  test('replay holds preserved proposal dispositions against concurrent staff rejection through commit', async () => {
+    await recordMessageOperations(mockPg, message, result, context);
+    const proposal = await mockPg('data_hygiene_proposals').first();
+    const previewHash = await replayPreviewHash();
+    await mockPg.transaction(async (trx) => {
+      await recordMessageOperations(trx, message, result, { ...context, replay: true, previewHash });
+      // The replay savepoint completed, but the owning transaction has not.
+      await expect(mockPg.transaction(async (reject) => {
+        await reject.raw("SET LOCAL lock_timeout = '100ms'");
+        return reject('data_hygiene_proposals').where({ id: proposal.id, status: 'pending' }).update({ status: 'rejected' });
+      })).rejects.toThrow('lock timeout');
+      expect((await trx('data_hygiene_proposals').where({ id: proposal.id }).first()).status).toBe('pending');
+    });
+    expect(await mockPg('data_hygiene_proposals').where({ id: proposal.id, status: 'pending' }).update({ status: 'rejected' })).toBe(1);
+  });
+
+  test('provider object key order does not change an otherwise identical replay preview', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const previewHash = await replayPreviewHash();
+    const reordered = { ...result, facts: result.facts.map((fact) => Object.fromEntries(Object.entries(fact).reverse())) };
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash, extract: async () => reordered }))
+      .toMatchObject({ proposed: 1 });
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
+  });
+
+  test('a pending sibling added after preview cannot be retired without a new preview', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => result };
+    const before = await replaySmsProfile(args);
+    const [sibling] = await mockPg('data_hygiene_proposals').insert({
+      rule_id: 'extract.irrigation_controller_location', rule_version: '1',
+      resource_type: 'property_preferences', scope_type: 'customer', scope_id: message.customer_id,
+      field: 'irrigation_controller_location', source: 'message-extraction', confidence: 0.9, tier: 'medium',
+      status: 'pending', idempotency_key: randomUUID(),
+      evidence: JSON.stringify({ source_at: new Date(message.created_at.getTime() - 1000).toISOString() }),
+    }).returning('id');
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: before.preview_hash }))
+      .toEqual({ skipped: 'preview_changed' });
+    expect(await mockPg('data_hygiene_proposals').where({ id: sibling.id }).first()).toMatchObject({ status: 'pending' });
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
+    expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
+    const refreshed = await replaySmsProfile(args);
+    expect(refreshed.outcomes[0]).toMatchObject({ retired_proposal_ids: [sibling.id] });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: refreshed.preview_hash })).toMatchObject({ proposed: 1 });
+    expect(await mockPg('data_hygiene_proposals').where({ id: sibling.id }).first()).toMatchObject({ status: 'stale' });
+  });
+
   test('a changed staff disposition invalidates execution even when extracted facts stay identical', async () => {
     await recordMessageOperations(mockPg, message, result, context);
     const previewHash = await replayPreviewHash();
@@ -288,13 +366,16 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test('preview exposes validation dispositions without persisting an exception bell or failed receipt', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const notifier = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
     const before = await mockPg('sms_log').first();
     const extract = async () => ({ ...result, facts: [{ ...result.facts[0], duration: 'visit_only' }] });
     expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract }))
       .toMatchObject({ dry_run: true, applied: 0, proposed: 0, outcomes: [
         { field: 'irrigation_controller_location', action: 'temporary_instruction' },
       ] });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(await mockPg('notifications')).toHaveLength(0);
     expect(await mockPg('sms_log').first()).toEqual(before);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
     expect(await mockPg('audit_log')).toHaveLength(0);
