@@ -4780,17 +4780,29 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               err.code = 'VISIT_OWNER_CHANGED';
               throw err;
             }
+            // Property re-resolve under the lock (Codex r1/r3 on #4113): the
+            // lawn plan above was built from the handler-entry property (turf
+            // profile, history, assignment), and the lawn actuals ledger and
+            // lawn_assessments freeze svc.property_id at completion. An
+            // address edit that committed between the load and this lock
+            // would stamp the old plan onto the new property — abort with the
+            // same retryable shape as the owner change rather than adopt
+            // either side silently.
+            if (Object.prototype.hasOwnProperty.call(lockedSvcRow, 'property_id')
+              && String(lockedSvcRow.property_id || '') !== String(svc.property_id || '')) {
+              const err = new Error('This appointment\'s property changed while completing — reload the job and complete it again.');
+              err.statusCode = 409;
+              err.isOperational = true;
+              err.code = 'VISIT_PROPERTY_CHANGED';
+              throw err;
+            }
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
             const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
             const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);
-            // property_id: the lawn actuals ledger and lawn_assessments freeze
-            // the service property at completion — an address edit that
-            // committed before this lock must win, not the handler-entry row.
             for (const field of [
               'actual_end_time', 'check_out_time', 'completed_at',
               'service_time_minutes', 'actual_duration_minutes',
               'time_on_site_adjusted_minutes', 'time_on_site_correction_seq',
-              'property_id',
             ]) {
               if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];
             }
