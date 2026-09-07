@@ -140,8 +140,13 @@ async function evaluate(conn, invoiceId, catalogNames, { lock = false } = {}) {
     if (!svc || DEAD_VISIT_STATUSES.includes(String(svc.status)) || dateOnly(svc.scheduled_date) !== day) return { skip: 'visitChanged' };
     // Uniqueness AGAIN under the locks (pre-push P1): a visit moved onto or
     // reactivated for this date while we waited makes the pairing a guess.
-    const stillOne = await conn('scheduled_services').where({ customer_id: inv.customer_id })
-      .whereRaw('scheduled_date::date = ?::date', [day]).whereNotIn('status', DEAD_VISIT_STATUSES).select('id');
+    // EVERY row the customer has on this date is locked here, dead statuses
+    // included, and stays locked through commit — a `rescheduled` sibling
+    // flipped back to `confirmed` by the schedule status route contends on
+    // its own row, not on the selected visit's chain (pre-push r4 P1).
+    const sameDay = await conn('scheduled_services').where({ customer_id: inv.customer_id })
+      .whereRaw('scheduled_date::date = ?::date', [day]).forUpdate().select('id', 'status');
+    const stillOne = sameDay.filter((row) => !DEAD_VISIT_STATUSES.includes(String(row.status)));
     if (stillOne.length !== 1 || String(stillOne[0].id) !== String(svc.id)) return { skip: 'ambiguous' };
   } else {
     svc = await conn('scheduled_services').where({ id: visits[0].id }).first('id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id');
