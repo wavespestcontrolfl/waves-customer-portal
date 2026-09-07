@@ -119,6 +119,11 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
     : 0;
 
   const unmatched = items.filter((item) => !item.product && isMaterialIntentLine(item));
+  // The reference matcher returns one catalog product per line. A '+' outside
+  // annotations can name another material; do not certify that partial match.
+  const selectedCombinedProducts = selectedItems.filter((item) => (
+    isMaterialIntentLine(item) && /\+/.test(String(item.raw || '').replace(/\([^)]*\)/g, ''))
+  ));
   const selectedMissingMaterialCost = selectedItems.filter((item) => (
     item.product
     && item.mix?.amount
@@ -163,6 +168,7 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
     selectedLineCount: materialSummary.selectedLineCount,
     missingPriceCount: materialSummary.missingPriceCount,
     unmatched,
+    selectedCombinedProducts,
     selectedMissingMaterialCost,
     selectedMissingRate,
     selectedNeedsPricing,
@@ -188,6 +194,7 @@ function buildCadenceReport(products, lawn = protocols.lawn) {
       }));
       const issues = results.flatMap((result) => [
         ...result.unmatched.map((item) => ({ visit: result.visit, reason: 'unmatched_product', line: item.raw })),
+        ...result.selectedCombinedProducts.map((item) => ({ visit: result.visit, reason: 'combined_products_unresolved', line: item.raw })),
         ...result.selectedMissingRate.map((item) => ({ visit: result.visit, reason: 'missing_rate', line: item.raw })),
         ...result.selectedMissingMaterialCost.map((item) => ({ visit: result.visit, reason: 'missing_cost', line: item.raw })),
         ...result.selectedNeedsPricing.map((item) => ({ visit: result.visit, reason: 'needs_pricing', line: item.raw })),
@@ -222,7 +229,8 @@ function buildCadenceReport(products, lawn = protocols.lawn) {
     referenceSqft: MATERIAL_REFERENCE_SQFT,
     budgetSource: '@waves/lawn-cost-floor repository allowances; deployed pricing overrides are not verified.',
     basis: 'Average flagged windows multiplied by sold applications; not a scheduled calendar.',
-    catalogScope: 'First-year selected products at normal weed pressure; unselected conditional products excluded. Unit conversions, supplier costs and field usage still need verification.',
+    catalogScope: 'JSON reference matched to catalog defaults, first year at normal weed pressure; unselected conditional products excluded. Does not reconcile lawn_protocol_windows/products or establish field-execution costs. Unit conversions and supplier costs still need verification.',
+    operatingLayerVerified: false,
     supplierCostsVerified: false,
     rows,
   };
@@ -309,6 +317,7 @@ function printResults(results) {
   }
 
   issueLines(results, 'unmatched', 'Unmatched protocol lines');
+  issueLines(results, 'selectedCombinedProducts', 'Combined product lines needing individual resolution');
   issueLines(results, 'selectedMissingRate', 'Selected lines missing rate');
   issueLines(results, 'selectedMissingMaterialCost', 'Selected lines with amount but no positive materialCost');
   issueLines(results, 'selectedNeedsPricing', 'Selected needs-pricing products');

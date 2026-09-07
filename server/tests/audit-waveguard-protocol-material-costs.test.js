@@ -29,6 +29,7 @@ test('catalog quantity cost scales to 4500 sqft and annualizes the sold count, n
   expect(nine.budgetMinusStaticAllowance).toBe(-97);
   expect(nine.catalogCalculationComplete).toBe(true);
   expect(result.supplierCostsVerified).toBe(false);
+  expect(result.operatingLayerVerified).toBe(false);
   expect(JSON.stringify(LAWN_MATERIAL_BUDGETS)).toBe(before);
 });
 
@@ -37,6 +38,23 @@ test('unmatched treatment without a dollar annotation makes the annual calculati
   expect(row.catalogSelectedAnnual).toBeNull();
   expect(row.catalogCalculationComplete).toBe(false);
   expect(row.issues).toContainEqual(expect.objectContaining({ reason: 'unmatched_product' }));
+});
+
+test.each([
+  'Synthetic Fertilizer + Secondary Blend ($3+$1)',
+  'Synthetic Fertilizer ($3) + Secondary Blend ($1)',
+  'Synthetic Fertilizer + NIS',
+])('a combined line remains incomplete even when the matcher finds a priced product: %s', (primary) => {
+  const row = reportFor([{ ...visit, primary }], [product, { ...product, id: 'synthetic-secondary', name: 'Secondary Blend' }]).rows[0];
+  expect(row.catalogSelectedSubtotal).toBeGreaterThan(0);
+  expect(row.catalogSelectedAnnual).toBeNull();
+  expect(row.issues).toContainEqual(expect.objectContaining({ reason: 'combined_products_unresolved', line: primary }));
+});
+
+test('a numeric combination inside a product annotation does not become a combined-material issue', () => {
+  const row = reportFor([{ ...visit, primary: 'Synthetic Fertilizer (FRAC 11+3)' }]).rows[0];
+  expect(row.catalogSelectedAnnual).toBe(162);
+  expect(row.issues).toEqual([]);
 });
 
 test.each([
