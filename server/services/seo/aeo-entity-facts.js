@@ -41,7 +41,6 @@ const CLAUSE_BOUNDARY_RE = /[.!?;\n]|,?\s+(?:but|however|whereas|although|though
 // "does not offer: fumigation, insulation" — a negated verb right before a
 // colon governs the list that follows; "is not a franchise: it offers …" does not.
 const LIST_INTRO_RE = /\b(?:offer|offers|include|includes|provide|provides|cover|covers|do|does|perform|performs|treat|treats|handle|handles|sell|sells|service|services|are|is)\s*$/i;
-const CLAUSE_WINDOW = 80;
 
 function leadClause(text) {
   const clause = text.split(CLAUSE_BOUNDARY_RE).pop();
@@ -67,19 +66,24 @@ const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d+[.)])[ \t]+/;
 // URL. List items stay on their own lines (each item is its own assertion)
 // EXCEPT under a negated list intro ("does not offer:"), whose items are
 // joined into one comma list so the intro governs every one of them.
+function stripEmphasis(line) {
+  return line
+    .replace(/^[ \t]*#{1,6}[ \t]+/, '')
+    .replace(/[*`~]+/g, '')
+    .replace(/(^|[\s(])_+|_+(?=[\s).,;:!?]|$)/g, '$1');
+}
+
 function normalizeAnswer(text) {
   const flat = String(text || '')
     .replace(/[\u2018\u2019\u02BC\u2032]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
-    .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
-    .replace(/[*`~]+/g, '')
-    .replace(/(^|[\s(])_+|_+(?=[\s).,;:!?]|$)/g, '$1');
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
   const lines = [];
   let governed = false;
   for (const raw of flat.split('\n')) {
+    // Detect the list marker BEFORE stripping emphasis: "* item" is a bullet.
     const isItem = LIST_MARKER_RE.test(raw);
-    const line = raw.replace(LIST_MARKER_RE, '').trim();
+    const line = stripEmphasis(raw.replace(LIST_MARKER_RE, '')).trim();
     if (!line) { governed = false; continue; }
     if (isItem && governed) { lines[lines.length - 1] += `, ${line}`; continue; }
     if (!isItem) {
@@ -110,8 +114,10 @@ function asserted(compiled, answer, { attributed = false } = {}) {
     if (compiled.rejectValue !== undefined && match[1] === compiled.rejectValue) continue;
     const start = match.index;
     const end = start + match[0].length;
-    const before = leadClause(answer.slice(Math.max(0, start - CLAUSE_WINDOW), start));
-    const after = trailClause(answer.slice(end, end + CLAUSE_WINDOW), before.trim() === '');
+    // Clause boundaries are found on the full text, never a fixed window: a
+    // governed list can run well past 80 characters before its last item.
+    const before = leadClause(answer.slice(0, start));
+    const after = trailClause(answer.slice(end), before.trim() === '');
     if (attributed && aboutAnotherEntity(before)) continue;
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first

@@ -65,6 +65,8 @@ test('markdown, bulleted lists and label-value answers score like plain prose', 
   expect(score('E6', 'Waves does not offer:\n- Fumigation\n- Insulation\n- Wildlife trapping').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Services include:\n1. Pest control\n2. Fumigation').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Fumigation: not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves does not offer:\n* Insulation\n* Fumigation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves does not offer:\n- wildlife trapping or removal\n- attic insulation installation or replacement\n- tent fumigation for drywood termite colonies').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '- Fumigation: not offered.\n- Termite: offered.').forbidden.fumigation_offered).toBe(false);
 });
 
