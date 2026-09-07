@@ -189,6 +189,17 @@ const embedHelmet = helmet({
   crossOriginOpenerPolicy,
 });
 
+// Website estimate embeds are restricted to the existing first-party fleet
+// allowlist. Unlike the general /book embed, unrelated sites cannot frame a
+// customer estimate. The query changes presentation only; token guards stand.
+const websiteEstimateHelmet = helmet({
+  contentSecurityPolicy: {
+    directives: { ...cspDirectives, frameAncestors: ["'self'", ...require('./config/cors-origins').allowedOrigins] },
+  },
+  frameguard: false,
+  crossOriginOpenerPolicy,
+});
+
 // First-party PostHog ingest proxy (/ingest/* → PostHog Cloud). Mounted
 // ABOVE helmet, the CORS allowlist, and the body parsers on purpose: PostHog's
 // own CORS headers must pass through untouched (spoke origins are not on the
@@ -201,6 +212,9 @@ app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened
   // (query string is not part of req.path; handle trailing slash too)
   if (req.path === '/book' || req.path === '/book/') return embedHelmet(req, res, next);
+  if (/^\/estimate\/[A-Za-z0-9_-]{15,64}\/?$/.test(req.path)
+    && req.query.website === '1' && req.query.embed === '1'
+    && require('./config/feature-gates').isEnabled('websiteQuoteBooking')) return websiteEstimateHelmet(req, res, next);
   return strictHelmet(req, res, next);
 });
 
