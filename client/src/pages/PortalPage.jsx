@@ -3468,10 +3468,10 @@ function ServicesTab() {
     moreSequence.current += 1;
     setLoadingMore(false);
     setServices(d.services || []);
-    setServicesOffset((d.services || []).length);
+    setServicesOffset(d.nextOffset ?? (d.services || []).length);
     setTotalServices(Number.isFinite(d.total) ? d.total : null);
     return () => { moreSequence.current += 1; };
-  }, [historyRead.data]);
+  }, [historyRead.data, historyRead.pending]);
 
   // The server caps each page at 100 rows — older visits stay reachable
   // through an explicit Load More instead of silently vanishing from history.
@@ -3486,12 +3486,16 @@ function ServicesTab() {
         // completed between pages shifts the boundary and re-sends the last
         // row of the previous page. Dedupe by id so it can't render twice,
         // but advance the cursor by rows RECEIVED so paging never stalls.
-        setServices(prev => {
-          const seen = new Set(prev.map(s => s.id));
-          return [...prev, ...(d.services || []).filter(s => !seen.has(s.id))];
+        historyRead.update(previous => {
+          const existing = previous.services || [];
+          const seen = new Set(existing.map(s => s.id));
+          return {
+            ...previous,
+            services: [...existing, ...(d.services || []).filter(s => !seen.has(s.id))],
+            nextOffset: servicesOffset + (d.services || []).length,
+            ...(Number.isFinite(d.total) ? { total: d.total } : {}),
+          };
         });
-        setServicesOffset(prev => prev + (d.services || []).length);
-        if (Number.isFinite(d.total)) setTotalServices(d.total);
       })
       .catch(err => {
         if (moreSequence.current !== attempt) return;
@@ -12808,12 +12812,9 @@ function TermiteBondCard({ bonds, compact, card, sectionTitle, primaryButton, se
 }
 
 function DocumentsTab({ customer, onSwitchTab }) {
-  const [termiteBonds, setTermiteBonds] = useState(null);
-  useEffect(() => {
-    api.getTermiteBond().then(d => {
-      setTermiteBonds(d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null);
-    }).catch(() => {});
-  }, []);
+  const termiteBondsRead = usePortalRead('termite-bonds', () => api.getTermiteBond()
+    .then(d => d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null));
+  const termiteBonds = termiteBondsRead.verified ? termiteBondsRead.data : null;
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const documentsRead = usePortalRead('documents', () => api.getDocuments());

@@ -74,6 +74,22 @@ afterEach(() => {
 });
 
 describe('open service reports', () => {
+  it('retains previously loaded older visits when going offline and revisiting the tab', async () => {
+    api.getServices.mockResolvedValueOnce({ services: [{ id: 'recent', type: 'Recent fixture treatment', date: '2024-02-01' }], total: 2 })
+      .mockResolvedValueOnce({ services: [{ id: 'older', type: 'Older fixture treatment', date: '2024-01-01' }] });
+    const view = (show) => <PortalReadProvider enabled><PortalRefreshArea>{show && <ServicesTab />}</PortalRefreshArea></PortalReadProvider>;
+    const { rerender } = render(view(true));
+    fireEvent.click(await screen.findByRole('button', { name: 'Load More Visits', exact: true }));
+    await screen.findByRole('button', { name: /Older fixture treatment/ });
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    expect(screen.getByText('Older fixture treatment', { exact: true })).toBeInTheDocument();
+    rerender(view(false));
+    rerender(view(true));
+    expect(await screen.findByText('Older fixture treatment', { exact: true })).toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['refresh', 'offline'])('keeps the existing report iframe mounted during %s', async (transition) => {
     native.enabled = true;
     vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
