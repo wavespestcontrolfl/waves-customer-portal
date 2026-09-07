@@ -85,3 +85,21 @@ describe('app education content contracts', () => {
     expect(() => buildVersion('app_intro', { blocks: APP_V4.blocks, text_body: 'Staff authored plaintext' })).toThrow('custom plaintext');
   });
 });
+
+
+test('staff-added app buttons survive the tour rewrite', () => {
+  const customButton = { type: 'cta', label: 'Staff help link', url: 'https://www.wavespestcontrol.com/contact/' };
+  const { assertOriginalTour } = require('../models/migrations/20260907000089_app_onboarding_tour_preflight');
+  const blocks = [...APP_V4.blocks, customButton];
+  expect(() => assertOriginalTour(blocks)).not.toThrow();
+  const next = buildVersion('app_intro', { blocks });
+  expect(JSON.parse(next.blocks)).toContainEqual(customButton);
+});
+
+test.each([0, 1])('edited welcome paragraph %s requires review', index => {
+  const { assertOriginalWelcome, WELCOME_PARAGRAPHS } = require('../models/migrations/20260907000088_app_onboarding_welcome_preflight');
+  const blocks = WELCOME_PARAGRAPHS.map(content => ({ type: 'paragraph', content }));
+  expect(() => assertOriginalWelcome(blocks)).not.toThrow();
+  blocks[index].content += ' Staff directions.';
+  expect(() => assertOriginalWelcome(blocks)).toThrow('edited welcome paragraph');
+});
