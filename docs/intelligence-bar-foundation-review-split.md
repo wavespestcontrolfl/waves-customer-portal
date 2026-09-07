@@ -174,3 +174,12 @@ unavailable customers are excluded. The final parent-integrated checks pass
 earlier unchanged provider/publisher checks remain recorded above.
 
 Customer-ID-only searches retain linked history after a phone-number change; only unlinked messages depend on the current saved phone. An explicit phone selector still narrows the results. The final seven adapter DB cases and 32 reader/pinning/history tests pass after this correction, and independent review closed it.
+
+B1 also binds explicit child identifiers in the request, requires a deliberate
+reference for customerless calls, and freshly validates every child owner.
+Emails inherit a converted lead's customer and reject deleted or conflicting
+ownership; an address-only reply requires exactly one matching thread. Relevant
+page hints survive stale auxiliary hints, including compound “this customer and
+that estimate” requests. Name lookup now uses the same punctuation and space
+normalization as request matching. The resulting scope passes 154 unit/write
+boundary cases and 19 rollback-only PostgreSQL cases. No provider was called.

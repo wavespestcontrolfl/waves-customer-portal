@@ -83,6 +83,67 @@ suite('IB target validation against isolated PostgreSQL', () => {
     expect((await Context.validateRecordTarget(params, task, { toolName: 'send_sms' })).code).toBe('target_relationship_mismatch');
   });
 
+  test('an unlinked call requires an explicit current-request or viewed-call reference', async () => {
+    const id = randomUUID();
+    await mockDb('call_log').insert({ id, customer_id: null, twilio_call_sid: `fixture-${id}`,
+      direction: 'inbound', from_phone: '+15550101234', to_phone: '+15550104321' });
+    const unrelated = await Context.resolve({ prompt: 'Look up inventory', pageData: { call_id: id } });
+    expect(await Context.validateRecordTarget({ call_id: id }, unrelated)).toMatchObject({ code: 'target_clarification_required' });
+    for (const prompt of ['Read this call', `Read call ${id}`]) {
+      const task = await Context.resolve({ prompt, pageData: { call_id: id } });
+      expect(await Context.validateRecordTarget({ call_id: id }, task)).toBeNull();
+    }
+  });
+
+  test('child-only validation rechecks a deleted parent customer', async () => {
+    const id = randomUUID();
+    await mockDb('customer_properties').insert({ id, customer_id: customerId, address_line1: '100 Test Street' });
+    const task = await Context.resolve({ prompt: 'Update this property', pageData: { property_id: id } });
+    expect(await Context.validateRecordTarget({ property_id: id }, task)).toBeNull();
+    await mockDb('customers').where('id', customerId).update({ deleted_at: mockDb.fn.now() });
+    expect(await Context.validateRecordTarget({ property_id: id }, task)).toMatchObject({ code: 'record_unavailable' });
+  });
+
+  test('an address-only reply requires a unique current Gmail thread', async () => {
+    const one = randomUUID(), two = randomUUID(), thread = randomUUID();
+    const from = `${randomUUID()}@example.invalid`;
+    const email = (id, gmail_thread_id) => ({ id, gmail_id: randomUUID(), gmail_thread_id, customer_id: customerId,
+      from_address: from, subject: 'Synthetic thread', received_at: new Date() });
+    await mockDb('emails').insert(email(one, thread));
+    const task = await Context.resolve({ prompt: `Reply to ${from}`, pageData: {} });
+    expect(await Context.validateRecordTarget({ email_id: one }, task, { toolName: 'send_email_reply' })).toBeNull();
+    await mockDb('emails').insert(email(two, randomUUID()));
+    expect(await Context.validateRecordTarget({ email_id: one }, task, { toolName: 'send_email_reply' })).toMatchObject({ code: 'target_clarification_required' });
+    await mockDb('emails').where('id', two).update({ gmail_thread_id: thread });
+    expect(await Context.validateRecordTarget({ email_id: one }, task, { toolName: 'send_email_reply' })).toBeNull();
+    const viewed = await Context.resolve({ prompt: 'Reply to this email', pageData: { email_id: two } });
+    expect(await Context.validateRecordTarget({ email_id: two }, viewed, { toolName: 'send_email_reply' })).toBeNull();
+  });
+
+  test('a converted email lead supplies fresh customer ownership', async () => {
+    const lead = randomUUID(), email = randomUUID();
+    await mockDb('leads').insert({ id: lead, customer_id: customerId, first_name: 'Synthetic', last_name: 'Converted' });
+    await mockDb('emails').insert({ id: email, gmail_id: randomUUID(), gmail_thread_id: randomUUID(), lead_id: lead, from_address: 'converted@example.invalid',
+      subject: 'Synthetic converted inquiry', received_at: new Date() });
+    const task = await Context.resolve({ prompt: 'Text this customer', pageData: { email_id: email } });
+    expect(task.target).toMatchObject({ customer_id: customerId });
+    expect(await Context.validateRecordTarget({ email_id: email }, task)).toBeNull();
+    await mockDb('leads').where('id', lead).update({ deleted_at: mockDb.fn.now() });
+    expect(await Context.validateRecordTarget({ email_id: email }, task)).toMatchObject({ code: 'record_unavailable' });
+  });
+
+  test('an unavailable unrelated page hint does not block the explicitly viewed customer', async () => {
+    const task = await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: customerId, appointment_id: randomUUID() } });
+    expect(task.target).toMatchObject({ customer_id: customerId });
+    expect(await Context.validateRecordTarget({ customer_id: customerId }, task)).toBeNull();
+  });
+
+  test('stored customer names use the same punctuation and whitespace normalization as the request', async () => {
+    await mockDb('customers').where('id', customerId).update({ first_name: 'Synthetic', last_name: 'O’Neill, Jr.' });
+    const task = await Context.resolve({ prompt: "Update Synthetic O'Neill Jr notes", pageData: {} });
+    expect(task.target).toMatchObject({ customer_id: customerId });
+  });
+
   test('a viewed call resolves its owner and cannot be swapped for a sibling call or body reference', async () => {
     const ids = [randomUUID(), randomUUID()];
     await mockDb('call_log').insert(ids.map(id => ({ id, customer_id: customerId, twilio_call_sid: `fixture-${id}`,

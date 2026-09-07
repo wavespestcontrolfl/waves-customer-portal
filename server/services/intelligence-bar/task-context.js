@@ -14,7 +14,7 @@ const RECORDS = {
   invoice_id: { table: 'invoices', fields: ['id', 'customer_id', 'updated_at'] },
   product_id: { table: 'products_catalog', fields: ['id', 'name', 'updated_at'] },
   lead_id: { table: 'leads', fields: ['id', 'customer_id', 'first_name', 'last_name', 'updated_at', 'deleted_at'] },
-  email_id: { table: 'emails', fields: ['id', 'customer_id', 'lead_id', 'from_address', 'updated_at'] },
+  email_id: { table: 'emails', fields: ['id', 'customer_id', 'lead_id', 'from_address', 'gmail_thread_id', 'updated_at'] },
   call_id: { table: 'call_log', fields: ['id', 'customer_id', 'updated_at'] },
   review_id: { table: 'google_reviews', fields: ['id', 'customer_id', 'reviewer_name', 'missing_since', 'dismissed', 'updated_at'] },
 };
@@ -36,7 +36,7 @@ const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:
 function targetClause(prompt, retainRecordConstraints = false) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select a recipient/account.
-  let clause = String(prompt).split(/[:;\n“”"]|\b(?:notes?|message|instructions|comments)\s+that\b|\b(?:saying|regarding|about)\b/i)[0];
+  let clause = String(prompt).split(/[:;\n“”"]|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing)\b|\b(?:saying|regarding|about)\b/i)[0];
   if (/\b(?:change|update|set|rename|relabel|add|save)\b/i.test(clause)) {
     clause = clause.split(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
   }
@@ -118,12 +118,19 @@ async function namedCustomers(prompt) {
   if (!phrases.length && !singleNames.length) return [];
   const columns = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
-    .whereIn(db.raw("lower(concat_ws(' ', first_name, last_name))"), phrases).limit(10).select(columns) : [];
+    .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(10).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));
   if (fullNames.length || !singleNames.length) return fullNames;
   return db('customers').whereNull('deleted_at').where(function () {
-    this.whereIn(db.raw('lower(first_name)'), singleNames).orWhereIn(db.raw('lower(last_name)'), singleNames);
+    this.whereIn(normalizedStoredName('first_name'), singleNames).orWhereIn(normalizedStoredName('last_name'), singleNames);
   }).limit(10).select(columns);
+}
+
+// Callers supply only the fixed customer/lead/estimate column expressions below.
+// Match the current-request normalizer, including punctuation and whitespace.
+function normalizedStoredName(expression) {
+  return db.raw(`btrim(regexp_replace(regexp_replace(regexp_replace(replace(lower(coalesce(${expression}, '')), ?, ?), ?, '', 'g'), ?, ' ', 'g'), ?, ' ', 'g'))`,
+    ["’", "'", "'s(?![abcdefghijklmnopqrstuvwxyz0123456789_])", "[^[:alnum:][:space:]'-]", '[[:space:]]+']);
 }
 
 // Shared whitelist reader for page context and read/write relationships. It
@@ -141,7 +148,8 @@ async function readReferences(input) {
   }
   const batches = await Promise.all([...groups].map(async ([kind, group]) => {
     const { definition } = group[0];
-    const rows = await db(definition.table).whereIn('id', group.map(r => r.id)).select(definition.fields);
+    const fields = kind === 'customer_id' ? [...definition.fields, db.raw('updated_at::text AS version')] : definition.fields;
+    const rows = await db(definition.table).whereIn('id', group.map(r => r.id)).select(fields);
     return [kind, new Map(rows.map(row => [String(row.id).toLowerCase(), row]))];
   }));
   const byKind = new Map(batches);
@@ -151,23 +159,50 @@ async function readReferences(input) {
     return row && { ...row, kind };
   });
   if (records.some(r => !r || r.active === false || r.deleted_at || r.missing_since || r.dismissed || r.reviewer_name === '_stats')) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
-  return { records };
+  const linkedEmails = records.filter(record => record.kind === 'email_id' && record.lead_id);
+  if (linkedEmails.length) {
+    const leads = await db('leads').whereIn('id', [...new Set(linkedEmails.map(record => record.lead_id))]).select('id', 'customer_id', 'deleted_at');
+    const byId = new Map(leads.map(lead => [lead.id, lead]));
+    for (const email of linkedEmails) {
+      const lead = byId.get(email.lead_id);
+      if (!lead || lead.deleted_at || (lead.customer_id && email.customer_id && lead.customer_id !== email.customer_id)) {
+        return { error: 'The email ownership is unavailable or changed', code: 'record_unavailable' };
+      }
+      email.customer_id = email.customer_id || lead.customer_id;
+    }
+  }
+  const parentIds = customerIds(records);
+  const directParents = byKind.get('customer_id') || new Map();
+  const missingParents = parentIds.filter(id => !directParents.has(id));
+  const parents = [...directParents.values(), ...(missingParents.length ? await db('customers').whereIn('id', missingParents).whereNull('deleted_at')
+    .select([...CUSTOMER_FIELDS, db.raw('updated_at::text AS version')]) : [])];
+  if (parents.length !== parentIds.length || parents.some(parent => parent.deleted_at)) {
+    return { error: 'A referenced customer is unavailable', code: 'record_unavailable' };
+  }
+  return { records, parents };
 }
 
 function customerIds(records) {
   return [...new Set(records.map(r => r.kind === 'customer_id' ? r.id : r.customer_id).filter(Boolean))];
 }
 
-async function loadPage(pageData) {
-  const ids = pageIds(pageData);
+async function loadPage(pageData, prompt) {
+  let ids = pageIds(pageData);
   if (ids.error) return ids;
+  const referencedKinds = new Set([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
+    .map(match => `${match[1].toLowerCase() === 'account' ? 'customer' : match[1].toLowerCase()}_id`));
+  // A directly referenced available hint takes precedence over unrelated page
+  // hints. With no direct customer hint, retain child-owner lookup as before.
+  if (referencedKinds.size && [...referencedKinds].every(kind => ids[kind])) {
+    ids = Object.fromEntries(Object.entries(ids).filter(([kind]) => referencedKinds.has(kind)));
+  }
   const resolved = await readReferences(ids);
   if (resolved.error) return resolved;
   const customers = customerIds(resolved.records);
   if (customers.length > 1) return { error: 'The viewed records belong to different customers', code: 'context_mismatch' };
   const page = { ids, records: Object.fromEntries(resolved.records.map(r => [r.kind, r])) };
   if (!customers.length) return page;
-  const customer = await customerById(customers[0]);
+  const customer = resolved.parents.find(parent => parent.id === customers[0]);
   if (!customer) return { error: 'The viewed customer is unavailable', code: 'record_unavailable' };
   page.customer = customerTarget(customer, 'viewed_record');
   return page;
@@ -187,7 +222,7 @@ function candidateSelection(candidates, prompt, viewedCustomer) {
 }
 
 async function resolve({ prompt, pageData, selectedTarget }) {
-  const [viewed, named] = await Promise.all([loadPage(pageData), namedCustomers(prompt)]);
+  const [viewed, named] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
   // A stale page hint cannot block an unrelated task or an explicitly named
   // customer. A request relying on the unavailable viewed record still stops.
   if (viewed.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length && !selectedTarget?.customer_id) return viewed;
@@ -211,6 +246,20 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
   const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => { const kind = `${match[1].toLowerCase()}_id`; return [kind, page.ids[kind] || null]; }));
+  // Explicit current-request child IDs narrow even same-customer operations.
+  // Keep all deliberately named records for compound requests; body text never
+  // enters this clause and page hints cannot replace the explicit selection.
+  const explicitRecords = {};
+  // A content-introducing noun ends explicit ID authority regardless of the
+  // conjunction or wording that follows it. Deictic constraints above may
+  // still narrow existing customer authority; they never widen this ID set.
+  const explicitRecordClause = targetClause(prompt, true).split(/\b(?:notes?|messages?|instructions|comments)\b/i)[0];
+  for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
+    (explicitRecords[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());
+  }
+  for (const [kind, ids] of Object.entries(explicitRecords)) {
+    requestedRecords[kind] = Object.hasOwn(requestedRecords, kind) ? ids.filter(id => id === requestedRecords[kind]) : ids;
+  }
   return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
     reviewReference: reviewReference?.toLowerCase() || null,
     bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
@@ -221,12 +270,19 @@ async function resolve({ prompt, pageData, selectedTarget }) {
 }
 
 async function unlinkedRecordIsReferenced(record, context) {
-  if (Object.hasOwn(context.requestedRecords || {}, record.kind) && context.requestedRecords[record.kind] !== record.id) return false;
-  if (record.customer_id) return true;
+  if (Object.hasOwn(context.requestedRecords || {}, record.kind) && ![context.requestedRecords[record.kind]].flat().includes(record.id)) return false;
   const { targets = [], requestPhrase = '', explicitEmails = [] } = context;
+  if (record.kind === 'email_id' && !targets.length && explicitEmails.includes(normalizeEmail(record.from_address))
+    && !Object.hasOwn(context.requestedRecords || {}, 'email_id')) {
+    const threads = await db('emails').whereRaw('lower(btrim(from_address)) = ?', [normalizeEmail(record.from_address)])
+      .distinct(db.raw("coalesce(nullif(gmail_thread_id, ''), id::text) as thread_key")).limit(2);
+    return threads.length === 1 && threads[0].thread_key === (record.gmail_thread_id || record.id);
+  }
+  if (record.customer_id) return true;
   const ids = context.page?.ids || {};
   if (record.kind === 'review_id') return targets.length === 0 && context.reviewReference === record.id;
-  if (record.kind === 'call_id') return targets.length === 0;
+  if (record.kind === 'call_id') return targets.length === 0 && [context.requestedRecords?.call_id].flat().includes(record.id);
+  if (record.kind === 'appointment_id') return targets.length === 0;
   if (!['lead_id', 'email_id', 'estimate_id'].includes(record.kind)) return true;
   const noun = record.kind.replace(/_id$/, '');
   if (ids[record.kind] === record.id && new RegExp(`\\b(?:this|that|current|selected|viewed|open)\\s+${noun}\\b`).test(requestPhrase)) return true;
@@ -238,10 +294,7 @@ async function unlinkedRecordIsReferenced(record, context) {
   // Both expressions are selected from this fixed whitelist. Request data and
   // regex patterns remain bound values. Count linked and unlinked duplicates
   // across statuses; the supplied record ID must never break a name tie.
-  const matches = db(table).whereRaw(
-    `btrim(regexp_replace(regexp_replace(regexp_replace(replace(lower(coalesce(${nameSql}, '')), ?, ?), ?, '', 'g'), ?, ' ', 'g'), ?, ' ', 'g')) = ?`,
-    ["’", "'", "'s(?![abcdefghijklmnopqrstuvwxyz0123456789_])", "[^[:alnum:][:space:]'-]", '[[:space:]]+', normalizeName(fullName)],
-  );
+  const matches = db(table).whereRaw('? = ?', [normalizedStoredName(nameSql), normalizeName(fullName)]);
   if (table === 'leads') matches.whereNull('deleted_at');
   const candidates = await matches.select('id').limit(2);
   return candidates.length === 1 && candidates[0].id === record.id;
@@ -266,7 +319,7 @@ function bulkLeadSelection(toolName, records, params) {
 }
 
 async function validateRecordTarget(params, context = {}, { toolName } = {}) {
-  if (toolName === 'send_sms' && params.customer_name && !params.customer_id) {
+  if (['send_sms', 'trigger_review_request', 'reply_via_sms'].includes(toolName) && params.customer_name && !params.customer_id) {
     return { error: 'Resolve the message recipient to a customer identifier before proposing this action', code: 'target_clarification_required' };
   }
   const references = { ...params };
