@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const nativeMocks = vi.hoisted(() => {
   const state = { permission: 'prompt', requestResult: 'granted', listeners: {} };
@@ -49,6 +49,8 @@ beforeEach(() => {
   api.request.mockClear();
   localStorage.clear();
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe('nativePush permission and tap handling', () => {
   it('does not prompt at startup and routes taps through the customer URL validator', async () => {
@@ -104,6 +106,55 @@ describe('nativePush permission and tap handling', () => {
     accept({ success: true });
     await registration;
     await expect(enrollment).resolves.toBe('granted');
+  });
+
+  it('releases the enable action when the native register call never settles', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('waves_token', 'test-customer-session');
+    nativeMocks.state.permission = 'granted';
+    nativeMocks.PushNotifications.register.mockImplementationOnce(() => new Promise(() => {}));
+    let result;
+    requestNativePushPermission().then((value) => { result = value; });
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(result).toBe('registration_unavailable');
+    await expect(requestNativePushPermission()).resolves.toBe('granted');
+  });
+
+  it('accepts a confirmed registration even if the native register promise is pending', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('waves_token', 'test-customer-session');
+    nativeMocks.state.permission = 'granted';
+    nativeMocks.PushNotifications.register.mockImplementationOnce(() => new Promise(() => {}));
+    let result;
+    requestNativePushPermission().then((value) => { result = value; });
+    await vi.advanceTimersByTimeAsync(0);
+    await nativeMocks.state.listeners.registration({ value: 'confirmed-device' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBe('granted');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not let a timed-out attempt’s late rejection fail the next retry', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('waves_token', 'test-customer-session');
+    nativeMocks.state.permission = 'granted';
+    let rejectFirst;
+    nativeMocks.PushNotifications.register.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }));
+    const first = requestNativePushPermission();
+    await vi.advanceTimersByTimeAsync(15000);
+    await expect(first).resolves.toBe('registration_unavailable');
+
+    nativeMocks.PushNotifications.register.mockImplementationOnce(async () => {});
+    let result;
+    requestNativePushPermission().then((value) => { result = value; });
+    await vi.advanceTimersByTimeAsync(0);
+    rejectFirst(new Error('late bridge failure'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBeUndefined();
+    await nativeMocks.state.listeners.registration({ value: 'retried-device' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBe('granted');
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('posts a pre-login device token through the refresh-aware customer API after login', async () => {
