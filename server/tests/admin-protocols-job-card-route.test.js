@@ -203,13 +203,18 @@ describe('job-card routes', () => {
     expect(jobCard.mixForProduct).toHaveBeenCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID, includePricing: true });
   });
 
-  test('a rig pick replaces gallons: a full tank of that calibration, validated as an id', async () => {
+  test('a rig pick replaces gallons: a full tank of that rig, validated as an id, scoped to the technician', async () => {
     process.env.GATE_JOB_CARD = 'true';
     jobCard.mixForProduct.mockResolvedValue({ amount: 0.34, unit: 'oz', gallons: 4 });
-    expect((await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, rig: 'cal-3' })).statusCode).toBe(400);
+    expect((await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, rig: 'sys-3' })).statusCode).toBe(400);
     expect(jobCard.mixForProduct).not.toHaveBeenCalled();
     const rig = await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, rig: SERVICE_ID });
     expect(rig.body).toEqual({ enabled: true, amount: 0.34, unit: 'oz', gallons: 4 });
-    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, null, { serviceId: SERVICE_ID, includePricing: true, calibrationId: SERVICE_ID });
+    // An admin doses on any calibration.
+    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, null, { serviceId: SERVICE_ID, includePricing: true, equipmentSystemId: SERVICE_ID, technicianId: null });
+    // A technician's pick carries their id: only a shared calibration or their own may dose it (Codex r1 P1).
+    db.ownedRow = { id: SERVICE_ID };
+    await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, rig: SERVICE_ID, __tech: true });
+    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, null, { serviceId: SERVICE_ID, includePricing: false, equipmentSystemId: SERVICE_ID, technicianId: 'tech-1' });
   });
 });

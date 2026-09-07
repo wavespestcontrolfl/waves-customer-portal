@@ -5008,8 +5008,8 @@ function JobCardTank({ tank, serviceId, D }) {
   }, [q]);
 
   const rigs = tank?.rigs || [];
-  const rig = rigs.find((r) => r.calibrationId === rigId) || null;
-  const pickedRigId = rig?.calibrationId || null;
+  const rig = rigs.find((r) => r.equipmentSystemId === rigId) || null;
+  const pickedRigId = rig?.equipmentSystemId || null;
 
   useEffect(() => {
     if (!picked) {
@@ -5072,9 +5072,9 @@ function JobCardTank({ tank, serviceId, D }) {
         </div>
         {rigs.length > 0 && (
           <div style={{ display: "grid", gap: 8 }}>
-            <div style={{ fontSize: 12, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Rigs · full tank</div>
+            <div style={{ fontSize: 14, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Rigs · full tank</div>
             {rigs.map((r) => (
-              <button key={r.calibrationId} type="button" style={rigRow(r.calibrationId === pickedRigId)} onClick={() => setRigId(r.calibrationId)}>
+              <button key={r.equipmentSystemId} type="button" style={rigRow(r.equipmentSystemId === pickedRigId)} onClick={() => setRigId(r.equipmentSystemId)}>
                 <span>{r.name}</span>
                 <span style={{ fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{r.tankCapacityGal} gal</span>
               </button>
@@ -5137,7 +5137,7 @@ function JobCardTank({ tank, serviceId, D }) {
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {rig ? rig.tankCapacityGal : gallons} gal{rig ? ` · ${rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>

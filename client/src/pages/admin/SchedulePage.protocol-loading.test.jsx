@@ -249,9 +249,9 @@ describe("ProtocolPanel independent request failures", () => {
 
 describe("Job card Tank section rigs", () => {
   const rigs = [
-    { calibrationId: "cal-1", name: "110-Gallon Spray Tank #1", tankCapacityGal: 110 },
-    { calibrationId: "cal-2", name: "Tank #2", tankCapacityGal: 110 },
-    { calibrationId: "cal-3", name: "FlowZone Typhoon 3.0 #1", tankCapacityGal: 4 },
+    { equipmentSystemId: "sys-1", name: "110-Gallon Spray Tank #1", tankCapacityGal: 110 },
+    { equipmentSystemId: "sys-2", name: "Tank #2", tankCapacityGal: 110 },
+    { equipmentSystemId: "sys-3", name: "FlowZone Typhoon 3.0 #1", tankCapacityGal: 4 },
   ];
   const card = {
     enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Lawn Care" }, products: [], addons: [], planBlocks: [],
@@ -265,9 +265,12 @@ describe("Job card Tank section rigs", () => {
       if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p1", name: "Celsius WG", category: "herbicide" }] });
       if (parsed.pathname.endsWith("/protocols/job-card/mix")) {
         const sprayCheck = { verdict: "unknown", reason: "Judged on the visit day" };
+        // The rig answer names the volume and rig it was computed for; the
+        // section labels the dose from the answer, not its list (here the
+        // rig's tank grew to 5 gal after the card loaded).
         return reply(parsed.searchParams.get("rig")
-          ? { enabled: true, amount: 1.36, unit: "oz", gallons: 4, coversSqft: 3008, sprayCheck }
-          : { enabled: true, amount: 6.215, unit: "oz", gallons: 110, coversSqft: 55000, sprayCheck });
+          ? { enabled: true, amount: 1.36, unit: "oz", gallons: 5, coversSqft: 3760, rig: { equipmentSystemId: "sys-3", name: "FlowZone Typhoon 3.0 #1", tankCapacityGal: 5 }, sprayCheck }
+          : { enabled: true, amount: 6.215, unit: "oz", gallons: Number(parsed.searchParams.get("gallons")), coversSqft: 55000, sprayCheck });
       }
       if (parsed.pathname.includes("/protocols/job-card/")) return reply(card);
       return reply(fixture(url));
@@ -283,8 +286,8 @@ describe("Job card Tank section rigs", () => {
     expect(mixCalls().at(-1)).toContain("gallons=110");
 
     fireEvent.click(rows[2]);
-    expect(await screen.findByText("in 4 gal · FlowZone Typhoon 3.0 #1 · covers 3,008 sq ft")).toBeVisible();
-    expect(mixCalls().at(-1)).toContain("rig=cal-3");
+    expect(await screen.findByText("in 5 gal · FlowZone Typhoon 3.0 #1 · covers 3,760 sq ft")).toBeVisible();
+    expect(mixCalls().at(-1)).toContain("rig=sys-3");
     expect(mixCalls().at(-1)).not.toContain("gallons=");
 
     // A preset takes the mix back off the rig.
