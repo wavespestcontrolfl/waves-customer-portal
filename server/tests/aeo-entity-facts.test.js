@@ -74,6 +74,8 @@ test('markdown, bulleted lists and label-value answers score like plain prose', 
   expect(score('E6', 'Fumigation: not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves does not offer:\n* Insulation\n* Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves does not offer the following:\n- Fumigation\n- Insulation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Services not offered:\n- Fumigation\n- Insulation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Services offered:\n- Fumigation').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Waves offers the following:\n- Pest control\n- Fumigation').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Waves does not offer:\n- wildlife trapping or removal\n- attic insulation installation or replacement\n- tent fumigation for drywood termite colonies').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '- Fumigation: not offered.\n- Termite: offered.').forbidden.fumigation_offered).toBe(false);
@@ -156,6 +158,10 @@ test('ownership: another capitalized name is a wrong founder; Adam is not', () =
   expect(score('E1', 'Waves Pest Control was founded by Adam Benetti.')).toMatchObject({ expected: { founder: true }, forbidden: { wrong_founder: false } });
   expect(score('E1', 'It was founded by John Smith in Bradenton.')).toMatchObject({ expected: { founder: false }, forbidden: { wrong_founder: true } });
   expect(score('E1', 'It is owned by a family and run by its founder.').forbidden.wrong_founder).toBe(false);
+  expect(score('E1', 'John Smith owns Waves Pest Control.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves Pest Control is owned by Adam Smith.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Adam Benetti founded Waves in 2024, and Owner Adam Benetti still runs it.').forbidden.wrong_founder).toBe(false);
+  expect(score('E1', 'The business is owned by Waves Pest Control, LLC.').forbidden.wrong_founder).toBe(false);
 });
 
 test('franchise: a negated mention is fine, an affirmative one is a wrong claim', () => {

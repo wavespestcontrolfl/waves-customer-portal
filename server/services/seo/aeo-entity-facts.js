@@ -43,7 +43,8 @@ const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|without|except|exc
 const CLAUSE_BOUNDARY_RE = /[.!?;\n]|,?\s+(?:but|however|whereas|although|though|yet)\b|,?\s+(?:and|or)\s+(?=(?:\w+\s+){0,2}(?:is|are|was|were|does|do|did|offers?|provides?|has|have|will|can|covers?|includes?|charges?|treats?|serves?|handles?|performs?|operates?|holds?)\b)/i;
 // "does not offer: fumigation, insulation" — a negated verb right before a
 // colon governs the list that follows; "is not a franchise: it offers …" does not.
-const LIST_INTRO_RE = /\b(?:offer|offers|include|includes|provide|provides|cover|covers|do|does|perform|performs|treat|treats|handle|handles|sell|sells|service|services|are|is)\s*(?:(?:any of |all of )?(?:the following|these|those|the below|this list))?\s*$/i;
+// Active ("does not offer:") and passive ("Services not offered:") intros.
+const LIST_INTRO_RE = /\b(?:offer|offers|offered|include|includes|included|provide|provides|provided|cover|covers|covered|do|does|perform|performs|performed|treat|treats|treated|handle|handles|handled|sell|sells|sold|service|services|serviced|available|are|is)\s*(?:(?:any of |all of )?(?:the following|these|those|the below|this list))?\s*$/i;
 
 function leadClause(text) {
   const clause = text.split(CLAUSE_BOUNDARY_RE).pop();
@@ -151,7 +152,7 @@ function asserted(compiled, answer) {
   for (const match of answer.matchAll(compiled.scanRe)) {
     // The captured value is the first defined group (a pattern may capture in
     // any one of its alternatives).
-    if (compiled.rejectValue !== undefined && match.slice(1).find(v => v !== undefined) === compiled.rejectValue) continue;
+    if (compiled.rejectValue !== undefined && (match.slice(1).find(v => v !== undefined) || '').includes(compiled.rejectValue)) continue;
     const start = match.index;
     let end = start + match[0].length;
     // A pattern may stop mid-word ("fumigat"); the assertion is the whole word.
