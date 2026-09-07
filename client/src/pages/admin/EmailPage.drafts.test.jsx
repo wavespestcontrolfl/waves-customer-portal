@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { BrowserRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EmailPage from "./EmailPage";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
+import useEmailEditor from "./email/useEmailEditor";
 
 vi.mock("../../hooks/useIsMobile", () => ({ default: () => false }));
 const a = { id: "00000000-0000-4000-8000-000000000001", gmail_thread_id: "thread-a", from_address: "a@example.invalid", subject: "First fixture message", is_read: true, received_at: new Date().toISOString(), body_text: "First fixture body" };
@@ -29,7 +30,7 @@ beforeEach(() => {
     if (loadResponse) return loadResponse();
     if (url.pathname.endsWith("/oauth/status")) return response({ connected: true });
     if (url.pathname.endsWith("/inbox")) return response({ emails: inbox, total: inbox.length });
-    if (url.pathname.endsWith("/send")) return sendResponse ? sendResponse(options) : response({ success: true });
+    if (url.pathname.endsWith("/send")) return sendResponse ? sendResponse(options) : response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" });
     if (url.pathname.endsWith("/ai-draft")) return draftResponse ? draftResponse() : response({ reply_draft: "Synthetic AI suggestion" });
     if (url.pathname.includes("/thread/")) return response({ thread: [url.pathname.endsWith("thread-a") ? a : b] });
     if (url.pathname.endsWith("/star")) return response({ is_starred: true });
@@ -64,6 +65,79 @@ async function open(message) {
 }
 
 describe("Email draft and navigation preservation", () => {
+  it("retains Gmail acceptance when refreshing the inbox throws, without permitting another send", async () => {
+    const { result } = renderHook(() => useEmailEditor("fixture-owner"));
+    act(() => result.current.setComposeForm(() => ({ to: "fixture@example.invalid", subject: "Fixture", body: "Submitted" })));
+    await act(async () => result.current.handleComposeSend(async () => { throw new Error("Refresh failed"); }));
+    expect(window.alert).toHaveBeenCalledWith("Gmail accepted the email. The inbox could not refresh; do not resend it.");
+    expect(result.current.sendAttempts.compose).toMatchObject({ status: "provider_accepted", messageId: "synthetic-gmail-id" });
+    expect(result.current.composeForm.body).toBe("");
+    act(() => result.current.setComposeForm(() => ({ to: "fixture@example.invalid", subject: "Fixture", body: "Submitted" })));
+    await act(async () => result.current.handleComposeSend(vi.fn()));
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
+  });
+  it.each(["typed", "transport", "legacy-503", "unreadable", "missing-id"])("keeps an uncertain %s send locked after remount until an explicit Sent-folder verdict", async (failure) => {
+    sendResponse = () => {
+      if (failure === "transport") return Promise.reject(new Error("Connection lost"));
+      if (failure === "unreadable") return { ok: true, json: async () => { throw new Error("Truncated response"); } };
+      if (failure === "legacy-503") return response({ error: "Unavailable" }, 503);
+      if (failure === "missing-id") return response({ success: true });
+      return response({ status: "outcome_unknown" }, 202);
+    };
+    const view = mount(); const dialog = await compose();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
+    await screen.findByText(/Email outcome unknown/);
+    view.unmount(); mount(); fireEvent.click(await screen.findByRole("button", { name: "Resume draft" }));
+    const send = within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true });
+    expect(send).toBeDisabled(); fireEvent.click(send);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
+    expect(window.alert).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "I checked Sent: it was not sent" }));
+    expect(send).toBeEnabled();
+    expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
+  });
+
+  it("locks an uncertain reply, preserves newer edits on reconciliation, and does not lock another thread", async () => {
+    sendResponse = () => response({ status: "outcome_unknown" }, 202);
+    const view = mount(); const reply = await open(a);
+    fireEvent.change(reply, { target: { value: "Submitted reply" } });
+    fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
+    await screen.findByText(/Email outcome unknown/);
+    view.unmount(); mount();
+    const recovered = await screen.findByRole("textbox", { name: "Reply" });
+    fireEvent.change(recovered, { target: { value: "New unsent edit" } });
+    expect(screen.getByRole("button", { name: /Send Reply/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "I checked Sent: it was sent" }));
+    expect(recovered).toHaveValue("New unsent edit");
+    expect(screen.getByRole("button", { name: /Send Reply/ })).toBeEnabled();
+    fireEvent.change(await open(b), { target: { value: "Separate thread" } });
+    expect(screen.getByRole("button", { name: /Send Reply/ })).toBeEnabled();
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
+  });
+
+  it("does not call the send endpoint when saving the attempt fails", async () => {
+    mount(); const dialog = await compose();
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Quota"); });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
+    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining("Send was not started"));
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(0);
+  });
+
+  it.each(["outcome_unknown", "provider_accepted"])("keeps the settled %s outcome visible if its storage update fails", async status => {
+    let finish;
+    sendResponse = () => new Promise(resolve => { finish = resolve; });
+    mount(); const dialog = await compose();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Quota after submit"); });
+    await act(async () => finish(status === "provider_accepted"
+      ? response({ success: true, status, messageId: "fixture-message" }) : response({ status }, 202)));
+    if (status === "provider_accepted") fireEvent.click(screen.getByRole("button", { name: "New Email" }));
+    expect(await screen.findByText(status === "provider_accepted" ? /Gmail accepted this email/ : /Email outcome unknown/)).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+    expect(screen.getByRole("button", { name: status === "provider_accepted" ? "Dismiss accepted send" : "I checked Sent: it was sent" })).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
+  });
+
   it("inserts public Quick Links once and keeps the email draft after closing the picker", async () => {
     loadResponses["link-library"] = () => response({ links: [
       { key: "quote", name: "Request a quote", category: "booking", url: "https://www.wavespestcontrol.com/quote/" },
@@ -365,7 +439,7 @@ describe("Email draft and navigation preservation", () => {
   });
 
   it("retains a failed compose and clears it only after a confirmed send", async () => {
-    sendResponse = () => response({ error: "Synthetic send failure" }, 503);
+    sendResponse = () => response({ error: "Synthetic send failure", status: "failed" }, 502);
     const view = mount(); const dialog = await compose();
     fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
     await waitFor(() => expect(window.alert).toHaveBeenCalled());
@@ -408,7 +482,7 @@ describe("Email draft and navigation preservation", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
     fireEvent.change(screen.getByLabelText("Message *"), { target: { value: "New compose edit" } });
     fireEvent.change(screen.getByLabelText("Message *"), { target: { value: "Unsent compose text" } });
-    await act(async () => finish(response({ success: true })));
+    await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));
     expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
   });
 
@@ -420,7 +494,7 @@ describe("Email draft and navigation preservation", () => {
     fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
     fireEvent.change(reply, { target: { value: "New reply edit" } });
     fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
-    await act(async () => finish(response({ success: true })));
+    await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));
     expect(reply).toHaveValue("Submitted snapshot");
   });
 
@@ -431,7 +505,7 @@ describe("Email draft and navigation preservation", () => {
     fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
     fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
     fireEvent.change(reply, { target: { value: "New unsent edit" } });
-    await act(async () => finish(response({ success: true })));
+    await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));
     expect(reply).toHaveValue("New unsent edit");
   });
 
@@ -468,7 +542,7 @@ describe("Email draft and navigation preservation", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
     view.unmount(); mount();
     await screen.findByRole("button", { name: "Resume draft" });
-    await act(async () => finish(response({ success: true })));
+    await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));
     expect(screen.getByRole("button", { name: "New Email" })).toBeInTheDocument();
   });
 
@@ -484,7 +558,7 @@ describe("Email draft and navigation preservation", () => {
     const send = within(screen.getByRole("dialog")).getByRole("button", { name: "Sending…", exact: true });
     expect(send).toBeDisabled(); fireEvent.click(send);
     expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
-    await act(async () => finish(response({ error: "Synthetic failure" }, 503)));
+    await act(async () => finish(response({ error: "Synthetic failure", status: "failed" }, 502)));
     expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true })).toBeEnabled();
     expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
     const settled = new Event("beforeunload", { cancelable: true });
@@ -502,7 +576,7 @@ describe("Email draft and navigation preservation", () => {
     const send = screen.getByRole("button", { name: /Sending/ });
     expect(send).toBeDisabled(); fireEvent.click(send);
     expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
-    await act(async () => finish(response({ success: true })));
+    await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));
     expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("");
   });
 });

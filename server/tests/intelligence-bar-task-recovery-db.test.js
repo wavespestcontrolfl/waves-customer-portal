@@ -4,6 +4,7 @@ const crypto = require('crypto');
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
+jest.setTimeout(30000); // Isolated Railway DB round trips can exceed Jest's 5s default.
 
 suite('IB task recovery and retained approval proof in isolated Postgres', () => {
   let db, Tasks, Pending;
@@ -86,7 +87,8 @@ suite('IB task recovery and retained approval proof in isolated Postgres', () =>
     const original = await create(task, params.phone);
     // Existing persisted keys used domestic digits; they must still reconcile.
     const legacyKey = Pending.paramsHash('send_sms', { ...params, message_type: 'manual' });
-    await db('ib_pending_actions').where('id', original.id).update({ step_key: legacyKey });
+    await db('ib_pending_actions').where('id', original.id).update({ step_key: legacyKey,
+      params: JSON.stringify(params), params_hash: Pending.paramsHash('send_sms', params) });
     await Pending.claimForConfirm(original.id, actorId);
     await Pending.recordResult(original.id, { state: 'provider_accepted', providerMessageId: 'synthetic-sms-receipt' });
     await expireLease(task.id);
@@ -100,6 +102,78 @@ suite('IB task recovery and retained approval proof in isolated Postgres', () =>
     expect((await Pending.claimForConfirm(original.id, actorId)).error).toBe('already_used');
     expect(Pending.stepKey('send_sms', { ...params, phone: '+445550101234' }))
       .not.toBe(Pending.stepKey('send_sms', params));
+  });
+
+  test.each(['pending', 'outcome_unknown', 'provider_accepted'])('legacy UUID case replay retains the %s action and its original approval hashes', async outcome => {
+    const { task } = await begin();
+    const id = crypto.randomUUID();
+    const originalParams = { email_id: id.toUpperCase(), reply_body: 'Synthetic only; never sent' };
+    const make = params => Pending.createPendingAction({ toolName: 'send_email_reply', requestedBy: actorId, taskId: task.id,
+      runnerToken: task.runner_token, stepKey: Pending.stepKey('send_email_reply', params), params });
+    const original = await make(originalParams);
+    const legacyHash = Pending.paramsHash('send_email_reply', originalParams);
+    await db('ib_pending_actions').where('id', original.id).update({ step_key: legacyHash, params: JSON.stringify(originalParams), params_hash: legacyHash });
+    if (outcome !== 'pending') {
+      expect((await Pending.claimForConfirm(original.id, actorId)).action.id).toBe(original.id);
+      if (outcome === 'provider_accepted') await Pending.recordResult(original.id, { state: 'provider_accepted', providerMessageId: 'fixture-provider-id' });
+    }
+    const stored = await db('ib_pending_actions').where('id', original.id).first();
+    const duplicate = await make({ ...originalParams, email_id: id });
+    expect(duplicate.id).toBe(original.id);
+    expect(await Pending.forTask(task.id, actorId)).toHaveLength(1);
+    expect(await db('ib_pending_actions').where('id', original.id).first()).toEqual(stored);
+    if (outcome !== 'pending') expect((await Pending.claimForConfirm(duplicate.id, actorId)).error).toBe('already_used');
+    else expect((await Pending.claimForConfirm(duplicate.id, actorId)).action.params).toEqual(originalParams);
+  });
+
+  test('a legacy bulk UUID set dedupes mixed-case repeats without rewriting its approved scope', async () => {
+    const { task } = await begin();
+    const id = crypto.randomUUID(), other = crypto.randomUUID();
+    const params = { customer_ids: [id.toUpperCase(), other].sort(), updates: { notes: 'Synthetic only' } };
+    const oldHash = Pending.paramsHash('bulk_update_customers', params);
+    const [original] = await db('ib_pending_actions').insert({ task_id: task.id, step_key: oldHash, tool_name: 'bulk_update_customers',
+      requested_by: actorId, params: JSON.stringify(params), params_hash: oldHash, status: 'confirmed',
+      result: JSON.stringify({ success: true }), expires_at: new Date(Date.now() + 600000) }).returning('*');
+    const retry = { ...params, customer_ids: [other.toUpperCase(), id, id.toUpperCase()] };
+    const duplicate = await Pending.createPendingAction({ toolName: original.tool_name, requestedBy: actorId, taskId: task.id,
+      runnerToken: task.runner_token, stepKey: Pending.stepKey(original.tool_name, retry), params: retry });
+    expect(duplicate.id).toBe(original.id);
+    expect(duplicate.params).toEqual(params);
+    expect(await Pending.forTask(task.id, actorId)).toHaveLength(1);
+  });
+
+  test('legacy inventory bindings are reused only when their original canonical input can be proved', async () => {
+    for (const previewOnly of [false, true]) {
+      const { task } = await begin();
+      const productId = crypto.randomUUID();
+      const canonical = { product_id: productId.toUpperCase(), quantity: 2, unit: 'bottle', priority: 'normal' };
+      const params = previewOnly ? { product_name: 'Synthetic product', quantity: 2 } : canonical;
+      const oldHash = Pending.paramsHash('create_restock_request', canonical);
+      const [original] = await db('ib_pending_actions').insert({ task_id: task.id, step_key: oldHash, tool_name: 'create_restock_request',
+        requested_by: actorId, params: JSON.stringify(params), params_hash: Pending.paramsHash('create_restock_request', params),
+        status: 'confirmed', result: JSON.stringify({ success: true }), expires_at: new Date(Date.now() + 600000) }).returning('*');
+      const retry = { product_id: productId, quantity: 2, unit: 'bottle', priority: 'normal' };
+      const call = Pending.createPendingAction({ toolName: original.tool_name, requestedBy: actorId, taskId: task.id,
+        runnerToken: task.runner_token, stepKey: Pending.stepKey(original.tool_name, retry), params: retry });
+      if (previewOnly) await expect(call).rejects.toMatchObject({ code: 'action_reconciliation_required' });
+      else expect((await call).id).toBe(original.id);
+      expect(await Pending.forTask(task.id, actorId)).toHaveLength(1);
+    }
+  });
+
+  test('versioned preview-based steps dedupe retries and permit an explicitly different completed successor', async () => {
+    const { task } = await begin();
+    const productId = crypto.randomUUID();
+    const create = (quantity, id) => Pending.createPendingAction({ toolName: 'create_restock_request', requestedBy: actorId, taskId: task.id,
+      runnerToken: task.runner_token, params: { product_name: 'Synthetic product', quantity },
+      stepKey: Pending.stepKey('create_restock_request', { product_name: 'Synthetic product', quantity }, { product: { id }, unit: 'bottle' }) });
+    const first = await create(2, productId.toUpperCase());
+    expect(first.params._ib_step_key_version).toBe(2);
+    await Pending.claimForConfirm(first.id, actorId);
+    await Pending.recordResult(first.id, { success: true });
+    expect((await create(2, productId)).id).toBe(first.id);
+    expect((await create(3, productId)).id).not.toBe(first.id);
+    expect(await Pending.forTask(task.id, actorId)).toHaveLength(2);
   });
 
   test('persisted proposal proof omits resolution PII and survives the confirmation hash check', async () => {

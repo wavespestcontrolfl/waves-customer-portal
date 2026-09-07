@@ -228,3 +228,47 @@ coverage/domain/brand gates pass. Shared-shell desktop/mobile recovery is
 rerun against the final integrated parent code with independent A-only database
 read-back. Final GitHub Codex review is pending its shared usage-limit reset;
 all PRs remain drafts and no production or merge action is authorized.
+
+B1 also binds explicit child identifiers in the request, requires a deliberate
+reference for customerless calls, and freshly validates every child owner.
+Emails inherit a converted lead's customer and reject deleted or conflicting
+ownership; an address-only reply requires exactly one matching thread. Relevant
+page hints survive stale auxiliary hints, including compound “this customer and
+that estimate” requests. Name lookup now uses the same punctuation and space
+normalization as request matching. The resulting scope passes 154 unit/write
+boundary cases and 19 rollback-only PostgreSQL cases. No provider was called.
+
+B2 propagates Gmail uncertainty through the native email route and editor.
+The existing tab-scoped draft store saves an attempt before submission, retains
+the guard through reloads and quota failures, and requires explicit Sent-folder
+reconciliation before another send. Gmail acceptance requires its message ID;
+inbox-refresh failure cannot become a send failure. The shared Gmail client
+also rejects ID-less responses as unknown, so the existing outreach claim and
+manual reconciliation path retain their send lock. This closes native-tab retry
+behavior, not cross-device/server idempotency; that remains Phase 3 work.
+
+Controlled desktop (1440) and mobile (390) browser checks covered compose/reply
+uncertainty, reload, both reconciliation verdicts and no duplicate send. Three
+screenshots were inspected; no JavaScript errors or horizontal overflow appeared.
+The provider was stubbed in browser QA. Actual native-route tests and the real
+Google SDK with a controlled transporter separately cover outcome classification.
+The parent-integrated database suites pass 26 rollback-only cases.
+
+C normalizes UUID identity in scalar selectors, nested product fields and bulk
+sets while preserving exact approval parameters and hashes. Legacy keys must
+prove their original canonical input before semantic replay; preview-only
+bindings that cannot be reconstructed require reconciliation. New task actions
+record a hash-bound step-key version so a legitimate distinct successor is
+still possible. The final checks pass 155 unit cases and 33 isolated PostgreSQL
+cases, including pending, accepted and unknown legacy replay. Independent
+review found no actionable issue; no provider or domain send ran.
+
+The next B1 correction generalizes canonical name-selector guards to all
+classified writes, including lead status, and requires explicit current-request
+evidence for customerless appointments. A capped name query preserves its raw
+completeness evidence before filtering incidental matches; incomplete cohorts
+cannot become approved subsets. Independent compound actions retain their
+explicit estimate IDs, while message-body commands grant no record authority.
+Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
+PostgreSQL tests. Independent review closed both additional edge cases before
+the fifth remote review. No provider, customer message or production write ran.

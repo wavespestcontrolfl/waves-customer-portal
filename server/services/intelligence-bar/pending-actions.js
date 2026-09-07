@@ -33,7 +33,7 @@ function paramsHash(toolName, params) {
     .digest('hex');
 }
 
-function stepKey(toolName, params, preview = {}) {
+function canonicalStepInput(toolName, params, preview = {}) {
   const canonical = Object.fromEntries(Object.entries(params || {}).filter(([key]) => !key.startsWith('_') && !['confirmed', 'confirm'].includes(key)));
   for (const [snake, camel, name] of [['customer_id', 'customerId', 'customer_name'], ['lead_id', 'leadId', 'lead_name'], ['technician_id', 'technicianId', 'technician_name']]) {
     if (!(canonical[snake] || canonical[camel])) continue;
@@ -55,7 +55,41 @@ function stepKey(toolName, params, preview = {}) {
     }
   }
   if (canonical.engineInputs) delete canonical.engineResult; // Derived cross-check, never a second intended effect.
-  return paramsHash(toolName, canonical);
+  return canonical;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const IDENTIFIER_KEY_RE = /^(?:id|estimate_identifier)$|_ids?$|Ids?$/;
+const SET_ID_KEYS = new Set(['customer_ids', 'lead_ids', 'service_ids']);
+function normalizeStepIds(value, key = '') {
+  if (value && typeof value.toJSON === 'function') return normalizeStepIds(value.toJSON(), key);
+  if (Array.isArray(value)) {
+    const items = value.map(item => normalizeStepIds(item, key));
+    return SET_ID_KEYS.has(key) ? [...new Set(items)].sort() : items;
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, normalizeStepIds(item, name)]));
+  }
+  return typeof value === 'string' && IDENTIFIER_KEY_RE.test(key) && UUID_RE.test(value) ? value.toLowerCase() : value;
+}
+
+function stepKey(toolName, params, preview) {
+  return paramsHash(toolName, normalizeStepIds(canonicalStepInput(toolName, params, preview)));
+}
+
+// Persisted pre-version keys are an external contract. Prove their original
+// input before comparing a normalized retry; today's product preview cannot
+// reconstruct a product/default that existed only in yesterday's preview.
+function legacyStepKey(row) {
+  const canonical = canonicalStepInput(row.tool_name, row.params);
+  const oldHashes = [paramsHash(row.tool_name, canonical)];
+  if (row.tool_name === 'send_sms' && row.params.phone) {
+    oldHashes.push(paramsHash(row.tool_name, { ...canonical, phone: String(row.params.phone).replace(/\D/g, '') }));
+  }
+  if (!oldHashes.includes(row.step_key)) {
+    throw Object.assign(new Error('Reconcile the earlier action before preparing another write of this kind'), { code: 'action_reconciliation_required' });
+  }
+  return paramsHash(row.tool_name, normalizeStepIds(canonical));
 }
 
 async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey, runnerToken }) {
@@ -65,14 +99,18 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
       .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
     if (!task) throw new Error('Task execution was superseded');
     const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
-    const existing = previous.find(row => row.step_key === actionStepKey
-      || (toolName === 'send_sms' && row.tool_name === toolName && stepKey(toolName, row.params) === actionStepKey));
+    const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
+      || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
     if (existing) return existing;
     if (previous.some(row => row.status !== 'confirmed'
       || !['completed', 'provider_accepted'].includes(executionOutcome(row.result)))) {
       throw new Error('Resolve the preceding action outcome before preparing another write');
     }
   }
+  // New step hashes include normalized UUID identity even when their canonical
+  // product/default inputs come from a preview. Old approval payloads/hashes
+  // remain untouched; the marker is server-owned and bound in new params_hash.
+  if (taskId) params = { ...params, _ib_step_key_version: 2 };
   if (params?._ib_task_context) {
     const scope = await require('./task-context').validateRecordTarget(params, params._ib_task_context,
       { toolName, forApproval: true });
