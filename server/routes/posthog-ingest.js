@@ -7,8 +7,9 @@
  * (VITE_POSTHOG_HOST) can point their SDK here and the funnels stay whole.
  *
  * Contract: a transparent pass-through for whatever posthog-js sends — /e/,
- * /i/v0/e/, /batch/, /flags/, /decide/, /s/ (replay), /array/<key>/config, and
- * /static/* (array.js, the recorder) which lives on PostHog's assets host.
+ * /i/v0/e/, /batch/, /flags/, /decide/, /s/ (replay) on the API host, and
+ * /static/* (array.js, the recorder) plus /array/<key>/config (remote config)
+ * on PostHog's assets host — the same split as PostHog's own proxy docs.
  * Upstream hosts are FIXED here, never derived from the request, so nothing can
  * steer this anywhere else. Consent gating, PII scrubbing and replay masking are
  * the SDKs' job and are unchanged: this route only sees what the browser already
@@ -79,7 +80,9 @@ function upstreamUrl(req) {
   // (WHATWG URL treats '\\' as '/' for https). Collapse every leading slash /
   // backslash to a single '/', then let URL normalise any ../ inside.
   const tail = '/' + raw.replace(/^[\\/]+/, '');
-  const base = tail.startsWith('/static/') ? ASSET_HOST : API_HOST;
+  // Same split as PostHog's own Cloudflare proxy: static assets AND the
+  // /array/<key>/config remote-config files live on the assets host.
+  const base = (tail.startsWith('/static/') || tail.startsWith('/array/')) ? ASSET_HOST : API_HOST;
   const url = new URL(tail, base);
   if (url.origin !== base) throw new Error('upstream origin escaped');
   return url.toString();

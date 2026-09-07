@@ -610,8 +610,8 @@ REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a Railway unset is a
 live kill, no redeploy).
 Mounted in `server/index.js` ABOVE helmet, the CORS allowlist and the body
 parsers → `routes/posthog-ingest.js`. Invariants: the upstream origins are
-FIXED constants (`https://us.i.posthog.com`; `/static/*` →
-`https://us-assets.i.posthog.com`) and the resolved URL's origin is asserted
+FIXED constants (`https://us.i.posthog.com`; `/static/*` and `/array/*` →
+`https://us-assets.i.posthog.com`, PostHog's own proxy split) and the resolved URL's origin is asserted
 against them (400 otherwise) — leading `/` and `\` runs are collapsed to one
 `/` first, so a protocol-relative (`//evil.com/e/`) or backslash tail can
 never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only

@@ -3,7 +3,7 @@
  * unauthenticated on the portal origin:
  *  - dark (404) unless GATE_POSTHOG_INGEST_PROXY is on, read at REQUEST time (an
  *    env change after the router loaded flips it); 405 for non GET/POST/OPTIONS
- *  - upstream host is FIXED: /static/* → assets host, everything else → API host,
+ *  - upstream host is FIXED: /static/* and /array/* → assets host, everything else → API host,
  *    query string preserved, ../ cannot escape the host
  *  - cookies / authorization / referer never reach PostHog; origin + content-type
  *    do; X-Forwarded-For carries the visitor IP; raw POST body forwarded byte-for-byte;
@@ -104,14 +104,18 @@ describe('gate + method surface', () => {
 });
 
 describe('upstream routing', () => {
-  test('/static/* goes to the assets host, everything else to the API host, query kept', async () => {
+  test('/static/* and /array/* go to the assets host, everything else to the API host, query kept', async () => {
     await request({ path: '/ingest/static/array.js' });
     await request({ path: '/ingest/e/?ip=1&_=123&ver=1.2' });
     await request({ path: '/ingest/array/phc_abc/config.js' });
+    await request({ path: '/ingest/array/phc_abc/config?v=1' });
+    await request({ path: '/ingest/flags/?v=2' });
     expect(fetchCalls.map((c) => c.url)).toEqual([
       `${router.ASSET_HOST}/static/array.js`,
       `${router.API_HOST}/e/?ip=1&_=123&ver=1.2`,
-      `${router.API_HOST}/array/phc_abc/config.js`,
+      `${router.ASSET_HOST}/array/phc_abc/config.js`,
+      `${router.ASSET_HOST}/array/phc_abc/config?v=1`,
+      `${router.API_HOST}/flags/?v=2`,
     ]);
   });
 
