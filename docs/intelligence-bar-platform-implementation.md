@@ -107,11 +107,15 @@ mailbox extraction: 21 additional sites and one changed Communications site,
 verified against that source commit and retained as **unmapped**. Older moved
 sites and fingerprint history remain recorded. No email parity is implied.
 
-Current foundation census: 1,714 UI sites; ten transport exceptions; 1,704 domain
+The `bd735bc42` main integration adds the completion pricing source reader;
+its exact upstream fingerprint is recorded as unmapped. No scheduling parity is
+claimed by importing this already-merged portal action.
+
+Current foundation census: 1,715 UI sites; ten transport exceptions; 1,705 domain
 sites still unsupported/unverified in the matrix. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 The dependent property branch adds two UI sites and verifies four property
-operations: 1,716 retained sites, ten transport exceptions, and 1,702 unverified.
+operations: 1,717 retained sites, ten transport exceptions, and 1,703 unverified.
 
 ## Verification evidence
 
@@ -172,6 +176,8 @@ operations: 1,716 retained sites, ten transport exceptions, and 1,702 unverified
   passed with no JS errors or overflow. Artifacts: `.local/ib-uuid-*`. The latest
   client run passes 20 tests (17 bar, two identity, one hook); all six scheduler
   registration tests and the production build pass after current-main integration.
+  Client-only native CI initially failed to resolve the server-owned UUID package;
+  the client now declares the same existing UUID dependency for isolated installs.
 - Local preview: `http://127.0.0.1:5292/admin/customers` while the QA harness runs;
   this is not a deployed preview. The synthetic session is local-only.
 - Live-model/provider evaluation has not run. No provider credentials are loaded
