@@ -152,18 +152,21 @@ async function getGrowthbookFeatures(input) {
 
 // Running experiments with their latest analysis, shaped for the weekly BI
 // briefing: one row per experiment, one row per goal metric × variation with
-// users / conversions / rate / chance-to-beat-control, plus a readiness note
-// so the briefing never dresses up a 7-user split as a result. Shares gbGet
-// (key, base, timeout) with the two IB tools above. Results are whatever the
-// last GrowthBook refresh computed (dateUpdated says when) — this does not
-// trigger an analysis.
+// users / numerator / mean / chance-to-beat-control, plus a readiness note
+// (the smallest arm across EVERY goal metric) so the briefing never dresses
+// up a 7-user split as a result. Field names are GrowthBook's own — numerator
+// is a conversion count only for a binomial metric; for revenue / count /
+// duration it is the aggregate value and mean the value per user — so the
+// metric type rides along. Shares gbGet (key, base, timeout) with the two IB
+// tools above. Results are whatever the last GrowthBook refresh computed
+// (dateUpdated says when) — this does not trigger an analysis.
 const MIN_USERS_PER_ARM = 100;
 
 function summariseAnalysis(a) {
   if (!a) return null;
   return {
-    conversions: a.numerator ?? null,
-    rate: typeof a.mean === 'number' ? Number(a.mean.toFixed(4)) : null,
+    numerator: a.numerator ?? null,
+    mean: typeof a.mean === 'number' ? Number(a.mean.toFixed(4)) : null,
     percent_change: typeof a.percentChange === 'number' ? Number((a.percentChange * 100).toFixed(1)) : null,
     ci: [a.ciLow, a.ciHigh].every((n) => typeof n === 'number') ? [Number((a.ciLow * 100).toFixed(1)), Number((a.ciHigh * 100).toFixed(1))] : null,
     chance_to_beat_control: typeof a.chanceToBeatControl === 'number' ? Number(a.chanceToBeatControl.toFixed(3)) : null,
@@ -171,32 +174,47 @@ function summariseAnalysis(a) {
   };
 }
 
+async function listAll(path, key) {
+  const out = [];
+  for (let offset = 0; ; offset += 100) {
+    const json = await gbGet(`${path}?limit=100&offset=${offset}`);
+    out.push(...(json[key] || []));
+    if (!json.hasMore) return out;
+  }
+}
+
+function isNotFound(err) {
+  return /HTTP 404/.test(String(err && err.message));
+}
+
 async function getExperimentResultsSummary() {
-  const list = await gbGet('/api/v1/experiments?limit=50');
-  const running = (list.experiments || []).filter((e) => e.status === 'running' && !e.archived);
+  const [experiments, metricRows] = await Promise.all([listAll('/api/v1/experiments', 'experiments'), listAll('/api/v1/metrics', 'metrics')]);
+  const metricType = new Map(metricRows.map((m) => [m.id, m.type || null]));
+  const running = experiments.filter((e) => e.status === 'running' && !e.archived);
   const out = [];
   for (const e of running) {
     let r = null;
-    let results_error = null;
     try {
       const json = await gbGet(`/api/v1/experiments/${encodeURIComponent(e.id)}/results`);
       r = json.result || null;
     } catch (err) {
-      // "No results found" (never refreshed) is a plain 404 — report it, don't fail the tool.
-      results_error = err.message;
+      // Only a never-refreshed experiment ("No results found", a plain 404) is
+      // experiment state; an outage / auth / rate-limit failure must surface
+      // as the tool's error, not masquerade as "no analysis yet".
+      if (!isNotFound(err)) throw err;
     }
     const overall = r && Array.isArray(r.results) ? r.results.find((d) => !d.dimension) || r.results[0] : null;
     const metrics = overall && Array.isArray(overall.metrics) ? overall.metrics.map((m) => ({
       metric: m.metricName || m.metricId,
+      type: metricType.get(m.metricId) || (String(m.metricId).startsWith('fact__') ? 'fact' : null),
       variations: (m.variations || []).map((v) => ({
         name: v.variationName || v.variationId,
         users: v.users ?? null,
         ...summariseAnalysis((v.analyses || [])[0]),
       })),
     })) : [];
-    const minArm = metrics.length && metrics[0].variations.length
-      ? Math.min(...metrics[0].variations.map((v) => v.users || 0))
-      : 0;
+    const armSizes = metrics.flatMap((m) => m.variations.map((v) => v.users || 0));
+    const minArm = armSizes.length ? Math.min(...armSizes) : 0;
     const srm = overall && overall.checks && typeof overall.checks.srm === 'number' ? overall.checks.srm : null;
     out.push({
       id: e.id,
@@ -209,7 +227,6 @@ async function getExperimentResultsSummary() {
       srm_warning: srm !== null && srm < 0.001,
       readiness: !r ? 'no analysis yet' : minArm < MIN_USERS_PER_ARM ? `too early — smallest arm has ${minArm} users (need ${MIN_USERS_PER_ARM}+)` : 'enough traffic to read',
       metrics,
-      results_error,
     });
   }
   return { experiments: out, running: out.length };

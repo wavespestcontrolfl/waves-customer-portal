@@ -96,7 +96,7 @@ Save a detailed report to the dashboard after sending the SMS.`,
     {
       type: 'custom',
       name: 'get_experiment_results',
-      description: `Get every RUNNING GrowthBook experiment with its latest analysis: name, start date, hypothesis, total users, per goal-metric × variation users / conversions / rate / chance-to-beat-control, an SRM warning, and a readiness note. Report each in ONE line in the content & SEO section ("Auto-prompt test: 7 users, too early" or "Estimate v2: 61% chance to beat v1, 340 users"). Never call a result before the readiness note says there is enough traffic; if configured=false or running=0, say nothing about experiments.`,
+      description: `Get every RUNNING GrowthBook experiment with its latest analysis: name, start date, hypothesis, total users, per goal-metric × variation users / numerator / mean / chance-to-beat-control with the metric type (binomial: numerator = conversions, mean = rate; revenue/count/duration: numerator = aggregate, mean = per user), an SRM warning, and a readiness note computed over every goal metric. Report each in ONE line in the content & SEO section ("Auto-prompt test: 7 users, too early" or "Estimate v2: 61% chance to beat v1, 340 users"). Never call a result before the readiness note says there is enough traffic; if configured=false or running=0, say nothing about experiments.`,
       input_schema: { type: 'object', properties: {} },
     },
 
