@@ -100,6 +100,20 @@ test('forecast converts quantities, orders risks and preserves partial plan fail
   expect(db.transaction).not.toHaveBeenCalled();
 });
 
+test('forecast reports an appointment whose archived recipe cannot be reproduced instead of counting zero demand', async () => {
+  visits = readQuery([{ id: 'visit-archived', scheduled_date: '2030-01-10', first_name: 'Ada', last_name: 'Lovelace' }]);
+  buildPlanForService.mockResolvedValue({
+    mixCalculator: { items: [] },
+    propertyGate: { blocks: [{ code: 'lawn_archived_recipe_unavailable', severity: 'block', message: 'The assigned archived recipe cannot be reproduced with the current products and rates. Review the assigned protocol and enter the actual work.' }] },
+  });
+  const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(result.errors).toEqual([{
+    serviceId: 'visit-archived', scheduledDate: '2030-01-10', customerName: 'Ada Lovelace',
+    message: expect.stringContaining('archived recipe cannot be reproduced'),
+  }]);
+  expect(result).toMatchObject({ serviceCount: 1, productCount: 0, products: [] });
+});
+
 test('forecast HTTP handler returns computed demand and forwards query bounds', async () => {
   const { body, next } = await get('/waveguard-forecast', { days: '2', limit: '20' });
   expect(next).not.toHaveBeenCalled();

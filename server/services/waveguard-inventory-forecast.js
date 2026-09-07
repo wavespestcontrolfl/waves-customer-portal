@@ -93,6 +93,16 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
     try {
       const plan = await buildPlanForService(service.id, { db: knex });
       const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
+      // Under the lawn completion gates an archived assignment whose recipe no
+      // longer reproduces plans NO products (waveguard-plan-engine withholds
+      // rather than borrowing a later recipe). Counting that as zero demand
+      // would read as "nothing needed" and under-order — report it the way a
+      // failed plan is reported.
+      const archivedRecipeBlock = (plan?.propertyGate?.blocks || []).find((block) => block.code === 'lawn_archived_recipe_unavailable');
+      if (archivedRecipeBlock) {
+        errors.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName, message: archivedRecipeBlock.message });
+        continue;
+      }
       for (const item of plan?.mixCalculator?.items || []) {
         if (!item?.product?.id) continue;
         const amount = numberOrNull(item.mix?.amount);
