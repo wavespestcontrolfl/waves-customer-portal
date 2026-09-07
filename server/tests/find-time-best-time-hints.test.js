@@ -19,6 +19,17 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => jest.fn());
+// Pin ET "now" (12:00 ET, Aug 31 2026) so the same-day picked-hour floor
+// test is deterministic; every other test passes explicit past dates.
+jest.mock('../utils/datetime-et', () => {
+  const actual = jest.requireActual('../utils/datetime-et');
+  const PINNED_NOW = new Date('2026-08-31T16:00:00Z');
+  return {
+    ...actual,
+    etParts: (date) => actual.etParts(date || PINNED_NOW),
+    etDateString: (date) => actual.etDateString(date || PINNED_NOW),
+  };
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
@@ -372,4 +383,17 @@ test('garbage pickedStart 400s before the engine runs; no pickedStart means no p
   const body = await (await post({ ...BASE, hint: true })).json();
   expect(body.picked).toBeUndefined();
   expect(findAvailableSlots.mock.calls[0][0].topN).toBe(30);
+});
+
+test('a same-day picked hour before the engine\'s now+30 floor is not scored (no picked key), later hours are', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // ET now is pinned at 12:00 → the engine floors today at 12:30, so a
+  // 12:00 pick is absent from its list for reasons that say nothing
+  // about the route; a 13:00 pick sits in the returned gap.
+  const TODAY = { ...BASE, dateFrom: '2026-08-31', dateTo: '2026-08-31' };
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot({ date: '2026-08-31', start_time: '13:00', end_time: '14:00', latest_start_min: 15 * 60 })], evaluated: 1 });
+  const early = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, pickedStart: '12:00' })).json();
+  expect(early.picked).toBeUndefined();
+  const later = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, pickedStart: '13:00' })).json();
+  expect(later.picked).toMatchObject({ start: '13:00', fits: true });
 });

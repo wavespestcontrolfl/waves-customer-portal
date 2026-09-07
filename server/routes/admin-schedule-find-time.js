@@ -27,7 +27,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadOccupancy, conflictsForTarget } = require('../services/rain-out');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
-const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, etParts } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
 const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
 
@@ -317,7 +317,14 @@ router.post('/', async (req, res) => {
     // day's route; a gap the tech-blind occupancy snapshot vetoes = same
     // answer (fail-open on a snapshot error, like the chips guard).
     let picked;
-    if (hint && pickedStart) {
+    // The engine floors a same-day search at ET now + 30 min (a slot is
+    // never offered seconds before it starts), so on today an hour before
+    // that floor is absent from rawSlots whether or not the route fits it.
+    // Such an hour is not scored at all — no `picked` key, the line stays
+    // blank — rather than reported as "doesn't fit" (pre-push P1).
+    const nowEt = etParts();
+    const pickedTooSoon = from === today && toMin(pickedStart) < nowEt.hour * 60 + nowEt.minute + 30;
+    if (hint && pickedStart && !pickedTooSoon) {
       const pickedMin = toMin(pickedStart);
       const gap = rawSlots.find((s) => {
         if (s.date !== from) return false;
