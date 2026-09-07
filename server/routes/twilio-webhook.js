@@ -150,6 +150,7 @@ router.post('/sms', async (req, res) => {
   // later error — sms_log.twilio_sid is not unique, so a Twilio retry would
   // duplicate the row. Better to keep the (already-logged) message claimed.
   let persisted = false;
+  let sourcePersistenceFailed = false;
   // Contact-correction queue slot + whether a branch actually ran it.
   // Declared out here so the route-level finally can release an un-run
   // reservation on EVERY exit path (round-15) — early returns, throws, and
@@ -662,7 +663,7 @@ router.post('/sms', async (req, res) => {
         // customers on any customer-facing number, legacy owner forward when
         // the bell didn't land — then stop: no reschedule/lead/estimator
         // automation ever sees a tapback (codex r2/r3).
-        const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking'];
+        const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking', 'tech_line'];
         let landed = false;
         if (customer && notifyTypes.includes(numberConfig.type)) {
           try {
@@ -679,8 +680,65 @@ router.post('/sms', async (req, res) => {
             await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
           } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
         }
+        // A loud tapback on a tech line reaches the holder too (same card as a
+        // text — codex #4053 r2 P2); quiet ones stay silent everywhere.
+        if (numberConfig.type === 'tech_line') {
+          await require('../services/tech-line').notifyTechLineText({
+            lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
+          }).catch((e) => logger.warn(`[tech-line] reaction notify failed: ${e.message}`));
+        }
       }
       return res.type('text/xml').send('<Response></Response>');
+    }
+
+    // Persist the shared source BEFORE either reply consumer performs work.
+    // Every ordinary inbound path, including a consumed reply, keeps this row.
+    const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
+      : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
+
+    // The unified row was written above; if the thread was opened in the
+    // meantime that row is already read and this legacy row must agree, or
+    // it would sit unread forever (no later mirror can find it — hook P1).
+    const unifiedAlreadyRead = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+      .then((r) => r?.is_read === true).catch(() => false);
+    const [smsLogEntry] = await db('sms_log').insert({
+      customer_id: customer?.id || null,
+      direction: 'inbound', from_phone: From, to_phone: To,
+      message_body: Body, twilio_sid: MessageSid, status: 'received',
+      message_type: messageType,
+      // Courtesy closers are read on arrival in the legacy log too, so the
+      // sms_log-backed unread counts agree with the unified messages row.
+      ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
+      metadata: JSON.stringify({
+        locationId: numberConfig.locationId,
+        source: numberConfig.type,
+        domain: numberConfig.domain,
+        media: inboundMedia,
+        ...(courtesyOnly ? { courtesyOnly: true } : {}),
+      }),
+    }).returning(['id', 'created_at']).catch(() => {
+      sourcePersistenceFailed = true;
+      throw new Error('inbound_sms_source_unavailable');
+    });
+    // Close the SELECT→INSERT window (hook P1): if the thread was read between
+    // the check above and this insert, the read mirror found no legacy row —
+    // re-check now that the row exists and mirror the state ourselves.
+    if (!courtesyOnly && !unifiedAlreadyRead && smsLogEntry?.id) {
+      const readNow = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+        .then((r) => r?.is_read === true).catch(() => false);
+      if (readNow) await db('sms_log').where({ id: smsLogEntry.id }).update({ is_read: true }).catch(() => {});
+    }
+    // The inbound message is now durably recorded — releasing the claim on a
+    // later error would let a retry duplicate this row (twilio_sid not unique).
+    persisted = true;
+
+    // The same post-ack kick covers both consumed replies and the ordinary
+    // path. A failed or interrupted kick is recovered from the persisted row.
+    if (Body && customer && !isAiNumber) {
+      res.once('finish', () => {
+        void require('../services/sms-operational-actions').runSmsOperationalActions()
+          .catch(() => logger.warn('[sms-operations] inbound kick deferred to recovery sweep'));
+      });
     }
 
     // Check for pending reschedule reply FIRST
@@ -689,21 +747,14 @@ router.post('/sms', async (req, res) => {
         const RescheduleSMS = require('../services/reschedule-sms');
         const rescheduleResult = await RescheduleSMS.handleRescheduleReply(customer.id, Body);
         if (rescheduleResult?.handled) {
-          logger.info(`Reschedule reply handled for ${customer.first_name}: ${rescheduleResult.action}`);
-          // Still log the inbound message
-          let rescheduleSmsLogId = null;
-          try {
-            const inserted = await db('sms_log').insert({
-              customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
-              message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'reschedule_reply',
-            }).returning('id');
-            rescheduleSmsLogId = inserted?.[0]?.id ?? inserted?.[0] ?? null;
-          } catch { /* logging is best-effort, as before */ }
+          logger.info(`Reschedule reply handled for customer ${customer.id}: ${rescheduleResult.action}`);
+          await db('sms_log').where({ id: smsLogEntry.id }).update({ message_type: 'reschedule_reply' })
+            .catch(() => logger.warn('[sms-ingestion] reschedule source classification deferred'));
           // A handled reschedule reply can still CONTAIN an explicit contact
           // correction ("1. Also, my email is wrong; use …") — the
           // correction block further down is unreachable past this return,
           // so it fires here too (round-11), through the entry reservation.
-          await fireContactCorrection(rescheduleSmsLogId);
+          await fireContactCorrection(smsLogEntry.id);
           return res.type('text/xml').send('<Response></Response>');
         }
       } catch (e) { logger.error(`Reschedule reply check failed: ${e.message}`); }
@@ -731,7 +782,7 @@ router.post('/sms', async (req, res) => {
         customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk) {
       try {
         const LeadIntake = require('../services/lead-intake');
-        const intakeResult = await LeadIntake.handleIntakeReply(customer, Body);
+        const intakeResult = await LeadIntake.handleIntakeReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
         const outcome = intakeOutcome(intakeResult);
         if (outcome === 'continue_without_quote') {
           logger.info(`[lead-intake] Scope-vetoed (no draft) for ${customer.first_name}: ${customer.lead_intake_status} — continuing to normal inbound handling`);
@@ -739,23 +790,16 @@ router.post('/sms', async (req, res) => {
         } else if (outcome === 'consumed') {
           // The machine ANSWERED the customer (asked for the address, or
           // drafted and alerted the owner) — it owns this reply end to end.
-          logger.info(`[lead-intake] Handled for ${customer.first_name}: ${customer.lead_intake_status} → ${intakeResult.next}`);
-          let intakeSmsLogId = null;
-          try {
-            const inserted = await db('sms_log').insert({
-              customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
-              message_body: Body, twilio_sid: MessageSid, status: 'received',
-              message_type: 'lead_intake',
-            }).returning('id');
-            intakeSmsLogId = inserted?.[0]?.id ?? inserted?.[0] ?? null;
-          } catch { /* logging is best-effort, as before */ }
+          logger.info(`[lead-intake] Handled for customer ${customer.id}: ${customer.lead_intake_status} → ${intakeResult.next}`);
+          await db('sms_log').where({ id: smsLogEntry.id }).update({ message_type: 'lead_intake' })
+            .catch(() => logger.warn('[sms-ingestion] lead-intake source classification deferred'));
           // A consumed intake reply can still CONTAIN an explicit contact
           // correction (an awaiting_address customer correcting their email,
           // say) — the correction block further down is unreachable past
           // this return, so it fires here too (round-10), through the
           // entry reservation. The gate and the LLM extraction decide
           // whether anything applies.
-          await fireContactCorrection(intakeSmsLogId);
+          await fireContactCorrection(smsLogEntry.id);
           return res.type('text/xml').send('<Response></Response>');
         }
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
@@ -852,51 +896,14 @@ router.post('/sms', async (req, res) => {
       // message continues into normal inbox handling either way.
       const { handleClarifyReply } = require('../services/estimate-clarify-asks');
       const clarifyReply = (!intakeScopeVetoed && Body && String(Body).trim())
-        ? await handleClarifyReply({ phone: From, body: Body })
+        ? await handleClarifyReply({ phone: From, body: Body, triggerSmsLogId: smsLogEntry.id })
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
       if (!intakeScopeVetoed && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
-        await startSmsThreadDraft({ phone: From, triggerBody: Body });
+        await startSmsThreadDraft({ phone: From, triggerBody: Body, triggerSmsLogId: smsLogEntry.id });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
 
-
-    // Log inbound message
-    const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
-      : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
-
-    // The unified row was written above; if the thread was opened in the
-    // meantime that row is already read and this legacy row must agree, or
-    // it would sit unread forever (no later mirror can find it — hook P1).
-    const unifiedAlreadyRead = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
-      .then((r) => r?.is_read === true).catch(() => false);
-    const [smsLogEntry] = await db('sms_log').insert({
-      customer_id: customer?.id || null,
-      direction: 'inbound', from_phone: From, to_phone: To,
-      message_body: Body, twilio_sid: MessageSid, status: 'received',
-      message_type: messageType,
-      // Courtesy closers are read on arrival in the legacy log too, so the
-      // sms_log-backed unread counts agree with the unified messages row.
-      ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
-      metadata: JSON.stringify({
-        locationId: numberConfig.locationId,
-        source: numberConfig.type,
-        domain: numberConfig.domain,
-        media: inboundMedia,
-        ...(courtesyOnly ? { courtesyOnly: true } : {}),
-      }),
-    }).returning(['id', 'created_at']);
-    // Close the SELECT→INSERT window (hook P1): if the thread was read between
-    // the check above and this insert, the read mirror found no legacy row —
-    // re-check now that the row exists and mirror the state ourselves.
-    if (!courtesyOnly && !unifiedAlreadyRead && smsLogEntry?.id) {
-      const readNow = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
-        .then((r) => r?.is_read === true).catch(() => false);
-      if (readNow) await db('sms_log').where({ id: smsLogEntry.id }).update({ is_read: true }).catch(() => {});
-    }
-    // The inbound message is now durably recorded — releasing the claim on a
-    // later error would let a retry duplicate this row (twilio_sid not unique).
-    persisted = true;
 
     // Reschedule/away flag persists AFTER the sms_log row and BEFORE the
     // Twilio ack (codex r18): the webhook SID claim short-circuits
@@ -1007,7 +1014,9 @@ router.post('/sms', async (req, res) => {
     // sms_reply thread bell entirely and surface only as the legacy
     // "📩 New SMS" dashboard forward — the thread in /admin/communications
     // never rang (observed 2026-07-17, customer texting three Waves numbers).
-    const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || isTrackingLeadInbound;
+    // tech_line: the office keeps full visibility of a tech line's thread; the
+    // technician holding the line gets their own card below.
+    const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || numberConfig.type === 'tech_line' || isTrackingLeadInbound;
 
     // Reschedule/away flag — customer texts asking to move or miss a visit
     // are invisible to the reminder/en-route automation (2026-08-05: a
@@ -1041,6 +1050,17 @@ router.post('/sms', async (req, res) => {
         if (e.alreadyRead) { knownInboundNotified = true; logger.info('[notifications] sms_reply skipped — thread read before the bell'); }
         else logger.error(`[notifications] sms_reply trigger failed: ${e.message}`);
       }
+    }
+
+    // Tech line (GATE_TECH_LINES): the technician holding the line gets the
+    // text as a tech-home card + push (services/tech-line.js) in ADDITION to
+    // the office bell above / owner forward below — the office never loses
+    // sight of a tech line's thread. No auto-reply ever fires from a tech
+    // line (owner ruling: automated texts stay on the location lines).
+    if (numberConfig.type === 'tech_line' && (Body || inboundMedia.length) && !smsReaction && !courtesyOnly) {
+      await require('../services/tech-line').notifyTechLineText({
+        lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
+      }).catch((e) => logger.warn(`[tech-line] text notify failed: ${e.message}`));
     }
 
     // Notify Adam of regular inbound SMS. Domain/van tracking leads use the
@@ -1352,7 +1372,7 @@ router.post('/sms', async (req, res) => {
     // retry can't duplicate sms_log. (The deferred side-effects run after the
     // response with their own catch — they
     // never reach here, so a post-ack failure correctly keeps the claim.)
-    if (claimOwned && !persisted) void releaseInboundWebhook(req.body?.MessageSid);
+    if (claimOwned && !persisted) await releaseInboundWebhook(req.body?.MessageSid);
     notifyTwilioFailure({
       channel: 'sms',
       direction: 'inbound',
@@ -1364,7 +1384,9 @@ router.post('/sms', async (req, res) => {
       to: req.body?.To,
       link: '/admin/communications',
     });
-    res.type('text/xml').send('<Response></Response>');
+    // An unrecorded source is a webhook failure, never a successful
+    // acknowledgment. Provider retry/fallback policy is configured in Twilio.
+    res.status(sourcePersistenceFailed ? 503 : 200).type('text/xml').send('<Response></Response>');
   } finally {
     // Release an un-run correction reservation on every exit path — a
     // branch that fired keeps its row (correctionFired is set

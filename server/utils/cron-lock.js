@@ -551,4 +551,86 @@ function getHeldConnection() {
   return lockSlotContext.getStore()?.conn;
 }
 
-module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, wasLockSkipped, sanitizeJobError, getHeldConnection };
+/**
+ * Settle job_health rows a dead process left at 'running'. recordJobStart
+ * writes 'running' and only the body's end writes anything else, so a
+ * deploy kill (or OOM) mid-body leaves the row saying running until the
+ * job's NEXT tick overwrites it — a weekly job reads as stuck for a week
+ * and the watchers re-alert every pass (ops-inbox triage 2026-09-05 lane
+ * 3: voice-profile-distiller, auto-dispatch; 09-07: three rows at 100–240
+ * minutes). The advisory lock is the proof of death: it is session-scoped,
+ * so a process that exited holds nothing — read from pg_locks, never by
+ * taking the lock (lockHeldByAnySession). Every running row whose lock is
+ * FREE is marked failed with the reason; a row whose lock is HELD is an
+ * overlapping instance still in its body and is left alone, and an
+ * unknown probe (null) never settles on a guess. The update is pinned to
+ * the observed last_started_at so a tick that restarted the job between
+ * the read and the write keeps its fresh 'running'. Called once at boot
+ * from the scheduler; fail-soft, returns the settled job names.
+ */
+/**
+ * Whether ANY session holds a job's advisory lock — read from pg_locks,
+ * never by acquiring it. isLocked() probes with pg_try_advisory_lock, which
+ * briefly OWNS the work lease: a real tick colliding with that instant
+ * reads lease_held and skips its body (a skipped daily billing tick misses
+ * its cohort for good — codex P1 on #4103), so the maintenance sweep must
+ * not use it. pg_locks reports an int8 advisory key as (classid = high 32
+ * bits, objid = low 32 bits, objsubid = 1); the shift-or reassembles the
+ * signed key hashtext() produced. Returns true / false, or null when the
+ * probe itself failed.
+ */
+async function lockHeldByAnySession(jobName) {
+  try {
+    const res = await db.raw(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_locks
+         WHERE locktype = 'advisory' AND granted AND objsubid = 1
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND ((classid::bigint << 32) | objid::bigint) = hashtext(?)::bigint
+       ) AS held`,
+      [`cron:${jobName}`],
+    );
+    const held = res?.rows?.[0]?.held;
+    return typeof held === 'boolean' ? held : null;
+  } catch (err) {
+    logger.warn(`[cron-lock] lockHeldByAnySession(${jobName}) failed: ${err.message}`);
+    return null;
+  }
+}
+
+async function settleDeadRunningJobs() {
+  let rows;
+  try {
+    rows = await db('job_health').where({ last_status: 'running' }).select('job_name', 'last_started_at');
+  } catch (err) {
+    logger.warn(`[cron-lock] dead-running settle skipped: job_health unreadable (${err.message})`);
+    return [];
+  }
+  const settled = [];
+  for (const row of rows || []) {
+    const held = await lockHeldByAnySession(row.job_name);
+    if (held !== false) continue;
+    try {
+      const now = new Date();
+      const n = await db('job_health')
+        .where({ job_name: row.job_name, last_status: 'running', last_started_at: row.last_started_at })
+        .update({
+          last_status: 'failed',
+          last_finished_at: now,
+          // The exit time is unknown — a stale duration from the previous
+          // run must not read as this run's (codex P1 on #4103).
+          last_duration_ms: null,
+          updated_at: now,
+          last_error: 'process exited mid-run (advisory lock not held at boot)',
+          consecutive_failures: db.raw('consecutive_failures + 1'),
+        });
+      if (n) settled.push(row.job_name);
+    } catch (err) {
+      logger.warn(`[cron-lock] ${row.job_name}: dead-running settle failed (${err.message})`);
+    }
+  }
+  if (settled.length) logger.warn(`[cron-lock] settled ${settled.length} job_health row(s) left running by a dead process: ${settled.join(', ')}`);
+  return settled;
+}
+
+module.exports = { runExclusive, isLocked, lockHeldByAnySession, recordJobStart, recordJobEnd, recordMissedTick, settleDeadRunningJobs, wasLockSkipped, sanitizeJobError, getHeldConnection };

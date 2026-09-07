@@ -11,6 +11,9 @@
 //                      "went quiet while deciding" from "never engaged", and
 //                      so a parked request queue never fills with non-asks.
 //
+// The website callback variant (GATE_WEBSITE_QUOTE_BOOKING) records a call request;
+// it uses a separate requested-service key under the same locking and notify core.
+//
 // Design constraints (all owner rulings carried over from the measurement
 // review, which this module rides):
 // - No customer comms from this flow — the sheet's success state is the
@@ -96,7 +99,8 @@ function notFound() {
  * the LOCKED row, call-side verdict re-checked inside the transaction, open-
  * request dedupe pre-checked under the lock, notification after commit.
  */
-async function createEstimateChangeRequest({
+async function createEstimateOfficeRequest({
+  kind = 'change',
   estimateToken,
   topics,
   note,
@@ -107,8 +111,9 @@ async function createEstimateChangeRequest({
   const token = String(estimateToken || '').trim();
   if (!token) throw notFound();
 
-  const topicKeys = normalizeTopics(topics);
-  const cleanNote = cleanText(note, 500);
+  const callback = kind === 'callback';
+  const topicKeys = callback ? [] : normalizeTopics(topics);
+  const cleanNote = callback ? 'Please call me to discuss my estimate.' : cleanText(note, 500);
 
   const estimate = await database('estimates').where({ token }).first();
   if (!estimate || !viewabilityCheck(estimate) || !isSoftExitEligible(estimate)) {
@@ -135,7 +140,7 @@ async function createEstimateChangeRequest({
   const outcome = await runSerialized(async (dbx, lockedEstimate) => {
     if (!viewabilityCheck(lockedEstimate) || !isSoftExitEligible(lockedEstimate)) throw notFound();
     if (await callSideBlockedFor(dbx, lockedEstimate)) throw notFound();
-    return createChangeRequestRow({ database: dbx, estimate: lockedEstimate, topicKeys, cleanNote, serialized });
+    return createChangeRequestRow({ database: dbx, estimate: lockedEstimate, topicKeys, cleanNote, serialized, callback });
   });
 
   if (outcome && outcome.notify) {
@@ -145,15 +150,16 @@ async function createEstimateChangeRequest({
   return outcome;
 }
 
-async function createChangeRequestRow({ database, estimate, topicKeys, cleanNote, serialized = false }) {
+async function createChangeRequestRow({ database, estimate, topicKeys, cleanNote, serialized = false, callback = false }) {
+  const requestService = callback ? 'estimate_callback_request' : CHANGE_REQUEST_SERVICE_KEY;
   const existingOpen = await database('service_requests')
-    .where({ estimate_id: estimate.id, requested_service: CHANGE_REQUEST_SERVICE_KEY })
+    .where({ estimate_id: estimate.id, requested_service: requestService })
     .whereNotIn(database.raw("COALESCE(status, 'new')"), OPEN_REQUEST_TERMINAL_STATUSES)
     .first();
   if (existingOpen) return dedupedOutcome(existingOpen, estimate.id);
 
   const customer = await resolveEstimateCustomer(database, estimate, {
-    sourceDetail: 'estimate_change_request',
+    sourceDetail: requestService,
     // The estimate row is never mutated by this flow — skip the resolver's
     // customer_id backfill exactly as the measurement review does.
     skipEstimateBackfill: true,
@@ -161,8 +167,10 @@ async function createChangeRequestRow({ database, estimate, topicKeys, cleanNote
 
   const estimateNumber = estimate.estimate_number || estimate.id;
   const topicLabels = topicKeys.map((k) => CHANGE_REQUEST_TOPICS[k]);
-  const subject = `Change request on estimate #${estimateNumber}`;
-  const description = [
+  const subject = `${callback ? 'Call requested' : 'Change request'} on estimate #${estimateNumber}`;
+  const description = callback
+    ? `Customer requested a phone call about estimate ${estimateNumber}. Call the contact linked to this estimate; no booking or price change was requested.`
+    : [
     `Customer asked for a change to estimate ${estimateNumber} before deciding.`,
     topicLabels.length ? `About: ${topicLabels.join('; ')}.` : null,
     `Customer note: ${cleanNote}`,
@@ -174,15 +182,15 @@ async function createChangeRequestRow({ database, estimate, topicKeys, cleanNote
     [request] = await database('service_requests').insert({
       customer_id: customer.id,
       estimate_id: estimate.id,
-      requested_service: CHANGE_REQUEST_SERVICE_KEY,
+      requested_service: requestService,
       source: SOURCE_PUBLIC_ESTIMATE,
-      category: 'change_request',
+      category: callback ? 'contact_request' : 'change_request',
       subject,
       description,
       urgency: 'routine',
       status: 'new',
       pricing_revision: JSON.stringify({
-        type: 'estimate_change_request',
+        type: requestService,
         topics: topicKeys,
         note: cleanNote,
       }),
@@ -191,7 +199,7 @@ async function createChangeRequestRow({ database, estimate, topicKeys, cleanNote
     if (err.code === '23505') {
       if (serialized) throw err;
       const dupe = await database('service_requests')
-        .where({ estimate_id: estimate.id, requested_service: CHANGE_REQUEST_SERVICE_KEY })
+        .where({ estimate_id: estimate.id, requested_service: requestService })
         .whereNotIn(database.raw("COALESCE(status, 'new')"), OPEN_REQUEST_TERMINAL_STATUSES)
         .first();
       if (dupe) return dedupedOutcome(dupe, estimate.id);
@@ -269,6 +277,6 @@ module.exports = {
   CHANGE_REQUEST_TOPICS,
   normalizeTopics,
   isSoftExitEligible,
-  createEstimateChangeRequest,
+  createEstimateOfficeRequest,
   recordEstimateStillDeciding,
 };

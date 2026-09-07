@@ -16,11 +16,7 @@ const TWILIO_NUMBERS = require('../../server/config/twilio-numbers');
 // The sandbox number is deliberately absent from TWILIO_NUMBERS, so its rows
 // must be absent from the portal side too or the two counts drift apart.
 const { whereNotSandboxCall } = require('../../server/services/voice-agent/relay-protocol');
-
-const FLOW_SID = process.env.TWILIO_INBOUND_FLOW_SID || 'FW5fdc2e44700c6e786ed27de94e0cbace';
-const APP_VOICE_URL =
-  process.env.TWILIO_EXPECTED_APP_VOICE_URL ||
-  'https://waves-customer-portal-production.up.railway.app/api/webhooks/twilio/voice';
+const { FLOW_SID, expectedVoiceUrl, voiceUrlMatches } = require('./routing-contract');
 
 function argValue(name, fallback) {
   const prefix = `--${name}=`;
@@ -52,16 +48,6 @@ function countBy(items, keyFn) {
   }, {});
 }
 
-function expectedVoiceUrl() {
-  if (MODE === 'app') return APP_VOICE_URL;
-  return `/Flows/${FLOW_SID}`;
-}
-
-function voiceUrlMatches(url) {
-  if (MODE === 'app') return String(url || '') === APP_VOICE_URL;
-  return String(url || '').includes(`/Flows/${FLOW_SID}`);
-}
-
 async function listCallPages(client, params) {
   const calls = [];
   let pages = 0;
@@ -90,7 +76,7 @@ async function auditTwilio() {
     .sort((a, b) => a.phoneNumber.localeCompare(b.phoneNumber));
 
   const numberDrift = matchedNumbers
-    .filter((item) => !voiceUrlMatches(item.voiceUrl))
+    .filter((item) => !voiceUrlMatches(item.voiceUrl, MODE))
     .map((item) => ({
       number: maskPhone(item.phoneNumber),
       voiceUrl: item.voiceUrl,
@@ -124,7 +110,7 @@ async function auditTwilio() {
 
   return {
     mode: MODE,
-    expectedVoiceUrl: expectedVoiceUrl(),
+    expectedVoiceUrl: expectedVoiceUrl(MODE),
     numbers: {
       expected: expectedNumbers.size,
       matchedInTwilio: matchedNumbers.length,

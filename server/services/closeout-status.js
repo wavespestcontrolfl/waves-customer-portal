@@ -817,7 +817,7 @@ function deriveCloseoutFacts(inputs) {
       failed: [inputs.liveInvoiceLookupFailed ? 'live' : null, inputs.terminalInvoiceLookupFailed ? 'refunded' : null].filter(Boolean),
       expectation: expectation?.kind || null,
     });
-  } else if (['void', 'canceled', 'cancelled'].includes(inputs.packetInvoice?.packet_invoice_status)) {
+  } else if (['void', 'canceled', 'cancelled', 'refunded'].includes(inputs.packetInvoice?.packet_invoice_status)) {
     invoice = fact('pending', 'parked_manual_reversed_packet_invoice', {
       invoiceId: inputs.packetInvoice.invoice_id, status: inputs.packetInvoice.packet_invoice_status,
       expectation: expectation?.kind || null,

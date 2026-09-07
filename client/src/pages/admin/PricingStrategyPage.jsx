@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -80,7 +81,6 @@ const fmt = (n) =>
       })
     : "—";
 
-const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
 
 // `onSecondaryNav` (from PricingHubPage): the hub header owns the card, so
 // the strategy tabs are handed up to its second row instead of rendering
@@ -222,6 +222,7 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
 // MONEY MODEL TAB
 // ══════════════════════════════════════════════════════════════
 function MoneyModelTab({ dashboard, loading }) {
+  const isMobile = useIsMobile(768);
   if (loading)
     return (
       <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
@@ -509,6 +510,7 @@ function MoneyModelTab({ dashboard, loading }) {
 // VALUE EQUATION TAB
 // ══════════════════════════════════════════════════════════════
 function ValueEquationTab() {
+  const isMobile = useIsMobile(768);
   const [inputs, setInputs] = useState({
     dreamOutcome: 7,
     perceivedLikelihood: 7,
@@ -819,6 +821,7 @@ function ValueEquationTab() {
 // OFFER BUILDER TAB
 // ══════════════════════════════════════════════════════════════
 function OfferBuilderTab({ showToast }) {
+  const isMobile = useIsMobile(768);
   const [offers, setOffers] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -1217,6 +1220,7 @@ function UpsellEngineTab({ showToast }) {
 // LTV ANALYSIS TAB
 // ══════════════════════════════════════════════════════════════
 function LTVAnalysisTab() {
+  const isMobile = useIsMobile(768);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [recalculating, setRecalculating] = useState(false);

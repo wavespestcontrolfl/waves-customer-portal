@@ -354,7 +354,7 @@ async function auditHygieneProposalApply({
   trx, proposal_id, rule_id, rule_version, source, field,
   resource_type, resource_id, scope_type, scope_id,
   before_redacted, after_redacted, before_hash = null, after_hash = null,
-  vault_id = null, reviewer_id, reviewed_via, is_sensitive,
+  vault_id = null, reviewer_id, reviewed_via, is_sensitive, companions_before = null,
 }) {
   return recordAuditEvent({
     actor_type: reviewed_via === 'auto' ? 'agent' : 'technician',
@@ -371,6 +371,9 @@ async function auditHygieneProposalApply({
       after_redacted,
       before_hash,
       after_hash,
+      // Non-sensitive flags the apply changed alongside the field (e.g. the
+      // irrigation-system companion), with their before values.
+      companions_before,
       vault_id: vault_id || null,
       reviewer_id: reviewer_id || null,
     },
@@ -408,7 +411,7 @@ async function auditHygieneProposalRevert({
   resource_type, resource_id, scope_type, scope_id,
   before_redacted, after_redacted, before_hash = null, after_hash = null,
   vault_id = null, original_audit_id, reverted_by, is_sensitive,
-  reviewed_via = 'ui',
+  reviewed_via = 'ui', companions_reverted = null,
 }) {
   return recordAuditEvent({
     actor_type: 'technician',
@@ -417,6 +420,7 @@ async function auditHygieneProposalRevert({
     resource_type,
     resource_id: resource_id || null,
     metadata: {
+      companions_reverted,
       proposal_id, rule_id, rule_version, source, field,
       scope_type, scope_id,
       is_sensitive: !!is_sensitive,

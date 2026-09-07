@@ -9,7 +9,7 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function LoadingState() {
   return (
-    <div data-glass-clear="" className="min-h-screen bg-waves-page px-4 py-10">
+    <div data-glass-clear="" className="flex-1 bg-waves-page px-4 py-10">
       <div data-glass="soft" className="mx-auto max-w-3xl rounded-md border border-zinc-200 bg-white p-6 text-slate-600">
         Loading your lawn care program overview...
       </div>
@@ -23,7 +23,7 @@ function LoadingState() {
 // dead token can't recover, so the copy points at a resend instead.
 function ErrorState({ kind, message, onRetry }) {
   return (
-    <div data-glass-clear="" className="min-h-screen bg-waves-page px-4 py-10">
+    <div data-glass-clear="" className="flex-1 bg-waves-page px-4 py-10">
       <div className="mx-auto max-w-3xl rounded-md border border-red-200 bg-white p-6">
         <h1 className="text-xl font-semibold text-waves-blue-deeper">
           {kind === "gone" ? "This outline link has expired" : "We couldn't load your program overview"}

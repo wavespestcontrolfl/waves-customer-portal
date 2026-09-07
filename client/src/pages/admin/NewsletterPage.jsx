@@ -1036,9 +1036,10 @@ function EventInboxView({ onDraftFromEvent }) {
               <button
                 type="button"
                 onClick={doSearch}
-                className="h-8 w-8 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm hover:bg-zinc-50"
+                aria-label="Search"
+                className="h-11 w-11 sm:h-8 sm:w-8 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm hover:bg-zinc-50"
               >
-                <Search size={13} strokeWidth={1.75} />
+                <Search size={13} strokeWidth={1.75} aria-hidden />
               </button>
             </div>
           </div>

@@ -25,6 +25,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
+import useModalFocus from "../hooks/useModalFocus";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
@@ -35,6 +36,7 @@ import {
   isPathAdminOnly,
 } from "../config/adminNavigation";
 import NotificationBell from "./NotificationBell";
+import useUnreadConversations from "../hooks/useUnreadConversations";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
 import { clearEmailDrafts } from "../lib/emailDrafts";
 
@@ -52,6 +54,44 @@ function roleLabel(role) {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
+// Alert red (owner ruling 2026-09-07, DECISIONS.md): an unread inbound text is
+// a genuine alert — a customer is waiting on a reply — so the Messages badge
+// takes the `alert-fg` token class (Tailwind `alert.fg`, the same class the
+// Button / Badge primitives use), not the inbox row's dark dot (§5.7). Hidden at zero;
+// capped so a backlog never widens the tab.
+function UnreadBadge({ count, style }) {
+  if (!(count > 0)) return null;
+  const label = count > 99 ? "99+" : String(count);
+  return (
+      <span
+        aria-hidden="true"
+        className="bg-alert-fg text-white"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          minWidth: 18,
+          height: 18,
+          padding: "0 5px",
+          borderRadius: 9,
+          fontSize: 11,
+          fontWeight: 500,
+          lineHeight: 1,
+          fontVariantNumeric: "tabular-nums",
+          ...style,
+        }}
+      >
+        {label}
+      </span>
+  );
+}
+
+// Read after the label, so the link announces "Messages, 5 unread conversations".
+function UnreadSrText({ count }) {
+  if (!(count > 0)) return null;
+  return <span className="sr-only">, {count} unread conversation{count === 1 ? "" : "s"}</span>;
+}
+
 export default function AdminLayoutV2() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -59,8 +99,15 @@ export default function AdminLayoutV2() {
   const [user, setUser] = useState(null);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
+  // focus returns to the "Open menu" button (F0014).
+  const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const paletteRef = useRef(null);
+  // Global Messages badge: conversations with an unread inbound text. Polled
+  // only once staff access is verified (same cadence as the bell). The icon's
+  // destination is the inbox, never a particular customer.
+  const unreadConversations = useUnreadConversations(authStatus === "ready" && ["admin", "owner"].includes(user?.role));
 
   // Safari bookmark identity lives in App (AdminSafariShell) so /admin/login
   // is covered. The layout only owns chrome geometry.
@@ -181,6 +228,7 @@ export default function AdminLayoutV2() {
         color: "var(--text-primary)",
       }}
     >
+      <a href="#admin-main" className="admin-skip-link">Skip to content</a>
       {/* Mobile top bar — only visible below breakpoint */}
       {isMobile && (
         <div
@@ -266,6 +314,7 @@ export default function AdminLayoutV2() {
       {/* Sidebar */}
       <aside
         id="admin-sidebar"
+        ref={drawerRef}
         // When mobile + closed the sidebar is translated offscreen but still
         // rendered; `inert` pulls it (and its links) out of the tab order and
         // AT tree so a keyboard user can't Tab into the invisible menu.
@@ -487,7 +536,13 @@ export default function AdminLayoutV2() {
                     }}
                   >
                     <Icon size={18} strokeWidth={1.75} aria-hidden />
-                    <span>{label}</span>
+                    <span style={{ flex: 1 }}>
+                      {label}
+                      {item.id === "communications" ? <UnreadSrText count={unreadConversations} /> : null}
+                    </span>
+                    {item.id === "communications" ? (
+                      <UnreadBadge count={unreadConversations} />
+                    ) : null}
                   </Link>
                 );
               })}
@@ -574,7 +629,7 @@ export default function AdminLayoutV2() {
       </aside>
 
       {/* Main content */}
-      <div
+      <main id="admin-main" tabIndex={-1}
         style={{
           flex: 1,
           minWidth: 0,
@@ -607,7 +662,7 @@ export default function AdminLayoutV2() {
               : "Verifying staff access…"}
           </div>
         )}
-      </div>
+      </main>
 
       {/* Mobile bottom tab bar */}
       {isMobile && (
@@ -662,11 +717,19 @@ export default function AdminLayoutV2() {
                     minHeight: 44,
                   }}
                 >
-                  <Icon
-                    size={22}
-                    strokeWidth={active ? 2.25 : 1.75}
-                    aria-hidden
-                  />
+                  <span style={{ position: "relative", display: "inline-flex" }}>
+                    <Icon
+                      size={22}
+                      strokeWidth={active ? 2.25 : 1.75}
+                      aria-hidden
+                    />
+                    {item.id === "communications" ? (
+                      <UnreadBadge
+                        count={unreadConversations}
+                        style={{ position: "absolute", top: -6, right: -12 }}
+                      />
+                    ) : null}
+                  </span>
                   <span
                     style={{
                       fontSize: 12,
@@ -676,6 +739,7 @@ export default function AdminLayoutV2() {
                     }}
                   >
                     {label}
+                    {item.id === "communications" ? <UnreadSrText count={unreadConversations} /> : null}
                   </span>
                 </Link>
               );

@@ -109,6 +109,19 @@ function ActionColumn({ action }) {
 
 // ─── Prebuilt variants ────────────────────────────────────────────────────
 
+export function customerEstimateHref(customer) {
+  const params = new URLSearchParams();
+  const customerId = customer?.id || customer?.customerId;
+  if (customerId) params.set("customerId", customerId);
+  const fullName = `${customer?.firstName || ""} ${customer?.lastName || ""}`.trim() || customer?.name || "";
+  if (customer?.address) params.set("address", customer.address);
+  if (fullName) params.set("customerName", fullName);
+  if (customer?.phone) params.set("customerPhone", customer.phone);
+  if (customer?.email) params.set("customerEmail", customer.email);
+  const query = params.toString();
+  return query ? `/admin/estimates?${query}` : "/admin/estimates";
+}
+
 export function CustomerActionBar({ customer, standalone }) {
   const phone = customer?.phone;
   const customerId = customer?.id || customer?.customerId;
@@ -123,15 +136,7 @@ export function CustomerActionBar({ customer, standalone }) {
   // Build the Estimate prefill URL from whatever customer fields we have.
   // Falls back to /admin/estimates with no params (lands on Leads tab) when
   // the caller didn't pass enriched customer data.
-  const estimateHref = (() => {
-    const params = new URLSearchParams();
-    if (customer?.address) params.set("address", customer.address);
-    if (fullName) params.set("customerName", fullName);
-    if (phone) params.set("customerPhone", phone);
-    if (customer?.email) params.set("customerEmail", customer.email);
-    const qs = params.toString();
-    return qs ? `/admin/estimates?${qs}` : "/admin/estimates";
-  })();
+  const estimateHref = customerEstimateHref(customer);
 
   return (
     <StickyActionBar

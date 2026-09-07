@@ -1,5 +1,5 @@
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('Unexpected database access'); }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => false }));
 
 const { mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { averageScores, mapToDisplayScores, applySeasonalAdjustment } = require('../services/lawn-assessment');
