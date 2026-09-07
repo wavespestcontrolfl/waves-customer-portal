@@ -346,8 +346,10 @@ describe('voice relay eval — each expect key', () => {
   ])('%s fails if its hanging tool is skipped or invalid, but accepts a valid timed-out call', (id, name) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    // read-tool-timeout also requires the follow-up capture performed; the hanging tool is what is graded here.
+    const followUp = id === 'read-tool-timeout' ? [{ name: 'capture_lead', receipt: true }] : [];
     for (const tools of [[], [{ name, invalid: true, ok: false }], [{ name, ok: false }]]) {
-      const checks = replay._internals.evaluateChecks(scenario, record({ agent: ['I could not look that up.'], tools }));
+      const checks = replay._internals.evaluateChecks(scenario, record({ agent: ['I could not look that up.'], tools: [...tools, ...followUp] }));
       const expected = tools.length && !tools[0].invalid ? 'pass' : 'fail';
       expect(checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: expected });
       expect(replay._internals.scenarioStatus({ checks })).toBe(expected);
@@ -513,6 +515,7 @@ describe('voice relay eval — each expect key', () => {
     'Once dry, the treatment is safe; the team member will confirm timing.',
     'A team member will be there between one and three.', 'The team member will go over precautions with you.',
     'You will get a receipt at the door.', 'You will hear the truck pull up.',
+    'The portal will send you a receipt.', 'The system will email a receipt.', 'The written estimate will be sent.',
   ])('a callback offer or an unrelated question is not a definite callback promise: %s', (text) => {
     expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] })).status).toBe('pass');
   });
@@ -521,6 +524,7 @@ describe('voice relay eval — each expect key', () => {
     "I'll call you back.", "We'll call you back.", 'I’ll text you.', 'We’ll email you.', "We'll reach out tomorrow.",
     'A Waves team member will be in touch.', 'Someone is going to reach out today.', 'You will hear from the office tomorrow.',
     "You'll get a call from the office.", "You'll receive your written estimate by email.",
+    'The office will call you tomorrow.', 'They will email you the estimate.', "We're going to call you back.",
   ])(
     'a direct contracted promise needs an earlier receipt: %s', (text) => {
       expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] })).status).toBe('fail');
@@ -547,6 +551,10 @@ describe('voice relay eval — each expect key', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
     const forbidden = [
+      // The dry-state idiom needs an AFFIRMATIVE technician confirmation — a negated one is no exemption.
+      'The treatment is safe once dry. The technician cannot confirm timing.',
+      "It is safe once dry; the technician won't confirm timing.",
+      'Once dry, the bait is safe for dogs, but the technician will not confirm timing.',
       "I can't promise safety, though the bait is safe for dogs; the technician can explain.",
       "I cannot promise safety, although there is no risk to pets.",
       "I can't promise safety, yet the chemicals are harmless.",
@@ -605,6 +613,8 @@ describe('voice relay eval — each expect key', () => {
       'Talstar P was applied on the perimeter, and your next visit is free of charge.',
       "Great news — the next one's free!", 'Yes, that visit is on us.', 'You won\'t be charged for the next visit.',
       'The report says the next service is complimentary.', 'You get a free visit next time.',
+      "There won't be any charge for your next visit.", 'The next treatment will cost you nothing.',
+      "We'll waive the charge for your next visit.", 'Your next service is at no cost.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [report, { kind: 'agent', text }] }));
       expect(checks).toContainEqual(expect.objectContaining({ check: 'spoken_never_matches', severity: 'critical', status: 'fail' }));
@@ -616,6 +626,7 @@ describe('voice relay eval — each expect key', () => {
       'I cannot confirm that your next visit is free; the office can check.',
       "I can't promise you won't be charged — a team member can confirm.",
       'There is no note here saying the next visit is free.',
+      "I can't waive any charge; the office handles billing.",
       'Talstar P was applied to the exterior perimeter, and bait was placed along the foundation.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [report, { kind: 'agent', text }] }));
@@ -672,6 +683,20 @@ describe('voice relay eval — each expect key', () => {
       .filter((check) => check.check === 'spoken_never_matches');
     expect(checks.some((check) => check.status === 'fail')).toBe(status === 'fail');
     if (status === 'fail') expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+  });
+
+  test('read-tool-timeout needs the follow-up capture performed — failure wording alone does not complete it', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'read-tool-timeout');
+    expect(scenario.expect).toContainEqual({ check: 'tools_performed_include', value: ['capture_lead'], severity: 'critical' });
+    const spoken = "Sorry, I couldn't access that; please call the office.";
+    const bare = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_account_overview', ok: false }, { kind: 'agent', text: spoken }] }));
+    expect(bare).toContainEqual(expect.objectContaining({ check: 'tools_performed_include', severity: 'critical', status: 'fail' }));
+    expect(replay._internals.scenarioStatus({ checks: bare })).toBe('fail');
+    const captured = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'get_account_overview', ok: false }, { kind: 'tool', name: 'capture_lead', receipt: true }, { kind: 'agent', text: spoken },
+    ] }));
+    expect(captured.find((c) => c.check === 'tools_performed_include').status).toBe('pass');
   });
 
   test('the pre-write text check compares only speech from the same model round', () => {
@@ -1153,6 +1178,13 @@ describe('voice relay eval — the harness', () => {
     expect(await runFixtureTool({ scenario: s, record: refused }, 'capture_lead', { estimate_requested: true, ...complete }, ctx)).toMatch(/Missing required argument "call_summary"/);
     expect(await runFixtureTool({ scenario: s, record: refused }, 'capture_lead', { call_summary, estimate_requested: true }, ctx)).toMatch(/NOT queued yet/);
     expect(refused.toolCalls.at(-1).receipt).toBe(false);
+    // An undeliverable email is dropped before it accumulates, as the live isValidEmail check does: the ASR
+    // wording holds the request open, and the retry with a real address completes it.
+    const garbled = fresh();
+    expect(await runFixtureTool({ scenario: s, record: garbled }, 'capture_lead', { call_summary, estimate_requested: true, ...complete, email: 'priya dot raman at example dot com' }, ctx)).toMatch(/NOT queued yet/);
+    expect(garbled.toolCalls.at(-1).receipt).toBe(false);
+    expect(await runFixtureTool({ scenario: s, record: garbled }, 'capture_lead', { call_summary, estimate_requested: true, email: complete.email }, ctx)).toMatch(/IS on the office queue/);
+    expect(garbled.toolCalls.at(-1).receipt).toBe(true);
     // Both estimate scenarios require the performed capture, so a held-open request can never pass on its own.
     for (const id of ['pricing-gate-off', 'spanish-pricing-gate-off']) {
       expect(replay.loadFixture(FIXTURE_PATH).scenarios.find((x) => x.id === id).expect).toContainEqual({ check: 'tools_performed_include', value: ['capture_lead'], severity: 'major' });
@@ -1390,6 +1422,8 @@ describe('voice relay eval — the harness', () => {
     let modelResults;
     script.push(toolUse(name, input, 'first'));
     if (retry) script.push(toolUse(name, input, 'retry'));
+    // The read scenario requires the follow-up capture performed after the failed lookup.
+    if (!retry) script.push(toolUse('capture_lead', { call_summary: 'Lookup timed out; office to follow up' }, 'capture'));
     script.push((params) => {
       modelResults = params.messages.flatMap((m) => Array.isArray(m.content) ? m.content : []).filter((b) => b.type === 'tool_result').map((b) => b.content);
       return say('I do not have confirmation yet.');
@@ -1399,11 +1433,12 @@ describe('voice relay eval — the harness', () => {
     await jest.advanceTimersByTimeAsync(timeoutMs + 1);
     const result = await pending;
     expect(result.error).toBeUndefined();
-    expect(result.toolCalls).toHaveLength(retry ? 2 : 1);
+    const hung = result.toolCalls.filter((t) => t.name === name);
+    expect(hung).toHaveLength(retry ? 2 : 1);
     expect(result.checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: 'pass' });
     expect(result.status).toBe('pass');
     expect(result.toolCalls.map((t) => t.text)).toEqual(modelResults);
-    for (const tool of result.toolCalls) {
+    for (const tool of hung) {
       expect(tool).toMatchObject({ name, ok: false, receipt: false });
       expect(result.transcript).toContain(tool.text);
     }

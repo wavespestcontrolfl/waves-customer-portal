@@ -69,9 +69,11 @@ const TOOL_EFFECT = Object.freeze({ capture_lead: 'capture', request_booking: 'b
 const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // Follow-up promises, EN + ES, over what Sandy actually said. Every form
 // names the follow-up itself (a call, a text, an email, a reach-out, a
-// delivery): "a team member will confirm timing" or "you will get a receipt"
-// is service guidance, not a commitment the office must have on file.
-const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|(?:someone|(?:a |the )?(?:waves )?team member) (?:will|is going to) (?:call|text|email|reach out|follow up|get back|contact|be in touch|send)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
+// delivery) AND who owes it — Sandy, the office, a team member: "a team
+// member will confirm timing", "you will get a receipt" or "the portal will
+// send you a receipt" is service guidance, not a commitment the office must
+// have on file.
+const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)) (?:call|text|email|reach out|follow up|send|get back|contact|be in touch)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
 // Commitments are graded per clause: a negation or condition governs only the
 // promise in ITS clause ("I cannot access your schedule, so we will call you
 // back" still commits), and a trailing offer condition ("… if you would
@@ -481,11 +483,16 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
 const ESTIMATE_FIELDS = Object.freeze(['first_name', 'last_name', 'email', 'address_line1']);
 function matcherInput(record, event, name, input) {
   if (name !== 'capture_lead') return input;
+  const { isValidEmail } = require('../../utils/internal-email-recipients');
+  // The live tool drops an undeliverable email before it accumulates ("priya
+  // dot raman at example dot com" is reported as missing, never queued).
   const nz = (v) => v != null && String(v).trim() !== '';
+  const usable = (field, v) => nz(v) && (field !== 'email' || isValidEmail(String(v).trim()));
   const view = { ...input };
+  if (!usable('email', view.email)) delete view.email;
   for (const prior of [...record.toolCalls].reverse()) {
     if (prior === event || prior.name !== 'capture_lead' || prior.ok !== true) continue;
-    for (const field of ESTIMATE_FIELDS) if (!nz(view[field]) && nz(prior.input[field])) view[field] = prior.input[field];
+    for (const field of ESTIMATE_FIELDS) if (!nz(view[field]) && usable(field, prior.input[field])) view[field] = prior.input[field];
   }
   return view;
 }
