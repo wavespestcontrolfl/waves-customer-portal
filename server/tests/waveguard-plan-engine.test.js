@@ -171,18 +171,19 @@ describe('waveguard-plan-engine helpers', () => {
     expect(expired.selected.carrier_gal_per_1000).toBe(2);
   });
 
-  test('ambiguous active equipment calibrations select nothing and block nothing', () => {
-    const result = summarizeCalibration({
-      calibrations: [
-        { equipment_system_id: 'tank', system_name: '110-Gallon Spray Tank #1', carrier_gal_per_1000: 2 },
-        { equipment_system_id: 'backpack', system_name: 'FlowZone Typhoon 2.5 #1', carrier_gal_per_1000: 0.5 },
-      ],
-      date: new Date('2026-05-01T12:00:00'),
-    });
-
+  test('several active rigs: the tank rig decides, a backpack never does, and disagreeing tanks select nothing — never a block', () => {
+    const tank1 = { equipment_system_id: 'tank1', system_type: 'tank', system_name: '110-Gallon Spray Tank #1', carrier_gal_per_1000: 2, calibration_status: 'estimated_not_field_verified' };
+    const tank2 = { equipment_system_id: 'tank2', system_type: 'tank', system_name: '110-gal tank #2', carrier_gal_per_1000: '2.000', calibration_status: 'field_verified' };
+    const backpack = { equipment_system_id: 'backpack', system_type: 'backpack', system_name: 'FlowZone Typhoon 3.0 #1', carrier_gal_per_1000: 1.33 };
+    const date = new Date('2026-05-01T12:00:00');
+    expect(summarizeCalibration({ calibrations: [tank1, backpack], date }).selected).toBe(tank1);
+    // Two tanks on the same carrier resolve (the field-verified one is named).
+    expect(summarizeCalibration({ calibrations: [tank1, tank2, backpack], date }).selected).toBe(tank2);
+    const result = summarizeCalibration({ calibrations: [tank1, { ...tank2, carrier_gal_per_1000: 3 }, backpack], date });
     expect(result.selected).toBeNull();
     expect(result.blocks).toEqual([]);
     expect(result).not.toHaveProperty('options');
+    expect(summarizeCalibration({ calibrations: [backpack, { ...backpack, equipment_system_id: 'backpack2' }], date }).selected).toBeNull();
   });
 
   test('isConditionalSelected includes base products and excludes unselected optional products', () => {

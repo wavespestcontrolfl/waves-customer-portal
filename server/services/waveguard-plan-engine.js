@@ -856,13 +856,26 @@ function summarizeOrdinanceStatus({ date, ordinances, candidateItems }) {
 // The rig is a convenience for tank-fill math, never a gate (owner ruling
 // 2026-09-07: the "select a rig" block had produced zero assignments in
 // prod and held every lawn visit). The assigned rig wins, a lone active rig
-// is used, and none / several resolves to the protocol window's default
-// carrier downstream.
+// is used, and among several the tank rigs decide: one tank rig, or every
+// tank rig on the same carrier (both 110-gal rigs run the same gun and
+// pace), resolves; tank rigs that disagree resolve nothing and the protocol
+// window's default carrier applies downstream. Backpacks never decide a
+// tank mix.
+function resolveAmongActive(activeCalibrations) {
+  const tanks = activeCalibrations.filter((row) => row.system_type === 'tank');
+  if (!tanks.length) return null;
+  const carriers = new Set(tanks.map((row) => Number(row.carrier_gal_per_1000 || 0)));
+  if (carriers.size !== 1) return null;
+  return tanks.find((row) => row.calibration_status === 'field_verified') || tanks[0];
+}
+
 function summarizeCalibration({ calibration, calibrations }) {
   const activeCalibrations = Array.isArray(calibrations)
     ? calibrations
     : (calibration ? [calibration] : []);
-  const selected = calibration || (activeCalibrations.length === 1 ? activeCalibrations[0] : null);
+  const selected = calibration
+    || (activeCalibrations.length === 1 ? activeCalibrations[0] : null)
+    || (activeCalibrations.length > 1 ? resolveAmongActive(activeCalibrations) : null);
   const warnings = [];
   if (selected && !selected.tank_capacity_gal) {
     warnings.push({

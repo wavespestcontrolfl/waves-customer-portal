@@ -374,9 +374,17 @@ describe('tankFromCalibrations', () => {
   test('a lone active rig supplies the carrier and tank capacity', () => {
     expect(jobCard.tankFromCalibrations([live], 1)).toMatchObject({ calibrated: true, source: 'rig', carrierGalPer1000: 2, tankCapacityGal: 110, systemName: 'Rig' });
   });
-  test('two active rigs and no assignment fall back to the protocol carrier — no rig block (owner ruling 2026-09-07)', () => {
-    expect(jobCard.tankFromCalibrations([live, { ...live, carrier_gal_per_1000: 1, system_name: 'Skid' }], 1))
+  test('two tank rigs that disagree and no assignment fall back to the protocol carrier — no rig block (owner ruling 2026-09-07)', () => {
+    const tank = { ...live, system_type: 'tank' };
+    expect(jobCard.tankFromCalibrations([tank, { ...tank, carrier_gal_per_1000: 1, system_name: 'Skid' }], 1))
       .toMatchObject({ calibrated: true, source: 'protocol_default', reason: null, carrierGalPer1000: 1, tankCapacityGal: null, systemName: null });
+  });
+  test('a tank rig beside an active backpack, or two tank rigs on the same carrier, mix on the rig', () => {
+    const tank = { ...live, system_type: 'tank' };
+    const backpack = { ...live, system_type: 'backpack', carrier_gal_per_1000: 1.33, system_name: 'FlowZone' };
+    expect(jobCard.tankFromCalibrations([backpack, tank], 1)).toMatchObject({ calibrated: true, source: 'rig', carrierGalPer1000: 2, systemName: 'Rig' });
+    expect(jobCard.tankFromCalibrations([tank, { ...tank, system_name: 'Tank #2', calibration_status: 'estimated_not_field_verified' }, backpack], 1))
+      .toMatchObject({ calibrated: true, source: 'rig', carrierGalPer1000: 2, systemName: 'Rig' });
   });
   test('no rig and no protocol carrier → no tank math, with the reason', () => {
     expect(jobCard.tankFromCalibrations([])).toMatchObject({ calibrated: false, source: null, reason: 'No carrier rate on file', carrierGalPer1000: null });
