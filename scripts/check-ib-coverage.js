@@ -150,7 +150,8 @@ function checkCoverage(current, manifest, policy, baselineProof = new Set()) {
       && previous.evidence.every(value => typeof value === 'string' && value.trim())
       && ['permission', 'approval', 'inputsAndEffects'].every(key => typeof previous[key] === 'string'
         && previous[key].trim() && previous[key].trim() !== 'requires_action_review');
-    const exception = previous.status === 'reviewed_exception' && previous.exception?.review && previous.exception?.reason;
+    const exception = previous.status === 'reviewed_exception'
+      && ['review', 'reason'].every(key => typeof previous.exception?.[key] === 'string' && previous.exception[key].trim());
     if ((implemented || exception) && previous.reviewedFingerprint === action.fingerprint) continue;
     if (previous.status !== 'unmapped' || previous.baselineFingerprint !== action.fingerprint || !baselineProof.has(`${action.id}:${action.fingerprint}`)) {
       errors.push(`Changed action needs IB mapping or reviewed exception: ${action.ui.file}:${action.ui.line}`);

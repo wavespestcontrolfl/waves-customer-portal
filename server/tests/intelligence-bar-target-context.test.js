@@ -52,6 +52,30 @@ test('viewed and selected targets retain the database text version without Date 
 });
 const context = (customerId = A) => ({ targets: customerId ? [{ customer_id: customerId }] : [], page: { ids: {} } });
 
+test.each(['Synthetic Person', 'Another Person', 'Unresolved'])('SMS recipient name %s requires a canonical customer ID', async customer_name => {
+  expect((await Context.validateRecordTarget({ customer_name }, context(), { toolName: 'send_sms' })).code).toBe('target_clarification_required');
+  expect((await Context.validateRecordTarget({ customer_name, customerId: A }, context(), { toolName: 'send_sms' })).code).toBe('target_clarification_required');
+  expect(db).not.toHaveBeenCalled();
+  rows.customers[0].phone = '+15550101234';
+  expect(await Context.validateRecordTarget({ customer_id: A, customer_name, phone: '5550101234' }, context(), { toolName: 'send_sms' })).toBeNull();
+  expect((await Context.validateRecordTarget({ customer_id: B, customer_name }, context(), { toolName: 'send_sms' })).code).toBe('target_clarification_required');
+  expect((await Context.validateRecordTarget({ customer_id: A, customer_name, phone: '5550104321' }, context(), { toolName: 'send_sms' })).code).toBe('target_relationship_mismatch');
+});
+
+test.each([['email', 'emails'], ['call', 'call_log'], ['lead', 'leads']])('a %s mentioned only in content gives no customer authority', async (noun, table) => {
+  const id = '40000000-0000-4000-8000-000000000001';
+  rows[table] = [{ id, customer_id: A }];
+  for (const prompt of [`Add a note: this ${noun} needs attention`, `Add a note saying this ${noun} needs attention`, `Add a note that this ${noun} needs attention`]) {
+    const task = await Context.resolve({ prompt, pageData: { [`${noun}_id`]: id } });
+    expect(task.targets).toEqual([]);
+    expect((await Context.validateRecordTarget({ customer_id: A }, task)).code).toBe('target_clarification_required');
+  }
+  const missing = await Context.resolve({ prompt: `Update this ${noun}`, pageData: {} });
+  expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, missing)).code).toBe('target_clarification_required');
+  rows[table] = [];
+  expect((await Context.resolve({ prompt: `Update this ${noun}`, pageData: { [`${noun}_id`]: id } })).code).toBe('record_unavailable');
+});
+
 test('the native review deep link and explicit review IDs enter the same whitelist', () => {
   expect(Context.pageIds({ search: `?review=${REVIEW}` })).toEqual({ review_id: REVIEW });
   expect(Context.pageIds({ reviewId: REVIEW })).toEqual({ review_id: REVIEW });
@@ -96,6 +120,20 @@ test('malformed identifiers refuse before a query, and child relationships are c
   expect((await Context.validateRecordTarget({ customer_id: A, property_id: PROPERTY }, context())).code).toBe('target_relationship_mismatch');
 });
 
+test.each([['lead', 'leads', { first_name: 'Synthetic', last_name: 'Unlinkedfixture' }],
+  ['estimate', 'estimates', { customer_name: 'Synthetic Unlinkedfixture' }]])('an unlinked %s needs a deliberate target expression', async (noun, table, name) => {
+  const id = '40000000-0000-4000-8000-000000000001';
+  rows[table] = [{ id, customer_id: null, ...name }];
+  for (const prompt of ['Look up inventory', 'Add a note: Synthetic Unlinkedfixture needs attention', 'Add a note saying Synthetic Unlinkedfixture needs attention']) {
+    const task = await Context.resolve({ prompt, pageData: { [`${noun}_id`]: id } });
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).code).toBe('target_clarification_required');
+  }
+  for (const prompt of [`Update this ${noun}`, `Update that ${noun}`, 'Update Synthetic Unlinkedfixture']) {
+    const task = await Context.resolve({ prompt, pageData: { [`${noun}_id`]: id } });
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).toBeNull();
+  }
+});
+
  test.each([
   'Reply to the review for Another Person',
   `Add a note: reply to review ${REVIEW}`,
@@ -119,8 +157,7 @@ test.each([
   rows[table] = [{ id, customer_id: A }, { id: sibling, customer_id: A }];
   for (const reference of ['this', 'that', 'selected']) {
     const task = await Context.resolve({ prompt: `Update ${reference} ${noun}`, pageData: { [`${noun}_id`]: id } });
-    // Customer resolution is independent of the exact child-record binding.
-    task.targets = [{ customer_id: A }];
+    expect(task.target.customer_id).toBe(A);
     expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).toBeNull();
     expect((await Context.validateRecordTarget({ [`${noun}_id`]: sibling }, task)).code).toBe('target_clarification_required');
   }
