@@ -1,0 +1,208 @@
+// Real migrated PostgreSQL, synthetic records, rolled back after every test.
+// The completion itself is mocked — this covers WHICH visit closes (linked
+// invoices only), the gate, resume, and the quiet posture handed to the
+// canonical completion.
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+jest.mock('../models/db', () => {
+  const db = (...args) => db.connection(...args);
+  db.raw = (...args) => db.connection.raw(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
+  Object.defineProperty(db, 'schema', { get: () => db.connection.schema });
+  Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
+  return db;
+});
+const mockCompleteScheduledService = jest.fn(async () => ({ status: 200, body: { success: true } }));
+jest.mock('../services/complete-scheduled-service', () => ({ completeScheduledService: (...a) => mockCompleteScheduledService(...a) }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => ({})) }));
+// The gate table is built at module load from process.env; the test flips
+// the gate through a mock instead of racing the require.
+const mockGate = { on: true };
+jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => gate === 'invoiceIssuedClosesVisit' && mockGate.on }));
+const { randomUUID } = require('node:crypto');
+const { resolveVisitForIssuedInvoice, closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+const { recordAuditEvent } = require('../services/audit-log');
+
+const { backfillCompletionPlan, backfillCompletionEndInstant } = jest.requireActual('../services/complete-scheduled-service');
+
+describe('backfillCompletionPlan same-day switch', () => {
+  test('the panel rule stays past-only; the internal issued-invoice trigger admits today, never the future', () => {
+    const base = { backfill: true, role: 'admin', today: '2040-03-04' };
+    expect(backfillCompletionPlan({ ...base, scheduledDate: '2040-03-04' }).error.code).toBe('backfill_not_past');
+    expect(backfillCompletionPlan({ ...base, scheduledDate: '2040-03-04', allowSameDay: true })).toEqual({ active: true, serviceDate: '2040-03-04' });
+    expect(backfillCompletionPlan({ ...base, scheduledDate: '2040-03-05', allowSameDay: true }).error.code).toBe('backfill_not_past');
+    expect(backfillCompletionPlan({ ...base, scheduledDate: '2040-03-03', allowSameDay: true })).toEqual({ active: true, serviceDate: '2040-03-03' });
+  });
+
+  test('a same-day backfill ends at the closeout itself; earlier days keep ET noon; no anchor keeps the noon contract', () => {
+    const now = new Date('2040-03-04T15:20:00Z'); // 10:20 ET on 2040-03-04 (EST)
+    expect(backfillCompletionEndInstant('2040-03-04', null, {}, { now }).getTime()).toBe(now.getTime());
+    expect(backfillCompletionEndInstant('2040-03-03', null, {}, { now }).toISOString()).toBe('2040-03-03T17:00:00.000Z');
+    expect(backfillCompletionEndInstant('2040-03-04', null, {}).toISOString()).toBe('2040-03-04T17:00:00.000Z');
+  });
+});
+
+postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
+  let database;
+  let trx;
+  let customerId;
+  const TODAY = '2040-03-04';
+
+  beforeAll(() => {
+    const url = new URL(process.env.DATABASE_URL);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use a disposable local/CI database');
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+  });
+  beforeEach(async () => {
+    mockGate.on = true;
+    mockCompleteScheduledService.mockClear();
+    recordAuditEvent.mockClear();
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+    customerId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${customerId}@example.invalid`, phone: `fixture-${customerId.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
+    });
+  });
+  afterEach(async () => { await trx.rollback(); require('../models/db').connection = database; });
+  afterAll(async () => { await database.destroy(); });
+
+  async function visit({ status = 'confirmed', date = TODAY, serviceType = 'Quarterly Pest Control Service', ...rest } = {}) {
+    const id = randomUUID();
+    await trx('scheduled_services').insert({ id, customer_id: customerId, scheduled_date: date, service_type: serviceType, status, ...rest });
+    return trx('scheduled_services').where({ id }).first();
+  }
+  async function invoice({ status = 'sent', date = TODAY, serviceType = 'Quarterly Pest Control Service', ...rest } = {}) {
+    const id = randomUUID();
+    await trx('invoices').insert({
+      id, customer_id: customerId, invoice_number: `TST-${id.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''),
+      status, total: 117, subtotal: 117, service_date: date, service_type: serviceType,
+      line_items: JSON.stringify([{ description: serviceType, amount: 117, quantity: 1, unit_price: 117 }]),
+      ...rest,
+    });
+    return trx('invoices').where({ id }).first();
+  }
+
+  test('a linked open visit on or before today resolves; closed, future and cancelled visits do not', async () => {
+    const open = await visit();
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id }), { today: TODAY })).svc.id).toBe(open.id);
+    const past = await visit({ date: '2040-02-20', status: 'on_site' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY })).svc.id).toBe(past.id);
+    const future = await visit({ date: '2040-03-05' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: future.id, date: '2040-03-05' }), { today: TODAY })).reason).toBe('visit_in_future');
+    const done = await visit({ status: 'completed', date: '2040-02-01' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: done.id, date: '2040-02-01' }), { today: TODAY })).reason).toBe('visit_completed');
+    const dead = await visit({ status: 'cancelled', date: '2040-02-02' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: dead.id, date: '2040-02-02' }), { today: TODAY })).reason).toBe('visit_cancelled');
+  });
+
+  test('a linked open visit closes with the quiet posture handed to the canonical completion', async () => {
+    const open = await visit();
+    const inv = await invoice({ scheduled_service_id: open.id });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', actorTechnicianId: null, conn: trx, today: TODAY });
+    expect(out).toMatchObject({ closed: true, visitId: open.id, resumed: false });
+    expect(mockCompleteScheduledService).toHaveBeenCalledTimes(1);
+    const call = mockCompleteScheduledService.mock.calls[0][0];
+    expect(call.serviceId).toBe(open.id);
+    expect(call.body).toMatchObject({ visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true });
+    expect(call.issuedInvoiceCloseout).toEqual({ invoiceId: inv.id, trigger: 'sent' });
+    expect(call.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'visit.completed_on_invoice_issued', resource_id: open.id, actor_type: 'system', actor_id: null }));
+  });
+
+  test('the operator behind the send is the completion actor; an automated trigger acts as the system, never as the visit technician', async () => {
+    const techId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Fixture Technician', role: 'technician', active: true });
+    const automated = await visit({ technician_id: techId });
+    await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: automated.id })).id, trigger: 'paid', conn: trx, today: TODAY });
+    expect(mockCompleteScheduledService.mock.calls[0][0].actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: automated.id, actor_type: 'system', actor_id: null }));
+    mockCompleteScheduledService.mockClear();
+    recordAuditEvent.mockClear();
+    const byOperator = await visit({ technician_id: techId, date: '2040-03-01' });
+    await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: byOperator.id, date: '2040-03-01' })).id, trigger: 'sent', actorTechnicianId: 'admin-1', conn: trx, today: TODAY });
+    expect(mockCompleteScheduledService.mock.calls[0][0].actor.technicianId).toBe('admin-1');
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: byOperator.id, actor_type: 'admin', actor_id: 'admin-1' }));
+  });
+
+  test('a linked visit left open is audited as refused with the reason; an invoice with no visit link is logged only', async () => {
+    const future = await visit({ date: '2040-03-05' });
+    const inv = await invoice({ scheduled_service_id: future.id, date: '2040-03-05' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_in_future', visitId: future.id });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledTimes(1);
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: future.id,
+      metadata: expect.objectContaining({ invoiceId: inv.id, trigger: 'sent', code: 'visit_in_future' }),
+    }));
+    recordAuditEvent.mockClear();
+    const done = await visit({ status: 'completed', date: '2040-02-01' });
+    await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: done.id, date: '2040-02-01' })).id, trigger: 'paid', conn: trx, today: TODAY });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: done.id, metadata: expect.objectContaining({ code: 'visit_completed' }) }));
+    recordAuditEvent.mockClear();
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice()).id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'not_linked', visitId: null });
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('an invoice linked only through a service record is left alone — that visit already completed once', async () => {
+    const open = await visit({ status: 'on_site' });
+    const recordId = randomUUID();
+    await trx('service_records').insert({ id: recordId, customer_id: customerId, scheduled_service_id: open.id, service_date: TODAY, service_type: open.service_type });
+    const inv = await invoice({ service_record_id: recordId });
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY })).toMatchObject({ svc: null, reason: 'record_linked_only' });
+  });
+
+  test('an UNLINKED office invoice is never paired by inference — the visit stays open', async () => {
+    await visit();
+    const inv = await invoice();
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'not_linked' });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    expect((await trx('invoices').where({ id: inv.id }).first()).scheduled_service_id).toBeNull();
+  });
+
+  test('a grouped stop is left to its visit closeout', async () => {
+    const visitId = randomUUID();
+    await trx('service_visits').insert({ id: visitId, customer_id: customerId, scheduled_date: TODAY, stop_base_key: `stop-${visitId.slice(0, 8)}`, created_by: 'test' });
+    const a = await visit({ visit_id: visitId });
+    await visit({ visit_id: visitId, serviceType: 'Mosquito Barrier Treatment' });
+    const inv = await invoice({ scheduled_service_id: a.id });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY });
+    expect(out.closed).toBe(false);
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('a completed visit whose OWN issued-invoice closeout was parked resumable is resumed; anyone else\'s completion is not', async () => {
+    const done = await visit({ status: 'completed' });
+    const inv = await invoice({ scheduled_service_id: done.id });
+    // No attempt at all → the visit is simply done.
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_completed' });
+    // A panel's parked attempt under another key → not ours, leave it.
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: done.id, idempotency_key: randomUUID(), status: 'side_effects_pending', request_hash: 'x' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_completed' });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // Our own parked attempt → hand it back to the canonical completion to resume.
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: done.id, idempotency_key: `invoice-issued:${inv.id}`, status: 'side_effects_pending', request_hash: 'x' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: true, resumed: true, visitId: done.id });
+    expect(mockCompleteScheduledService).toHaveBeenCalledTimes(1);
+    expect(mockCompleteScheduledService.mock.calls[0][0].idempotencyKey).toBe(`invoice-issued:${inv.id}`);
+  });
+
+  test('gate off: nothing runs', async () => {
+    mockGate.on = false;
+    const open = await visit();
+    const inv = await invoice({ scheduled_service_id: open.id });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toEqual({ closed: false, reason: 'gate_off' });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('a refused completion is reported, audited as refused, and never thrown', async () => {
+    mockCompleteScheduledService.mockResolvedValueOnce({ status: 409, body: { code: 'already_completed' } });
+    const open = await visit();
+    const inv = await invoice({ scheduled_service_id: open.id });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'already_completed' });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'visit.completion_on_invoice_issued_refused' }));
+  });
+});

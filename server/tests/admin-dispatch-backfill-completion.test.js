@@ -2073,7 +2073,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // same hoisted derivations and row columns the shouldInvoice call
       // reads — the frozen posture can never describe a different population
       // than the one the mint decision bills.
-      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*recapReviewOnly,\s*\n\s*autopayCoversVisit,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
+      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*issuedInvoiceCloseout: !!issuedInvoiceCloseout,\s*\n\s*recapReviewOnly,\s*\n\s*autopayCoversVisit,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
       // Dues coverage joins the freeze with its REAL value (fix round 12):
       // the coverage derivation is hoisted above the transaction — one
       // derivation shared with the invoice block, like every other input —
@@ -2310,7 +2310,7 @@ describe('completion route wiring (source contracts)', () => {
   const verdictSource = fs.readFileSync(path.join(__dirname, '../services/completion-charge-verdict.js'), 'utf8');
 
   test('route feeds the requester role into the plan and honors the 403 status', () => {
-    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole \}\)/);
+    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole, allowSameDay: !!completionInput\.issuedInvoiceCloseout \}\)/);
     expect(source).toMatch(/\{ status: backfillPlan\.status \|\| 400, body: backfillPlan\.error \}/);
   });
 
@@ -2537,7 +2537,7 @@ describe('completion route wiring (source contracts)', () => {
     // no wall-clock end instant can reach the row. The live admin override's
     // adjusted instant sits strictly after backfill's in the fallback chain
     // and is null in every backfill mode (guarded on !isBackfillCompletion).
-    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc\)\s*\n\s*: null;/);
+    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc, \{ now: completionEndedAt \}\)\s*\n\s*: null;/);
     expect(source).toMatch(/const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite\s*\n\s*&& !correctionPreservedMidFlight\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionEndedAt\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| adjustedEndedAt \|\| completionEndedAt;/);
   });
 
@@ -2728,7 +2728,7 @@ describe('completion route wiring (source contracts)', () => {
     // The else branch carries the LIVE admin override's adjusted instant
     // (codex P2 #3152 round 10) — null for plain live completions, so the
     // backfill contract itself is unchanged.
-    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
+    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n(?:\s*\/\/[^\n]*\n)*\s*\{ now: completionWallClockAt \|\| new Date\(\) \},\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
     // Derived AFTER the crash-resume re-derivation (it reads the healed
     // flag AND the frozen duration), BEFORE the first markComplete that
     // consumes it.

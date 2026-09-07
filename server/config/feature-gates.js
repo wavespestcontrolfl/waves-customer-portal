@@ -1305,6 +1305,11 @@ const gates = {
   // appointment_cancelled template instead of vanishing silently
   // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
   cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
+  // Invoice issued ⇒ visit completed (owner ruling 2026-09-07): an invoice
+  // linked to an open visit that is SENT to the customer or PAID by hand
+  // closes the visit out quietly (no report / text / review ask / charge;
+  // the invoice is reused). Ships DARK; owner flips.
+  invoiceIssuedClosesVisit: process.env.GATE_INVOICE_ISSUED_CLOSES_VISIT === 'true',
   // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
   // an accept's customers.monthly_rate becomes the SUM of the customer's
   // customer_plan_rates components, so a multi-plan customer's same-family

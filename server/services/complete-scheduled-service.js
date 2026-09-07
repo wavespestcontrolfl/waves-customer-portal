@@ -552,7 +552,12 @@ function serviceDateOnly(value) {
 // close out a visit. `role` is req.techRole; anything but 'admin' fail-closes
 // to 403 (Codex P1 on the fix round). Errors carry `status` so the call site
 // returns 403 for the authz failure vs 400 for the date validation.
-function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(), role } = {}) {
+// allowSameDay: the invoice-issued closeout (invoice-issued-closeout.js) is
+// an internal trigger, never a panel submission — an invoice sent or paid
+// on the visit day proves the visit happened, so today qualifies; the
+// future never does. The HTTP body cannot set it (the route never passes
+// it), so the panel's past-only rule is unchanged.
+function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(), role, allowSameDay = false } = {}) {
   if (backfill !== true) return { active: false };
   if (role !== 'admin') {
     return {
@@ -565,7 +570,7 @@ function backfillCompletionPlan({ backfill, scheduledDate, today = etDateString(
     };
   }
   const serviceDate = scheduledDate ? serviceDateOnly(scheduledDate) : null;
-  if (!serviceDate || serviceDate >= today) {
+  if (!serviceDate || serviceDate > today || (!allowSameDay && serviceDate === today)) {
     return {
       active: false,
       error: {
@@ -737,7 +742,13 @@ function applyBackfillRecordTimingPolicy(timingFields, timeOnSite, service = {})
 //    lifecycle/record END-FIELD strips for this shape stay exactly as they
 //    were (applyBackfillDurationPolicy / applyBackfillRecordTimingPolicy):
 //    only the tracker's completed_at carries the day-scale instant.
-function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
+// `now` (the closeout's own wall clock): a SAME-DAY backfill — only the
+// invoice-issued closeout can make one (backfillCompletionPlan allowSameDay;
+// the panel is past-only) — ended at the closeout itself, not at an ET noon
+// that may still be hours away (GitHub r2 P2 #4127: a future completed_at
+// inverts audit ordering and the completed_at-window readers). Earlier days
+// keep the honest day-scale noon instant.
+function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}, { now = null } = {}) {
   const explicitMinutes = backfillTimeOnSiteMinutes(timeOnSite);
   const realStart = BACKFILL_INFERRED_START_FIELDS
     .map((field) => finiteDate(service?.[field]))
@@ -745,6 +756,8 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
   if (realStart && explicitMinutes) {
     return new Date(realStart.getTime() + explicitMinutes * 60000);
   }
+  const closeoutNow = finiteDate(now);
+  if (closeoutNow && serviceDateOnly(serviceDate) === etDateString(closeoutNow)) return closeoutNow;
   return toETNoonServiceDate(serviceDate);
 }
 
@@ -2018,6 +2031,10 @@ function completionSmsWithheldForMissingReportToken({
 // never drift.
 function backfillExpectedMintAtCommit({
   isBackfillCompletion = false,
+  // Invoice-issued closeout: the issued invoice IS the visit's invoice —
+  // this mode never mints (pre-push P0), so the frozen posture is NOT
+  // required even when the live inputs would otherwise bill.
+  issuedInvoiceCloseout = false,
   recapReviewOnly = false,
   autopayCoversVisit = false,
   createInvoiceOnComplete = false,
@@ -2034,6 +2051,7 @@ function backfillExpectedMintAtCommit({
   visitPerformed = true,
   typedOneTimeBilling = false,
 }) {
+  if (issuedInvoiceCloseout) return false;
   if (isBackfillCompletion !== true) {
     // LIVE completions: only the typed one-time population is REQUIRED —
     // the pre-gate that used to fail-close it BEFORE commit is removed
@@ -2080,6 +2098,9 @@ function backfillExpectedMintAtCommit({
 }
 
 function shouldAutoInvoiceCompletion({
+  // Invoice-issued closeout never mints — the issued invoice is reused or
+  // (voided since) the visit closes without one; never a replacement.
+  issuedInvoiceCloseout = false,
   recapReviewOnly,
   alreadyPaid,
   prepaidCovered,
@@ -2137,6 +2158,7 @@ function shouldAutoInvoiceCompletion({
   // invoice would double-bill covered plan work. Autopay dues coverage rides
   // its own flag (autopayCoversVisit) and, like every other suppressor
   // (alreadyPaid / pre-minted / existing invoice), is untouched.
+  if (issuedInvoiceCloseout) return false;
   const effectivePrepaidCovered = isBackfillCompletion ? annualPrepayCovered : prepaidCovered;
   if (recapReviewOnly || alreadyPaid || effectivePrepaidCovered || autopayCoversVisit
     || preMintedInvoice || existingCompletionInvoice) {
@@ -2577,11 +2599,28 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // can't flip loud↔quiet before a record exists) — hashed everywhere,
     // the mismatch 409'd completion_resume_payload_mismatch and stranded
     // the committed completion before the re-derivation could run.
-    const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: completionInput.actor.techRole });
+    const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: completionInput.actor.techRole, allowSameDay: !!completionInput.issuedInvoiceCloseout });
     if (backfillPlan.error) {
       return ({ status: backfillPlan.status || 400, body: backfillPlan.error });
     }
     let isBackfillCompletion = backfillPlan.active;
+    // Invoice-issued closeout: the invoice it names must still be THIS
+    // visit's live invoice, or nothing is written (pre-push P0) — a voided
+    // or re-pointed invoice means the office changed its mind, and a
+    // closeout would otherwise complete the visit and, under the REQUIRED
+    // posture, mint a replacement the operator never asked for. 409 before
+    // the claim, so the visit simply stays open for a human.
+    if (completionInput.issuedInvoiceCloseout) {
+      const InvoiceServiceForIssued = require('../services/invoice');
+      const issued = await db('invoices').where({ id: completionInput.issuedInvoiceCloseout.invoiceId }).first('id', 'status', 'scheduled_service_id');
+      if (!issued || InvoiceServiceForIssued.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(issued.status))
+        || String(issued.scheduled_service_id) !== String(svc.id)) {
+        return ({ status: 409, body: {
+          error: 'The invoice this closeout was issued for is no longer this visit\'s live invoice — the visit stays open.',
+          code: 'issued_invoice_not_reusable',
+        } });
+      }
+    }
     // Backfill trusts a supplied timeOnSite only as sanitized minutes
     // (positive, ≤ the workday cap) — a pre-fix panel auto-submits its
     // running elapsed, i.e. the stale span itself. Sanitized ONCE here so
@@ -2807,7 +2846,14 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // snapshot, and the activity score entirely (pre-push Codex P0). A stale
     // pre-deploy tab gets a clear 422 telling it to refresh — cutover
     // migrations only run after the typed UI has shipped.
-    const typedFindingsType = completionProfile?.findingsType || null;
+    // Invoice-issued closeout (invoice-issued-closeout.js): a billing-truth
+    // completion with no findings form behind it — the invoice is the
+    // customer-facing artifact and no report is rendered or sent. It
+    // completes UNTYPED (no typed findings / next-step / activity-score
+    // gates, no Tree/Shrub closeout lockout) and stamps its provenance on
+    // the record below. Internal input only — the HTTP body cannot set it.
+    const issuedInvoiceCloseout = completionInput.issuedInvoiceCloseout || null;
+    const typedFindingsType = issuedInvoiceCloseout ? null : (completionProfile?.findingsType || null);
     const typedIndicator = typedFindingsType
       ? ActivityIndicators.getActivityIndicator(typedFindingsType)
       : null;
@@ -3093,7 +3139,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // companions entirely. Mutates validatedCompanions on success.
     let validatedCompanions = [];
     const runCompanionValidation = () => {
-      if (isIncompleteVisit) return null;
+      // An invoice-issued closeout carries no form at all — companion
+      // sections included (pre-push P1); the panel's guards are untouched.
+      if (isIncompleteVisit || issuedInvoiceCloseout) return null;
       const declaredCompanions = Array.isArray(completionProfile?.companions)
         ? completionProfile.companions
         : [];
@@ -3145,7 +3193,11 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // a later profile graduation (see the re-derivation before token mint).
     const deliveryPosture = resolveCompletionDeliveryPosture({
       typedFindingsType,
-      completionMode: completionProfile?.completionMode,
+      // Invoice-issued closeout: no findings were submitted, so no customer
+      // report may exist — not sent, not rendered, not in Documents. The
+      // internal-only posture is the existing "disabled delivery" lane and
+      // is frozen on the record (pre-push P1).
+      completionMode: issuedInvoiceCloseout ? 'internal_only' : completionProfile?.completionMode,
       profileDeliveryMode: completionProfile?.deliveryMode,
       specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
       profileCategory: completionProfile?.category,
@@ -3199,6 +3251,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // would make those jobs impossible to complete (Codex P1).
     const treeShrubCloseoutRequired = !isIncompleteVisit
       && !typedFindingsType
+      && !issuedInvoiceCloseout
       && ['tree_shrub', 'palm'].includes(reportServiceLine);
     // Typed T&S completions skip the legacy closeout but keep its
     // pre-commit photo upload gate (Codex P2): without it, an S3 failure
@@ -3599,7 +3652,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.
     if (claim.action === 'proceed') {
-      if (canLinkLawnAssessmentRecord) {
+      // The lawn assessment confirmation is a FORM gate; an invoice-issued
+      // closeout has no form behind it and renders no report (pre-push P1).
+      if (canLinkLawnAssessmentRecord && !issuedInvoiceCloseout) {
         const lawnAssessmentCompletionBlock = await preflightLawnAssessmentCompletion({
           knex: db,
           serviceId: svc.id,
@@ -3891,6 +3946,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // NOT-required — no mint was ever owed for it.
     const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({
       isBackfillCompletion,
+      issuedInvoiceCloseout: !!issuedInvoiceCloseout,
       recapReviewOnly,
       autopayCoversVisit,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
@@ -4686,6 +4742,22 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
           }
           const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+          // Invoice-issued closeout: the pre-claim check above ran unlocked
+          // (pre-push P1). Re-check the issued invoice HERE, locked, in the
+          // transaction that commits the completion — a void or unlink that
+          // landed in between refuses the closeout instead of committing a
+          // completed visit with no invoice. Taken AFTER the customer and
+          // visit row locks (pre-push P1 r7): every invoice writer orders
+          // customer → visit → invoice, and an invoice lock ahead of them
+          // here would invert it.
+          if (issuedInvoiceCloseout) {
+            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id');
+            const InvoiceServiceForIssued = require('../services/invoice');
+            if (!issuedNow || InvoiceServiceForIssued.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(issuedNow.status))
+              || String(issuedNow.scheduled_service_id) !== String(svc.id)) {
+              throw Object.assign(new Error('issued invoice no longer reusable'), { code: 'issued_invoice_not_reusable' });
+            }
+          }
           if (completionPricingPlan) {
             await require('../services/completion-pricing').commitCompletionPricingReview(trx, completionPricingPlan, {
               role: completionInput.actor.techRole, technicianId: completionInput.actor.technicianId,
@@ -4786,7 +4858,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           // backfillCompletionEndInstant / applyBackfillDurationPolicy /
           // applyBackfillRecordTimingPolicy).
           const backfillEndedAt = isBackfillCompletion
-            ? backfillCompletionEndInstant(completionServiceDate, effectiveTimeOnSite, svc)
+            ? backfillCompletionEndInstant(completionServiceDate, effectiveTimeOnSite, svc, { now: completionEndedAt })
             : null;
           // Live admin override: with a real row-backed start, the honest end
           // is start + typed minutes — stamping it keeps every timestamp-pair
@@ -4886,6 +4958,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             // Backfill frozen on the record: a crash-resumed retry may lack
             // the body flag, and the quiet/backdate posture must survive it.
             ...(isBackfillCompletion ? { backfill: true } : {}),
+            // Provenance of an invoice-issued closeout (which invoice, sent
+            // or paid) — the reason this record exists without a form.
+            ...(issuedInvoiceCloseout ? { issuedInvoiceCloseout: { invoiceId: issuedInvoiceCloseout.invoiceId, trigger: issuedInvoiceCloseout.trigger } } : {}),
             // Durable audit marker: this duration is an admin-typed override
             // of the running timer, not the timer itself (or a mid-flight
             // correction this finalization preserved — codex round 15). No
@@ -6346,6 +6421,13 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
           } });
         }
+        if (err && err.code === 'issued_invoice_not_reusable') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'The invoice this closeout was issued for is no longer this visit\'s live invoice — the visit stays open.',
+            code: 'issued_invoice_not_reusable',
+          } });
+        }
         throw err;
       }
     }
@@ -6432,6 +6514,11 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         serviceDateOnly(svc.scheduled_date),
         effectiveTimeOnSite,
         svc,
+        // Same-day (invoice-issued) closeout: the transaction's own wall
+        // clock, so the tracker agrees with the committed lifecycle stamp;
+        // a crash-resumed retry has no anchor in this process and takes the
+        // resume's clock (still that day, never the future).
+        { now: completionWallClockAt || new Date() },
       )
       // Live admin override (codex P2 #3152 round 10): the tracker's
       // completed_at must carry the corrected end too — date-window readers
@@ -7326,16 +7413,28 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     let completionLiveBesideInvoice = null;
     let completionTerminalIncludedSetupFee = false;
     try {
-      existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
-      if (!existingCompletionInvoice) {
+      // Invoice-issued closeout: the invoice that triggered it IS this
+      // visit's invoice — pinned by id, never "the newest linked row"
+      // (GitHub r1 P2 #4127: linked invoices are not unique per visit, so a
+      // newer draft beside the issued one would otherwise take the record
+      // association while the issued invoice stayed unlinked). It was
+      // validated live + linked before the claim and re-checked locked in
+      // the record transaction; voided since → null, and no sibling row
+      // stands in for it.
+      if (issuedInvoiceCloseout) {
+        existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { id: issuedInvoiceCloseout.invoiceId, scheduled_service_id: svc.id });
+      } else {
+        existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
+      }
+      if (!existingCompletionInvoice && !issuedInvoiceCloseout) {
         existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
-        if (existingCompletionInvoice && !existingCompletionInvoice.service_record_id) {
-          await db('invoices').where({ id: existingCompletionInvoice.id }).update({
-            service_record_id: record.id,
-            technician_id: svc.technician_id || existingCompletionInvoice.technician_id || null,
-            updated_at: new Date(),
-          });
-        }
+      }
+      if (existingCompletionInvoice && !existingCompletionInvoice.service_record_id) {
+        await db('invoices').where({ id: existingCompletionInvoice.id }).update({
+          service_record_id: record.id,
+          technician_id: svc.technician_id || existingCompletionInvoice.technician_id || null,
+          updated_at: new Date(),
+        });
       }
     } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     // Own-visit refunded check right after the direct suppressors and
@@ -7641,7 +7740,11 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     let preMintedInvoice = null;
     try {
       if (!recapReviewOnly) {
-        preMintedInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
+        // The issued invoice is pinned above (existingCompletionInvoice) —
+        // the newest-linked-row lookup would hand back a sibling draft here.
+        preMintedInvoice = issuedInvoiceCloseout
+          ? existingCompletionInvoice
+          : await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
         // Refunded-invoice reconciliation wins here too (pre-push P0): when
         // a newer refunded invoice beat an older live row above, this lookup
         // would fetch that same older row again and its pay link would be
@@ -7699,6 +7802,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // Hoisted so the terminal-invoice alert below can re-ask the SAME gate
     // with only the terminal flag cleared (deciding-reason check).
     const completionInvoiceGateInput = {
+      issuedInvoiceCloseout: !!issuedInvoiceCloseout,
       recapReviewOnly,
       alreadyPaid,
       prepaidCovered,
@@ -9568,7 +9672,12 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // before this PR, money-safe (no double-bill), but it drops the add-on AR until
     // the base-covered / add-ons-collectible SPLIT ships as the fast-follow. Fails
     // closed: a cash-paid / in-flight invoice is left for normal handling.
-    if (annualPrepayCovered && invoice?.id
+    // Invoice-issued closeout: the issued invoice is the customer-facing
+    // artifact the office chose to send — it is never settled or voided here
+    // (pre-push P0: a covered visit whose SENT invoice carried add-ons would
+    // have been voided outright, dropping collectible AR right after
+    // delivery). Coverage questions on such an invoice are the office's.
+    if (annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
       && !['paid', 'prepaid', 'void'].includes(String(invoice.status || '').toLowerCase())) {
       try {
         const InvoiceService = require('../services/invoice');

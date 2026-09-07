@@ -2365,7 +2365,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -2691,6 +2691,13 @@ const InvoiceService = {
       // pass. Resend-safe via the priorStatus gate inside the helper.
       if (!allowClaimed) {
         await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
+        // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark
+        // behind GATE_INVOICE_ISSUED_CLOSES_VISIT). DIRECT SMS-only sends
+        // (admin batch, AI assistant, collections) own it here; when
+        // sendViaSMSAndEmail drives this leg (allowClaimed) the wrapper owns
+        // it after both legs, so the closeout runs once per delivery.
+        const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
+        await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
       }
 
       return { sent: true, payUrl };
@@ -2740,6 +2747,17 @@ const InvoiceService = {
           } catch (e) {
             logger.error(`[invoice] lead conversion failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
           }
+          // A recovered send is a durable send (GitHub r1 P1): the customer
+          // has the pay link and the finalize committed, so the linked visit
+          // closes out here exactly as on the happy path — otherwise the
+          // invoice is sent while its visit stays open, the state this gate
+          // exists to end.
+          try {
+            const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
+            await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
+          } catch (e) {
+            logger.error(`[invoice] issued-invoice closeout failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
+          }
         }
         return { sent: true, payUrl, finalizeError: err.message };
       }
@@ -2764,6 +2782,9 @@ const InvoiceService = {
       emailRecipientOverride = null,
       payUrlParams = null,
       operatorInitiated = false,
+      // The staff user behind an operator send (attribution for the
+      // invoice-issued closeout's audit row); null for automated sends.
+      actorTechnicianId = null,
     } = {},
   ) {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -3041,6 +3062,14 @@ const InvoiceService = {
         }
       }
     }
+    // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark
+    // behind GATE_INVOICE_ISSUED_CLOSES_VISIT): a delivered invoice closes
+    // the open visit it bills, quietly. Best-effort after the send — the
+    // customer already has the invoice either way.
+    if (ok) {
+      const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
+      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
+    }
     return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0 };
   },
 
@@ -3154,6 +3183,26 @@ const InvoiceService = {
       .catch((err) =>
         logger.warn(`[invoice] activity_log insert failed: ${err.message}`),
       );
+
+    // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+
+    // GATE_INVOICE_ISSUED_CLOSES_VISIT): every delivery finalization that
+
+    // does not run through sendViaSMS / sendViaSMSAndEmail (deferred rails,
+
+    // project reports with an invoice, completion-owned notices) lands here.
+
+    // Best-effort; the closeout refuses a visit that is already completed,
+
+    // so a completion-owned finalization is a quiet no-op.
+
+    {
+
+      const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
+
+      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent" });
+
+    }
 
     return finalInvoice;
   },
