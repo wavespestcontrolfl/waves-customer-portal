@@ -288,6 +288,41 @@ describe('triggerNotification bell outcome', () => {
 
     expect(result.bellWritten).toBe(true);
   });
+
+  test('resumable events use the canonical bell identity and retain the push handoff check', async () => {
+    const beforePush = jest.fn(async () => false);
+    const result = await triggerNotification('twilio_failure', { channel: 'sms' }, {
+      dedupeKey: 'fixture_completion_record', beforePush,
+    });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.any(String),
+      expect.objectContaining({ dedupeKey: 'fixture_completion_record' }));
+    expect(result).toMatchObject({ bellWritten: true, retryable: false });
+    expect(beforePush).toHaveBeenCalled();
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  test('a failed durable bell stays retryable for a resumed event', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+    expect(await triggerNotification('twilio_failure', {}, { dedupeKey: 'fixture_completion_record' }))
+      .toMatchObject({ bellWritten: false, retryable: true });
+  });
+
+  test('an intentionally suppressed durable bell is not a retryable failure', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ suppressed: true });
+    expect(await triggerNotification('twilio_failure', {}, { dedupeKey: 'fixture_completion_record' }))
+      .toMatchObject({ bellWritten: false, retryable: false });
+  });
+
+  test('a resumed event retries an unavailable recipient lookup without dispatching', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'technicians') throw new Error('Synthetic recipient lookup outage');
+      return tableMock([]);
+    });
+    expect(await triggerNotification('twilio_failure', {}, { dedupeKey: 'fixture_completion_record' }))
+      .toMatchObject({ bellWritten: false, retryable: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
 });
 
 describe('triggerNotification preference lookup failure', () => {

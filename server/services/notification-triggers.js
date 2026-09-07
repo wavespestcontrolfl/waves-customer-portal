@@ -803,7 +803,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -852,6 +852,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       activeAdmins = await recipientQuery.select('id', 'role');
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
+      if (dedupeKey) return { bellWritten: false, push: null, retryable: true };
     }
 
     const prefsByUser = new Map(prefs.map((p) => [p.admin_user_id, p]));
@@ -866,6 +867,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       })
       .map((u) => u.id);
     let bellWritten = false;
+    let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
     // banners, some are bells"): the bell policy is evaluated ONCE per event,
     // independent of any user's bell/push preference, and gates BOTH the
@@ -903,16 +905,20 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.title,
             built.body,
             { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
+              ...(dedupeKey ? { dedupeKey } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
+          if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
         }
       }
     }
 
-    const stats = { bellWritten, push: null };
+    const stats = { bellWritten, push: null,
+      ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
+    };
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate

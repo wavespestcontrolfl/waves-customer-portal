@@ -1054,17 +1054,17 @@ async function handleChildStopChanged(scheduledServiceId) {
  * (reason legacy_completion) so it can never speak for rows that already
  * spoke for themselves. Both idempotent, both stop-lock ordered.
  */
-async function ensureLegacyCompletable(scheduledServiceId) {
-  const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'visit_id');
+async function ensureLegacyCompletable(scheduledServiceId, database = db) {
+  const row = await database('scheduled_services').where({ id: scheduledServiceId }).first('id', 'visit_id');
   if (!row) return { ok: false, reason: 'not_found' };
   if (!row.visit_id) return { ok: true };
-  const visit = await db('service_visits').where({ id: row.visit_id }).first('id', 'status');
+  const visit = await database('service_visits').where({ id: row.visit_id }).first('id', 'status');
   if (!visit) return { ok: false, reason: 'orphan', visitId: row.visit_id }; // fail closed
   if (String(visit.status) === 'dissolved') return { ok: true };
   if (['closing', 'closed'].includes(String(visit.status))) {
     return { ok: false, reason: 'visit_' + visit.status, visitId: visit.id };
   }
-  const packet = await db('visit_completion_packets').where({ visit_id: visit.id }).first('id');
+  const packet = await database('visit_completion_packets').where({ visit_id: visit.id }).first('id');
   if (packet) return { ok: false, reason: 'packet_exists', visitId: visit.id };
   return { ok: true, openVisitId: visit.id };
 }
