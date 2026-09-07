@@ -1,4 +1,5 @@
 const express = require('express');
+const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
 const router = express.Router();
 const db = require('../models/db');
@@ -72,7 +73,7 @@ async function technicianServicesCustomer(req, customerId) {
 // identity, contact, address, and service context — not account financials
 // or CRM/marketing state.
 const TECH_LIST_STRIPPED_FIELDS = [
-  'lifetimeRevenue', 'balanceOwed', 'overdueInvoiceCount', 'cardsOnFile', 'healthScore',
+  'lifetimeRevenue', 'balanceOwed', 'overdueInvoiceCount', 'cardsOnFile', 'healthScore', 'healthGrade',
   'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'lastContactType', 'nextFollowUp',
   'lastRating', 'tags',
@@ -987,27 +988,63 @@ async function getHealthScoreColumns() {
   }
 }
 
-function latestHealthScoreRaw(columns) {
-  const scoreCol = columns.has('overall_score')
-    ? 'overall_score'
-    : columns.has('health_score')
-      ? 'health_score'
-      : null;
-  if (!scoreCol) return db.raw('NULL as health_score');
-  const orderCol = columns.has('scored_at')
-    ? 'scored_at'
-    : columns.has('score_date')
-      ? 'score_date'
-      : columns.has('created_at')
-        ? 'created_at'
-        : 'id';
+// The same latest recorded row supplies directory display and filter predicates.
+// Column alternatives cover existing schema versions; missing data stays NULL.
+function latestHealthValueRaw(columns, field) {
+  const candidates = {
+    score: ['overall_score', 'health_score'],
+    grade: ['score_grade'],
+    risk: ['churn_risk', 'churn_risk_level'],
+    probability: ['churn_probability'],
+  };
+  const column = candidates[field].find((name) => columns.has(name));
+  if (!column) return db.raw('NULL');
+  const orderCol = ['scored_at', 'score_date', 'created_at', 'id'].find((name) => columns.has(name)) || 'id';
   return db.raw(`(
-    SELECT ${scoreCol}
-    FROM customer_health_scores
+    SELECT ?? FROM customer_health_scores
     WHERE customer_health_scores.customer_id = customers.id
-    ORDER BY ${orderCol} DESC
-    LIMIT 1
-  ) as health_score`);
+    ORDER BY ?? DESC NULLS LAST, id DESC LIMIT 1
+  )`, [column, orderCol]);
+}
+
+const customerHealthFilterSchema = Joi.object({
+  healthGrade: Joi.string().valid('A', 'B', 'C', 'D', 'F', 'ungraded'),
+  healthRisk: Joi.string().valid('low', 'moderate', 'high', 'critical', 'at_risk'),
+  minHealthScore: Joi.number().integer().min(0).max(100),
+  maxHealthScore: Joi.number().integer().min(Joi.ref('minHealthScore', { adjust: (value) => value ?? 0 })).max(100),
+  minChurnProbability: Joi.number().min(0).max(100),
+  retention: Joi.string().valid('outreach_sent', 'saved', 'revenue_saved', 'upsell_accepted', 'upsell_revenue'),
+});
+
+function applyCustomerHealthFilters(query, filters, columns) {
+  const { healthGrade, healthRisk, minHealthScore, maxHealthScore, minChurnProbability, retention } = filters;
+  if (healthGrade === 'ungraded') query.whereNull(latestHealthValueRaw(columns, 'grade'));
+  else if (healthGrade) query.where(latestHealthValueRaw(columns, 'grade'), healthGrade);
+  const riskValues = {
+    low: ['low', 'healthy'], moderate: ['moderate', 'watch'],
+    high: ['high', 'at_risk'], critical: ['critical'],
+    at_risk: ['high', 'at_risk', 'critical'],
+  };
+  if (healthRisk) query.whereIn(latestHealthValueRaw(columns, 'risk'), riskValues[healthRisk]);
+  if (minHealthScore != null) query.where(latestHealthValueRaw(columns, 'score'), '>=', minHealthScore);
+  if (maxHealthScore != null) query.where(latestHealthValueRaw(columns, 'score'), '<=', maxHealthScore);
+  if (minChurnProbability != null) query.where(latestHealthValueRaw(columns, 'probability'), '>=', minChurnProbability / 100);
+  if (retention) {
+    // Match the existing RetentionEngine.getMetrics(30) creation cohort.
+    // EXISTS returns each customer once even with several matching records.
+    const upsell = retention.startsWith('upsell_');
+    const table = upsell ? 'upsell_opportunities' : 'retention_outreach';
+    const records = db(table).select('customer_id')
+      .whereRaw('??.customer_id = customers.id', [table])
+      .where('created_at', '>', filters.retentionSince);
+    if (upsell) records.where('status', 'accepted');
+    else if (retention === 'outreach_sent') records.whereIn('status', ['sent', 'completed', 'customer_responded', 'save_successful', 'save_failed']);
+    else records.where(function () { this.where('outcome', 'retained').orWhere('status', 'save_successful'); });
+    if (retention === 'revenue_saved') records.where('revenue_saved', '>', 0);
+    if (retention === 'upsell_revenue') records.where('estimated_monthly_value', '>', 0);
+    query.whereExists(records);
+  }
+  return query;
 }
 
 async function latestHealthScoreForCustomer(customerId) {
@@ -1118,6 +1155,7 @@ function mapCustomerListRow(c) {
     balanceOwed: parseFloat(c.balance_owed || 0),
     overdueInvoiceCount: Number(c.overdue_invoice_count || 0),
     healthScore: c.health_score != null ? parseInt(c.health_score) : null,
+    healthGrade: c.health_grade || null,
     cardsOnFile: parseInt(c.cards_on_file || 0),
   };
 }
@@ -1215,7 +1253,7 @@ function customerSearchTerms(value) {
     .match(/[a-z0-9]+/gi) || [];
 }
 
-function applyCustomerListFilters(query, filters) {
+function applyCustomerListFilters(query, filters, healthColumns) {
   const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited } = filters;
   if (search) {
     const s = `%${search}%`;
@@ -1304,7 +1342,7 @@ function applyCustomerListFilters(query, filters) {
       }
     }
   }
-  return query;
+  return applyCustomerHealthFilters(query, filters, healthColumns);
 }
 
 async function auditCustomerMutation(req, action, customerId, metadata = {}, critical = false, trx = null) {
@@ -2279,12 +2317,16 @@ router.get('/', async (req, res, next) => {
       return q;
     };
 
-    const allFilters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited };
+    const healthInput = Object.fromEntries(['healthGrade', 'healthRisk', 'minHealthScore', 'maxHealthScore', 'minChurnProbability', 'retention']
+      .filter((key) => req.query[key] !== undefined).map((key) => [key, req.query[key]]));
+    const healthValidation = customerHealthFilterSchema.validate(isTechRequest ? {} : healthInput);
+    if (healthValidation.error) return res.status(400).json({ error: 'Invalid health or retention filter' });
+    const allFilters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, ...healthValidation.value, retentionSince: new Date(Date.now() - 30 * 86400000) };
     const filters = isTechRequest ? techSafeListFilters(allFilters) : allFilters;
     const effectiveSort = isTechRequest ? techSafeSort(sort) : sort;
-    const healthScoreSelect = latestHealthScoreRaw(await getHealthScoreColumns());
+    const healthColumns = await getHealthScoreColumns();
 
-    let query = scopeTechAssigned(applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters)).select(
+    let query = scopeTechAssigned(applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters, healthColumns)).select(
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
@@ -2298,7 +2340,8 @@ router.get('/', async (req, res, next) => {
       // Invoice exception only, including third-party bills on the record.
       // This is not an assertion that the homeowner owes a self-pay balance.
       db.raw("(SELECT COUNT(*) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue') AND GREATEST(total - COALESCE(credit_applied, 0), 0) > 0 AND (status = 'overdue' OR due_date < ?)) as overdue_invoice_count", [etDateString()]),
-      healthScoreSelect,
+      db.raw('? as health_score', [latestHealthValueRaw(healthColumns, 'score')]),
+      db.raw('? as health_grade', [latestHealthValueRaw(healthColumns, 'grade')]),
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
       // Net of all paid payments minus refunds — the same definition the
       // customer-detail endpoint computes. customers.lifetime_revenue has NO
@@ -2311,20 +2354,19 @@ router.get('/', async (req, res, next) => {
     // on last name or other columns. NULLS LAST keeps blank-first-name
     // rows pinned to the end of the list instead of the top.
     const dir = order === 'desc' ? 'desc' : 'asc';
-    if (effectiveSort === 'name') {
-      query = query.orderByRaw(`LOWER(first_name) ${dir} NULLS LAST`);
-    } else if (effectiveSort === 'revenue') {
-      // Sort by the computed net, not the writer-less lifetime_revenue column.
-      // `dir` is sanitized to asc/desc above.
-      query = query.orderByRaw(`lifetime_revenue_net ${dir}`);
-    } else {
-      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date' }[effectiveSort] || 'first_name';
-      query = query.orderBy(sortCol, dir);
-    }
+    const sortSql = new Map([
+      ['name', `LOWER(first_name) ${dir} NULLS LAST`],
+      // Net payments, matching the customer-detail revenue definition.
+      ['revenue', `lifetime_revenue_net ${dir}`],
+      ['lead_score', `lead_score ${dir}`],
+      ['rate', `monthly_rate ${dir}`],
+      ['last_contact', `last_contact_date ${dir}`],
+    ]).get(effectiveSort) || `first_name ${dir}`;
+    query = query.orderByRaw(sortSql);
 
     const total = await scopeTechAssigned(applyCustomerListFilters(
       db('customers').whereNull('customers.deleted_at'),
-      filters
+      filters, healthColumns
     )).count('* as count').first();
     const totalCount = parseInt(total?.count || 0);
     const offset = (page - 1) * limit;
@@ -5659,6 +5701,9 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 });
 
 router._private = {
+  latestHealthValueRaw,
+  customerHealthFilterSchema,
+  applyCustomerListFilters,
   CUSTOMER_STAGES,
   SENSITIVE_CUSTOMER_FIELDS,
   PROPERTY_FIELD_LIMITS,

@@ -7,8 +7,8 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 //   - DELETE /admin/customers/:id
 //   - GET  /admin/customers/pipeline/view
 // Scope: Directory view + header chrome + QuickAddModal redesigned.
-// Pipeline / Map / Health / AI Advisor render V1 panels via named exports
-// from CustomersPage.jsx (PR #4b/#4c/#4d will reskin those in later passes).
+// Map and outreach reuse named exports from CustomersPage.jsx.
+// Recorded health and retention segments compose with Directory filters.
 //
 // Daily driver: Virginia (CSR) + the owner. ~700 active customers + ~70
 // new leads, paginated 100 per page. Search + stage + tier + city
@@ -32,15 +32,11 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 // - Quick-add (POST /admin/customers) — phone duplicate check returns
 //   409. Confirm the modal surfaces the conflict cleanly with a
 //   "merge with existing?" path or a clear error.
-// - V1/V2 panel reuse: CustomerHealthSection (V1 export) renders
-//   inside V2. Watch for V1 styling leaking through — should be
-//   reskinned eventually but for now stylistic drift is the risk.
 import { useState, useEffect, useRef, useId } from "react";
 import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   Filter,
-  HeartPulse,
   MapPinned,
   MessageSquare,
   Phone,
@@ -62,7 +58,8 @@ import {
   PROPERTY_LABEL_OPTIONS,
   normalizeCustomerTag,
 } from "../../lib/customerFormOptions";
-import { CustomerHealthSection } from "./CustomerHealthTabs";
+import CustomerHealthGrade from "../../components/admin/CustomerHealthGrade";
+import CustomerHealthFilters from "../../components/admin/CustomerHealthFilters";
 import {
   Button,
   Badge,
@@ -955,8 +952,7 @@ function SortHeaderV2({
 const VIEWS = [
   { key: "directory", label: "Directory", Icon: Users },
   { key: "map", label: "Map", Icon: MapPinned },
-  { key: "health", label: "Health", Icon: HeartPulse },
-  { key: "intelligence", label: "Retention & Upsells", Icon: Sparkles },
+  { key: "intelligence", label: "Outreach & Upsells", Icon: Sparkles },
 ];
 
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
@@ -989,8 +985,9 @@ function FilterPill({ active, onClick, alert = false, children }) {
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
-        "u-label px-3 h-9 rounded-full border-hairline whitespace-nowrap transition-colors",
+        "text-14 px-3 h-11 rounded-full border-hairline whitespace-nowrap transition-colors",
         active
           ? alert
             ? "bg-alert-bg text-alert-fg border-alert-fg"
@@ -1057,7 +1054,6 @@ const CUSTOMER_VIEW_KEYS = new Set([
   "directory",
   "pipeline",
   "map",
-  "health",
   "intelligence",
 ]);
 
@@ -1091,7 +1087,7 @@ export default function CustomersPageV2() {
   // Explicit ?view=… URLs win — deep-links still work.
   const [view, setView] = useState(() => {
     const raw = searchParams.get("view");
-    if (raw) return raw;
+    if (raw && raw !== "health") return raw;
     return "directory";
   });
 
@@ -1117,6 +1113,7 @@ export default function CustomersPageV2() {
   const [search, setSearch] = useState("");
   const [filterStage, setFilterStage] = useState("all");
   const [filterTier, setFilterTier] = useState("all");
+  const [healthFilters, setHealthFilters] = useState({});
   const [sortBy, setSortBy] = useState("lastName");
   const [sortDir, setSortDir] = useState("asc");
   const isNewCustomerRoute = location.pathname === "/admin/customers/new";
@@ -1171,7 +1168,8 @@ export default function CustomersPageV2() {
   // Keep the page state aligned with notification/command-palette links and
   // browser back/forward navigation after the component is already mounted.
   useEffect(() => {
-    const urlView = searchParams.get("view") || "directory";
+    const rawView = searchParams.get("view");
+    const urlView = !rawView || rawView === "health" ? "directory" : rawView;
     const urlCustomerId = searchParams.get("customerId") || null;
     setView((current) => (current === urlView ? current : urlView));
     setSelected360Id((current) =>
@@ -1307,6 +1305,11 @@ export default function CustomersPageV2() {
     if (filterHasBalance) params.set("hasBalance", "true");
     if (filterLastVisited !== "all")
       params.set("lastVisited", filterLastVisited);
+    if (isAdmin) {
+      for (const [key, value] of Object.entries(healthFilters)) {
+        if (value !== "") params.set(key, value);
+      }
+    }
     params.set("sort", sortBy);
     params.set("order", sortDir);
     params.set("page", String(pg));
@@ -1378,6 +1381,7 @@ export default function CustomersPageV2() {
     filterCards,
     filterHasBalance,
     filterLastVisited,
+    healthFilters,
     sortBy,
     sortDir,
     view,
@@ -1504,7 +1508,8 @@ export default function CustomersPageV2() {
     (filterStage !== "all" ? 1 : 0) +
     (filterLastVisited !== "all" ? 1 : 0) +
     (filterCards !== "all" ? 1 : 0) +
-    (filterHasBalance ? 1 : 0);
+    (filterHasBalance ? 1 : 0) +
+    (isAdmin ? Object.values(healthFilters).filter((value) => value !== "").length : 0);
 
   const customerEditor = (
     <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
@@ -1805,7 +1810,7 @@ export default function CustomersPageV2() {
                 />{" "}
               </div>{" "}
               <div className="text-center">Address</div>{" "}
-              <div className="text-center">HP</div>{" "}
+              <div className="text-center">Grade</div>{" "}
               <div className="text-center">Next Svc</div> <div />{" "}
             </div>
           )}
@@ -1857,7 +1862,7 @@ export default function CustomersPageV2() {
                           style={{ height: 64 }}
                         >
                           {" "}
-                          <HealthDot score={c.healthScore} />{" "}
+                          <CustomerHealthGrade grade={c.healthGrade} score={c.healthScore} />{" "}
                           <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                             {" "}
                             <button
@@ -1956,7 +1961,7 @@ export default function CustomersPageV2() {
                       </div>{" "}
                       <div className="flex items-center justify-center">
                         {" "}
-                        <HealthDot score={c.healthScore} />{" "}
+                        <CustomerHealthGrade grade={c.healthGrade} score={c.healthScore} />{" "}
                       </div>{" "}
                       <div className="u-nums text-11 text-ink-secondary text-center">
                         {c.nextServiceDate ? (
@@ -2161,13 +2166,6 @@ export default function CustomersPageV2() {
         </>
       )}
 
-      {/* ======================= HEALTH ======================= */}
-      {view === "health" && (
-        <div className="mt-4">
-          <CustomerHealthSection />
-        </div>
-      )}
-
       {/* ======================= AI ADVISOR ======================= */}
       {view === "intelligence" && (
         <div className="mt-4">
@@ -2193,10 +2191,10 @@ export default function CustomersPageV2() {
               <DialogTitle>Filter customers</DialogTitle>{" "}
             </DialogHeader>{" "}
             <DialogBody>
-              {" "}
+              {isAdmin && <CustomerHealthFilters value={healthFilters} onChange={setHealthFilters} />}
               <div className="mb-4">
                 {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
+                <div className="text-14 font-medium text-ink-secondary mb-1.5">
                   Last visited
                 </div>{" "}
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -2219,7 +2217,7 @@ export default function CustomersPageV2() {
               </div>{" "}
               <div className="mb-4">
                 {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
+                <div className="text-14 font-medium text-ink-secondary mb-1.5">
                   Cards on file
                 </div>{" "}
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -2240,7 +2238,7 @@ export default function CustomersPageV2() {
               </div>{" "}
               <div className="mb-4">
                 {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
+                <div className="text-14 font-medium text-ink-secondary mb-1.5">
                   Status
                 </div>{" "}
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -2270,7 +2268,7 @@ export default function CustomersPageV2() {
               </div>{" "}
               <div>
                 {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
+                <div className="text-14 font-medium text-ink-secondary mb-1.5">
                   Tier
                 </div>{" "}
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -2299,6 +2297,7 @@ export default function CustomersPageV2() {
               <Button
                 variant="secondary"
                 onClick={() => {
+                  setHealthFilters({});
                   setFilterTier("all");
                   setFilterStage("all");
                   setFilterLastVisited("all");

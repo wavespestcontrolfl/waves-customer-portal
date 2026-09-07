@@ -1,3 +1,4 @@
+import CustomerHealthGrade from "./CustomerHealthGrade";
 import { Fragment, useEffect, useRef } from "react";
 import { ArrowDown, ArrowUp, MoreHorizontal, Phone, MessageSquare, PenLine, Trash2 } from "lucide-react";
 import { Button, Table, THead, TBody, TR, TH, TD } from "../ui";
@@ -34,7 +35,10 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
         return <Fragment key={customer.id}>
           <TR className="customer-directory-record">
             <TD className="customer-directory-identity">
-              <button type="button" className="customer-directory-name u-focus-ring" onClick={() => onOpen(customer.id)} aria-label={`Open ${name} customer profile`}>{name}</button>
+              <div className="flex items-baseline gap-2">
+                <button type="button" className="customer-directory-name u-focus-ring" onClick={() => onOpen(customer.id)} aria-label={`Open ${name} customer profile`}>{name}</button>
+                <CustomerHealthGrade grade={customer.healthGrade} score={customer.healthScore} />
+              </div>
               <span>{customer.email || customer.phone || "No contact on file"}</span>
               {customer.profileLabel && customer.profileLabel !== "Primary" && <span>{customer.profileLabel}</span>}
             </TD>

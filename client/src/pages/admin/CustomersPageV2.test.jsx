@@ -23,7 +23,6 @@ vi.mock('../../components/AddressAutocomplete', () => ({
     </>
   ),
 }));
-vi.mock('./CustomerHealthTabs', () => ({ CustomerHealthSection: () => null }));
 
 function response(body, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), {
@@ -54,6 +53,49 @@ function NavigateToCustomerButton() {
 }
 
 describe('CustomersPageV2 workflow state', () => {
+  it('shows recorded grades beside names and composes server filters with search and pagination', async () => {
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname === '/api/admin/customers') {
+        requests.push(parsed.searchParams);
+        return response({ ...list, customers: [{ ...list.customers[0], healthGrade: 'A' }], total: 501, totalPages: 2 });
+      }
+      return response({});
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    const grade = await screen.findByLabelText('Health grade A · score 90/100');
+    expect(grade.parentElement).toContainElement(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    expect(screen.queryByRole('button', { name: 'Health', exact: true })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+    await waitFor(() => expect(requests.at(-1).get('page')).toBe('2'));
+    fireEvent.change(screen.getByPlaceholderText('Search customers...'), { target: { value: 'Avery' } });
+    fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
+    const dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    fireEvent.change(dialog.getByLabelText('Health grade'), { target: { value: 'A' } });
+    fireEvent.change(dialog.getByLabelText('Health / churn risk'), { target: { value: 'low' } });
+    fireEvent.change(dialog.getByLabelText('Minimum health score'), { target: { value: '0' } });
+    fireEvent.change(dialog.getByLabelText('Retention outcome'), { target: { value: 'saved' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({ page: '1', search: 'Avery', healthGrade: 'A', healthRisk: 'low', minHealthScore: '0', retention: 'saved' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
+    fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
+    expect(screen.getByLabelText('Health grade')).toHaveValue('A');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+    await waitFor(() => expect(requests.at(-1).has('healthGrade')).toBe(false));
+    expect(requests.at(-1).get('search')).toBe('Avery');
+    expect(requests.at(-1).has('retention')).toBe(false);
+  });
+
+  it('opens old health links in the Directory and leaves unrecorded grades unknown', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&view=health']}><CustomersPageV2 /></MemoryRouter>);
+    expect(await screen.findByLabelText('Health grade not recorded')).toHaveTextContent('—');
+    expect(screen.getByRole('button', { name: 'Open Avery Customer customer profile' })).toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/admin/health/'))).toBe(false);
+  });
+
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
