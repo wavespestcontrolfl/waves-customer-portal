@@ -221,15 +221,17 @@ async function main() {
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   const owned = (await client.incomingPhoneNumbers.list({ limit: 500 })).sort((a, b) => a.phoneNumber.localeCompare(b.phoneNumber));
   const numberBySid = new Map(owned.map(n => [n.sid, n.phoneNumber]));
-  const sandboxKey = last10(process.env.VOICE_RELAY_SANDBOX_NUMBER);
+  // Matched on the last 10 digits, the same way the /relay-sandbox route matches
+  // Twilio's To (any format). A configured value that yields no match — a
+  // released number, a typo, or no digits at all — is a defect, distinct from unset.
+  const sandboxRaw = String(process.env.VOICE_RELAY_SANDBOX_NUMBER || '').trim();
+  const sandboxKey = last10(sandboxRaw);
   const sandbox = sandboxKey ? owned.find(n => last10(n.phoneNumber) === sandboxKey) : null;
   const numbers = owned.filter(n => n !== sandbox);
   const fleet = numbers.map(n => n.phoneNumber);
 
   const defects = [];
-  // A configured sandbox number that matches no owned line means the documented
-  // test path points at a released or mistyped number — distinct from unset.
-  if (sandboxKey && !sandbox) defects.push(`sandbox  VOICE_RELAY_SANDBOX_NUMBER (…${sandboxKey.slice(-4)}) matches no owned number`);
+  if (sandboxRaw && !sandbox) defects.push(`sandbox  VOICE_RELAY_SANDBOX_NUMBER is set (…${sandboxRaw.slice(-4)}) but matches no owned number`);
   defects.push(
     ...auditRouting(numbers, sandbox, new Set(owned.map(n => n.phoneNumber))),
     ...(await auditTrustHub(client, fleet, numberBySid)),

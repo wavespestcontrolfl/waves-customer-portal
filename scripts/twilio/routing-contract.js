@@ -39,10 +39,12 @@ function voiceUrlMatches(url, mode) {
 // Every IncomingPhoneNumber field Twilio consults when a call or text arrives.
 // The portal's status callbacks and SMS handler are POST-only; the voice
 // fallback is a static twil.io asset fetched with GET; an Application SID or
-// trunk overrides the URLs, so a production line must have none.
+// trunk overrides the URLs, so a production line must have none; a line
+// switched to fax receive mode never reaches the voice URL at all.
 const APP_ROUTING = Object.freeze({
   voiceUrl: APP_VOICE_URL,
   voiceMethod: 'POST',
+  voiceReceiveMode: 'voice',
   voiceFallbackUrl: VOICE_FALLBACK_URL,
   voiceFallbackMethod: 'GET',
   statusCallback: `${PORTAL_ORIGIN}/api/webhooks/twilio/call-status`,
@@ -72,6 +74,7 @@ const SMS_ROUTING = Object.freeze({
 const SANDBOX_ROUTING = Object.freeze({
   voiceUrl: `${PORTAL_ORIGIN}/api/webhooks/twilio/relay-sandbox`,
   voiceMethod: 'POST',
+  voiceReceiveMode: 'voice',
   voiceApplicationSid: '',
   trunkSid: '',
 });
