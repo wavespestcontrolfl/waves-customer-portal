@@ -136,25 +136,32 @@ source commit and remain **unmapped**. The prior fingerprint and retired sites
 remain recorded. This addresses CI's merged-main census drift without claiming
 support for those new portal actions.
 
-Current foundation census: 1,739 retained UI sites; five current transport
+Current foundation census: 1,740 retained UI sites; six current transport
 exceptions; 1,734 sites still unsupported/unverified in the matrix. Historical
 transport calls remain recorded after their frontend sites changed. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 
 ## Verification evidence
 
-The split integration at `1a63489ed` imports current main `db70ae441` and the
-reviewed registry, target, and recovery services. Its 28 real PostgreSQL route
-scenarios pass in one run (87.61 seconds); the bulk-preview follow-up adds a
-passing focused database rerun that excludes an unrelated same-status lead.
-The final private cohort field is passed by both execution and confirmation
-recheck. The persisted approval format stays unchanged.
+The integrated runtime passes all 29 real PostgreSQL route scenarios in one
+run (82.48 seconds), including receipt preservation in the response after
+Continue. The bulk preview and execution use the same private approved cohort;
+persisted approval formats stay unchanged. Model-proposed alternate SMS names
+cannot replace a resolved customer before approval.
 
-The integrated unit run passes 251 tests across ten suites; the additional
-bulk-preview regression passes with 69 existing confirmation/pinning tests.
-Client bar/card/hook tests pass 26 tests; two separate session-identity tests
-cover the existing UUID fallback. These deterministic tests use the scripted
-model and isolated database, not a live-model evaluation.
+The earlier integrated unit run passes 251 tests across ten suites, with an
+additional bulk-preview regression. After the response snapshot change, all
+69 affected route/confirmation/history tests pass. The shared hook, real shell
+and global bar pass 33 client tests, including duplicate-name selection,
+confirmation, continuation, saved-task recovery, stale responses and unavailable
+status reads. Earlier card/session checks remain applicable. These tests use a
+scripted model and isolated database, not a live-model evaluation.
+
+The shared ProtocolPanel bar uses the same durable task card and task endpoints
+as the global bar. Navigation remounts it by appointment ID. Confirmed and
+cancelled receipts remain visible when the following status refresh fails;
+Clear removes the local transcript and leaves saved operations recoverable.
+Dedicated agent-estimate and technician contexts remain isolated.
 
 Repeated confirmations, an intervening model outage, and pre-model ambiguity
 selection retain the original or latest successfully appended thread cursor.
@@ -165,7 +172,11 @@ refuses changed customer linkage before publishing.
 
 Desktop (1440) and mobile (390) Chrome screenshots verify the review identity
 card and cancel action, with no JS exceptions or horizontal overflow. The
-review reply remains unset in PostgreSQL after cancellation. Earlier runtime
+review reply remains unset in PostgreSQL after cancellation. Shared-shell browser
+checks at both widths also select between duplicate names, confirm a note,
+Continue, Clear, reload and recover the saved receipt. Independent database reads
+verify that only the selected fixture changed; no console errors, network
+failures or horizontal overflow occurred in that focused harness. Earlier runtime
 screenshots verify A-only note persistence and expired approvals without
 executable controls. Native iOS notches/keyboards, voice and live-provider
 delivery remain unverified. Earlier regression evidence is retained below.

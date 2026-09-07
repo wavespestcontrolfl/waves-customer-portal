@@ -27,6 +27,7 @@ import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { ibRequestIdentity, ibSessionId } from "../../utils/ibSession";
+import { retainTaskReceipt } from "../../utils/ibTaskReceipts";
 import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
@@ -650,6 +651,7 @@ function GlobalCommandPalette({ user }, ref) {
     setPendingActions(previous => previous.map(item => item.id === action.id
       ? { ...item, receipt: body, resolvedStatus: decision === 'cancel' && body.cancelled ? 'cancelled' : undefined } : item));
     if (threadEpochRef.current !== actionEpoch) return;
+    setActiveTask(task => retainTaskReceipt(task, action, decision, body));
     if (activeTask) void refreshTask();
   };
   const taskCard = <IntelligenceTaskCard task={activeTask}

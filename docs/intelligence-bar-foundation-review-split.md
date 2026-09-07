@@ -153,7 +153,16 @@ dev database; no production migration or gate activation is authorized.
   one-use helpers would only move branches. Further simplification must keep
   every tested authorization path.
 
-Part D integration preserves private execution pins outside model schemas, the native owner/idempotency endpoint, and original persisted approval formats. Review cards disclose review identity; thread continuations retain their own cursor through early model outages and refuse unseen concurrent appends. The integrated database suite passes all 28 scenarios in one run; 251 affected unit tests pass, with one additional passing bulk-preview regression. Desktop/mobile Chrome verifies A-only note persistence, expired approval recovery, and review identity with cancellation and zero publishing. The bulk recheck uses the same private cohort field as execution, while stored approval formats stay unchanged.
+Part D preserves private execution pins outside model schemas, the native
+owner/idempotency endpoint and persisted approval formats. Its 29 PostgreSQL
+route scenarios pass, including durable receipts returned after Continue.
+The shared hook/shell and global bar pass 33 client tests. Desktop/mobile Chrome
+verifies target selection, confirmation, continuation, Clear/reload recovery,
+A-only persistence, expiry and review cancellation with zero publishing.
+The shared ProtocolPanel consumes the existing task card/endpoints and remounts
+by appointment ID. Trusted confirmation receipts survive failed status reads.
+The current census retains 1,740 sites, including six reviewed task transport
+exceptions and 1,734 unsupported/unverified entries; no domain parity is inferred.
 
 Main integration at `db70ae441` adds the three new prep-guide/Quick Links
 request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.

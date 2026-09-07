@@ -17,6 +17,7 @@ import {
 } from '../utils/ibStorage';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../utils/ibImages';
 import { ibRequestIdentity, ibSessionId } from '../utils/ibSession';
+import { retainTaskReceipt } from '../utils/ibTaskReceipts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -30,7 +31,9 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
-      throw new Error(body.message || body.error || `HTTP ${r.status}`);
+      const error = new Error(body.message || body.error || `HTTP ${r.status}`);
+      error.status = r.status;
+      throw error;
     }
     return r.json();
   });
@@ -50,6 +53,10 @@ export function useIntelligenceBar({
   // Pending write proposals (issue #1568). The ids inside are confirmation
   // credentials — keep them here only; never copy into conversationHistory.
   const [pendingActions, setPendingActions] = useState([]);
+  const [activeTask, setActiveTask] = useState(null);
+  const [savedTasks, setSavedTasks] = useState([]);
+  const [tasksAvailable, setTasksAvailable] = useState(false);
+  const [taskHistoryError, setTaskHistoryError] = useState(null);
   const [conversationHistory, setConversationHistory] = useState([]);
   const [quickActions, setQuickActions] = useState([]);
   const [expanded, setExpanded] = useState(false);
@@ -61,6 +68,7 @@ export function useIntelligenceBar({
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
   const epochRef = useRef(0);
+  const taskHistoryEpochRef = useRef(0);
   const submittingRef = useRef(false);
   const sessionIdRef = useRef(null);
   if (!sessionIdRef.current) sessionIdRef.current = ibSessionId();
@@ -71,6 +79,72 @@ export function useIntelligenceBar({
   useEffect(() => { buildPageDataRef.current = buildPageData; }, [buildPageData]);
   useEffect(() => { onAfterSubmitRef.current = onAfterSubmit; }, [onAfterSubmit]);
   useEffect(() => { getRequestKeyRef.current = getRequestKey; }, [getRequestKey]);
+  useEffect(() => () => { epochRef.current += 1; }, []);
+
+  const loadTasks = useCallback(async () => {
+    const epoch = ++taskHistoryEpochRef.current;
+    if (context === 'agent_estimate' || context === 'tech') {
+      setTasksAvailable(false); setSavedTasks([]); setTaskHistoryError(null);
+      return;
+    }
+    try {
+      const data = await adminFetch(`/admin/intelligence-bar/tasks?session_id=${encodeURIComponent(sessionIdRef.current)}`);
+      if (epoch !== taskHistoryEpochRef.current) return;
+      setTasksAvailable(true);
+      setSavedTasks(data.tasks || []);
+      setTaskHistoryError(null);
+    } catch (error) {
+      if (epoch !== taskHistoryEpochRef.current) return;
+      if (error.status === 404) { setTasksAvailable(false); setTaskHistoryError(null); }
+      else setTaskHistoryError('Saved requests are temporarily unavailable.');
+    }
+  }, [context]);
+  useEffect(() => {
+    void loadTasks();
+    return () => { taskHistoryEpochRef.current += 1; };
+  }, [loadTasks]);
+
+  const applyResponse = useCallback((data) => {
+    setResponse(data.response || null);
+    setStructuredData(data.structuredData || null);
+    setPendingActions(data.pendingActions || []);
+    setActiveTask(data.taskId ? data : null);
+    setConversationHistory(data.conversationHistory || []);
+    if (data.taskId) setTasksAvailable(true);
+  }, []);
+
+  const refreshTask = useCallback(async (id = activeTask?.taskId, operation = null, candidate = null) => {
+    if (!id || submittingRef.current) return;
+    const epoch = ++epochRef.current;
+    const requestKey = getRequestKeyRef.current?.();
+    const isStale = () => epoch !== epochRef.current || (getRequestKeyRef.current && requestKey !== getRequestKeyRef.current());
+    submittingRef.current = true;
+    setLoading(true);
+    setExpanded(true);
+    try {
+      const data = await adminFetch(operation ? `/admin/intelligence-bar/tasks/${encodeURIComponent(id)}/${operation}`
+        : `/admin/intelligence-bar/tasks/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionIdRef.current)}`,
+      operation ? { method: 'POST', body: JSON.stringify({ session_id: sessionIdRef.current,
+        ...(candidate ? { customer_id: candidate.customer_id } : {}) }) } : {});
+      if (!isStale()) applyResponse(data);
+    } catch (error) {
+      if (!isStale()) setResponse(`Status unavailable: ${error.message}`);
+    } finally {
+      if (epoch === epochRef.current) { submittingRef.current = false; setLoading(false); }
+    }
+  }, [activeTask?.taskId, applyResponse]);
+
+  const actionEpoch = epochRef.current;
+  const onActionResolved = useCallback((action, decision, body) => {
+    if (actionEpoch !== epochRef.current) return;
+    setPendingActions(previous => previous.map(item => item.id === action.id ? { ...item, receipt: body,
+      resolvedStatus: decision === 'cancel' && body.cancelled ? 'cancelled' : undefined } : item));
+    setActiveTask(task => retainTaskReceipt(task, action, decision, body));
+    if (decision === 'confirm' && body?.success) onAfterSubmitRef.current?.({
+      toolCalls: [{ name: action.tool }], confirmedAction: true, result: body.result,
+    });
+    if (activeTask) void refreshTask(activeTask.taskId);
+  }, [actionEpoch, activeTask, refreshTask]);
 
   useEffect(() => {
     setRecentPrompts(getRecents(context));
@@ -132,6 +206,7 @@ export function useIntelligenceBar({
     setResponse(null);
     setStructuredData(null);
     setPendingActions([]);
+    setActiveTask(null);
     const requestKey = getRequestKeyRef.current?.();
 
     setRecentPrompts(addRecent(context, q));
@@ -164,10 +239,7 @@ export function useIntelligenceBar({
         return;
       }
 
-      setResponse(data.response);
-      setStructuredData(data.structuredData);
-      setPendingActions(data.pendingActions || []);
-      setConversationHistory(data.conversationHistory || []);
+      applyResponse(data);
 
       if (onAfterSubmitRef.current) onAfterSubmitRef.current(data);
     } catch (err) {
@@ -182,7 +254,7 @@ export function useIntelligenceBar({
     setLoading(false);
     setPrompt('');
     resetAttachments();
-  }, [prompt, loading, conversationHistory, context, attachments, resetAttachments]);
+  }, [prompt, loading, conversationHistory, context, attachments, resetAttachments, applyResponse]);
 
   const clear = useCallback(() => {
     epochRef.current += 1;
@@ -192,6 +264,7 @@ export function useIntelligenceBar({
     setResponse(null);
     setStructuredData(null);
     setPendingActions([]);
+    setActiveTask(null);
     resetAttachments();
     setExpanded(false);
   }, [resetAttachments]);
@@ -207,6 +280,13 @@ export function useIntelligenceBar({
     response,
     structuredData,
     pendingActions,
+    activeTask,
+    savedTasks,
+    tasksAvailable,
+    taskHistoryError,
+    loadTasks,
+    refreshTask,
+    onActionResolved,
     conversationHistory,
     quickActions,
     expanded, setExpanded,
