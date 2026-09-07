@@ -281,6 +281,30 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([0, 240])('an active invoice send delays a %s balance until delivery finishes', async (total) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sending', total, discount_amount: 240 - total });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending', invoiceId });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' })).toHaveLength(0);
+    // The locked guard also protects an initial snapshot read before the send
+    // claim, including the canonical saved-card caller's second check.
+    await expect(mockPg.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+      await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+      await assertVisitCompletionCharge(trx, locked, saved.body.packetId);
+    })).rejects.toMatchObject({ code: 'VISIT_PAYMENT_SEND_IN_FLIGHT' });
+    expect(await mockPg('invoices').where({ id: invoiceId }).first('status')).toEqual({ status: 'sending' });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first('billing_hold')).toEqual({ billing_hold: false });
+
+    await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent' });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({
+      state: total === 0 ? 'prepaid' : 'payment_needed', invoiceId,
+    });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
   test('positive shared-invoice collection remains singular and replays its paid state', async () => {
     const methodId = randomUUID();
     await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,

@@ -15,6 +15,12 @@ function refuse(reason) {
 /** Called by the canonical saved-card charger under its invoice/customer locks. */
 async function assertVisitCompletionCharge(trx, invoice, packetId) {
   if (invoice.visit_completion_packet_id !== packetId || invoice.payer_id) refuse('invoice_owner_changed');
+  // Initial sends render outside their claim transaction, just like reminders.
+  if (invoice.status === 'sending') {
+    throw Object.assign(new Error('Visit invoice delivery is still in flight. Retry closeout.'), {
+      code: 'VISIT_PAYMENT_SEND_IN_FLIGHT',
+    });
+  }
   // Plan creation holds this invoice lock, but a draft may have no reminder
   // sequence to stop. The plan itself owns its collection arrangement.
   if (await trx('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id')) {
@@ -130,6 +136,7 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
     return { state: finalized.ok ? 'office_required' : 'payment_pending', invoiceId: invoice?.id || null };
   }
   if (!invoice) return { state: 'no_charge', invoiceId: null };
+  if (invoice.status === 'sending') return { state: 'payment_pending', invoiceId: invoice.id };
   if (!isInvoiceCollectibleStatus(invoice.status)) {
     // Processing also parks ambiguous saved-card requests. Only a durable
     // payment matching this invoice's bound PI proves accepted money in flight.
