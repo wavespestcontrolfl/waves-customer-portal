@@ -69,6 +69,14 @@ describe('GET /', () => {
     techLineContext.mockResolvedValue(null);
     expect((await call('get', '/', {})).body).toEqual({ line: null });
   });
+
+  test('a lookup failure is a 503 the client keeps as "unknown" — never a { line: null } that shows the personal phone', async () => {
+    techLineContext.mockRejectedValueOnce(new Error('select * from technicians where id = tech-1 — pg down'));
+    const r = await call('get', '/', {});
+    expect(r.statusCode).toBe(503);
+    expect(r.body).toEqual({ error: 'Your line could not be checked', code: 'LINE_LOOKUP_FAILED' });
+    expect(techLineContext).toHaveBeenCalledWith('tech-1', { strict: true });
+  });
 });
 
 describe('POST /sms', () => {
@@ -213,6 +221,8 @@ describe('tech-click calls never auto-book (codex #4072 r1 P1)', () => {
     // The CSR scorer's gate excludes the same source (codex #4072 r4 P1).
     const scorable = proc.slice(proc.indexOf('const csrScorable ='), proc.indexOf(';', proc.indexOf('const csrScorable =')));
     expect(scorable).toContain("call.source !== 'tech-click'");
+    // …and the approved-but-unbooked audit never opens a card for one (codex #4072 r6 P2).
+    expect(proc).toContain("if (!bookedServiceId && call.source !== 'tech-click' && !heldReasons.has(appointmentResult?.skippedReason)) {");
     const route = fs.readFileSync(path.join(__dirname, '../routes/tech-line.js'), 'utf8');
     expect(route).toContain("source: 'tech-click'");
   });

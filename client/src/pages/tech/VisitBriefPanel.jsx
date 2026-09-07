@@ -25,7 +25,7 @@
 //
 // Tech portal style rule (CLAUDE.md): inline styles + dark palette,
 // Montserrat headings per-element. No Tailwind, no components/ui.
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { stopPropertyAlerts } from './routeStops';
 import {
   fmtMoney,
@@ -564,7 +564,12 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
   );
 }
 
-export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, techLine = null, request = null }) {
+// After Twilio accepts a bridge the tech's phone rings for up to ~40s and
+// only then is the customer dialed: Call stays locked for that window so a
+// second tap cannot originate a second bridge (codex #4072 r6 P2).
+const CALL_LOCK_MS = 45000;
+
+export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, techLine = null, request = null, onBusyChange = null }) {
   const service = stop.primary;
   const phone = service.customerPhone || service.customer_phone || null;
   // Own-line mode: Call bridges through the line, Text composes from it.
@@ -578,6 +583,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const [composeOpen, setComposeOpen] = useState(false);
   const [textBusy, setTextBusy] = useState(false);
   const [callState, setCallState] = useState({ busy: false, note: '', error: '' });
+  const callLockTimer = useRef(null);
+  useEffect(() => () => clearTimeout(callLockTimer.current), []);
+  // The parent accordion must not unmount a panel with a text or a bridge
+  // in flight (a fresh panel would let the same action go out twice).
+  const busy = textBusy || callState.busy;
+  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   async function callFromLine() {
     if (callState.busy) return;
     const name = service.customer_name || service.customerName || 'the customer';
@@ -585,7 +596,9 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
     setCallState({ busy: true, note: '', error: '' });
     try {
       await request('/tech/line/call', { method: 'POST', body: JSON.stringify({ scheduledServiceId: service.id }) });
-      setCallState({ busy: false, note: 'Ringing your phone — press 1 to connect.', error: '' });
+      setCallState({ busy: true, note: 'Ringing your phone — press 1 to connect.', error: '' });
+      clearTimeout(callLockTimer.current);
+      callLockTimer.current = setTimeout(() => setCallState((s) => ({ ...s, busy: false })), CALL_LOCK_MS);
     } catch (err) {
       setCallState({ busy: false, note: '', error: String(err?.message || err).slice(0, 160) });
     }
@@ -637,7 +650,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       {(tel || sms || address) && (
         <div style={{ display: 'flex', gap: 8 }}>
           {tel && !lineUnknown && (line
-            ? (line.canCall && <LinkBtn icon="📞" label={callState.busy ? 'Calling…' : 'Call'} onClick={callFromLine} />)
+            ? (line.canCall && <LinkBtn icon="📞" label={callState.busy ? 'Calling…' : 'Call'} disabled={callState.busy} onClick={callFromLine} />)
             : <LinkBtn href={tel} icon="📞" label="Call" />)}
           {sms && !lineUnknown && (line
             ? <LinkBtn icon="💬" label="Text" disabled={textBusy} onClick={() => setComposeOpen((o) => !o)} />

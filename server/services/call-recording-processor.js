@@ -14970,7 +14970,10 @@ const CallRecordingProcessor = {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
       const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered']);
-      if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
+      // A tech's own-line call (source tech-click) skips auto-booking BY
+      // DESIGN — the tech is standing at the visit the call belongs to; a
+      // reiterated time is not an approved-but-unbooked call (codex #4072 r6 P2).
+      if (!bookedServiceId && call.source !== 'tech-click' && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
           || appointmentResult?.error

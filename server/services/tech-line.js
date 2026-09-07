@@ -90,13 +90,18 @@ async function ringTargetForLine(number) {
 // holds a line (gate on, assignable), else null. `cell` may be null (no
 // usable phone on the row) — texting from the line still works, the
 // press-1 bridge does not.
-async function techLineContext(technicianId) {
-  const line = await lineForTechnician(technicianId);
+// `strict`: rethrow a DB failure instead of failing soft to null — the tech
+// portal's own lookup must not report "no line" on an outage, or the
+// client shows the personal-phone links (codex #4072 r6 P2). Inbound
+// routing and the customer card keep the fail-soft default.
+async function techLineContext(technicianId, { strict = false } = {}) {
+  const line = await lineForTechnician(technicianId, { strict });
   if (!line) return null;
   try {
     const tech = await db('technicians').where({ id: technicianId }).first('id', 'name', 'phone');
     return { line, cell: usableCell(tech), technicianName: tech?.name || null };
   } catch (err) {
+    if (strict) throw err;
     logger.warn(`[tech-line] context lookup failed for technician ${technicianId} (${errorTag(err)})`);
     return null;
   }
@@ -104,7 +109,7 @@ async function techLineContext(technicianId) {
 
 // Registry entry for the line a technician holds, or null (gate off, no line,
 // not assignable). The customer card swaps the office number for this.
-async function lineForTechnician(technicianId) {
+async function lineForTechnician(technicianId, { strict = false } = {}) {
   if (!technicianId || !gateEnvValue(GATE)) return null;
   try {
     const tech = await db('technicians')
@@ -113,6 +118,7 @@ async function lineForTechnician(technicianId) {
     if (!isAssignable(tech) || !tech.twilio_number) return null;
     return registryLine(tech.twilio_number);
   } catch (err) {
+    if (strict) throw err;
     logger.warn(`[tech-line] line lookup failed for technician ${technicianId} (${errorTag(err)})`);
     return null;
   }

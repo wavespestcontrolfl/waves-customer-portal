@@ -74,12 +74,19 @@ async function visitCustomer(req, scheduledServiceId) {
   return { customer, to, visit: svc };
 }
 
-router.get('/', async (req, res, next) => {
+// Strict lookups: a DB failure must never read as "no line" — the client
+// would show the personal-phone links (GET) or the tech would be told they
+// hold no line (sends). GET answers 503 so the client keeps its unknown
+// state; the send routes fall through to their sanitized 500.
+router.get('/', async (req, res) => {
   try {
-    const ctx = await techLineContext(req.technicianId);
+    const ctx = await techLineContext(req.technicianId, { strict: true });
     if (!ctx) return res.json({ line: null });
     res.json({ line: publicLine(ctx), canCall: Boolean(ctx.cell) });
-  } catch (err) { next(err); }
+  } catch (err) {
+    logger.error(`[tech-line] line lookup failed (${String(err?.code || err?.name || 'error')})`);
+    res.status(503).json({ error: 'Your line could not be checked', code: 'LINE_LOOKUP_FAILED' });
+  }
 });
 
 router.post('/sms', async (req, res, next) => {
@@ -87,7 +94,7 @@ router.post('/sms', async (req, res, next) => {
     const body = String(req.body?.body || '').trim();
     if (!body) return res.status(400).json({ error: 'Message is required' });
     if (body.length > MAX_TEXT_CHARS) return res.status(400).json({ error: `Message must be ${MAX_TEXT_CHARS} characters or fewer` });
-    const ctx = await techLineContext(req.technicianId);
+    const ctx = await techLineContext(req.technicianId, { strict: true });
     if (!ctx) return res.status(409).json({ error: 'You have no tech line assigned', code: 'NO_TECH_LINE' });
     const target = await visitCustomer(req, req.body?.scheduledServiceId);
     if (target.error) return res.status(target.status).json({ error: target.error });
@@ -153,7 +160,7 @@ router.post('/sms', async (req, res, next) => {
 router.post('/call', async (req, res, next) => {
   try {
     if (!isEnabled('twilioVoice')) return res.status(409).json({ error: 'Voice calling is disabled', code: 'VOICE_GATE_OFF' });
-    const ctx = await techLineContext(req.technicianId);
+    const ctx = await techLineContext(req.technicianId, { strict: true });
     if (!ctx) return res.status(409).json({ error: 'You have no tech line assigned', code: 'NO_TECH_LINE' });
     if (!ctx.cell) return res.status(409).json({ error: 'Your staff profile needs your cell number before calls can bridge to you', code: 'NO_CELL' });
     const target = await visitCustomer(req, req.body?.scheduledServiceId);

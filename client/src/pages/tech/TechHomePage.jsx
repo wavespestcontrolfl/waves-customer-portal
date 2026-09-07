@@ -1254,6 +1254,10 @@ function TimecardSignoffCard({ techName }) {
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
 function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead, techLine }) {
+  // The header cannot collapse the brief while its own-line text or bridge
+  // is in flight — unmounting the panel would let the tech resend it.
+  const [panelBusy, setPanelBusy] = useState(false);
+  const toggle = () => { if (!panelBusy) onToggle(); };
   const service = stop.primary;
   const status = service.status || 'pending';
   // A grouped transition that only partially fanned out leaves live
@@ -1295,9 +1299,9 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
-        onClick={onToggle}
+        onClick={toggle}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); }
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
         }}
         style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', minHeight: 44 }}
       >
@@ -1347,6 +1351,7 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
           onZone={onZone}
           onLead={onLead}
           techLine={techLine}
+          onBusyChange={setPanelBusy}
           request={techRequest}
         />
       )}

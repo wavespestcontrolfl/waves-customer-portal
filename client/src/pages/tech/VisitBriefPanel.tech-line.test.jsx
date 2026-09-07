@@ -84,6 +84,23 @@ describe('VisitBriefPanel — own tech line', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it('Call stays locked after the bridge is accepted (phone still ringing) and the parent is told the panel is busy', async () => {
+    vi.useFakeTimers();
+    const request = vi.fn(async () => ({ success: true }));
+    const onBusyChange = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<VisitBriefPanel stop={stop} detail={detail} techLine={LINE} request={request} onBusyChange={onBusyChange} />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Call/ })); });
+    expect(screen.getByRole('button', { name: /Calling…/ })).toBeDisabled();
+    expect(onBusyChange).toHaveBeenLastCalledWith(true);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Calling…/ })); });
+    expect(request).toHaveBeenCalledTimes(1);
+    await act(async () => { vi.advanceTimersByTime(45000); });
+    expect(screen.getByRole('button', { name: /Call$/ })).toBeEnabled();
+    expect(onBusyChange).toHaveBeenLastCalledWith(false);
+    vi.useRealTimers();
+  });
+
   it('a declined confirm never calls the server', () => {
     const request = vi.fn();
     vi.spyOn(window, 'confirm').mockReturnValue(false);
