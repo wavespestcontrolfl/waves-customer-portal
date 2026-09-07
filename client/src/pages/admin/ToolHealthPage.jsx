@@ -695,6 +695,7 @@ function RecentErrorRow({ err, isLast }) {
         color: "inherit",
         textAlign: "inherit",
         width: "100%",
+        boxSizing: "border-box",
         padding: "7px 14px",
         borderBottom: isLast ? "none" : `1px solid ${D.border}`,
         display: "grid",
