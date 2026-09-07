@@ -22,7 +22,13 @@
  *   - executeTool is replaced wholesale (no lead, ticket, booking or handoff
  *     packet can be written), the capture-floor / callback writers are stubbed
  *     to throw, and the db module is proxied to REFUSE any query while a
- *     scenario runs (disarmed again for the eval's own notification).
+ *     scenario's CONVERSATION runs. It is disarmed for the judge and for the
+ *     eval's own notification on purpose: the judge is a ledgered lane
+ *     (`voice_relay_judge`, ledger 'call' in agent-control/lane-policies), so
+ *     under GATE_LLM_CALL_LEDGER / _TRACES / _DISPATCH_METRICS its verdict
+ *     calls write llm_dispatch_log / llm_call_traces rows like every other
+ *     lane — labelled as replay workload, never as live traffic. Those rows
+ *     and the --notify bell are the only writes a run can make.
  *   - This module must load BEFORE voice-agent/relay-conversation, which
  *     destructures resolveCallerContext / createLeadFromExtraction at load.
  *     The script and the cron's child process guarantee that; jest isolates
@@ -757,6 +763,10 @@ async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
   record.checks = record.error ? [] : evaluateChecks(scenario, record);
   record.judge = null;
   if (!record.error && judge) {
+    // The db guard is DISARMED here by design: the judge dispatch is a
+    // ledgered lane and must be free to write its llm_dispatch_log /
+    // llm_call_traces rows under the ledger gates (replay-labelled). Sandy's
+    // own turns above ran with the guard armed.
     const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
     const officeHours = scenario.fixtures && typeof scenario.fixtures.officeHours === 'string' ? scenario.fixtures.officeHours : (scenario.fixtures && scenario.fixtures.officeHours ? 'open' : 'unknown');
     const callerBlock = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;

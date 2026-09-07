@@ -13,9 +13,12 @@
  *   node server/scripts/run-voice-relay-eval.js --notify
  *
  * Needs ANTHROPIC_API_KEY (Sandy's own model + the judge's primary leg);
- * OPENAI_API_KEY gives the judge its fallback leg. No database is read or
- * written by the scenarios themselves (the harness refuses DB access while a
- * scenario runs); --notify writes the one regression notification.
+ * OPENAI_API_KEY gives the judge its fallback leg. The scenarios themselves
+ * read and write no database (the harness refuses DB access while a
+ * conversation runs). The judge is a ledgered lane: with the LLM ledger /
+ * trace / dispatch-metrics gates on, its verdict calls write their usual
+ * llm_dispatch_log / llm_call_traces rows, labelled as replay workload.
+ * --notify adds the one regression notification.
  *
  * Exit codes: 0 = verified clean; 1 = repeated scenario failure;
  * 3 = eval could not run; 2 = runner crashed before producing a result.
