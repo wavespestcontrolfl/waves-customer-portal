@@ -86,6 +86,7 @@ jest.mock('../services/composer-customer-links', () => ({
   buildServiceReportLink: jest.fn(),
   buildContractSigningLink: jest.fn(),
   buildStatementLink: jest.fn(),
+  buildReceiptLink: jest.fn(),
   buildProjectReportLink: jest.fn(),
 }));
 jest.mock('../services/prep-guide-sender', () => ({
@@ -316,10 +317,22 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test('project_report: dispatch the whole account id set; rides the owner back (account-scoped customer bearer — /sms applies the recipient\'s consent policy)', async () => {
+  test('receipt + project_report: dispatch the whole account id set; both ride the owner back (account-scoped customer bearers — /sms applies the recipient\'s consent policy)', async () => {
     wireDb({ customers: soloCustomer() });
+    builders.buildReceiptLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/receipt/abc', line: 'Here is your receipt for invoice INV-1: https://portal.wavespestcontrol.com/receipt/abc\n\n', immediateOnly: true, receipt: { id: 'inv-1', invoiceNumber: 'INV-1', status: 'paid', total: 85, paidAt: '2026-08-30' } });
     builders.buildProjectReportLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/report/project/persona-ffffffffffff', line: 'Here is your WDO report: https://portal.wavespestcontrol.com/report/project/persona-ffffffffffff\n\n', immediateOnly: true, projectReport: { id: 'p1', title: 'WDO', projectType: 'wdo', projectDate: '2026-08-10' } });
     await withServer(async (baseUrl) => {
+      const receipt = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'receipt' });
+      expect(receipt.status).toBe(200);
+      // The resolved owner rides in as the recipient whose receipt-text consent the builder checks.
+      expect(builders.buildReceiptLink).toHaveBeenCalledWith([CUSTOMER_UUID], CUSTOMER_UUID);
+      const receiptBody = await receipt.json();
+      expect(receiptBody).toMatchObject({ kind: 'receipt', url: 'portal.wavespestcontrol.com/receipt/abc', receipt: { invoiceNumber: 'INV-1' }, customerId: CUSTOMER_UUID });
+      // Immediate-only (pre-push Codex P1 on r9): the send seam re-runs the
+      // recipient's receipt-text consent; scheduling / drafts never reach it.
+      expect(receiptBody.immediateOnly).toBe(true);
+
+      // The phone-only resolver's selects are queued per request.
       wireDb({ customers: soloCustomer() });
       const report = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'project_report' });
       expect(report.status).toBe(200);
@@ -514,6 +527,23 @@ describe('POST /admin/communications/customer-link', () => {
   // accepted must not read as "try again" (GH Codex #3856 r8 P2).
   describe('POST /send-prep', () => {
     const { sendPrepToCustomer } = require('../services/prep-guide-sender');
+    test.each(['sms', 'email'])('a partial standalone guide does not promise a blocked %s retry', async (failedChannel) => {
+      sendPrepToCustomer.mockResolvedValueOnce({
+        ok: true, reason: 'partial', pestType: 'sprinkler_timer', label: 'Sprinkler Timer Guide', failedChannel,
+        emailSent: failedChannel === 'sms', smsSent: failedChannel === 'email',
+        emailAddress: 'recipient@example.com', phone: '+19415550101',
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'sprinkler_timer', channel: 'both' });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.partial).toBe(true);
+        expect(body.message).toContain(`${failedChannel === 'sms' ? 'Text' : 'Email'} delivery was not confirmed.`);
+        expect(body.message).toContain('this one-time guide cannot be retried with Send prep guide');
+        expect(body.message).not.toMatch(/send it again|try again/);
+      });
+    });
+
     test('no leg confirmed + an uncertain leg → check the log, not try again', async () => {
       sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, emailUncertain: true, smsSent: false });
       await withServer(async (baseUrl) => {

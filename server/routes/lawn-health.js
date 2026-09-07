@@ -48,7 +48,7 @@ const {
 function formatScore(row) {
   return {
     assessmentId: row.id,
-    assessmentDate: row.service_date,
+    assessmentDate: row.visit_date || row.service_date,
     turfDensity: row.turf_density,
     weedSuppression: row.weed_suppression,
     colorHealth: row.color_health,
@@ -135,15 +135,23 @@ router.get('/:customerId', async (req, res, next) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
+    const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+    const historyReader = propertyHistoryEnabled ? require('../services/lawn-assessment-history') : null;
+    const eligibleVisitIds = historyReader
+      ? await historyReader.eligibleVisitIds(await historyReader.visitEligibility({ customerId }, db), db)
+      : undefined;
+
     // Mowing height-of-cut (independent of a vision assessment) — latest reading
     // + trend for the card. Fail-soft helpers → null when none / feature off.
     const mowingHeight = buildMowingHeightContext(
-      await getLatestTurfHeight(customerId),
-      await getTurfHeightTrend(customerId, 12),
+      await getLatestTurfHeight(customerId, db, { eligibleVisitIds }),
+      await getTurfHeightTrend(customerId, 12, db, null, { eligibleVisitIds }),
     );
 
     // Get all confirmed assessments
-    const assessments = await db('lawn_assessments')
+    const assessments = propertyHistoryEnabled
+      ? (await historyReader.latestForCustomer(customerId, {}, db)).map((row) => ({ ...row, service_date: row.visit_date }))
+      : await db('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
       .orderBy('service_date', 'asc');
 
@@ -310,7 +318,8 @@ router.get('/:customerId/history', async (req, res, next) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    const assessments = await db('lawn_assessments')
+    const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+    const assessments = propertyHistoryEnabled ? await require('../services/lawn-assessment-history').latestForCustomer(customerId, {}, db) : await db('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
       .orderBy('service_date', 'asc');
 

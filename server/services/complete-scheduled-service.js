@@ -1913,18 +1913,10 @@ function completionSavedCardFallbackPolicy({
 // outranks the base row entirely, so an armed, successfully-rendered text can
 // reach a customer with an open invoice and no way to pay it. Checking the
 // rendered output (not the stored template) is what makes that unreachable.
-// The comparison MUST be scheme-normalised: getTemplate strips https:// from
-// owned portal hosts before returning the body (admin-sms-templates.js
-// stripPortalUrlScheme), so a raw `body.includes(payUrl)` never matches a
-// portal pay link and would send EVERY billed visit to the fallback — leaving
-// the gated lane permanently unreachable. Both sides go through the renderer's
-// own function so this cannot drift as SCHEMELESS_SMS_HOSTS changes.
+// Compare in SMS display form so a valid pay link survives scheme removal.
 function reportV1InvoiceBodyCarriesPayLink(body, payUrl, normalize) {
-  const strip = typeof normalize === 'function'
-    ? normalize
-    : (typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
-      ? smsTemplatesRouter.stripPortalUrlScheme
-      : (s) => s);
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const strip = typeof normalize === 'function' ? normalize : stripSmsUrlScheme;
   const text = String(body || '');
   const url = String(payUrl || '').trim();
   if (!text) return false;
@@ -3372,6 +3364,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
       && await db.schema.hasColumn('lawn_assessments', 'service_record_id').catch(() => false);
+    const canStampLawnAssessmentProperty = canLinkLawnAssessmentRecord
+      && await db.schema.hasColumn('lawn_assessments', 'property_id').catch(() => false);
+    const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
 
     const rawIdempotencyKey = completionInput.idempotencyKey || bodyIdempotencyKey
       || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
@@ -4652,6 +4647,11 @@ async function completeScheduledService(completionInput, packetRecord = null) {
 
         completionTimerEntriesSnapshot = null;
         const persistRecord = async (trx) => {
+          // Baseline -> customer -> visit matches confirmation. Take this before
+          // the existing row locks because linking can change the installed row.
+          if (propertyHistoryEnabled && canLinkLawnAssessmentRecord) {
+            await require('./lawn-assessment').lockCustomerBaseline(svc.customer_id, trx);
+          }
           // Estimate -> customer -> visit is also acceptance's lock order.
           // Packet entry prelocks all reviewed estimates before its customer.
           if (completionPricingPlan) {
@@ -5847,6 +5847,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             service_id: svc.id,
             service_record_id: record.id,
             updated_at: trx.fn.now(),
+            ...(canStampLawnAssessmentProperty ? {
+              property_id: trx.raw('COALESCE(lawn_assessments.property_id, ?::uuid)', [svc.property_id || null]),
+            } : {}),
           };
           if (lawnAssessmentId) {
             const [linked] = await trx('lawn_assessments')
@@ -5884,6 +5887,12 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             }
           }
           if (linkedLawnAssessmentId) {
+            if (propertyHistoryEnabled) {
+              const history = require('./lawn-assessment-history');
+              const linked = await history.assessmentQuery(svc.customer_id, trx).where('la.id', linkedLawnAssessmentId).first();
+              const scope = await history.scopeForAssessment(linked, trx);
+              await require('./lawn-assessment').refreshPropertyBaseline(svc.customer_id, scope, trx);
+            }
             record.structured_notes = {
               ...structuredNotes,
               lawnAssessmentId: linkedLawnAssessmentId,
@@ -6665,10 +6674,20 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           // A setup failure BEFORE the backlink write leaves the assessment
           // unlinked and sanitation rejects it forever (codex P1 r40) —
           // restore the known link first (idempotent, only-if-null).
-          await db('lawn_assessments')
+          if (propertyHistoryEnabled) {
+            await require('./lawn-assessment').linkAssessmentServiceRecord({
+              assessment: { id: completedLawnAssessmentId, customer_id: svc.customer_id, service_id: svc.id },
+              serviceRecordId: record.id, onlyIfUnlinked: true,
+            }, { knex: db }).catch((linkErr) => logger.warn(`[dispatch] assessment backlink recovery failed for ${completedLawnAssessmentId}: ${linkErr.message}`));
+          } else await db('lawn_assessments')
             .where({ id: completedLawnAssessmentId })
             .whereNull('service_record_id')
-            .update({ service_record_id: record.id })
+            .update({
+              service_record_id: record.id,
+              ...(canStampLawnAssessmentProperty ? {
+                property_id: db.raw('COALESCE(lawn_assessments.property_id, ?::uuid)', [svc.property_id || null]),
+              } : {}),
+            })
             .catch((linkErr) => logger.warn(`[dispatch] assessment backlink recovery failed for ${completedLawnAssessmentId}: ${linkErr.message}`));
           const res = await KnowledgeBridgeGate.sanitizeStoredRecommendations(completedLawnAssessmentId)
             .catch((e) => ({ changed: false, error: e.message }));
@@ -6691,12 +6710,20 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           throw new Error('Linked lawn assessment is not confirmed for this service');
         }
         if (canLinkLawnAssessmentRecord) {
-          await db('lawn_assessments')
+          if (propertyHistoryEnabled) {
+            await require('./lawn-assessment').linkAssessmentServiceRecord({
+              assessment: { id: completedAssessment.id, customer_id: svc.customer_id, service_id: svc.id },
+              serviceRecordId: record.id,
+            }, { knex: db });
+          } else await db('lawn_assessments')
             .where({ id: completedAssessment.id })
             .update({
               service_id: svc.id,
               service_record_id: record.id,
               updated_at: new Date(),
+              ...(canStampLawnAssessmentProperty ? {
+                property_id: db.raw('COALESCE(lawn_assessments.property_id, ?::uuid)', [svc.property_id || null]),
+              } : {}),
             });
         }
         const wiki = require('../services/agronomic-wiki');
@@ -10990,7 +11017,8 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           };
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
-          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id };
+          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true };
+          if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
             smsMetadata.report_url = reportUrl;
@@ -11014,9 +11042,10 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             body: sentSmsBody,
             channel: 'sms',
             audience: 'customer',
-            purpose: 'appointment',
+            purpose: 'service_completion',
             customerId: svc.customer_id,
             appointmentId: svc.id,
+            ...(sentSmsType === 'service_complete_paid_receipt' && invoice?.id ? { invoiceId: invoice.id } : {}),
             identityTrustLevel: 'phone_matches_customer',
             metadata: smsMetadata,
           };
@@ -11037,6 +11066,10 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             invoiceLinkAllowed: allowCompletionInvoiceLink,
           };
           let smsResult = await sendCustomerMessage(sendInput);
+          if (smsResult.channel === 'push') {
+            sentSmsChannel = 'push';
+            completionSmsAcceptedSnapshot.channel = 'push';
+          }
           if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
             logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
             const fallbackMetadata = { ...smsMetadata };
@@ -11104,6 +11137,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
                 message_type: sentSmsType,
                 metadata: JSON.stringify({
                   entry_point: 'dispatch_completion_deferred',
+                  replay_purpose: 'service_completion',
+                  notificationEventKey: `scheduled-service:${svc.id}:completed`,
+                  useCustomerChannel: true,
                   service_record_id: record.id,
                   original_block_code: smsResult.code,
                   refresh_customer_phone: true,

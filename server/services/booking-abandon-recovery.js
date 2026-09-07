@@ -21,6 +21,8 @@ const EmailTemplateLibrary = require('./email-template-library');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { gsmSafeName, normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+const { countSegments } = require('./messaging/segment-counter');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const Experiments = require('./experimentation/growthbook');
@@ -116,9 +118,12 @@ async function customerEmailDisabled(customerId) {
 async function renderSms(vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      // noVariants: the one-segment guard below pre-renders and may re-render
+      // with a generic greeting — both must be the SAME body (the rain-out
+      // custom rung pins the base row for the same reason).
       const body = await smsTemplatesRouter.getTemplate('booking_abandonment_recovery', vars, {
         workflow: 'booking_abandon_recovery', entity_type: 'booking_intent',
-      });
+      }, { noVariants: true });
       if (body) return body;
     }
   } catch (err) {
@@ -236,6 +241,12 @@ const SERVICE_LABELS = {
 function serviceLabelOf(intent) {
   return SERVICE_LABELS[String(intent.service_id || '').trim()] || 'your service';
 }
+// The recovery TEXT only (owner, 2026-09-07): the one label that cannot fit a
+// single segment. The email keeps the canonical name.
+const SMS_SERVICE_LABELS = { bora_care: 'Bora-Care' };
+function smsServiceLabelOf(intent) {
+  return SMS_SERVICE_LABELS[String(intent.service_id || '').trim()] || serviceLabelOf(intent);
+}
 
 async function bookingUrlFor(intent) {
   // Carry the abandoned service so the recovery link preselects it — without
@@ -262,6 +273,42 @@ async function bookingUrlFor(intent) {
   return shortenOrPassthrough(url, {
     kind: 'booking', entityType: 'booking_intents', entityId: intent.id, customerId: intent.customer_id || null,
   }).catch(() => url);
+}
+
+// One segment (owner, 2026-09-07 — multi-segment texts have failed to
+// deliver): the name is GSM-folded first (one non-GSM character would flip
+// the whole text to UCS-2 and three segments); if the render still spills
+// past a single segment the only variable part worth dropping is the name,
+// so it is re-rendered with the generic greeting. A body that still exceeds
+// one segment (the shortener down → full-length link; an /admin edit that
+// outgrew the budget) is NOT sent: null here means no claim, so the intent is
+// retried next tick — a recovered shortener fixes the first case by itself,
+// and the warning names the second for /admin.
+// Counts are taken on the body as it will leave (sendCustomerMessage
+// normalizes typographic punctuation first), so a curly quote in an /admin
+// edit does not make every candidate look like three UCS-2 segments.
+const segmentsOf = (body) => countSegments(normalizeGsmPunctuation(body)).segmentCount;
+async function renderOneSegmentSms(intent) {
+  const vars = {
+    first_name: gsmSafeName(firstNameOf(intent)),
+    service_type: smsServiceLabelOf(intent),
+    booking_url: await bookingUrlFor(intent),
+  };
+  let body = await renderSms(vars);
+  if (!body) return body;
+  let segments = segmentsOf(body);
+  if (segments > 1 && vars.first_name !== 'there') {
+    const generic = await renderSms({ ...vars, first_name: 'there' });
+    if (generic && segmentsOf(generic) < segments) {
+      body = generic;
+      segments = segmentsOf(body);
+    }
+  }
+  if (segments > 1) {
+    logger.warn(`[booking-recovery] SMS for intent ${intent.id} would be ${segments} segments (${countSegments(normalizeGsmPunctuation(body)).encoding}) — not sent; retried next tick (shortener down, or the template in /admin outgrew one segment)`);
+    return null;
+  }
+  return body;
 }
 
 // ── SMS stage (touch 1) ────────────────────────────────────────────────────
@@ -296,11 +343,7 @@ async function runSmsStage(now, sentPhones) {
         logger.info(`[booking-recovery] SMS skip ${intent.id}: customer-replied-recently`);
         continue;
       }
-      const body = await renderSms({
-        first_name: firstNameOf(intent),
-        service_type: serviceLabelOf(intent),
-        booking_url: await bookingUrlFor(intent),
-      });
+      const body = await renderOneSegmentSms(intent);
       if (!body) continue; // missing template — don't claim, retry next tick
 
       if (!(await claimStage(intent.id, 'followup_sms_sent', new Date(nowMs - SMS_MIN_AGE_H * 3600000)))) continue;
@@ -456,5 +499,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor },
+  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, SMS_SERVICE_LABELS, renderOneSegmentSms },
 };

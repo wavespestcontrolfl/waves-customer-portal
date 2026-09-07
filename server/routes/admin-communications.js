@@ -9,13 +9,12 @@ const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { normalizePhone } = require('../utils/phone');
+const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
-const smsTemplatesRouter = require('./admin-sms-templates');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
@@ -1150,10 +1149,18 @@ const PREP_REFUSAL_COPY = {
   prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
   unsupported_pest_type: () => 'That prep type is not available yet.',
   unsupported_channel: () => 'Choose Email, Text, or Both.',
+  // The sprinkler timer guide is a seasonal tip for recurring lawn customers, sent once.
+  not_recurring_lawn: () => 'The sprinkler timer guide is for recurring lawn customers who get the Monday watering plan — this customer is not one, so it was not sent.',
+  seasonal_tips_off: () => 'This customer turned off Seasonal Lawn Tips, and the sprinkler timer guide is one — it was not sent.',
+  email_opted_out: () => 'This customer turned off email — choose Text to send the sprinkler timer guide link instead.',
+  seasonal_tips_not_opted_in: () => 'A sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in (a text is a marketing message) — this customer has not opted in, so choose Email.',
+  guide_already_sent: (r) => `This customer already received the sprinkler timer guide${r.sentAt ? ` on ${new Date(r.sentAt).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : ''} — it is sent once. The guide link is in the composer's link library if they need it again.`,
+  guide_check_failed: () => "Couldn't confirm this customer's preferences or send history — try again.",
 };
 // Both delivered the email but not the text: why the text did not go, by the
 // link's own reason (an unplanned text); anything else = the number.
 const PREP_TEXT_DOWN_COPY = {
+  seasonal_tips_not_opted_in: () => 'The text was not sent — a sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in, and this customer has not opted in.',
   no_upcoming_visit: () => 'The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.',
   prep_page_taken: (r) => `The text was not sent — the customer's next visit already carries the ${r.takenBy || 'other'} prep page.`,
   prep_link_failed: () => 'The text was not sent — the guide page link could not be built; try Text again later.',
@@ -1162,7 +1169,7 @@ const PREP_TEXT_DOWN_COPY = {
 };
 // SendGrid MAY have accepted the email (post-dispatch throw): the page claim
 // is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).
-// The text leg is never uncertain (sendPrepSms).
+// Standalone guide texts also retain uncertain provider outcomes for reconciliation.
 const PREP_EMAIL_UNCERTAIN_COPY = "The prep email may or may not have gone out — check the customer's email log before sending it again.";
 
 function manualPrepMessage(result) {
@@ -1176,10 +1183,15 @@ function manualPrepMessage(result) {
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
   const sent = `${result.label} prep ${parts.join(' and ')}.`;
   if (result.reason !== 'partial') return sent;
+  if (result.pestType === 'sprinkler_timer') {
+    const missing = result.failedChannel === 'sms' ? 'Text' : 'Email';
+    return `${sent} ${missing} delivery was not confirmed. Check delivery history; this one-time guide cannot be retried with Send prep guide.`;
+  }
   if (result.failedChannel === 'sms') {
     const why = PREP_TEXT_DOWN_COPY[result.smsLinkReason];
     return `${sent} ${why ? why(result) : 'The text did not go out — send it again as Text once the number is confirmed.'}`;
   }
+  if (result.emailSkipReason === 'email_opted_out') return `${sent} The email was not sent — this customer turned off email.`;
   return result.emailUncertain
     ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`
     : `${sent} The email did not go out — send it again as Email once the address is confirmed.`;
@@ -1370,6 +1382,13 @@ router.get('/log', async (req, res, next) => {
           .orWhereNull('customers.phone'));
     }
 
+    // Exact contact match for a lead that has no customer record yet. Never
+    // use broad body/name search to choose the conversation or mark it read.
+    if (req.query.phone !== undefined) {
+      const phones = phoneMatchDigits(req.query.phone);
+      if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
+      query = query.whereRaw("regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
+    }
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);
     if (messageType) query = query.where('messages.message_type', messageType);
@@ -1526,6 +1545,14 @@ router.post('/messages/read', async (req, res, next) => {
       messageIds: ids, conversationIds, readBefore, adminUserId: req.technicianId || null, role: req.techRole,
     });
     res.json({ success: true, updated, notificationsCleared });
+  } catch (err) { next(err); }
+});
+
+// Same conversation count consumed by Customer 360's one global badge.
+router.get('/unread-count', requireAdmin, async (req, res, next) => {
+  try {
+    const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES }));
   } catch (err) { next(err); }
 });
 
@@ -1827,15 +1854,8 @@ async function firstNameForPhone(last10, customerIds) {
   return agreedFirstName(rows);
 }
 
-// Composer link inserts are SMS bodies the operator sends verbatim — they
-// never pass through getTemplate, so the owned-host scheme strip (owner
-// directive 2026-08-01: portal links go bare in SMS) has to happen here.
-// Same renderer function as the template path (admin-sms-templates
-// stripPortalUrlScheme) so the two paths can never disagree about which
-// hosts go bare; third-party hosts keep their scheme.
-const stripSmsLinkScheme = typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
-  ? smsTemplatesRouter.stripPortalUrlScheme
-  : (s) => s;
+// Composer inserts use the same SMS formatting as templates and sends.
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
@@ -1918,8 +1938,8 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
 
     res.json({
-      url: stripSmsLinkScheme(url),
-      line: stripSmsLinkScheme(line),
+      url: stripSmsUrlScheme(url),
+      line: stripSmsUrlScheme(line),
       firstName: recipientFirstName,
       appointment: {
         id: svc.id,
@@ -2032,8 +2052,8 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
     res.json({
-      url: stripSmsLinkScheme(url),
-      line: stripSmsLinkScheme(line),
+      url: stripSmsUrlScheme(url),
+      line: stripSmsUrlScheme(line),
       customerId: eligible.id,
       lanes,
       firstName: recipientFirstName,
@@ -2186,7 +2206,7 @@ const EMAIL_SEND_CHANNELS = ['email', 'both'];
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
 // pay_balance | estimate | referral | autopay_setup | appointment |
 // card_request | prep_guide | service_report | contract | statement |
-// project_report. Same
+// receipt | project_report. Same
 // fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
@@ -2231,8 +2251,8 @@ async function statementLinkInsert(builders, last10, bodyCustomerId) {
     status: 200,
     body: {
       kind: 'statement',
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
+      url: stripSmsUrlScheme(result.url),
+      line: stripSmsUrlScheme(result.line),
       statement: result.statement || undefined,
       immediateOnly: result.immediateOnly || undefined,
       customerId: (selected || owners[0])?.id,
@@ -2321,7 +2341,11 @@ function composerLinkBuilders() {
     // Handled by statementLinkInsert before any customer resolution (the
     // key here only admits the kind).
     statement: null,
-    // A project report is the account's, like a service report.
+    // A receipt is the account's, like the pay link (a household shares
+    // its bills) — the resolved owner is the recipient whose receipt-text
+    // consent the builder checks; a project report the account's, like a
+    // service report.
+    receipt: (ids, primaryId) => builders.buildReceiptLink(ids, primaryId),
     project_report: (ids) => builders.buildProjectReportLink(ids),
   };
 }
@@ -2344,7 +2368,10 @@ const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_g
 // typed-in number sends as an unverified conversational lead, whose consent
 // read can miss the customer's notification_prefs entirely when the number
 // is formatted differently on file (GH Codex #3844 r4 P1).
-const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report'];
+// A receipt link is account-scoped like the pay link but its text is a
+// customer bearer too — the owner rides back so /sms applies the recipient's
+// own consent policy, never the unverified-lead one (GH Codex #3893 r3 P1).
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report', 'receipt'];
 
 // The row a /customer-link kind targets: the operator-selected row first,
 // else the account row whose phone matches the number, else the first
@@ -2381,7 +2408,7 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
 // inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
@@ -2434,8 +2461,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     res.json({
       kind,
       channel,
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
+      url: stripSmsUrlScheme(result.url),
+      line: stripSmsUrlScheme(result.line),
       firstName: recipientFirstName,
       ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
       // Owner-bound kinds (and the account-scoped bearers above): the
@@ -2462,7 +2489,7 @@ router.get('/link-library', async (req, res) => {
       linkLibrary.listLinks(),
       linkLibrary.sitemapLastSyncedAt(),
     ]);
-    res.json({ links, lastSyncedAt });
+    res.json({ links, lastSyncedAt, receiptLinksEnabled: require('../config/feature-gates').isEnabled('composerReceiptLinks') });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);
     res.status(500).json({ error: err.message });

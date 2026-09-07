@@ -17,6 +17,7 @@ function daysAgo(n) { return etDateString(addETDays(new Date(), -n)); }
 function mondayThisWeek() { return etWeekStart(); }
 
 const { DRAFT_REPLY_PREFIX, whereNeedsRealReply: whereNeedsRealReviewReply } = require('./review-reply/draft-prefix');
+const { getExperimentResultsSummary } = require('./intelligence-bar/growthbook-tools');
 
 async function executeBITool(toolName, input) {
   switch (toolName) {
@@ -294,6 +295,18 @@ async function executeBITool(toolName, input) {
         gsc: { clicks: gscSummary.clicksThisWeek, clickChange, impressions: gscSummary.impressionsThisWeek },
         backlinks: { total: backlinks.total, newThisWeek: backlinks.newThisWeek },
       };
+    }
+
+    case 'get_experiment_results': {
+      // GrowthBook is optional infrastructure: no key = a plain "not
+      // configured" answer, never an error the briefing has to explain.
+      if (!process.env.GROWTHBOOK_API_KEY) return { configured: false, running: 0, experiments: [] };
+      try {
+        return { configured: true, ...(await getExperimentResultsSummary()) };
+      } catch (e) {
+        logger.warn(`[bi-agent] get_experiment_results failed: ${e.message}`);
+        return { configured: true, error: e.message, running: 0, experiments: [] };
+      }
     }
 
     case 'get_anomalies': {

@@ -1,7 +1,5 @@
-import React, { Component, useEffect } from 'react';
+import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
-import { GrowthBookProvider } from '@growthbook/growthbook-react';
-import { growthbook } from './lib/growthbook';
 import { reportError } from './lib/reportError';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
@@ -183,6 +181,12 @@ function ReviewLinkRedirect() {
   const { token } = useParams();
   const location = useLocation();
   return <Navigate to={`/rate/${token}${location.search}`} replace />;
+}
+
+function EstimateRoute() {
+  const { search } = useLocation();
+  const page = <EstimateViewPage />;
+  return new URLSearchParams(search).get('website') === '1' ? page : <WavesShell>{page}</WavesShell>;
 }
 
 // Legacy linked-estimate booking page: its estimate fetch expected JSON from
@@ -430,13 +434,34 @@ function RoutesErrorBoundary({ children }) {
 }
 
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading, error } = useAuth();
+  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty } = useAuth();
   const location = useLocation();
+  const targetProperty = new URLSearchParams(location.search).get('notificationProperty');
+  const targetPending = !!targetProperty && isAuthenticated && String(customer?.id) !== targetProperty;
+  const switchingTarget = useRef(null);
+  const [targetError, setTargetError] = useState(null);
+  useEffect(() => {
+    if (!targetPending || loading || switchingTarget.current === targetProperty) return;
+    if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
+    if (!properties.some((property) => String(property.id) === targetProperty)) {
+      setTargetError('This notification belongs to a property that is no longer available on your account.');
+      return;
+    }
+    switchingTarget.current = targetProperty;
+    // select-property verifies ownership again on the server. The portal
+    // stays unmounted until the authenticated customer matches the target.
+    void switchProperty(targetProperty).then((switched) => {
+      if (!switched) setTargetError('This property could not be opened. Try again.');
+    }).catch(() => setTargetError('This property could not be opened. Try again.'));
+  }, [targetPending, targetProperty, loading, properties, propertiesError, switchProperty]);
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
-  useGlassSurface(loading);
+  useGlassSurface(loading || targetPending);
 
-  if (loading) {
+  if (targetPending && targetError) {
+    return <CustomerFailureScreen title="Property unavailable" message={targetError} onRetry={() => window.location.assign('/')} />;
+  }
+  if (loading || targetPending) {
     return (
       <div style={{
         minHeight: '100vh',
@@ -525,7 +550,7 @@ export default function App() {
           {Object.entries(ESTIMATE_MARKETING_REDIRECTS).map(([slug, destination]) => (
             <Route key={slug} path={`/estimate/${slug}`} element={<ExternalRedirect to={destination} />} />
           ))}
-          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><EstimateViewPage /></WavesShell></Suspense>} />
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><EstimateRoute /></Suspense>} />
           {/* #EDF4FA fallbacks = glass-adjacent wash, not the warm legacy
               #FAF8F3 — these pages all mount the glass scene, so a warm
               fallback reads as the old theme flashing before glass. The
@@ -687,12 +712,5 @@ export default function App() {
       </BrowserRouter>
     </AuthProvider>
   );
-  // GrowthBook React requires a REAL instance — with no client key there is
-  // none, and <GrowthBookProvider growthbook={undefined}> can crash the SPA.
-  // Skip the provider entirely instead; no feature hooks are mounted while
-  // the lane is dark, and any future hook must tolerate the missing context
-  // exactly as it tolerates fallback values.
-  return growthbook
-    ? <GrowthBookProvider growthbook={growthbook}>{app}</GrowthBookProvider>
-    : app;
+  return app;
 }

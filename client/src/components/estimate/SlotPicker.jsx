@@ -73,7 +73,9 @@ function toAvailability(slots) {
 }
 
 export default function SlotPicker({
+  website = false,
   token,
+  preview = false,
   askToken = null,
   selectedSlotId,
   onSelect,
@@ -107,7 +109,7 @@ export default function SlotPicker({
   const latestPickedRequestRef = useRef(0);
   const pickedDateInputId = useId();
   // Glass copy pack (PR B) — availability-first phrasing.
-  const glass = glassCopyActive();
+  const glass = !website && glassCopyActive();
   // Slot freshness (glass, PR C): re-evaluate the 2-hour booking lead every
   // minute so a page left open grays out windows the server would now
   // reject — matching reserveSlot's guard instead of surfacing a
@@ -177,6 +179,7 @@ export default function SlotPicker({
   }, [glass, selectedSlotId, selectedSlot, heldSelection, freshnessTick, loading, data]);
 
   useEffect(() => {
+    if (preview) return undefined;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -202,7 +205,11 @@ export default function SlotPicker({
       .then((body) => { if (!cancelled) { setData(body); setLoading(false); } })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
-  }, [token, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
+  }, [token, preview, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
+
+  if (preview) return <section style={{ padding: 20 }} aria-label="Scheduling preview">
+    <p style={{ margin: 0, fontSize: 16 }}>Customers choose from current appointment times here. Scheduling and date searches are disabled in staff preview.</p>
+  </section>;
 
   // ── custom date/time finder ──
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -370,7 +377,7 @@ export default function SlotPicker({
   const search = (
     <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
       <WavesAIScheduleSearch
-        theme={{ accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.borderCool, surface: W.white, inputBg: W.offWhite }}
+        theme={website ? { accent: '#ffd700', accentText: '#1b2c5b', text: '#1b2c5b', muted: '#475569', border: '#cbd5e1', surface: '#ffffff', inputBg: '#ffffff' } : { accent: W.blueDeeper, accentText: W.white, text: W.blueDeeper, muted: W.textCaption, border: W.borderCool, surface: W.white, inputBg: W.offWhite }}
         showEyebrow={false}
         subtitle={null}
         onSearch={runAiSearch}
@@ -455,7 +462,7 @@ export default function SlotPicker({
 
   if (error) {
     return (
-      <div style={estimateCard()}>
+      <div data-website-card="" style={estimateCard()}>
         <div style={{ fontSize: 14, color: W.textBody }}>
           Couldn't load times right now. <a href="tel:+19412975749" style={{ color: W.blueDeeper }}>Call (941) 297-5749</a> and we'll get you scheduled.
         </div>
@@ -505,8 +512,8 @@ export default function SlotPicker({
   );
 
   return (
-    <div style={estimateCard()}>
-      {heading}
+    <div data-website-card="" style={estimateCard()}>
+      {website ? null : heading}
       {glass && selectedSlot && !glassSlotIsStale(selectedSlot) ? (
         <GlassTechChip slotMeta={glassSlotMeta(selectedSlot)} licenseNumber={licenseNumber} />
       ) : glass && heldSelection && !glassSlotIsStale(heldSelection) ? (

@@ -5,7 +5,7 @@
 // + the staff session's Bearer token so the server can serve the draft.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage, { DraftPreviewBanner } from './EstimateViewPage';
 
@@ -139,8 +139,64 @@ describe('EstimateViewPage staff draft preview', () => {
     expect(opts?.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('does not disable customer actions from an unverified copied preview marker', async () => {
+    window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
+    stubLocalStorage({});
+    const payload = draftPreviewPayload({ adminDraftPreview: false });
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(payload)));
+    render(<EstimateViewPage />);
+    await screen.findByText('Waves will confirm & schedule your trenching');
+    expect(screen.queryByText('Saved estimate preview')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Scheduling preview')).not.toBeInTheDocument();
+  });
+
   it('exports the banner as a standalone component', () => {
     render(<DraftPreviewBanner />);
     expect(screen.getByText('Draft preview — not sent to the customer yet')).toBeInTheDocument();
   });
+  it('keeps a sent staff preview inert across booking, service details, Ask and schedule controls', async () => {
+    window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
+    stubLocalStorage({ waves_admin_token: 'staff-jwt' });
+    const payload = draftPreviewPayload({ adminDraftPreview: false });
+    payload.verifiedStaffPreview = true;
+    Object.assign(payload.estimate, { id: 'estimate-fixture', status: 'sent', serviceCategory: 'pest', softExit: { enabled: true } });
+    payload.pricing.askChips = ['What happens during service?'];
+    payload.cta = { canAccept: true, terminalState: null, quoteRequired: false, reviewBeforeBooking: false };
+    const fetchMock = vi.fn(async (url, opts = {}) => {
+      if (opts.method && opts.method !== 'GET') throw new Error('Preview must never write');
+      return jsonResponse(payload);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    Element.prototype.scrollIntoView = vi.fn();
+    render(<EstimateViewPage />);
+    await screen.findByText('Saved estimate preview');
+    expect(screen.getByLabelText('Scheduling preview')).toHaveTextContent('Scheduling and date searches are disabled');
+    expect(screen.getByRole('link', { name: 'Edit services' })).toHaveAttribute('href', '/admin/pipeline?tab=new&editEstimateId=estimate-fixture#estimate-services');
+    // Exercise all rendered non-navigation buttons, including disabled
+    // controls (fireEvent cannot bypass the preview guards in their handlers).
+    for (const button of screen.queryAllByRole('button')) {
+      if (/print/i.test(button.textContent || '')) continue;
+      fireEvent.click(button);
+    }
+    for (const input of screen.queryAllByRole('textbox')) {
+      fireEvent.change(input, { target: { value: 'Tomorrow morning' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+    }
+    await act(async () => { await Promise.resolve(); });
+    expect(fetchMock.mock.calls.every(([, opts]) => !opts?.method || opts.method === 'GET')).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => /available-slots|find-slots/.test(String(url)))).toBe(false);
+    expect(screen.queryByRole('button', { name: /extend/i })).not.toBeInTheDocument();
+  });
+
+  it('never requests an extension from an expired staff preview', async () => {
+    window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
+    stubLocalStorage({ waves_admin_token: 'staff-jwt' });
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 404, json: async () => ({ extensionEligible: true }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+    await waitFor(() => expect(screen.queryByRole('heading', { level: 1 })).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /extend|request.*link/i })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([, opts]) => !opts?.method || opts.method === 'GET')).toBe(true);
+  });
+
 });

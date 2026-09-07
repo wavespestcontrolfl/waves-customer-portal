@@ -119,6 +119,8 @@ describe('scheduledDepositReceiptAllowed', () => {
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
     mockPrefsLookup({ payment_receipt_channel: 'both' });
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
+    mockPrefsLookup({ payment_receipt_channel: 'push' });
+    await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
     mockPrefsLookup(null);
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
   });

@@ -17,16 +17,24 @@
  *             (auto_*_no_email, three pests) or reason no_upcoming_visit.
  *   • both  → email + the text above.
  *
- * The Communications route allow-lists every PREP_CONFIG pest — the eight
+ * The Communications route allow-lists every PREP_CONFIG entry — the eight
  * live prep.* guides (prep.wildlife stays archived: wildlife is a prohibited
- * Waves service, migration 20260707000002). Wire a new pest by adding its
- * config here.
+ * Waves service, migration 20260707000002) plus the sprinkler timer guide.
+ * Wire a new one by adding its config here.
+ *
+ * A `guide` entry (sprinkler_timer) is not visit prep: it is a one-time
+ * how-to whose buttons deep-link to the hub, so it looks up no upcoming
+ * visit and claims no prep page — a lawn visit's own prep_template_key
+ * (prep.lawn) is never touched by it, and its text is always the hub-link
+ * standalone. Its email carries a `watering_block` rendered here from the
+ * current restriction policy and the customer's minutes per zone (owner
+ * scope 2026-09-05, docs/irrigation-controller-guide-scope.md).
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { sendCustomerMessage, normalizeRecipient } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { resolveProjectEmailRecipient, ensureServicePrepToken } = require('./project-email');
@@ -35,6 +43,8 @@ const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
+const { countyConfirmedAfterMove, parseConfirmedFields } = require('./irrigation-schedule-confirmation');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -147,11 +157,100 @@ const PREP_CONFIG = Object.freeze({
     emailTemplateKey: 'prep.termite',
     smsStandaloneKey: null,
   },
+  // One-time how-to, not visit prep (see the header): no serviceKeywords,
+  // no visit, no page claim. The text is the hub-link standalone on every
+  // channel.
+  sprinkler_timer: {
+    label: 'Sprinkler Timer Guide',
+    guide: true,
+    emailTemplateKey: 'prep.sprinkler_timer',
+    smsStandaloneKey: 'auto_sprinkler_timer',
+  },
 });
+
+// The guide email's watering callout, from what exists today: the CURRENT
+// restriction policy for the customer's resolved county (day count only —
+// the policy names no weekday or hour window) and the minutes per zone on
+// file. Fail closed: when coverage cannot be established the block points
+// the customer at the county rules and Monday's email instead of guessing.
+async function buildWateringBlock(customer, snapshot = {}) {
+  let inputs = { minutes: null, policy: null };
+  snapshot.moveStamp = null;
+  try {
+    inputs = await loadWateringInputs(customer, snapshot);
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] watering block inputs unavailable for customer ${customer.id}: ${err.name} (code=${err.code})`);
+  }
+  return renderWateringBlock(inputs);
+}
+
+// The reads behind the block, as one consistent snapshot: preferences,
+// the ACTIVE turf profile only (a retired profile's county is the former
+// home's — the weekly sweep joins on tp.active = true; GH Codex #3953 r1
+// P1), the address re-read AFTER the preferences (the caller's customer row
+// may predate a move), and the move stamp re-read after the address — a
+// stamp that moved between the reads means the inputs straddle a move, and
+// a legal instruction is not built on that (r2 P1). Minutes saved before a
+// move are the former home's until re-confirmed (pre-push P1 on d82831055).
+async function loadWateringInputs(customer, snapshot) {
+  const prefs = (await db('property_preferences').where({ customer_id: customer.id }).first()) || {};
+  const turf = (await db('customer_turf_profiles').where({ customer_id: customer.id, active: true }).first()) || {};
+  const home = (await db('customers').where({ id: customer.id }).first('city', 'zip')) || customer;
+  const stampAfter = (await db('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
+  const movedAt = prefs.irrigation_home_changed_at || null;
+  const stampMs = (v) => (v ? new Date(v).getTime() : null);
+  if (stampMs(stampAfter) !== stampMs(movedAt)) {
+    throw new Error('address changed while the watering block was being built');
+  }
+  // The stamp this block was built against — re-checked at the dispatch
+  // boundary (sendPrepEmail's onQueued) before the email leaves.
+  snapshot.moveStamp = stampAfter;
+  const minutesCurrent = !movedAt || parseConfirmedFields(prefs.irrigation_confirmed_fields).includes('irrigation_run_minutes');
+  const runMinutes = Number(prefs.irrigation_run_minutes);
+  const minutes = minutesCurrent && Number.isFinite(runMinutes) && runMinutes > 0 ? Math.round(runMinutes) : null;
+  const county = resolveRestrictionCounty({
+    county: turf.county || null,
+    profileCity: turf.city || null,
+    city: home.city,
+    zip: home.zip,
+    homeMoved: !!movedAt,
+    movedAt,
+    countyConfirmed: countyConfirmedAfterMove(prefs),
+  });
+  return { minutes, policy: currentRestrictionPolicy(new Date(), { county }) };
+}
+
+// The copy. No weekday, no hour window: the policy names neither. Fails
+// closed to the county's rules when there is no policy.
+function renderWateringBlock({ minutes, policy }) {
+  const minutesLine = minutes
+    ? `run each grass zone about ${minutes} minutes.`
+    : 'each Monday\'s email tells you how many minutes to run each zone.';
+  if (!policy) {
+    return `Before you run, check your county\'s watering rules for your assigned day and hours. Then ${minutesLine}`;
+  }
+  const days = Number(policy.maxDaysPerWeek);
+  const through = policy.expiresOn ? `, through ${formatDisplayDate(policy.expiresOn, { fallback: policy.expiresOn })}` : '';
+  if (days === 0) {
+    return `Right now lawn watering is not allowed in your area (${policy.label})${through}. Wait for Monday\'s email to tell you when it opens back up.`;
+  }
+  const dayWord = days === 1 ? 'one watering day' : `${days} watering days`;
+  const hours = policy.hoursNote ? `, ${policy.hoursNote}` : '';
+  const onDay = days === 1 ? 'On that day' : 'On each of those days';
+  return `Right now your area allows ${dayWord} a week (${policy.label})${hours}${through}. ${onDay}, ${minutesLine}`;
+}
 
 // The text that carries the tokened guide page — one template for every
 // pest; {prep_label} names the guide, {prep_url} is the /prep/:token link.
 const SMS_GUIDE_LINK_KEY = 'auto_prep_guide_link';
+// The hub link every sprinkler timer guide text carries (auto_sprinkler_timer,
+// 20260905000011) — the durable SMS-log signature of a delivered guide.
+const GUIDE_SMS_LINK_SIGNATURE = 'wavespestcontrol.com/sprinkler-timers/';
+// The pre-dispatch claim's body (openGuideSend) — settled into the delivered
+// marker or released; an unsettled one this old is reclaimed.
+const GUIDE_CLAIM_BODY = 'Prep send claimed via Communications — dispatching.';
+const GUIDE_EMAIL_DISPATCH_BODY = 'Prep email dispatch started — delivery unconfirmed; not resent.';
+const GUIDE_CLAIM_STALE_MS = 10 * 60 * 1000;
 
 const CHANNELS = Object.freeze(['email', 'sms', 'both']);
 
@@ -240,7 +339,7 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
     const [row] = await upcomingFamilyVisits(customerIds, config, 1);
     return row || null;
   } catch (err) {
-    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${[].concat(customerIds).filter(Boolean).join(',')}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${[].concat(customerIds).filter(Boolean).join(',')}: ${err.name} (code=${err.code})`);
     return null;
   }
 }
@@ -331,7 +430,7 @@ async function settleHeldEnrollment(customerId, templateKey) {
     const { advanceEnrollment } = require('./automation-runner');
     await advanceEnrollment(enrollment);
   } catch (err) {
-    logger.warn(`[prep-guide-sender] enrolment settle failed for customer ${customerId} (${sequenceKey}): ${err.message}`);
+    logger.warn(`[prep-guide-sender] enrolment settle failed for customer ${customerId} (${sequenceKey}): ${err.name} (code=${err.code})`);
   }
 }
 
@@ -377,7 +476,7 @@ async function releasePrepPage(serviceId, templateKey) {
       .whereRaw('COALESCE(prep_view_count, 0) = 0')
       .update({ prep_template_key: null });
   } catch (err) {
-    logger.warn(`[prep-guide-sender] prep page release failed for service ${serviceId}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] prep page release failed for service ${serviceId}: ${err.name} (code=${err.code})`);
   }
 }
 
@@ -405,7 +504,7 @@ async function resolvePrepVisit(customer, config) {
   try {
     visits = await nextUpcomingVisits(customer.id, config);
   } catch (err) {
-    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customer.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
     return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
   if (!visits.length) return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'no_upcoming_visit' };
@@ -413,7 +512,7 @@ async function resolvePrepVisit(customer, config) {
   try {
     loaded = await EmailTemplateLibrary.loadTemplateByKey(config.emailTemplateKey);
   } catch (err) {
-    logger.warn(`[prep-guide-sender] template lookup failed for ${config.emailTemplateKey}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] template lookup failed for ${config.emailTemplateKey}: ${err.name} (code=${err.code})`);
     return { visit: visits[0], prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
   if (!loaded?.activeVersion) return { visit: visits[0], prepUrl: null, ownsPage: false, linkReason: 'prep_guide_inactive' };
@@ -437,7 +536,7 @@ async function resolvePrepVisit(customer, config) {
       try {
         inFlight = await automationLaneLive(candidate, config.emailTemplateKey, customer.id);
       } catch (err) {
-        logger.warn(`[prep-guide-sender] automation liveness check failed for service ${candidate.id}: ${err.message}`);
+        logger.warn(`[prep-guide-sender] automation liveness check failed for service ${candidate.id}: ${err.name} (code=${err.code})`);
       }
       if (inFlight) return { visit: candidate, prepUrl: null, ownsPage: false, linkReason: 'prep_send_pending' };
       visit = candidate;
@@ -504,9 +603,69 @@ async function stampPrepSent(visit, config) {
 // immediately before the provider call: a throw BEFORE it (template
 // missing/disabled, no active version) reached no one and is a plain
 // failure (GH Codex #3856 r6 P2).
-async function sendPrepEmail({ customer, recipient, firstName, config, visit, prepUrl, stampVisit }) {
+async function sendPrepEmail({ customer, recipient, firstName, config, visit, prepUrl, stampVisit, guide = null }) {
   let dispatched = false;
   try {
+    if (config.guide) {
+      const snapshot = {};
+      const wateringBlock = await buildWateringBlock(customer, snapshot);
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: config.emailTemplateKey,
+        to: recipient.email,
+        recipientType: 'customer',
+        recipientId: customer.id,
+        suppressionGroupKey: SERVICE_GROUP,
+        categories: ['manual_prep', `prep_${config.emailTemplateKey.replace(/\./g, '_')}`],
+        triggerEventId: manualPrepTriggerId(customer.id, config.emailTemplateKey, null),
+        // Sent once per CLAIM: the ledger's unique key refuses a second
+        // dispatch of this attempt; a released claim (definite miss, a
+        // blocked suppression) gets a fresh key so a later retry can reach
+        // the provider (GH Codex #3953 r4 P2).
+        idempotencyKey: `prep_guide_once:${customer.id}:${config.emailTemplateKey}:${guide?.claimId ?? 'unclaimed'}`,
+        suppressProviderErrorLog: true,
+        // Dispatch-boundary home check (the weekly sender's own): re-read the
+        // move stamp UNDER the property-preferences advisory lock so an
+        // in-flight address change commits first; a stamp that moved since
+        // the block was built means the email carries the former home's
+        // rules — abort (onQueued → false). Unreadable = abort, fail closed
+        // (GH Codex #3953 r4 P1).
+        onQueued: async () => {
+          const stampAt = (v) => (v ? new Date(v).getTime() : null);
+          let verdict = false;
+          try {
+            verdict = await db.transaction(async (trx) => {
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customer.id)]);
+              const row = await trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
+              if (stampAt(row?.irrigation_home_changed_at) !== stampAt(snapshot.moveStamp)) return false;
+              // Record the handoff BEFORE the provider call. A crashed process
+              // cannot mistake an accepted-but-unlogged email for a free retry.
+              return (await trx('customer_interactions')
+                .where({ id: guide.claimId, customer_id: customer.id, body: GUIDE_CLAIM_BODY })
+                .update({ body: GUIDE_EMAIL_DISPATCH_BODY })) === 1;
+            });
+          } catch (err) {
+            // The library treats a THROWING hook as "keep" — an unreadable
+            // home check must abort explicitly (pre-push Codex P1 on 39222b221).
+            logger.warn(`[prep-guide-sender] guide email withheld for customer ${customer.id}: move-stamp re-read failed (${err.name} (code=${err.code}))`);
+            return false;
+          }
+          if (!verdict) {
+            logger.warn(`[prep-guide-sender] guide email withheld for customer ${customer.id}: address or delivery claim changed before dispatch`);
+            return false;
+          }
+          dispatched = true;
+          return true;
+        },
+        payload: {
+          first_name: firstName,
+          watering_block: wateringBlock,
+          customer_portal_url: portalUrl('/?tab=property'),
+          company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+          company_email: CONTACT_EMAIL,
+        },
+      });
+      return { sent: !!result?.sent };
+    }
     const portalVisitsUrl = portalUrl('/?tab=visits');
     const address = [customer.address_line1, customer.city, customer.state, customer.zip]
       .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
@@ -556,11 +715,10 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
 // The SMS leg. Outcome { sent }. sendCustomerMessage swallows provider
 // failures itself and throws in exactly two places: BEFORE the handoff
 // (definite — nothing reached Twilio) or while persisting the final audit,
-// carrying the KNOWN provider outcome on the error. So a throw is never
-// uncertain: providerOutcome.sent === true is a send (the caller stamps the
-// page and writes the tagger-compatible marker exactly as for a returned
-// send), anything else a plain failure (GH Codex #3856 r9 P2).
-async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, pestType, actorId }) {
+// carrying the provider outcome on the error. Acceptance is a send; a
+// provider failure can include a timeout after acceptance, so standalone
+// guides retain their claim until provider reconciliation proves absence.
+async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, purpose = 'appointment', consentBasis = null, pestType, actorId }) {
   let body;
   try {
     body = await renderSmsTemplate(templateKey, { first_name: firstName, ...vars }, {
@@ -582,7 +740,8 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       body,
       channel: 'sms',
       audience: 'customer',
-      purpose: 'appointment',
+      purpose,
+      ...(consentBasis ? { consentBasis } : {}),
       customerId: customer.id,
       identityTrustLevel: 'phone_matches_customer',
       // Sole caller is the admin send-prep route — an operator-clicked send,
@@ -600,15 +759,15 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       },
     });
   } catch (err) {
-    const accepted = err?.providerOutcome?.sent === true;
+    const accepted = err.providerOutcome?.sent === true;
     logger.warn(`[prep-guide-sender] prep SMS wrapper threw for customer ${customer.id} (${err?.code || err?.name || 'Error'}, providerAccepted=${accepted})`);
-    return { sent: accepted };
+    return { sent: accepted, uncertain: err.providerOutcome?.sent === false };
   }
   // sent:true with a suppression sentinel (gate off, template disabled, owner
   // SMS kill) means nothing left — never record that as a delivery.
   if (!isRealProviderSend(res)) {
     logger.warn(`[prep-guide-sender] prep SMS not sent for customer ${customer.id}: ${res.code || res.reason || res.providerMessageId || 'unknown'}`);
-    return { sent: false };
+    return { sent: false, uncertain: res.code === 'PROVIDER_FAILURE' };
   }
   return { sent: true };
 }
@@ -617,8 +776,10 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
 // may be a service contact); the text goes to customer.phone — the primary's
 // line — so it greets the customer's own first name, never the contact's.
 // A chosen channel with nothing on file is an operator-facing refusal.
-function resolvePrepContacts(customer, channel) {
-  const recipient = resolveProjectEmailRecipient(customer);
+function resolvePrepContacts(customer, channel, config) {
+  const recipient = config.guide
+    ? { email: customer.email || '', name: customer.first_name || '' }
+    : resolveProjectEmailRecipient(customer);
   const firstWord = (v) => String(v || '').trim().split(/\s+/)[0] || 'there';
   const contacts = {
     recipient,
@@ -636,11 +797,19 @@ function resolvePrepContacts(customer, channel) {
 
 // Text body: the guide-page link when the visit's page is ours, else the
 // pest's inline-steps text, else nothing to text.
-function planPrepSms(config, prepUrl) {
+function planPrepSms(config, prepUrl, { consentBasis = null } = {}) {
   if (prepUrl) {
     return { templateKey: SMS_GUIDE_LINK_KEY, vars: { prep_label: config.label, prep_url: prepUrl }, variant: 'guide_link' };
   }
-  if (config.smsStandaloneKey) return { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone' };
+  // A standalone guide is a seasonal tip, not appointment prep: its text
+  // runs under the marketing_seasonal policy (owner ruling 08-25 — Seasonal
+  // Tips consent + the seasonal_tips preference; GH Codex #3953 r1 P1) and
+  // carries the verified consent basis the policy requires (r2 P1).
+  if (config.smsStandaloneKey) {
+    return config.guide
+      ? { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone', purpose: 'marketing_seasonal', consentBasis }
+      : { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone', purpose: 'appointment' };
+  }
   return null;
 }
 
@@ -662,7 +831,7 @@ async function pageStillOwned(page, config) {
       .first('id');
     return !!row;
   } catch (err) {
-    logger.warn(`[prep-guide-sender] prep page ownership re-check failed for service ${page.visit.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] prep page ownership re-check failed for service ${page.visit.id}: ${err.name} (code=${err.code})`);
     return false;
   }
 }
@@ -677,7 +846,7 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
   let uncertain = false;
   if (contacts.wantEmail) {
     const email = await sendPrepEmail({
-      customer, recipient: contacts.recipient, firstName: contacts.emailFirstName, config, visit, prepUrl, stampVisit,
+      customer, recipient: contacts.recipient, firstName: contacts.emailFirstName, config, visit, prepUrl, stampVisit, guide: page.guide || null,
     });
     result.emailSent = email.sent;
     result.emailUncertain = !!email.uncertain;
@@ -688,6 +857,7 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
       customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, ...smsPlan,
     });
     result.smsSent = sms.sent;
+    result.smsUncertain = !!sms.uncertain;
     if (sms.sent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(stampVisit, config);
   }
   result.ok = result.emailSent || result.smsSent;
@@ -699,6 +869,186 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
     // operator reads a half-delivered ask as fully sent (GH Codex #3856 r2 P2).
     result.reason = 'partial';
     result.failedChannel = result.emailSent ? 'sms' : 'email';
+  }
+}
+
+// The send-once fence. Three sources, any one is enough: the interaction
+// marker (the pre-dispatch claim, settled on delivery), the email ledger for
+// this template (delivered or uncertain attempts), and the SMS log by the
+// hub link the text carries (twilio.js keeps no caller metadata; pre-push Codex P1 on 1c5df4ec7). A claim that
+// never settled (process exit between the claim and the provider call) is
+// in flight while young and reclaimed once stale — never a permanent
+// "already sent" (GH Codex #3953 r4 P2).
+async function priorGuideDelivery(customer, config, pestType) {
+  const [marker, emails, text] = await Promise.all([
+    db('customer_interactions')
+      .where({ customer_id: customer.id })
+      .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
+      .orderBy('created_at', 'desc')
+      .first(),
+    db('email_messages')
+      .where({ recipient_id: customer.id, template_key: config.emailTemplateKey })
+      .whereNotIn('status', ['blocked', 'failed'])
+      .orderBy('created_at', 'desc')
+      .select('status', 'created_at', 'queued_at', 'sent_at', 'provider_message_id'),
+    db('sms_log')
+      .where({ customer_id: customer.id, direction: 'outbound' })
+      .whereRaw('message_body ILIKE ?', [`%${GUIDE_SMS_LINK_SIGNATURE}%`])
+      .orderBy('created_at', 'desc')
+      .first(),
+  ]);
+  // A stale queued row is retryable under the email library's own policy.
+  // Inspect every attempt: a newer abandoned queue cannot hide an older send.
+  const email = emails.find((row) => row.status !== 'queued' || row.sent_at || row.provider_message_id);
+  const settledMarker = marker?.body !== GUIDE_CLAIM_BODY ? marker : null;
+  const prior = settledMarker || email || text;
+  if (prior) return { refusal: { reason: 'guide_already_sent', sentAt: prior.created_at } };
+  if (emails.some((row) => EmailTemplateLibrary.queuedRowInFlight(row))) {
+    return { refusal: { reason: 'prep_send_busy' } };
+  }
+  // Older claims lack the durable dispatch fence. Their stale queued row
+  // cannot prove that SendGrid did not accept the email.
+  if (emails.length && marker?.metadata?.guide_email_fenced !== true) {
+    return { refusal: { reason: 'guide_check_failed' } };
+  }
+  if (marker) {
+    const ageMs = Date.now() - Date.parse(marker.created_at);
+    if (!Number.isFinite(ageMs) || ageMs < GUIDE_CLAIM_STALE_MS) return { refusal: { reason: 'prep_send_busy' } };
+    // Persist the intended recipient so a later phone edit cannot redirect
+    // reconciliation. Legacy claims did not record a channel or recipient.
+    const smsTo = marker.metadata?.guide_sms_to;
+    if (smsTo !== null) {
+      const TwilioService = require('./twilio');
+      const outcome = await TwilioService.findOutboundMessageSince({
+        to: normalizeRecipient(smsTo || customer.phone),
+        sentAfter: marker.created_at,
+        bodyFragment: GUIDE_SMS_LINK_SIGNATURE,
+      });
+      if (outcome.found) {
+        await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).update({
+          body: 'Prep text confirmed by provider reconciliation — not resent.',
+        });
+        return { refusal: { reason: 'guide_already_sent', sentAt: marker.created_at } };
+      }
+      if (outcome.found !== false || outcome.unavailable) return { refusal: { reason: 'guide_check_failed' } };
+    }
+    await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).del();
+  }
+  return { refusal: null };
+}
+
+// Why a standalone guide is not sent right now, or null. Reads fail closed:
+// an unreadable preference or history is treated as a refusal, never as a
+// send (a guide is a courtesy; a second copy or an unwanted one is not).
+async function guideGate(customer, config, pestType, { wantEmail = true, wantSms = true } = {}) {
+  try {
+    // The guide says "every Monday we email you your watering plan" — true
+    // only for the Monday sweep's audience: an ACTIVE customer with
+    // recurring lawn evidence (the sweep's own predicate). Channel
+    // preferences are judged below per leg, not here: the sweep's full query
+    // also folds in the email opt-out, which would refuse the text-only
+    // fallback outright (GH Codex #3953 r3 P2, r4 P2; pre-push P1 on
+    // 39222b221).
+    const { hasRecurringLawnEvidence } = require('./irrigation-weekly-email');
+    if (customer.active !== true || !(await hasRecurringLawnEvidence(customer.id))) return { refusal: { reason: 'not_recurring_lawn' } };
+    const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+    if (prefs && prefs.seasonal_tips === false) return { refusal: { reason: 'seasonal_tips_off' } };
+    // History BEFORE the email opt-out: on Both, that opt-out only drops the
+    // email leg, so a customer already sent the guide must be caught here
+    // or the text goes out twice (pre-push Codex P1 on 71346bab2).
+    const history = await priorGuideDelivery(customer, config, pestType);
+    if (history.refusal) return { refusal: history.refusal };
+    // The text is a seasonal tip: it needs the EXPLICIT Seasonal Tips opt-in
+    // (seasonal_tips === true; a never-asked NULL is not consent) and the
+    // consent basis the marketing_seasonal policy requires — the same
+    // derivation the customer-guide contract texts use (owner ruling 08-25;
+    // GH Codex #3953 r2 P1). No basis = no text, never a downgraded purpose.
+    let consentBasis = null;
+    if (wantSms) {
+      const { marketingSmsConsentBasisForContract } = require('./document-contract-delivery');
+      consentBasis = await marketingSmsConsentBasisForContract({ customer_id: customer.id });
+    }
+    // The customer's email opt-out (the weekly irrigation sweep's own
+    // np.email_enabled fence); a text-only send is unaffected by it, and on
+    // Both the caller keeps the text leg — so the basis rides along.
+    if (wantEmail && prefs && prefs.email_enabled === false) return { refusal: { reason: 'email_opted_out' }, consentBasis };
+    return { refusal: null, consentBasis };
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] guide preference / history read failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
+    return { refusal: { reason: 'guide_check_failed' } };
+  }
+}
+
+// Admission for a standalone guide: the gate's refusals, the effective
+// channel plan (an email opt-out or a missing Seasonal Tips opt-in drops
+// that leg on Both and names it; refuses a single-channel send), then the
+// pre-dispatch CLAIM — the marker row the fence reads, written before any
+// provider call so a swallowed post-provider write (twilio.js's sms_log
+// insert, the marker itself) can never leave an accepted send invisible.
+// Released only on a definite miss (settleGuideClaim). No claim = no send
+// (GH Codex #3953 r2 P2 + r3 P2).
+const NO_GUIDE = Object.freeze({ refusal: null, consentBasis: null, claimId: null, skippedLeg: null });
+async function openGuideSend({ customer, config, pestType, contacts, result, actorId }) {
+  if (!config.guide) return NO_GUIDE;
+  const gate = await guideGate(customer, config, pestType, { wantEmail: contacts.wantEmail, wantSms: contacts.wantSms });
+  let skippedLeg = null;
+  if (gate.refusal?.reason === 'email_opted_out' && contacts.wantSms) {
+    contacts.wantEmail = false;
+    result.emailSkipReason = 'email_opted_out';
+    skippedLeg = 'email';
+  } else if (gate.refusal) {
+    return { refusal: gate.refusal };
+  }
+  const consentBasis = gate.consentBasis || null;
+  if (contacts.wantSms && !consentBasis) {
+    if (!contacts.wantEmail) return { refusal: { reason: 'seasonal_tips_not_opted_in' } };
+    contacts.wantSms = false;
+    result.smsLinkReason = 'seasonal_tips_not_opted_in';
+    skippedLeg = 'sms';
+  }
+  try {
+    const [claimed] = await db('customer_interactions').insert({
+      customer_id: customer.id,
+      interaction_type: 'email_outbound',
+      admin_user_id: actorId || null,
+      subject: `${config.label} prep sent (manual)`,
+      body: GUIDE_CLAIM_BODY,
+      metadata: { guide_sms_to: contacts.wantSms ? normalizeRecipient(contacts.phone) : null, guide_email_fenced: true },
+    }, ['id']);
+    return { refusal: null, consentBasis, claimId: claimed?.id ?? claimed ?? null, skippedLeg };
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] guide send claim failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
+    return { refusal: { reason: 'guide_check_failed' } };
+  }
+}
+
+async function settleGuideClaim({ claimId, customer, config, contacts, result, pestType }) {
+  if (claimId == null) return;
+  const row = db('customer_interactions').where({ id: claimId, customer_id: customer.id });
+  try {
+    if (result.ok) {
+      await row.update({
+        interaction_type: result.smsSent ? 'sms_outbound' : 'email_outbound',
+        subject: result.smsSent ? `${pestType} prep info sent` : `${config.label} prep sent (manual)`,
+        body: `Prep sent manually via Communications — ${[
+          result.emailSent ? `email to ${contacts.recipient.email}` : null,
+          result.smsSent ? `text to ${contacts.phone}` : null,
+        ].filter(Boolean).join(' + ')}.`,
+      });
+    } else if (result.emailUncertain) {
+      await row.update({ body: 'Prep email dispatched via Communications — delivery uncertain (provider response lost); not resent.' });
+    } else if (result.smsUncertain) {
+      // Any email attempt definitely failed. Restore the pending text state
+      // so reconciliation can release it if Twilio proves no text went.
+      await row.update({ body: GUIDE_CLAIM_BODY });
+    } else {
+      await row.del();
+    }
+  } catch (err) {
+    // A delivered send whose settle failed still holds its claim (the fence
+    // reads the subject, which the claim already carries); only a release
+    // that failed costs an operator a "already sent" on the next click.
+    logger.warn(`[prep-guide-sender] guide claim settle failed for customer ${customer.id} (ok=${result.ok}): ${err.name} (code=${err.code})`);
   }
 }
 
@@ -720,7 +1070,7 @@ async function logPrepInteraction({ customer, config, contacts, result, pestType
       ].filter(Boolean).join(' + ')}.`,
     });
   } catch (err) {
-    logger.warn(`[prep-guide-sender] interaction log failed for customer ${customer.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] interaction log failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
   }
 }
 
@@ -735,7 +1085,7 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
   if (!customer) return { ok: false, reason: 'customer_not_found', pestType };
 
-  const contacts = resolvePrepContacts(customer, channel);
+  const contacts = resolvePrepContacts(customer, channel, config);
   const result = {
     ok: false,
     pestType,
@@ -757,13 +1107,26 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   // lease is an operator-facing "try again", not a wait (pre-push Codex
   // P1s on 8dbc30cc1 + 87b4cee92).
   const outcome = await runExclusive(`prep-send:${customer.id}`, async () => {
-    const page = await resolvePrepVisit(customer, config);
+    // A guide hangs on no visit: nothing to look up, claim, link or stamp.
+    // It is also a seasonal tip sent ONCE: a customer who turned off Seasonal
+    // Lawn Tips does not get it (the weekly irrigation email honors the same
+    // preference), and a customer who already received it is not sent it
+    // again — the interaction row logPrepInteraction writes is the durable
+    // proof (GH Codex #3953 r1 P1 + P2).
+    // A guide: admission (audience, preferences, history), the effective
+    // channel plan, and the pre-dispatch claim, in one step; neutral for
+    // visit prep.
+    const guide = await openGuideSend({ customer, config, pestType, contacts, result, actorId });
+    if (guide.refusal) return { ...result, ...guide.refusal };
+    const page = config.guide
+      ? { visit: null, prepUrl: null, ownsPage: false, linkReason: null, guide }
+      : await resolvePrepVisit(customer, config);
     // An automation is already sending this very guide for the visit —
     // every channel would duplicate it.
     if (page.linkReason === 'prep_send_pending') return { ...result, reason: 'prep_send_pending' };
     // The stamp target: only a visit whose page this guide owns.
     page.stampVisit = page.ownsPage ? page.visit : null;
-    const smsPlan = planPrepSms(config, page.prepUrl);
+    const smsPlan = contacts.wantSms ? planPrepSms(config, page.prepUrl, { consentBasis: guide.consentBasis }) : null;
     // Text-only: refused with the link's own reason (no visit / page taken /
     // link failed), never a blanket "no visit". Both: the email leg is
     // valid, so it goes out and the text is reported as the failed leg
@@ -777,7 +1140,18 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     }
 
     await deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result });
-    if (result.ok) {
+    // A guide leg dropped at admission (email opt-out, no Seasonal Tips
+    // opt-in) makes a delivered send partial, naming that leg.
+    if (result.ok && guide.skippedLeg) {
+      result.reason = 'partial';
+      result.failedChannel = guide.skippedLeg;
+    }
+    if (guide.claimId != null) {
+      // Settle the claim: delivered → the tagger-compatible marker
+      // (logPrepInteraction's own shape, on the claimed row); uncertain
+      // email → kept, marked; definite miss → released so a retry is allowed.
+      await settleGuideClaim({ claimId: guide.claimId, customer, config, contacts, result, pestType });
+    } else if (result.ok) {
       await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
       await settleHeldEnrollment(customer.id, config.emailTemplateKey);
     }
@@ -788,5 +1162,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 }
 
 module.exports = {
-  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
+  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
 };

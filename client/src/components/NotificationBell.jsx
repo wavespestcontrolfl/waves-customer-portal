@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import useModalFocus from '../hooks/useModalFocus';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
-import { isNativeApp, nativePushPermissionState, requestNativePushPermission } from '../native/nativePush.js';
+import { isNativeApp, nativePushConnectionState, requestNativePushPermission } from '../native/nativePush.js';
 import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -181,7 +181,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       return;
     }
     if (isNativeApp()) {
-      nativePushPermissionState()
+      nativePushConnectionState()
         .then((state) => setPushOn(state === 'granted'))
         .catch(() => setPushOn(false));
     }
@@ -194,7 +194,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       if (type === 'customer' && isNativeApp()) {
         const result = await requestNativePushPermission();
         if (result !== 'granted') {
-          throw new Error('Notifications are off. Enable them for Waves in your device Settings, then try again.');
+          throw new Error(result === 'denied'
+            ? 'Notifications are off. Enable them for Waves in your device Settings, then try again.'
+            : 'This device could not connect for app notifications. Check your connection and try again.');
         }
         setPushOn(true);
         return;

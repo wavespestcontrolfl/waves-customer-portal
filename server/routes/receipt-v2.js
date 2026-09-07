@@ -1,58 +1,19 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
+const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
 
 // Receipt links are PERMANENT bearer URLs — the strongest case on the
 // portal for keeping responses out of shared caches and search indexes.
 router.use(noStore);
-const { generateInvoicePDF, generateReceiptPDF } = require('../services/pdf/invoice-pdf');
-const logger = require('../services/logger');
+const { generateReceiptPDF } = require('../services/pdf/invoice-pdf');
 
 // Public receipt routes — no auth required. Reuses the permanent invoice.token.
 // Token is 64-char crypto-random and has no TTL — receipts are records, not
 // actions, so customers may retrieve them months later for bookkeeping.
 
-async function loadPaymentForInvoice(invoiceId, customerId, { stripePaymentIntentId = null, stripeChargeId = null, invoiceNumber = null } = {}) {
-  try {
-    const base = () => db('payments')
-      .where({ customer_id: customerId })
-      .whereIn('status', ['paid', 'refunded', 'processing'])
-      .orderBy('created_at', 'desc');
-    // Primary: payments tagged with this invoice in metadata.invoice_id.
-    let row = await base()
-      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoiceId])
-      .first();
-    // Fallback for legacy / card-on-file rows that predate the metadata tag: resolve
-    // by the invoice's own Stripe PaymentIntent / charge id. Without this a refunded
-    // invoice can return no payment row → the receipt PDF would render no refund and
-    // read as 'paid'.
-    if (!row && (stripePaymentIntentId || stripeChargeId)) {
-      row = await base()
-        .where(function () {
-          if (stripePaymentIntentId) this.orWhere('stripe_payment_intent_id', stripePaymentIntentId);
-          if (stripeChargeId) this.orWhere('stripe_charge_id', stripeChargeId);
-        })
-        .first();
-    }
-    // Manual self-pay rows (cash/check/Zelle) carry NEITHER metadata nor a
-    // PaymentIntent — their only link is the deterministic description
-    // `Invoice <number> — <method>` admin-invoices.js writes. The billing
-    // history resolves receipt links through this same linkage, so without it
-    // here a refunded manual payment shows a Download action that then 409s
-    // at the refund-record guard below (codex r5 P1).
-    if (!row && invoiceNumber && /^[A-Za-z0-9-]+$/.test(String(invoiceNumber))) {
-      row = await base()
-        .where('description', 'like', `Invoice ${invoiceNumber} — %`)
-        .first();
-    }
-    return row || null;
-  } catch (err) {
-    logger.warn(`[receipt-v2] payment lookup failed: ${err.message}`);
-    return null;
-  }
-}
+const { loadPaymentForInvoice } = require('../services/receipt-payment');
 
 // =========================================================================
 // GET /api/receipt/:token — Receipt view data (paid invoice record)
@@ -79,6 +40,10 @@ router.get('/:token', async (req, res, next) => {
       stripePaymentIntentId: data.stripe_payment_intent_id,
       stripeChargeId: data.stripe_charge_id,
       invoiceNumber: data.invoice_number,
+    }).catch((err) => {
+      // Preserve the permanent viewer's existing invoice-only fallback.
+      logger.warn(`[receipt-v2] payment lookup failed: ${err.message}`);
+      return null;
     });
 
     const refundAmount = payment ? Number(payment.refund_amount || 0) : 0;
@@ -199,6 +164,10 @@ router.get('/:token/pdf', async (req, res, next) => {
       stripePaymentIntentId: data.stripe_payment_intent_id,
       stripeChargeId: data.stripe_charge_id,
       invoiceNumber: data.invoice_number,
+    }).catch((err) => {
+      // Paid PDFs retain their fallback; refunded PDFs still refuse below.
+      logger.warn(`[receipt-v2] payment lookup failed: ${err.message}`);
+      return null;
     });
     // A refunded receipt MUST show the refund — if the payment/refund row can't be
     // resolved (e.g. a legacy row with neither metadata.invoice_id nor a matching

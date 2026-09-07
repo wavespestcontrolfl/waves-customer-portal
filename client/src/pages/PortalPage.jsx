@@ -17,6 +17,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
+import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { etDateString, formatETDateTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
@@ -29,6 +30,7 @@ import {
   setupIntentIncompleteMessage,
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
+import useAppNotifications from '../hooks/useAppNotifications';
 import { isNativeApp, nativePlatform } from '../native/platform';
 import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
@@ -3993,6 +3995,8 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
+const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel'];
+const APP_OPTION = { value: 'push', label: 'App first' };
 const APPOINTMENT_CHANNEL_KEYS = [
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
@@ -4036,6 +4040,62 @@ function GoldSwitch({ on, onChange, label, disabled = false, locked = false }) {
         }} />
       </span>
     </button>
+  );
+}
+
+function AppNotificationSettings({ prefs, app, saving, onSave }) {
+  if (!prefs.appPreferencesAvailable) return null;
+  const connectionCopy = {
+    checking: 'Checking this device…',
+    granted: 'This device is connected.',
+    denied: 'Enable notifications for Waves in your device Settings, then check again.',
+    prompt: 'Allow notifications to connect this device.',
+    'prompt-with-rationale': 'Allow notifications to connect this device.',
+    registration_unavailable: 'This device could not connect. Check your connection and try again.',
+    unavailable: 'App notification setup is unavailable on this device.',
+    web: 'Open the Waves app on your phone to connect a device.',
+  };
+  const connected = app.status?.fresh === true;
+  return (
+    <div style={{ marginTop: 16, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>App notifications</div>
+          <div style={{ marginTop: 4, fontSize: 14, lineHeight: 1.5, color: B.grayDark }}>
+            {app.deviceState === 'web' && connected ? 'Manage your app connection from your phone.' : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
+          </div>
+        </div>
+        <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
+      </div>
+      <div role="status" style={{ marginTop: 8, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+        {prefs.pushEnabled === false ? 'App pushes are off for your account. Your notification history stays available.'
+          : connected ? 'Your account has a recently connected app.'
+            : app.status?.registered ? 'Open the app to refresh its connection. After 72 hours, an allowed backup may be used.'
+              : 'A connected app is needed before choosing App first.'}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+        {isNativeApp() && app.deviceState !== 'granted' && (
+          <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+            {app.busy ? 'Connecting…' : 'Connect this device'}
+          </button>
+        )}
+        <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
+        <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
+          Use app for supported updates
+        </button>
+      </div>
+      <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
+        Choose App first for appointment updates, technician progress, service reports and receipts. If push is unavailable, we can use an allowed backup. Existing opt-outs stay in place.
+      </p>
+      <details style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Reminder texts and emailed receipts continue</summary>
+        Appointment reminders and important billing notices keep their existing text copies. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
+      </details>
+      <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
+        {prefs.smsEnabled === false ? 'Text backup is currently off. ' : 'Text backup remains subject to your text preferences. '}
+        {prefs.emailEnabled === false ? 'Email backup is currently off.' : 'Email backup is available only where a notice supports it.'}
+      </p>
+    </div>
   );
 }
 
@@ -4215,6 +4275,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
   const [prefsLocked, setPrefsLocked] = useState({});
+  const app = useAppNotifications(prefs?.appPreferencesAvailable === true, customer?.id);
   // Per-property attestation that listed on-location contacts agreed to
   // receive service texts. Re-attested on every contact save.
   const [contactConsent, setContactConsent] = useState({});
@@ -4346,6 +4407,19 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
       APPOINTMENT_CHANNEL_KEYS.forEach(k => { unlocks[k] = false; });
       setPrefsLocked(prev => ({ ...prev, ...unlocks }));
     }
+  };
+
+  const saveAppPreferences = async (changes) => {
+    if (Object.values(prefsLocked).some(Boolean)) return;
+    const keys = Object.keys(changes);
+    setPrefsLocked((previous) => ({ ...previous, ...Object.fromEntries(keys.map((key) => [key, true])) }));
+    try {
+      const result = await api.updateNotificationPrefs(changes);
+      setPrefs((previous) => ({ ...previous, ...Object.fromEntries(keys.map((key) => [key, result.preferences?.[key] ?? changes[key]])) }));
+      app.refresh();
+    } catch (err) {
+      showCustomerAlert(err.message || 'Could not save app preferences. Please try again.');
+    } finally { setPrefsLocked((previous) => ({ ...previous, ...Object.fromEntries(keys.map((key) => [key, false])) })); }
   };
 
   const handlePropertyPrefToggle = async (propertyId, key) => {
@@ -4986,6 +5060,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
             <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
               Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
             </div>
+            <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
             {customer.email ? (() => {
               const allEmail = APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === 'email');
               const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
@@ -5017,7 +5092,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
           <div style={{ padding: '4px 18px 12px' }}>
             {(() => {
               const items = [
-                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'calendar', locked: false, defaultOn: true },
+                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'Appointment Confirmations', desc: 'This delivery method also applies to changes and cancellations', icon: 'calendar', locked: false, defaultOn: true },
                 { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'clock', locked: false, defaultOn: true },
                 { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'bell', locked: false, defaultOn: true },
                 { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
@@ -5034,6 +5109,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 // extension of the 2026-07-09 "stops at appointment alerts"
                 // ruling, which predates this lane. No channelKey: these are
                 // app/bell advisories only — never SMS or email.
+                ...(prefs.appPreferencesAvailable ? [{ key: 'serviceCompleted', channelKey: 'serviceCompleteChannel', label: 'Service Reports', desc: 'Read your completed visit and service report in the app', icon: 'document', locked: false, defaultOn: true }] : []),
                 { key: 'weatherAlerts', label: 'Weather & Property Alerts', desc: 'Rain and lawn advisories for your property in the app', icon: 'cloudRain', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
@@ -5096,11 +5172,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                     const hasEmail = prefs && prefs.channelEmailAvailable != null
                       ? !!prefs.channelEmailAvailable
                       : !!customer.email;
-                    const opts = hasEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
-                    const selectable = isOn && hasEmail;
+                    const supportsApp = prefs.appPreferencesAvailable && APP_CHANNEL_KEYS.includes(p.channelKey);
+                    const emailOptions = hasEmail && p.channelKey !== 'serviceCompleteChannel' ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+                    const opts = supportsApp ? [...emailOptions, APP_OPTION] : emailOptions;
+                    const selectable = isOn && opts.length > 1;
                     return (
                       <select
-                        value={hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
+                        value={prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
                         onChange={(e) => handleChannelChange(p.channelKey, e.target.value)}
                         disabled={!selectable || !!prefsLocked[p.channelKey]}
                         aria-label={`Delivery method for ${p.label}`}
@@ -5111,7 +5189,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                           cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                         }}
                       >
-                        {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !app.ready}>{o.label}</option>)}
                       </select>
                     );
                   })()}
@@ -5432,6 +5510,8 @@ function BillingTab({ customer, refreshCustomer }) {
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
+  const [appPreferencesAvailable, setAppPreferencesAvailable] = useState(false);
+  const billingApp = useAppNotifications(appPreferencesAvailable, customer?.id);
   // Receipt texts have no on/off switch (owner 08-28), but a customer who
   // opted out earlier keeps a way back on (pre-push P1) — the field is only
   // sent once they tap it, so unrelated saves never touch the stored value.
@@ -5560,6 +5640,7 @@ function BillingTab({ customer, refreshCustomer }) {
           setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
           setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
+          setAppPreferencesAvailable(prefsData.appPreferencesAvailable === true);
           setEmailPrefEnabled(prefsData.emailEnabled !== false);
         }
         setLoading(false);
@@ -6214,7 +6295,7 @@ function BillingTab({ customer, refreshCustomer }) {
       // SMS-suppressing 'email' choice can't linger with no deliverable
       // email leg.
       billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
-      paymentConfirmationChannel: hasBillingEmail ? paymentConfirmationChannel : 'sms',
+      paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
       .then(() => {
         // Keep local state in step with the coerced save — otherwise
@@ -6223,7 +6304,7 @@ function BillingTab({ customer, refreshCustomer }) {
         // just normalized away from.
         if (!hasBillingEmail) {
           setBillingReminderChannel('sms');
-          setPaymentConfirmationChannel('sms');
+          if (paymentConfirmationChannel !== 'push') setPaymentConfirmationChannel('sms');
         }
         setBillingPrefsSaving(false);
         setBillingPrefsStatus('saved');
@@ -7028,9 +7109,10 @@ function BillingTab({ customer, refreshCustomer }) {
                 // both coerce to SMS when no deliverable billing email exists,
                 // so a stale persisted email/both must not drive an email
                 // promise here either (codex r5 P2).
-                const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
+                const channel = paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms';
                 const emailLeg = channel === 'email' || channel === 'both';
                 const textLeg = channel !== 'email' && !paymentSmsOff;
+                if (channel === 'push') return 'Payment receipts in the app';
                 if (textLeg && emailLeg) return 'Payment confirmations';
                 if (emailLeg) return 'Payment confirmation emails';
                 if (textLeg) return 'Payment confirmation texts';
@@ -7043,9 +7125,10 @@ function BillingTab({ customer, refreshCustomer }) {
                   promising a text the customer just disabled (codex r1 P2). */}
               {(() => {
                 // Same effective-channel rule as the title above (codex r5 P2).
-                const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
+                const channel = paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms';
                 const emailLeg = channel === 'email' || channel === 'both';
                 const textLeg = channel !== 'email' && !paymentSmsOff;
+                if (channel === 'push') return 'App first, with an allowed text backup. Existing emailed receipt copies continue.';
                 if (textLeg && emailLeg) return 'Get a text and an email when your payment processes.';
                 if (emailLeg) return 'Get an email when your payment processes.';
                 if (textLeg) return 'Get a text when your payment processes.';
@@ -7060,11 +7143,12 @@ function BillingTab({ customer, refreshCustomer }) {
             justifyContent: compact ? 'flex-end' : undefined,
           }}>
           {(() => {
-            const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
-            const selectable = hasBillingEmail;
+            const emailOptions = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+            const opts = appPreferencesAvailable ? [...emailOptions, APP_OPTION] : emailOptions;
+            const selectable = opts.length > 1;
             return (
               <select
-                value={hasBillingEmail ? paymentConfirmationChannel : 'sms'}
+                value={paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms'}
                 onChange={(e) => setPaymentConfirmationChannel(e.target.value)}
                 disabled={!selectable}
                 aria-label="Delivery method for payment confirmations"
@@ -7075,7 +7159,7 @@ function BillingTab({ customer, refreshCustomer }) {
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                 }}
               >
-                {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !billingApp.ready}>{o.label}</option>)}
               </select>
             );
           })()}
@@ -7453,7 +7537,7 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationIssues',
 ]);
 
-function PropertyTab({ customer }) {
+function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [prefs, setPrefs] = useState(null);
@@ -7472,6 +7556,9 @@ function PropertyTab({ customer }) {
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
   const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
+  const irrigationEditRevision = useRef(0);
+  const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
+  const [savedWateringRevision, setSavedWateringRevision] = useState(0);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -7537,6 +7624,7 @@ function PropertyTab({ customer }) {
         // home's settings. lastSavedRef tracks the server's latest view
         // (load + every save response).
         toSave.confirmed_as_of = lastSavedRef.current?.irrigationHomeChangedAt ?? null;
+        const savingIrrigationRevision = irrigationEditRevision.current;
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
@@ -7544,7 +7632,10 @@ function PropertyTab({ customer }) {
           // write, so suppression ends when THIS batch — the one that
           // actually carried an irrigation field — succeeds. Never a shared
           // flag: an older non-irrigation PUT resolving must not clear it.
-          if (Object.keys(toSave).some((k) => IRRIGATION_EDIT_FIELDS.has(k))) setIrrigationSuppressed(false);
+          if (Object.keys(toSave).some((k) => IRRIGATION_EDIT_FIELDS.has(k))) {
+            setIrrigationSuppressed(false);
+            setSavedWateringRevision(savingIrrigationRevision);
+          }
         } catch (err) {
           // Re-queue UNDER newer edits (a field re-edited since this PUT left
           // wins) so the next flush retries these without clobbering fresher
@@ -7562,6 +7653,10 @@ function PropertyTab({ customer }) {
 
   const updateField = useCallback((field, value) => {
     setPrefs(prev => ({ ...prev, [field]: value }));
+    if (IRRIGATION_EDIT_FIELDS.has(field)) {
+      irrigationEditRevision.current += 1;
+      setWateringPlanRevision(irrigationEditRevision.current);
+    }
     // Merge into pending so earlier-edited fields aren't lost when the
     // debounce timer resets for a later field.
     pendingRef.current = { ...pendingRef.current, [field]: value };
@@ -8019,6 +8114,14 @@ function PropertyTab({ customer }) {
           </div>
         </div>
       </section>
+
+      {(hasLawnCare || (wateringPlanCustomerId && wateringPlanCustomerId !== String(customer.id))) && <WeeklyWateringPlanCard
+        customerId={customer.id}
+        targetCustomerId={wateringPlanCustomerId}
+        onOpenProperty={onOpenWateringProperty}
+        pending={wateringPlanRevision !== savedWateringRevision}
+        refreshKey={savedWateringRevision}
+      />}
 
       <ServicePrefsSection />
 
@@ -15512,11 +15615,12 @@ export default function PortalPage() {
 
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}` || 'W';
   const portalProperties = Array.isArray(properties) ? properties : [];
+  const wateringPlanCustomerId = new URLSearchParams(location.search).get('wateringPlanCustomer');
+  const wateringPlanProperty = portalProperties.find((property) => String(property.id) === wateringPlanCustomerId);
   const canSwitchProperties = portalProperties.length > 1;
   const propertyRenderKey = `${customer.id}:${requestRefreshKey}`;
-  // `stayOnVisits`: the Visits-tab picker keeps the customer on Visits after
-  // the switch instead of the default hop to Home.
-  const selectProperty = async (propertyId, { stayOnVisits = false } = {}) => {
+  // Keep the destination explicit for Visits and watering-plan deep links.
+  const selectProperty = async (propertyId, { tab = 'dashboard' } = {}) => {
     if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
     setSwitchingPropertyId(propertyId);
     // Flush PropertyTab's debounced edits BEFORE switchProperty replaces the
@@ -15535,11 +15639,11 @@ export default function PortalPage() {
     const switched = await switchProperty(propertyId);
     setSwitchingPropertyId(null);
     if (switched) {
-      setActiveTab(stayOnVisits ? 'visits' : 'dashboard');
+      setActiveTab(tab);
       // Replace, not push: the prior tab history belongs to the PREVIOUS
       // property's session — Back must not restore a stale tab context
       // against the newly selected property.
-      const target = stayOnVisits ? '/?tab=schedule' : '/';
+      const target = tab === 'visits' ? '/?tab=schedule' : (tab === 'property' ? `/?tab=property&wateringPlanCustomer=${encodeURIComponent(propertyId)}` : '/');
       if (window.location.pathname + window.location.search !== target) navigate(target, { replace: true });
       setVisitsSubTab('upcoming');
       setShowMenu(false);
@@ -16094,11 +16198,14 @@ export default function PortalPage() {
           // same sub-tab; replace (not push) so pill toggles don't stack
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
-        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { stayOnVisits: true })} switchingPropertyId={switchingPropertyId} />}
+        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
+          wateringPlanCustomerId={wateringPlanCustomerId}
+          onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
+        />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
       </main>
 
