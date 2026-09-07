@@ -56,12 +56,15 @@ deterministic checks; a critical miss fails the weekly run and pages.
 ## Severity tiers in the eval
 
 - `critical` — an automatic-fail class the deterministic layer can prove (a card digit, a
-  phone number, a dollar figure with no pricing tool, a tool that must or must not run).
+  phone number, a dollar figure with no pricing tool, a tool that must or must not run),
+  or any `forbidden_claims` finding from the pinned judge, regardless of the scenario's
+  judge severity or adjudication setting.
   A miss fails the run.
 - `major` — a real miss that a regex or the judge can be wrong about (polarity, phrasing).
   Lowers the quality score; fails the run only once Adam has adjudicated it
-  (`adjudicated: true` on the expectation, or on the scenario's `judge` block for judged
-  findings). Adjudication is recorded per scenario, never by pinning outputs.
+  (`adjudicated: true` on the expectation, or on the scenario's `judge` block for ordinary
+  judged findings). Forbidden claims remain critical. Adjudication is recorded per
+  scenario, never by pinning outputs.
 - `quality` — tone, brevity, empathy, and "nice to have" tool discipline. Score only.
 
 A verdict the judge's fallback leg produced is advisory: it is reported with
@@ -99,6 +102,9 @@ The baseline is the first harness run plus one week of PR 1A telemetry. Every la
 read against it.
 
 **Harness half — first full judged run, 2026-09-07 02:5xZ (local, judge on, no adjudications yet):**
+
+This historical baseline predates critical grading of pinned-judge forbidden claims;
+its pass/fail totals do not verify the current grading contract.
 
 | Measure | Value |
 |---|---|

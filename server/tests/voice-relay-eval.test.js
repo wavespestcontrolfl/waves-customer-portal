@@ -107,9 +107,37 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/no-allowlist: allowedTools must be a non-empty list/);
     expect(joined).toMatch(/bad-allowlist: allowedTools names unknown tool "launch_missiles"/);
     expect(joined).toMatch(/expects-outside: expect tools_called_include names "capture_lead", which allowedTools does not allow/);
-    expect(joined).toMatch(/bad-when: toolResponses.capture_lead: when must be a non-empty object/);
+    expect(joined).toMatch(/bad-when: toolResponses.capture_lead:/);
     expect(joined).toMatch(/bad-fixture-tool: toolResponses names unknown tool "not_a_tool"/);
     expect(replay.lintFixture({ schemaVersion: 'nope', scenarios: [] })).toEqual(expect.arrayContaining([expect.stringMatching(/schemaVersion/), 'fixture: no scenarios']));
+  });
+
+  test.each([
+    ['null', null], ['boolean', true], ['number', 42], ['empty list', []],
+    ['null entry', [null]], ['nested list', [['result']]], ['empty object', {}],
+    ['empty text', { text: '' }], ['blank text', '   '], ['numeric text', { text: 1 }],
+    ['no effect', { hang: false }], ['invalid capture', { capture: [] }],
+    ['string flag', { text: 'result', transfer: 'true' }],
+    ['null matcher', { when: null, text: 'result' }],
+    ['empty matcher', { when: {}, text: 'result' }],
+    ['string once', { once: 'true', text: 'result' }],
+  ])('rejects a %s tool response before scenario execution', (_label, response) => {
+    const fixture = replay.loadFixture(FIXTURE_PATH);
+    fixture.scenarios[0].fixtures.toolResponses.capture_lead = response;
+    expect(replay.lintFixture(fixture).join('\n')).toMatch(/toolResponses.capture_lead:/);
+    expect(() => replay._internals.selectScenarios(fixture)).toThrow(/fixture lint failed/);
+  });
+
+  test.each([
+    'result', { text: 'result' }, { text: 'Refused.', ok: false }, { hang: true }, { transfer: true },
+    { booking: true }, { reservice: true }, { capture: true },
+    { capture: { leadCreated: false } },
+    { when: { slot_ref: 'S2' }, once: true, text: 'result' },
+    ['first', { text: 'second' }],
+  ].map((response) => [response]))('accepts a supported response payload: %j', (response) => {
+    const fixture = replay.loadFixture(FIXTURE_PATH);
+    fixture.scenarios[0].fixtures.toolResponses.capture_lead = response;
+    expect(replay.lintFixture(fixture)).toEqual([]);
   });
 });
 
@@ -240,6 +268,9 @@ describe('voice relay eval — argument-matched fixture answers', () => {
       lookup_customer: ['first', 'second'],
     } } };
     const used = {};
+    expect(pickToolResponse(scenario, 'request_booking', 1, { slot_ref: 'S1' }, used)).toEqual({ mismatch: true });
+    expect(pickToolResponse(scenario, 'request_booking', 2, { slot_ref: 'S3' }, used)).toEqual({ mismatch: true });
+    expect(used).toEqual({});
     expect(pickToolResponse(scenario, 'request_booking', 1, { slot_ref: 'S2' }, used).response.text).toBe('placed S2');
     expect(pickToolResponse(scenario, 'request_booking', 2, { slot_ref: 'S2' }, used).response.text).toBe('already placed'); // once: consumed
     expect(pickToolResponse(scenario, 'request_booking', 2, { slot_ref: 'S3' }, used).response.text).toBe('already placed');
@@ -249,6 +280,13 @@ describe('voice relay eval — argument-matched fixture answers', () => {
     expect(pickToolResponse(scenario, 'lookup_customer', 3, {}, used).response.text).toBe('second');
     expect(pickToolResponse(scenario, 'capture_lead', 1, {}, used)).toBeNull();
     expect(MISMATCH_TEXT).toMatch(/nothing was done/);
+  });
+
+  test('ordinary argument-dependent refusals remain available before a non-one-shot success', () => {
+    const { loadFixture } = require('../services/eval/voice-relay-replay');
+    const scenario = loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
+    expect(pickToolResponse(scenario, 'get_pricing', 1, { service: 'lawn_care' }, {}).response.text).toMatch(/Cannot price that plan yet/);
+    expect(pickToolResponse(scenario, 'get_pricing', 2, { service: 'pest_control' }, {}).response.text).toMatch(/quarterly \$129/);
   });
 });
 
@@ -381,7 +419,7 @@ describe('voice relay eval — the judge', () => {
     expect(MODELS.VOICE_JUDGE).toBe(process.env.MODEL_VOICE_JUDGE || MODELS.DEFAULTS.VOICE_JUDGE);
   });
 
-  test('judge_fallback cannot flip a scenario: fallback-leg findings are advisory; pinned-leg findings are majors that block only once adjudicated', () => {
+  test('fallback findings stay advisory; pinned forbidden claims block while ordinary majors need adjudication', () => {
     const scenario = { spec: { transfer_required: true }, judge: { severity: 'major', adjudicated: false } };
     const verdict = { pass: false, forbidden_claims: [{ category: 'invented_price', quote: '$99' }], required_facts_missing: ['x'], prohibited_facts_stated: [], action_taken: 'nothing', action_ok: false, transfer_ok: false, empathy_ok: false, brevity_ok: true, tone: 2 };
     const advisory = judgeChecks(scenario, { ok: true, judge_fallback: true, verdict });
@@ -396,15 +434,34 @@ describe('voice relay eval — the judge', () => {
     const holistic = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict: { ...verdict, pass: false, forbidden_claims: [], required_facts_missing: [], action_ok: true, transfer_ok: true, empathy_ok: true, tone: 4, rationale: 'rushed the caller off the line' } });
     expect(holistic.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'fail', detail: expect.stringContaining('rushed') });
     expect(holistic.filter((c) => c.status === 'fail').map((c) => c.check)).toEqual(['judge:verdict']);
-    expect(pinned.find((c) => c.check === 'judge:forbidden_claim:invented_price')).toMatchObject({ status: 'fail', severity: 'major', adjudicated: false });
+    expect(pinned.find((c) => c.check === 'judge:forbidden_claim:invented_price')).toMatchObject({ status: 'fail', severity: 'critical', adjudicated: false });
     expect(pinned.find((c) => c.check === 'judge:transfer').status).toBe('fail');
     expect(pinned.find((c) => c.check === 'judge:empathy')).toMatchObject({ status: 'fail', severity: 'quality' });
-    expect(scenarioStatus({ checks: pinned })).toBe('pass');
-    const adjudicated = judgeChecks({ ...scenario, judge: { severity: 'major', adjudicated: true } }, { ok: true, judge_fallback: false, verdict });
+    expect(scenarioStatus({ checks: pinned })).toBe('fail');
+    const ordinaryVerdict = { ...verdict, forbidden_claims: [] };
+    const ordinary = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict: ordinaryVerdict });
+    expect(scenarioStatus({ checks: ordinary })).toBe('pass');
+    const adjudicated = judgeChecks({ ...scenario, judge: { severity: 'major', adjudicated: true } }, { ok: true, judge_fallback: false, verdict: ordinaryVerdict });
     expect(scenarioStatus({ checks: adjudicated })).toBe('fail');
 
     expect(judgeChecks(scenario, { ok: false, reason: 'no_key' })).toEqual([expect.objectContaining({ check: 'judge:verdict', status: 'skip' })]);
     expect(judgeChecks(scenario, null)).toEqual([]);
+  });
+
+  test.each(judge.FORBIDDEN_CLAIM_CATEGORIES)('%s from the pinned judge fails the aggregate run, even with an unadjudicated quality setting', (category) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = { spec: {}, judge: { severity: 'quality', adjudicated: false } };
+    const verdict = { pass: false, forbidden_claims: [{ category, quote: 'synthetic forbidden claim' }], required_facts_missing: [], prohibited_facts_stated: [], action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5 };
+    for (const fallback of [false, true]) {
+      const judged = { ok: true, judge_fallback: fallback, verdict };
+      const checks = judgeChecks(scenario, judged);
+      const status = scenarioStatus({ checks });
+      const summary = replay._internals.summarize([{ id: category, status, checks, judge: judged }], { judge: true });
+      expect(checks.find((c) => c.check === `judge:forbidden_claim:${category}`)).toMatchObject({ severity: 'critical', status: fallback ? 'advisory' : 'fail' });
+      expect(summary.failed).toBe(fallback ? 0 : 1);
+      expect(summary.criticalMisses).toBe(fallback ? 0 : 1);
+      expect(replay.isFailedVoiceRun({ summary })).toBe(!fallback);
+    }
   });
 });
 
@@ -415,13 +472,13 @@ describe('voice relay eval — the harness', () => {
   function mockSdk() {
     jest.doMock('@anthropic-ai/sdk', () => {
       class Messages {
-        stream() {
+        stream(params) {
           const next = script.shift();
           return {
             on() {},
             finalMessage: async () => {
               if (!next) throw new Error('script exhausted');
-              const reply = typeof next === 'function' ? next() : next;
+              const reply = typeof next === 'function' ? next(params) : next;
               if (reply instanceof Error) throw reply;
               return reply;
             },
@@ -454,7 +511,7 @@ describe('voice relay eval — the harness', () => {
   });
 
   beforeEach(() => { jest.resetModules(); script = []; });
-  afterEach(() => { delete process.env.VOICE_RELAY_CONTEXT_ENABLED; });
+  afterEach(() => { delete process.env.VOICE_RELAY_CONTEXT_ENABLED; jest.useRealTimers(); });
 
   test('runs the live loop against fixture tools: capture latch ends the session, end() never runs, the db is never touched, gates are restored', async () => {
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; // must be restored after the run
@@ -615,14 +672,58 @@ describe('voice relay eval — the harness', () => {
     const wrong = await replay.runScenario(scenario({
       id: 'harness-mismatch', gates: { context: true, booking: true }, allowedTools: ['find_slots', 'request_booking', 'capture_lead'],
       caller: { from: '+19415550131', verified: true, context: { customer: { id: 'c1', first_name: 'Dana' }, tier: 'full', attested: true, block: 'KNOWN CALLER — test\n<<<KNOWN CALLER DATA\nFirst name: Dana\nEND KNOWN CALLER DATA>>>', dataTurn: null } },
-      fixtures: { officeHours: 'open', toolResponses: { find_slots: 'Open times: Monday at 9 AM (slot_ref: S1); Tuesday at 1 PM (slot_ref: S2).', request_booking: [{ when: { slot_ref: 'S2' }, text: 'placed S2', booking: true }], capture_lead: { text: 'Noted.', capture: { leadCreated: false } } } },
-      turns: [{ caller: 'Book Tuesday.' }], expect: [{ check: 'tools_called_include', value: ['request_booking'], severity: 'major' }],
+      fixtures: { officeHours: 'open', toolResponses: { find_slots: 'Open times: Monday at 9 AM (slot_ref: S1); Tuesday at 1 PM (slot_ref: S2).', request_booking: [{ when: { slot_ref: 'S2' }, once: true, text: 'placed S2', booking: true }, { text: 'A booking request has already been placed.' }], capture_lead: { text: 'Noted.', capture: { leadCreated: false } } } },
+      turns: [{ caller: 'Book Tuesday.' }], expect: [{ check: 'tools_called_include', value: ['request_booking'], severity: 'critical' }],
     }), { judge: false });
     const booking = wrong.toolCalls.find((t) => t.name === 'request_booking');
     expect(booking).toMatchObject({ invalid: true, mismatch: true, ok: false, receipt: false });
     expect(booking.text).toMatch(/nothing was done/);
     expect(wrong.checks.find((c) => c.check === 'tools_called_include').status).toBe('fail');
+    expect(wrong.status).toBe('fail');
     expect(wrong.officeStatus).toBe('open');
+  });
+
+  test.each([
+    ['read-tool-timeout', 'get_account_overview', {}, 3000, false],
+    ['write-tool-timeout', 'capture_lead', { call_summary: 'Synthetic callback request' }, 8000, true],
+  ])('%s records the exact bounded results given to Sandy and the judge', async (id, name, input, timeoutMs, retry) => {
+    jest.useFakeTimers();
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    let modelResults;
+    script.push(toolUse(name, input, 'first'));
+    if (retry) script.push(toolUse(name, input, 'retry'));
+    script.push((params) => {
+      modelResults = params.messages.flatMap((m) => Array.isArray(m.content) ? m.content : []).filter((b) => b.type === 'tool_result').map((b) => b.content);
+      return say('I do not have confirmation yet.');
+    });
+    const judgeFn = jest.fn(async () => ({ ok: true, judge_fallback: false, verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5 } }));
+    const pending = replay.runScenario({ ...fixture, turns: [{ caller: 'Please check that request.' }], expect: [] }, { judge: true, judgeFn });
+    await jest.advanceTimersByTimeAsync(timeoutMs + 1);
+    const result = await pending;
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls).toHaveLength(retry ? 2 : 1);
+    expect(result.toolCalls.map((t) => t.text)).toEqual(modelResults);
+    for (const tool of result.toolCalls) {
+      expect(tool).toMatchObject({ name, ok: false, receipt: false });
+      expect(judgeFn.mock.calls[0][0].transcript).toContain(tool.text);
+    }
+    expect(modelResults[0]).toMatch(retry ? /do not have confirmation either way/ : /Could not look that up/);
+    if (retry) expect(modelResults[1]).toMatch(/was NOT started again/);
+    expect(result.transcript).not.toMatch(/tool hung until/);
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test('provider-failure handoffs that call the fixture tool directly still record their result and receipt', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'second-model-failure');
+    const result = await replay.runScenario(fixture, { judge: false });
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls).toEqual([expect.objectContaining({ name: 'transfer_to_office', ok: true, receipt: true, text: expect.stringContaining('Transferring the caller') })]);
+    expect(result.transcript).toContain(result.toolCalls[0].text);
+    expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
   test('an interrupted utterance is graded as what the caller heard, with the full text kept as planned', async () => {

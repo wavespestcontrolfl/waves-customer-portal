@@ -12,7 +12,8 @@
  * and grades the result two ways: the deterministic `expect` checks in this
  * file, and the pinned judge (voice-relay-judge.js) against the scenario
  * `spec`. Severity decides the run: a `critical` miss or an `adjudicated`
- * major fails the run; unadjudicated majors and `quality` misses only lower
+ * major fails the run; pinned-judge forbidden claims are always critical.
+ * Unadjudicated majors and `quality` misses only lower
  * the quality score. A verdict from the judge's FALLBACK leg is advisory and
  * never flips pass/fail.
  *
@@ -44,6 +45,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const Joi = require('joi');
 const logger = require('../logger');
 const {
   attemptReplay, emailFailure, defaultNotify, defaultSendEmail,
@@ -102,6 +104,24 @@ const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. 
 const TRANSFER_TEXT = 'Transferring the caller to the office now. Your part of the call is over — do not say anything else and do not call any more tools.';
 const TRANSFER_IN_PROGRESS_TEXT = 'The transfer is already in progress. Say nothing further.';
 const MISMATCH_TEXT = 'Nothing matches those arguments on this call — nothing was done. Check what the caller actually asked for and the values earlier results gave you.';
+const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
+  Joi.string().pattern(/\S/),
+  Joi.object({
+    text: Joi.string().pattern(/\S/),
+    when: Joi.object().min(1).unknown(true),
+    once: Joi.boolean(),
+    ok: Joi.boolean(),
+    hang: Joi.boolean(),
+    transfer: Joi.boolean(),
+    booking: Joi.boolean(),
+    reservice: Joi.boolean(),
+    capture: Joi.alternatives().try(Joi.boolean(), Joi.object().min(1).unknown(true)),
+  }).custom((entry, helpers) => {
+    const hasEffect = ['hang', 'transfer', 'booking', 'reservice', 'capture'].some((key) => entry[key] === true);
+    if (entry.text || hasEffect || (entry.capture && typeof entry.capture === 'object')) return entry;
+    return helpers.message('response needs non-empty text, a side effect, or hang: true');
+  }),
+).required());
 
 // ── Fixture ───────────────────────────────────────────────────────────────
 
@@ -210,10 +230,8 @@ function scenarioShapeRules(s) {
 }
 
 function toolResponseEntryRules(name, raw) {
-  return (Array.isArray(raw) ? raw : [raw]).map((e) => [
-    e && typeof e === 'object' && ((e.when !== undefined && (typeof e.when !== 'object' || Array.isArray(e.when) || !Object.keys(e.when).length)) || (e.once !== undefined && typeof e.once !== 'boolean')),
-    `toolResponses.${name}: when must be a non-empty object and once a boolean`,
-  ]);
+  const { error } = TOOL_RESPONSES_SCHEMA.validate(Array.isArray(raw) ? raw : [raw], { convert: false });
+  return [[!!error, `toolResponses.${name}: ${error ? error.message : ''}`]];
 }
 
 function fixtureRules(s, knownTools) {
@@ -402,9 +420,10 @@ function inputMatches(input = {}, when = {}) {
  * matchers — the answer belongs to THOSE arguments, so a schema-valid but
  * scenario-wrong call never receives it) and `once` (consumed by its first
  * match). Conditioned entries are tried first, in order; unconditioned
- * entries then step by invocation count, the last one repeating. Returns
- * `{ response }`, `{ mismatch: true }` when every entry is conditioned and
- * none matches, or null when the fixture has no entry for the tool at all.
+ * entries require all one-shot matches to have been consumed, then step by
+ * invocation count, the last one repeating. Returns
+ * `{ response }`, `{ mismatch: true }` when no response is eligible, or null
+ * when the fixture has no entry for the tool at all.
  */
 function pickToolResponse(scenario, name, n, input = {}, used = {}) {
   const raw = scenario?.fixtures?.toolResponses?.[name];
@@ -420,7 +439,7 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
       return { response: entry };
     }
   }
-  if (!unconditioned.length) return { mismatch: true };
+  if (!unconditioned.length || conditioned.some((entry) => entry.once && !used[`${name}:${entries.indexOf(entry)}`])) return { mismatch: true };
   return { response: unconditioned[Math.min(Math.max(n, 1), unconditioned.length) - 1] };
 }
 
@@ -449,18 +468,23 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
   return { text: response.text || TRANSFER_TEXT, receipt: true };
 }
 
+function recordToolCall(record, name, input) {
+  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, ok: false, receipt: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
+  record.toolUse[name] = (record.toolUse[name] || 0) + 1;
+  record.events.push(event);
+  record.toolCalls.push(event);
+  return event;
+}
+
 /**
- * executeTool, fixture edition. Records the call, answers from the fixture
+ * executeTool, fixture edition. Records the call and answers from the fixture
  * and performs the SAME ctx side effects the real tool would (capture latch,
  * booking / re-service / transfer marks, the lookup budget) — never a write.
  */
 async function runFixtureTool(state, name, input = {}, ctx = {}) {
   const { scenario, record } = state;
   if (!scenario || !record) throw new Error('voice-relay eval: tool called outside a scenario');
-  record.toolUse[name] = (record.toolUse[name] || 0) + 1;
-  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, ok: null, receipt: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
-  record.events.push(event);
-  record.toolCalls.push(event);
+  const event = recordToolCall(record, name, input);
   const answer = (text, ok) => { event.ok = ok; event.text = text; return text; };
   // The real tool's own refusals come first — a missing argument, a bad
   // enum, an invented ref — before any fixture answer, hanging or not.
@@ -482,7 +506,6 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   }
   const { response } = picked;
   if (response.hang === true) {
-    answer('(no result — the tool hung until the relay\'s time bound)', false);
     return new Promise(() => {}); // the live bound (_executeToolBounded) degrades it
   }
   if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
@@ -817,7 +840,6 @@ function judgeMajorLines(v, scenario) {
   const verdictDetail = v.pass ? 'pass' : (detailFailed ? 'failed on the findings below' : (v.rationale ? clip(v.rationale, 200) : 'the judge failed the call'));
   return [
     ['judge:verdict', !v.pass && !detailFailed, verdictDetail],
-    ...v.forbidden_claims.map((c) => [`judge:forbidden_claim:${c.category}`, true, c.quote ? `"${clip(c.quote, 160)}"` : 'no quote']),
     ['judge:required_facts', v.required_facts_missing.length > 0, v.required_facts_missing.length ? `missing: ${v.required_facts_missing.join('; ')}` : 'all required facts conveyed'],
     ['judge:prohibited_facts', v.prohibited_facts_stated.length > 0, v.prohibited_facts_stated.length ? `stated: ${v.prohibited_facts_stated.join('; ')}` : 'none stated'],
     ['judge:action', !v.action_ok, v.action_taken || (v.action_ok ? 'acceptable' : 'not an acceptable action')],
@@ -844,6 +866,7 @@ function judgeChecks(scenario, judge) {
   });
   return [
     ...judgeMajorLines(judge.verdict, scenario).map((line) => mk(line, severity)),
+    ...judge.verdict.forbidden_claims.map((c) => mk([`judge:forbidden_claim:${c.category}`, true, c.quote ? `"${clip(c.quote, 160)}"` : 'no quote'], 'critical')),
     ...judgeQualityLines(judge.verdict).map((line) => mk(line, 'quality')),
   ];
 }
@@ -880,7 +903,7 @@ function newRecord(scenario, h) {
 /** The live conversation, wired to the record instead of a socket. */
 function newConversation(h, scenario, record) {
   const caller = scenario.caller || {};
-  return new h.RelayConversation({
+  const convo = new h.RelayConversation({
     callSid: null,
     sessionKey: null,
     callTokenVerified: caller.verified === true,
@@ -894,6 +917,17 @@ function newConversation(h, scenario, record) {
     },
     endSession: (frame) => { record.endSession = { ...(frame || {}), turn: record.turn }; return true; },
   });
+  // Record the result the live bound hands to Sandy, including timeouts and
+  // in-flight refusals that never invoke the fixture tool a second time.
+  const executeBounded = convo._executeToolBounded.bind(convo);
+  convo._executeToolBounded = async (name, input = {}, ctx = {}) => {
+    const firstEvent = record.toolCalls.length;
+    const out = await executeBounded(name, input, ctx);
+    const event = record.toolCalls[firstEvent] || recordToolCall(record, name, input);
+    event.text = String(out);
+    return out;
+  };
+  return convo;
 }
 
 /** 'open' | 'closed' | 'unknown' for the judge — an hours object resolves through the relay's own isOfficeOpenAt. */
