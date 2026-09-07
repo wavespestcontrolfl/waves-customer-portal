@@ -56,9 +56,20 @@ export default function LaneModelCard({ lane, catalog, draft, effectiveLeg, envF
   const primaryDraft = primaryEnv && draft[primaryEnv];
   const primaryNow = effectiveLeg(l.primary);
   const changed = [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean).some((leg) => effectiveLeg(leg) !== leg.model);
+  // On a `skipsEqualLeg` lane a leg that resolves to the same model as the one
+  // before it is never called. Derived from the DRAFTED models (not the server's
+  // `skipped` snapshot) so the preview shows the chain that runs after restart:
+  // splitting the retry model re-arms the rung, drafting a primary onto its
+  // backup skips it. The leg stays pickable — its selector still moves the lane.
+  const eqLeg = (a, b) => !!(l.skipsEqualLeg && a && b && effectiveLeg(a) === effectiveLeg(b));
+  const fallbackSkipped = eqLeg(l.primary, l.fallback);
+  const retrySkipped = !fallbackSkipped && eqLeg(l.fallback, l.retry);
+  const skippedNote = (skipped, which) => (skipped ? `${which} (skipped — same model)` : which);
+  const backupLeg = fallbackSkipped ? l.retry : l.fallback;
+  const retryLeg = fallbackSkipped || retrySkipped ? null : l.retry;
   const extraLegs = [
-    { leg: l.fallback, which: l.fanout ? "parallel arm" : "backup" },
-    { leg: l.retry, which: "retry" },
+    { leg: l.fallback, which: skippedNote(fallbackSkipped, l.fanout ? "parallel arm" : "backup") },
+    { leg: l.retry, which: skippedNote(retrySkipped, "retry") },
     ...(l.also || []).map((a) => ({ leg: a, which: "parallel arm" })),
   ].filter((x) => x.leg);
 
@@ -83,12 +94,12 @@ export default function LaneModelCard({ lane, catalog, draft, effectiveLeg, envF
           {primaryNow !== l.primary.model && <span className="text-13 text-ink-tertiary"> · was {modelLabel(catalog, l.primary.model)}</span>}
         </span>
         <span className="text-ink-secondary">
-          {l.fallback ? (
+          {backupLeg ? (
             <>
-              {l.fanout ? "Alongside" : "Backup"} <ModelChip catalog={catalog} id={effectiveLeg(l.fallback)} />
-              {l.retry && (
+              {l.fanout ? "Alongside" : "Backup"} <ModelChip catalog={catalog} id={effectiveLeg(backupLeg)} />
+              {retryLeg && (
                 <>
-                  {l.fanout ? " retried on" : " then"} <ModelChip catalog={catalog} id={effectiveLeg(l.retry)} />
+                  {l.fanout ? " retried on" : " then"} <ModelChip catalog={catalog} id={effectiveLeg(retryLeg)} />
                 </>
               )}
             </>

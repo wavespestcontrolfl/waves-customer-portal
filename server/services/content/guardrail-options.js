@@ -92,8 +92,8 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     primaryKeyword: brief.target_keyword || null,
     domains: spokeDomains.length ? spokeDomains : null,
     operatorFaqException,
-    // The brief's NAMED sources are the citation allowance now that the
-    // broad .gov/.edu TLD rule is gone (owner ruling 2026-08-01, third).
+    // Exact brief sources extend the shared government/trusted-source
+    // baseline without granting every URL on the same host.
     // Both shapes count: `required_sources` (must-link instructions) and
     // the manifest's own `sources` list. Non-URL entries — the briefs
     // carry prose instructions in there too — are skipped downstream.
