@@ -12,11 +12,14 @@
 # Comments only, enforced three ways: the action gets the workflow's own
 # GITHUB_TOKEN (scoped by `permissions:` below — contents:read, so no push
 # is possible), every file-edit and git tool is in --disallowedTools (deny
-# beats the action's acceptEdits default), and the gh allowlist holds only
-# read-only subcommands. No shell `git` at all — `git diff --no-index
-# --text <path>` prints any file, so a prompt-injected PR could read the
-# runner's environment through it; code reading goes through Read / Grep /
-# Glob and `gh pr diff`. Credential locations are Read-denied as well
+# beats the action's acceptEdits default), and the only shell commands are
+# two exact `gh pr diff` forms. No shell `git` (`git diff --no-index --text
+# <path>` prints any file) and no `gh` prefix that accepts `--jq` (`gh pr
+# view --jq '$ENV.X'` prints the environment) — a prompt-injected PR could
+# read runner secrets through either; code reading goes through Read /
+# Grep / Glob, PR title/body/comments arrive in the action's context, and
+# CI status comes from the action's own CI tools. Credential locations are
+# Read-denied as well
 # (`.git/**` — the action rewrites the origin URL with its token —, /proc,
 # /dev, the runner _actions tree, ~/.gitconfig, ~/.config), which also
 # blocks Grep there; checkout runs with persist-credentials: false, so the
@@ -105,7 +108,7 @@ jobs:
             --effort max
             --max-turns 200
             --max-budget-usd ${{ vars.CLAUDE_REVIEW_MAX_USD || '25' }}
-            --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*)"
+            --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff ${{ github.event.pull_request.number }}),Bash(gh pr diff ${{ github.event.pull_request.number }} --name-only)"
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git switch:*),Bash(git rm:*),Bash(git reset:*),Bash(git stash:*),Bash(git branch:*),Bash(git config:*),Bash(git fetch:*),Bash(git pull:*),Bash(git merge:*),Bash(git rebase:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git status:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Read(./.git/**),Read(//proc/**),Read(//dev/**),Read(//home/runner/work/_actions/**),Read(~/.gitconfig),Read(~/.git-credentials),Read(~/.config/**)"
           prompt: |
             REPO: ${{ github.repository }}
@@ -118,7 +121,9 @@ jobs:
             before merge: bugs, security holes, money and data-integrity
             errors, broken contracts, and violations of the repository rubric.
             The PR branch is checked out in the working directory; read it
-            with Read / Grep / Glob and the diff with `gh pr diff`.
+            with Read / Grep / Glob. The PR title, body, comments, and
+            review comments are in your context; the diff comes from
+            `gh pr diff <PR NUMBER>` (files only: add `--name-only`).
 
             ## Rubric
 
@@ -136,10 +141,11 @@ jobs:
 
             ## How to review
 
-            1. Read the PR with `gh pr view` (title, body) and `gh pr diff`.
-               The PR body may record an owner ruling, name the existing
-               mechanism a new one replaces, or state what was NOT verified
-               — take that into account.
+            1. Read the PR title and body from your context and the diff
+               from `gh pr diff <PR NUMBER>`. The PR body may record an
+               owner ruling, name the existing mechanism a new one
+               replaces, or state what was NOT verified — take that into
+               account.
             2. Earlier review rounds are in the PR comments and review
                comments provided in your context. If a previous
                `## Claude review` summary exists, this round is INCREMENTAL:
@@ -191,8 +197,8 @@ jobs:
                  behavior that diverges from the real module, assertions
                  that would still pass if the fix were reverted
                - Eastern-time handling and timezone-naive date math
-               Then check CI: `gh pr checks` and the CI tools available to
-               you. If the `tests` workflow failed on this head, read the
+               Then check CI with the CI status tools available to you.
+               If the `tests` workflow failed on this head, download and read the
                failing job log and tie the failure to the diff where it
                belongs (a failure caused by this PR is a finding; a failure
                inherited from main is noted in the summary, not flagged).
