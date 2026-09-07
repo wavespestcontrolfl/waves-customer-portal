@@ -149,7 +149,7 @@ test('this customer resolves through a viewed property without requiring a redun
 });
 
 
-test.each(['Text this customer', 'Email this customer', 'Send this customer a text', 'Update this customer and text them'])(
+test.each(['Text this customer', 'Email this customer', 'Send this customer a text', 'Update this customer and text them', 'Remind this customer', 'Notify this customer', 'Tell this customer'])(
   'a customer name in the body after "%s that" cannot choose the target', async prefix => {
     lookupRows = [rows.customers[0]]; // A real matching alternate name is available to the lookup.
     const task = await Context.resolve({ prompt: `${prefix} that customer Synthetic Person canceled`, pageData: { customer_id: B } });
@@ -164,4 +164,13 @@ test('a technician name in assignment is not an explicit customer selector', asy
   const task = await Context.resolve({ prompt: 'Assign Synthetic Person to this appointment', pageData: { appointment_id: appointment } });
   expect(task.target.customer_id).toBe(B);
   expect(await Context.validateRecordTarget({ appointment_id: appointment }, task)).toBeNull();
+});
+
+
+test('a compound communication request retains a narrowing appointment constraint after that', async () => {
+  const viewed = '40000000-0000-4000-8000-000000000005', sibling = '40000000-0000-4000-8000-000000000006';
+  rows.scheduled_services = [{ id: viewed, customer_id: B }, { id: sibling, customer_id: B }];
+  const task = await Context.resolve({ prompt: 'Text this customer and reschedule that appointment', pageData: { appointment_id: viewed } });
+  expect(await Context.validateRecordTarget({ appointment_id: viewed }, task)).toBeNull();
+  expect((await Context.validateRecordTarget({ appointment_id: sibling }, task)).code).toBe('target_clarification_required');
 });

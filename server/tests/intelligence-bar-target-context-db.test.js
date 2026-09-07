@@ -106,7 +106,7 @@ suite('IB target resolution against isolated PostgreSQL', () => {
     const recipientId = randomUUID();
     await mockDb('customers').insert({ id: recipientId, first_name: 'Synthetic', last_name: 'Recipientfixture',
       phone: '+1555' + (Date.now()+2).toString().slice(-7) });
-    for (const prefix of ['Text this customer', 'Email this customer', 'Send this customer a text', 'Update this customer and text them']) {
+    for (const prefix of ['Text this customer', 'Email this customer', 'Send this customer a text', 'Update this customer and text them', 'Remind this customer', 'Notify this customer', 'Tell this customer']) {
       const task = await Context.resolve({ prompt: `${prefix} that customer Synthetic Targetfixture canceled`,
         pageData: { customer_id: recipientId } });
       expect(task.target.customer_id).toBe(recipientId);

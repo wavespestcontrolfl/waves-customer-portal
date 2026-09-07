@@ -33,21 +33,19 @@ const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'h
 const NON_PERSON_NAMES = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice|review)|his|her|their)\b/i;
 
-function targetClause(prompt) {
+function targetClause(prompt, retainRecordConstraints = false) {
   // Message bodies and replacement values are data, even when they contain
-  // another customer's exact name. They never select the recipient/account.
-  const source = String(prompt).split(/[:;\n“”"]|\b(?:notes?|message|instructions|comments)\s+that\b|\b(?:saying|regarding|about)\b/i)[0];
-  const referenced = source.replace(/\bthat(?=\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\b)/gi, (word, offset) => {
-    const before = source.slice(0, offset);
-    const communication = before.match(/\b(?:text|message|sms|email|send|reply|respond)\b/i);
-    // After a communication recipient, "that ..." begins message content.
-    // Bare "send a text to that customer" still names the actual target.
-    const opener = /^(?:(?:text|message|sms|email|reply|respond)(?:\s+(?:to|for))?|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?(?:\s+(?:to|for))?)\s*$/i;
-    return communication && !opener.test(before.slice(communication.index)) ? word : 'this';
-  });
-  const clause = referenced.split(/\bthat\b/i)[0];
-  if (!/\b(?:change|update|set|rename|relabel|add|save)\b/i.test(clause)) return clause;
-  return clause.split(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
+  // another customer's exact name. They never select a recipient/account.
+  let clause = String(prompt).split(/[:;\n“”"]|\b(?:notes?|message|instructions|comments)\s+that\b|\b(?:saying|regarding|about)\b/i)[0];
+  if (/\b(?:change|update|set|rename|relabel|add|save)\b/i.test(clause)) {
+    clause = clause.split(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
+  }
+  // A deictic child-record constraint may only narrow already established
+  // authority. Retain it in compound requests even when recipient parsing
+  // stops at "that"; never use this view to grant customer/review authority.
+  if (retainRecordConstraints) return clause;
+  const opener = new RegExp(`^(\\s*(?:(?:please|can you|could you|would you|will you)\\s+)*(?:(?:${PERSON_ACTIONS}|set|rename|relabel|add|save)(?:\\s+(?:to|for))?|(?:draft|write|post|submit)\\s+(?:(?:a|the)\\s+)?(?:reply|response)\\s+(?:to|for)|send\\s+(?:a|an)\\s+(?:text|sms|message|reminder|email|reply)\\s+(?:to|for))\\s+)that(?=\\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\\b)`, 'i');
+  return clause.replace(opener, '$1this').split(/\bthat\b/i)[0];
 }
 
 function explicitSingleNames(prompt) {
@@ -198,7 +196,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   const explicitReview = reviewClause.match(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i)?.[1];
   const reviewReference = explicitReview || (!namesRequested(prompt)
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
-  const requestedRecords = Object.fromEntries([...targetClause(prompt).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
+  const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => { const kind = `${match[1].toLowerCase()}_id`; return [kind, page.ids[kind] || null]; }));
   return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(prompt),
     reviewReference: reviewReference || null,
