@@ -135,3 +135,13 @@ page hints survive stale auxiliary hints, including compound “this customer an
 that estimate” requests. Name lookup now uses the same punctuation and space
 normalization as request matching. The resulting scope passes 154 unit/write
 boundary cases and 19 rollback-only PostgreSQL cases. No provider was called.
+
+The next B1 correction generalizes canonical name-selector guards to all
+classified writes, including lead status, and requires explicit current-request
+evidence for customerless appointments. A capped name query preserves its raw
+completeness evidence before filtering incidental matches; incomplete cohorts
+cannot become approved subsets. Independent compound actions retain their
+explicit estimate IDs, while message-body commands grant no record authority.
+Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
+PostgreSQL tests. Independent review closed both additional edge cases before
+the fifth remote review. No provider, customer message or production write ran.
