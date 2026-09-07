@@ -203,11 +203,11 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
     <div
       onClick={dismiss}
       className="fixed inset-0 z-[1200] flex items-end md:items-center justify-center"
-      style={{ background: 'rgba(15,23,42,0.55)', padding: 16 }}
+      style={{ background: 'rgba(15,23,42,0.55)', padding: 16, paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))' }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full bg-white rounded-2xl"
+        className="w-full bg-white rounded-2xl max-h-full overflow-y-auto box-border"
         style={{ maxWidth: 480, padding: 20 }}
       >
         <div
