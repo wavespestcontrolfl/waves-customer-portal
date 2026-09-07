@@ -126,3 +126,12 @@ them. Linked and other-status duplicates count, while deleted leads do not.
 The final checks pass 148 unit/write-boundary tests and 13 real PostgreSQL tests.
 Generic action-object refusal hints (3947287736) remain deferred: recipient
 parsing must preserve earlier explicit targets across compound clauses.
+
+B1 also binds explicit child identifiers in the request, requires a deliberate
+reference for customerless calls, and freshly validates every child owner.
+Emails inherit a converted lead's customer and reject deleted or conflicting
+ownership; an address-only reply requires exactly one matching thread. Relevant
+page hints survive stale auxiliary hints, including compound “this customer and
+that estimate” requests. Name lookup now uses the same punctuation and space
+normalization as request matching. The resulting scope passes 154 unit/write
+boundary cases and 19 rollback-only PostgreSQL cases. No provider was called.
