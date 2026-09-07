@@ -34,11 +34,17 @@ const path = require('path');
 const twilio = require('twilio');
 const REGISTRY = require(path.join(__dirname, '..', '..', 'server', 'config', 'twilio-numbers.js'));
 
-const WEBHOOK_FIELDS = ['voiceUrl', 'voiceMethod', 'voiceFallbackUrl', 'statusCallback', 'smsUrl', 'smsMethod'];
+// A TwiML App (voice/smsApplicationSid) or SIP trunk (trunkSid) OVERRIDES the
+// URLs, so they are part of the routing config — a number handed to a third-party
+// app keeps a canonical-looking voiceUrl and would otherwise pass.
+const WEBHOOK_FIELDS = ['voiceUrl', 'voiceMethod', 'voiceFallbackUrl', 'statusCallback', 'smsUrl', 'smsMethod', 'voiceApplicationSid', 'smsApplicationSid', 'trunkSid'];
 const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
-// Twilio's fixed policy SID for the A2P Messaging Profile bundle — the brand
-// registration hangs off it and it never carries phone numbers by design.
+// Twilio's fixed Trust Hub policy SIDs. The A2P Messaging Profile bundle never
+// carries phone numbers by design (the brand registration hangs off it); a
+// toll-free verification bundle covers exactly its one toll-free number. Neither
+// is a fleet-wide product, so neither counts toward — or against — coverage.
 const A2P_MESSAGING_PROFILE_POLICY = 'RNb0d4771c2c98518d916a3d4cd70a8f8b';
+const TOLLFREE_VERIFICATION_POLICY = 'RNa282dd7f3dbef8586501ca2e045e764c';
 
 function mode(values) {
   const counts = new Map();
@@ -109,13 +115,12 @@ async function main() {
     const endpoints = await listEndpoints(b.kind, b.sid);
     console.log(`  ${b.kind === 'profile' ? 'profile' : 'product'} ${b.sid}  "${b.friendlyName}"  status=${b.status}  numbers=${endpoints.size}`);
     if (b.status !== 'twilio-approved' || endpoints.size === 0) continue;
+    if (b.policySid === TOLLFREE_VERIFICATION_POLICY) continue;
     const cur = livePerPolicy.get(b.policySid);
     if (!cur || endpoints.size > cur.endpoints.size) livePerPolicy.set(b.policySid, { bundle: b, endpoints });
   }
   for (const { bundle, endpoints } of livePerPolicy.values()) {
     const missing = numbers.map(n => n.phoneNumber).filter(p => !endpoints.has(p));
-    // Toll-free verification bundles cover exactly one toll-free number — skip them.
-    if (endpoints.size === 1 && [...endpoints].every(p => TOLL_FREE.test(p))) continue;
     if (missing.length) {
       console.log(`  MISSING from "${bundle.friendlyName}" (${bundle.sid}): ${missing.join(', ')}`);
       for (const m of missing) defect(m, `not assigned to live ${bundle.kind} "${bundle.friendlyName}" (${bundle.sid})`);
@@ -123,6 +128,7 @@ async function main() {
   }
   const leftovers = bundles.filter(b => b.status === 'twilio-approved'
     && b.policySid !== A2P_MESSAGING_PROFILE_POLICY
+    && b.policySid !== TOLLFREE_VERIFICATION_POLICY
     && livePerPolicy.get(b.policySid)?.bundle.sid !== b.sid);
   if (leftovers.length) console.log(`  info: ${leftovers.length} approved bundle(s) carry no numbers (duplicates / leftovers, not coverage): ${leftovers.map(b => `${b.sid} "${b.friendlyName}"`).join(', ')}`);
 
