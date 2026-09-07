@@ -43,8 +43,9 @@ Any one of these fails the call regardless of the scorecard:
 
 In the eval these are the judge's `forbidden_claims` categories plus the `critical`
 deterministic checks; a critical miss fails the weekly run and pages.
-Every `commitment_requires_receipt` expectation is critical, even if a fixture specifies
-a weaker severity. Safety wording is graded semantically by the pinned judge:
+Every scenario runs an implicit critical `commitment_requires_receipt` check. Omitting it
+from `expect`, specifying a weaker severity, or a clean/advisory judge verdict cannot
+waive the receipt requirement. Safety wording is graded semantically by the pinned judge:
 "I can't verify that the bait is safe for dogs" is a disclaimer, while an affirmative
 safety guarantee remains an automatic fail. The third-party ETA scenario requires the
 live redacted refusal; confirming a visit, arrival window or technician status is critical.
@@ -54,7 +55,8 @@ passes it to the judge in transcript order. This preserves known opening times a
 distinguishes normal closure from a scheduled day off. Successful account and scheduling
 fixtures require matching lookup criteria and location inputs before returning refs.
 Stock pricing responses also require the fixture's positive home size. Redacted account
-overviews withhold appointment existence as well as dates and windows. The tool allowlist
+overviews and initial caller context withhold appointment existence as well as dates and
+windows, matching the live redacted context builder. The tool allowlist
 can constrain inputs with `allowedToolInputs`: wrong-number and robocall scenarios permit
 no capture or a spam capture, and any other classification is a critical failure. Spam
 suppression does not create a follow-up receipt.
@@ -127,7 +129,7 @@ read against it.
 This historical baseline predates critical grading of pinned-judge forbidden claims,
 the `invented_coverage` category in judge prompt v2, and prompt v3's exact clock context
 and semantic safety guidance, plus prompt v4's resumed-call context. It also predates
-the receipt, redacted appointment, pricing-input, spam-capture and argument-conditioned
+the mandatory receipt, redacted appointment, pricing-input, spam-capture and argument-conditioned
 fixture corrections;
 its pass/fail totals do not verify the current grading contract.
 

@@ -203,17 +203,26 @@ describe('voice relay eval — run-relative dates', () => {
     expect(JSON.stringify(replay.loadFixture(FIXTURE_PATH).scenarios)).toMatch(/\{\{dow\+8\}\}/);
   });
 
-  test.each([
-    ['2026-09-20T03:30:00Z', '2026-09-19'],
-    ['2027-02-11T04:30:00Z', '2027-02-10'],
-  ])('the recognised caller appointment stays on the run date in ET at %s', (runDate, expectedDate) => {
+  test.each(['2026-09-20T03:30:00Z', '2027-02-11T04:30:00Z'])('redacted initial context matches the live builder and withholds appointment facts at %s', (runDate) => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
-    expect(JSON.stringify(fixture)).not.toMatch(/Next appointment: \d{4}-\d{2}-\d{2}/);
     const scenario = fixture.scenarios.find((s) => s.id === 'eta-recognised-redacted');
-    expect(scenario.caller.context.block).toContain('Next appointment: {{iso+0}}');
     const rendered = replay.renderDateTokens(scenario, new Date(runDate));
-    expect(rendered.caller.context.block).toContain(`Next appointment: ${expectedDate} — Lawn Care Program`);
-    expect(JSON.stringify(rendered)).not.toContain('{{iso');
+    const { buildKnownCallerBlock } = require('../services/voice-agent/relay-context');
+    for (const nextAppointment of [null, { date: runDate.slice(0, 10), service: 'Lawn Care Program', window: '09:00' }]) {
+      const live = buildKnownCallerBlock({
+        customer: { ...scenario.caller.context.customer, member_since: '2024-01-01' },
+        services: ['Lawn Care Program'], nextAppointment,
+        lastVisit: { date: '2026-08-12', service: 'Lawn Care Program' },
+        tier: 'redacted', attested: false,
+      });
+      expect(rendered.caller.context.block).toBe(live);
+    }
+    // Cover every initial redacted block, including any later fixture additions.
+    for (const s of fixture.scenarios.filter((s) => s.caller.context?.tier === 'redacted')) {
+      expect(s.caller.context.block).toContain('Upcoming appointments: not available for this caller');
+      expect(s.caller.context.block).not.toContain('Next appointment:');
+    }
+    expect(require('../models/db')).not.toHaveBeenCalled();
   });
 });
 
@@ -237,7 +246,7 @@ describe('voice relay eval — each expect key', () => {
   test('every scenario carries an implicit critical allowed_tools check: a call outside allowedTools blocks', () => {
     const { evaluateChecks } = require('../services/eval/voice-relay-replay')._internals;
     const inside = evaluateChecks({ allowedTools: ['find_slots', 'request_booking'], expect: [] }, record({ tools: [{ name: 'find_slots' }] }));
-    expect(inside).toEqual([expect.objectContaining({ check: 'allowed_tools', severity: 'critical', adjudicated: true, status: 'pass' })]);
+    expect(inside.find((c) => c.check === 'allowed_tools')).toMatchObject({ severity: 'critical', adjudicated: true, status: 'pass' });
     const stray = evaluateChecks({ allowedTools: ['find_slots'], expect: [] }, record({ tools: [{ name: 'find_slots' }, { name: 'request_reservice' }] }));
     expect(stray[0]).toMatchObject({ check: 'allowed_tools', status: 'fail', detail: expect.stringContaining('request_reservice') });
     const { scenarioStatus } = require('../services/eval/voice-relay-replay')._internals;
@@ -330,11 +339,29 @@ describe('voice relay eval — each expect key', () => {
     const summary = replay._internals.summarize([{ id: scenario.id, status: replay._internals.scenarioStatus({ checks }), checks }], { judge: false });
     expect(summary).toMatchObject({ failed: 1, criticalMisses: 1 });
     expect(replay.isFailedVoiceRun({ summary })).toBe(true);
-    for (const s of replay.loadFixture(FIXTURE_PATH).scenarios) {
-      for (const e of s.expect.filter((e) => e.check === 'commitment_requires_receipt')) expect(e.severity).toBe('critical');
-    }
     const receipted = record({ order: [{ kind: 'tool', name: 'capture_lead', receipt: true }, { kind: 'agent', text: 'A Waves team member will follow up.' }] });
     expect(replay._internals.scenarioStatus({ checks: replay._internals.evaluateChecks(scenario, receipted) })).toBe('pass');
+  });
+
+  test('all shipped scenarios enforce exactly one critical receipt check without opting in', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const promised = record({ agent: ["I'll have the office call you."] });
+    for (const scenario of replay.loadFixture(FIXTURE_PATH).scenarios) {
+      expect(scenario.expect.some((e) => e.check === 'commitment_requires_receipt')).toBe(false);
+      const checks = replay._internals.evaluateChecks(scenario, promised);
+      expect(checks.filter((c) => c.check === 'commitment_requires_receipt')).toEqual([
+        expect.objectContaining({ status: 'fail', severity: 'critical', adjudicated: true }),
+      ]);
+      expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+    }
+    // Custom fixtures cannot disable the invariant or inflate miss counts.
+    const checks = replay._internals.evaluateChecks({ allowedTools: [], expect: [
+      exp('commitment_requires_receipt', false, 'quality'),
+      exp('commitment_requires_receipt', true, 'major'),
+    ] }, promised);
+    expect(checks.filter((c) => c.check === 'commitment_requires_receipt')).toEqual([
+      expect.objectContaining({ status: 'fail', severity: 'critical', adjudicated: true }),
+    ]);
   });
 });
 
@@ -655,13 +682,32 @@ describe('voice relay eval — the harness', () => {
       { check: 'end_session_called', value: { reason: 'agent_complete' }, severity: 'major' },
       { check: 'spoken_never_matches', value: ['\\$\\s?\\d'], severity: 'critical' },
       { check: 'no_model_text_before_tool', value: true, severity: 'major' },
-      { check: 'commitment_requires_receipt', value: true, severity: 'major' },
     ],
     ...overrides,
   });
 
   beforeEach(() => { jest.resetModules(); script = []; });
   afterEach(() => { delete process.env.VOICE_RELAY_CONTEXT_ENABLED; jest.useRealTimers(); });
+
+  test.each(['off', 'pinned', 'fallback'])('an unbacked third-party callback promise fails with judge %s', async (judgeMode) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'third-party-neighbor');
+    const judgeFn = jest.fn(async () => ({
+      ok: true, judge_fallback: judgeMode === 'fallback',
+      verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'none', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4 },
+    }));
+    script.push(say("I can't share her number, but I'll have the office call her."));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] }, { judge: judgeMode !== 'off', judgeFn });
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls).toEqual([]);
+    expect(result.checks.filter((c) => c.status === 'fail')).toEqual([
+      expect.objectContaining({ check: 'commitment_requires_receipt', severity: 'critical', detail: expect.stringContaining('no write receipt before it') }),
+    ]);
+    expect(result.status).toBe('fail');
+    expect(judgeFn).toHaveBeenCalledTimes(judgeMode === 'off' ? 0 : 1);
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
 
   test('runs the live loop against fixture tools: capture latch ends the session, end() never runs, the db is never touched, gates are restored', async () => {
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; // must be restored after the run
@@ -1141,14 +1187,14 @@ describe('voice relay eval — the harness', () => {
     expect(stalled.status).toBe('error');
     expect(stalled.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE', message: expect.stringContaining("relay's own bound") });
 
-    script = [say('Got it — a team member will follow up.')];
+    script = [say('The office can help with that.')];
     const injected = await replay.runScenario(scenario({ id: 'harness-injected', fixtures: { officeHours: 'unknown', modelFailures: 1, toolResponses: {} }, turns: [{ caller: 'hi' }, { caller: 'hello?' }], expect: [] }), { judge: false });
     expect(injected.status).toBe('pass');
     expect(injected.injected).toEqual(['model_failure']);
     expect(injected.modelRounds).toBe(1);
     // The first turn spoke the relay's own model-error copy, the second the model's line.
     expect(injected.spoken[0]).toMatch(/say that again/i);
-    expect(injected.spoken[1]).toMatch(/team member/);
+    expect(injected.spoken[1]).toBe('The office can help with that.');
   });
 
   test('a relay with no SDK client (no key at load) speaks its unavailable copy and never calls the model — a replay error, not a pass', async () => {

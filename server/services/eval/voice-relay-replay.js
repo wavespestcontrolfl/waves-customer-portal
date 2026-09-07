@@ -848,7 +848,13 @@ function allowedToolsCheck(scenario, record) {
 }
 
 function evaluateChecks(scenario, record) {
-  return [allowedToolsCheck(scenario, record), ...(scenario.expect || []).map((e) => runCheck(e, record))];
+  // Receipt evidence is mandatory for every scenario, including custom fixtures.
+  // Ignore explicit copies so they cannot weaken or double-count the invariant.
+  return [
+    allowedToolsCheck(scenario, record),
+    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, record),
+    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, record)),
+  ];
 }
 
 // The major-tier lines of a verdict: [check, failed, detail]. The verdict
