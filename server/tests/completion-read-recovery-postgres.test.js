@@ -102,6 +102,18 @@ postgres('recoverable completion reads on PostgreSQL', () => {
     });
   });
 
+  test.each(['table probe', 'config row'])('Pest Pressure %s failure preserves its default config', async (read) => {
+    const { loadActiveConfig } = require('../services/pest-pressure/store');
+    const matches = read === 'table probe'
+      ? (query) => query.sql.includes('information_schema.tables') && query.bindings.includes('pest_pressure_configs')
+      : (query) => query.sql.includes('from "pest_pressure_configs"');
+    await withReadFailure(matches, async (trx) => {
+      expect(await loadActiveConfig(trx)).toMatchObject({
+        _source: read === 'table probe' ? 'default_no_table' : 'default_no_row',
+      });
+    });
+  });
+
   test.each([false, true])('Auto Pay query failures retain the failClosed=%p contract', async (failClosed) => {
     const { customerOnAutopay } = require('../services/autopay-eligibility');
     await withReadFailure((query) => query.sql.includes('from "payment_methods"'), async (trx) => {
