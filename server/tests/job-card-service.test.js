@@ -347,7 +347,7 @@ describe('buildMixAmount', () => {
 
   test.each([
     ['missing rate', { ratePer1000: null, carrierGalPer1000: 2, gallons: 110 }, 'No verified rate on file'],
-    ['missing calibration', { ratePer1000: 1.5, carrierGalPer1000: null, gallons: 110 }, 'Rig not calibrated'],
+    ['missing carrier', { ratePer1000: 1.5, carrierGalPer1000: null, gallons: 110 }, 'No carrier rate on file'],
     ['odd volume', { ratePer1000: 1.5, carrierGalPer1000: 2, gallons: 5 }, 'Pick 110 or 1 gallons'],
   ])('%s → null amount with reason', (_l, input, reason) => {
     expect(jobCard.buildMixAmount(input)).toMatchObject({ amount: null, reason });
@@ -366,22 +366,32 @@ describe('property coordinates', () => {
 });
 
 describe('tankFromCalibrations', () => {
+  const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' };
   test('an expired or unverified calibration still mixes — expiry / field-verification blocks were retired (#3935)', () => {
-    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', calibration_status: 'estimated_not_field_verified', tank_capacity_gal: 110, system_name: 'Rig' }]))
-      .toMatchObject({ calibrated: true, reason: null, carrierGalPer1000: 2 });
+    expect(jobCard.tankFromCalibrations([{ ...live, expires_at: '2026-07-11T00:00:00Z', calibration_status: 'estimated_not_field_verified' }]))
+      .toMatchObject({ calibrated: true, source: 'rig', reason: null, carrierGalPer1000: 2 });
   });
-  const now = new Date('2026-09-04T12:00:00Z');
-  test('live calibration', () => {
-    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }], now))
-      .toMatchObject({ calibrated: true, reason: null, tankCapacityGal: 110 });
+  test('a lone active rig supplies the carrier and tank capacity', () => {
+    expect(jobCard.tankFromCalibrations([live], 1)).toMatchObject({ calibrated: true, source: 'rig', carrierGalPer1000: 2, tankCapacityGal: 110, systemName: 'Rig' });
   });
-  test('two active rigs and no assignment → ambiguous, no mix (Codex r4 P1)', () => {
-    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' };
-    expect(jobCard.tankFromCalibrations([live, { ...live, carrier_gal_per_1000: 1, system_name: 'Skid' }], now))
-      .toMatchObject({ calibrated: false, reason: 'More than one rig is active — assign the rig on the Lawn plan', carrierGalPer1000: null });
+  test('two tank rigs that disagree and no assignment fall back to the protocol carrier — no rig block (owner ruling 2026-09-07)', () => {
+    const tank = { ...live, system_type: 'tank' };
+    expect(jobCard.tankFromCalibrations([tank, { ...tank, carrier_gal_per_1000: 1, system_name: 'Skid' }], 1))
+      .toMatchObject({ calibrated: true, source: 'protocol_default', reason: null, carrierGalPer1000: 1, tankCapacityGal: null, systemName: null });
   });
-  test('none on file', () => {
-    expect(jobCard.tankFromCalibrations([], now)).toMatchObject({ calibrated: false, reason: 'No rig calibration on file' });
+  test('a tank rig beside an active backpack, or two tank rigs on the same carrier, mix on the rig', () => {
+    const tank = { ...live, system_type: 'tank' };
+    const backpack = { ...live, system_type: 'backpack', carrier_gal_per_1000: 1.33, system_name: 'FlowZone' };
+    expect(jobCard.tankFromCalibrations([backpack, tank], 1)).toMatchObject({ calibrated: true, source: 'rig', carrierGalPer1000: 2, systemName: 'Rig' });
+    expect(jobCard.tankFromCalibrations([tank, { ...tank, system_name: 'Tank #2', calibration_status: 'estimated_not_field_verified' }, backpack], 1))
+      .toMatchObject({ calibrated: true, source: 'rig', carrierGalPer1000: 2, systemName: 'Rig' });
+  });
+  test('no rig and no protocol carrier → no tank math, with the reason', () => {
+    expect(jobCard.tankFromCalibrations([])).toMatchObject({ calibrated: false, source: null, reason: 'No carrier rate on file', carrierGalPer1000: null });
+    expect(jobCard.tankFromCalibrations([live, live])).toMatchObject({ calibrated: false, reason: 'No carrier rate on file' });
+  });
+  test('no rig with a protocol carrier mixes on the protocol default', () => {
+    expect(jobCard.tankFromCalibrations([], 2)).toMatchObject({ calibrated: true, source: 'protocol_default', carrierGalPer1000: 2 });
   });
 });
 
@@ -1018,9 +1028,9 @@ describe('PR review r6', () => {
   test('no usable rig withholds the card amounts with the tank reason (hook P1; expiry retired by #3935)', async () => {
     const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
     const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
-    const [card] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: 'No rig calibration on file' });
+    const [card] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: 'No carrier rate on file' });
     expect(card.planned).toBeNull();
-    expect(card.amountNote).toBe('No rig calibration on file — amount withheld');
+    expect(card.amountNote).toBe('No carrier rate on file — amount withheld');
     const [ok] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: null });
     expect(ok.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
   });
@@ -1114,10 +1124,9 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       chain.catch = (fn) => chain.then(undefined, fn);
       return chain;
     };
-    expect(await jobCard._test.loadRigCalibrations(failing, null)).toBeNull();
-    expect(jobCard._test.tankFromCalibrations(null)).toMatchObject({ calibrated: false, unavailable: true, reason: 'Rig calibration check unavailable', carrierGalPer1000: null });
-    expect(jobCard._test.tankFromCalibrations([])).toMatchObject({ calibrated: false, reason: 'No rig calibration on file' });
-    expect(jobCard._test.tankFromCalibrations([])).not.toHaveProperty('unavailable');
+    // A failed read is "no rig": the carrier falls back to the protocol default.
+    expect(await jobCard._test.loadRigCalibrations(failing, null)).toEqual([]);
+    expect(jobCard._test.tankFromCalibrations([], 2)).toMatchObject({ calibrated: true, source: 'protocol_default', carrierGalPer1000: 2 });
     // The Lawn plan's own read keeps its empty-list default.
     expect(await require('../services/waveguard-plan-engine').getActiveCalibrations(failing, {})).toEqual([]);
   });

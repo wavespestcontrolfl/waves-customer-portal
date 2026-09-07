@@ -179,11 +179,10 @@ function softenApprovalWording(text) {
     .replace(/\brequires manager approval\b/gi, "flagged for review")
     .trim();
 }
-// Rig-calibration states worth a closeout advisory line. Deliberately
-// excludes 'equipment_selection_required' — with no equipment step left in
-// the closeout, "select equipment" would be permanent noise.
+// Rig-calibration states worth a closeout advisory line. A missing or
+// ambiguous rig is not one (the plan falls back to the protocol's default
+// carrier); only a calibration that exists but is stale or unverified is.
 const CALIBRATION_ADVISORY_CODES = new Set([
-  "missing_calibration",
   "expired_calibration",
   "calibration_not_field_verified",
 ]);
@@ -5040,11 +5039,11 @@ function JobCardTank({ tank, serviceId, D }) {
       title="Tank"
       defaultOpen
       D={D}
-      right={tank && !tank.calibrated ? <JobCardChip tone="hold" label={tank.unavailable ? "Unavailable" : "Not calibrated"} D={D} /> : null}
+      right={tank && !tank.calibrated ? <JobCardChip tone="hold" label="No carrier" D={D} /> : null}
     >
       <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
         {tank && !tank.calibrated && (
-          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld {tank.unavailable ? "until the check succeeds" : "until a calibrated rig is on file"}; per-gallon dilutions still mix.</div>
+          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld until a rig calibration or protocol carrier is on file; per-gallon dilutions still mix.</div>
         )}
         <div style={{ display: "flex", gap: 8 }}>
           <button type="button" style={pill(110)} onClick={() => setGallons(110)}>110 gal</button>

@@ -35,15 +35,16 @@ test('missing or unconvertible inventory evidence never becomes a stock clearanc
   }
 });
 
-test('future weather stays on the visit day and unavailable rig evidence stays unknown', () => {
-  const result = dispatchReadiness({ ...base, isToday: false, tank: { calibrated: false, unavailable: true } });
+test('future weather stays on the visit day', () => {
+  const result = dispatchReadiness({ ...base, isToday: false });
   expect(result.issues).toContainEqual({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
-  expect(result.issues).toContainEqual({ kind: 'equipment', status: 'unknown', label: 'Rig check unavailable' });
 });
 
-test('per-gallon dilution does not require a carrier rig unless an area rate governs it', () => {
+test('the rig is never a readiness issue; only a missing carrier from BOTH sources is, and only for an area-rate tank mix (owner ruling 2026-09-07)', () => {
   const dilution = { ...line, planMix: null, product: { ...product, default_rate_per_1000: null, default_rate: '1', default_unit: 'fl_oz/gal' } };
-  const summary = input => dispatchReadiness({ ...base, lines: [input], tank: { calibrated: false } });
-  expect(summary(dilution).issues.some(issue => issue.kind === 'equipment')).toBe(false);
-  expect(summary({ ...dilution, planMix: { ratePer1000: 2 } }).issues).toContainEqual({ kind: 'equipment', status: 'hold', label: 'Rig needed' });
+  const summary = (input, tank) => dispatchReadiness({ ...base, lines: [input], tank });
+  const noCarrier = { calibrated: false, source: null };
+  expect(summary(dilution, noCarrier).issues.some(issue => issue.kind === 'carrier')).toBe(false);
+  expect(summary({ ...dilution, planMix: { ratePer1000: 2 } }, noCarrier).issues).toContainEqual({ kind: 'carrier', status: 'unknown', label: 'No carrier rate' });
+  expect(summary({ ...dilution, planMix: { ratePer1000: 2 } }, { calibrated: true, source: 'protocol_default' }).issues.some(issue => issue.kind === 'carrier')).toBe(false);
 });
