@@ -522,6 +522,29 @@ function retryAtForDeferredSend(result) {
 
 // ══════════════════════════════════════════════════════════════
 const ReviewService = {
+  completionReviewDelay(notes = {}) {
+    // The completion panel's explicit timing selection (Now / Tomorrow 8 AM
+    // / custom) is persisted on the service record — honor it through the
+    // payment deferral instead of silently reverting to the default
+    // (Codex P2, r3). An absolute time already elapsed sends immediately.
+    let delayMinutes;
+    // reviewScheduledFor is the TIMEZONE-LESS Eastern wall-clock string the
+    // completion panel posts — new Date() on a UTC server would read it
+    // 4-5h early (Codex P1, r5). Parse naive strings as ET, same as the
+    // completion validation; an explicit offset/Z (defensive) parses as-is.
+    let storedAt = null;
+    if (notes.reviewScheduledFor) {
+      const raw = String(notes.reviewScheduledFor);
+      storedAt = /Z$|[+-]\d{2}:?\d{2}$/.test(raw) ? new Date(raw) : parseETDateTime(raw);
+    }
+    if (storedAt && !Number.isNaN(storedAt.getTime())) {
+      delayMinutes = Math.max(0, Math.round((storedAt.getTime() - Date.now()) / 60000));
+    } else if (notes.reviewDelayMinutes != null && Number.isFinite(Number(notes.reviewDelayMinutes))) {
+      delayMinutes = Math.max(0, Number(notes.reviewDelayMinutes));
+    }
+    return delayMinutes;
+  },
+
   /**
    * Create a review request — called after payment or by tech.
    * @param {string} triggeredBy - 'auto' (post-payment), 'tech' (in-person), 'admin'
@@ -1423,6 +1446,9 @@ const ReviewService = {
    */
   async enrollForPaidInvoice(invoice, { source = "invoice_paid" } = {}) {
     try {
+      if (invoice?.visit_completion_packet_id) {
+        return await require('./visit-completion-packets').enrollVisitCompletionReview(invoice.visit_completion_packet_id);
+      }
       if (!invoice?.customer_id || !invoice?.service_record_id) {
         return { enrolled: false, reason: "not_completion_invoice" };
       }
@@ -1443,25 +1469,7 @@ const ReviewService = {
         logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): visit outcome ${notes.visitOutcome}`);
         return { enrolled: false, reason: "visit_outcome" };
       }
-      // The completion panel's explicit timing selection (Now / Tomorrow 8 AM
-      // / custom) is persisted on the service record — honor it through the
-      // payment deferral instead of silently reverting to the default
-      // (Codex P2, r3). An absolute time already elapsed sends immediately.
-      let delayMinutes;
-      // reviewScheduledFor is the TIMEZONE-LESS Eastern wall-clock string the
-      // completion panel posts — new Date() on a UTC server would read it
-      // 4-5h early (Codex P1, r5). Parse naive strings as ET, same as the
-      // completion validation; an explicit offset/Z (defensive) parses as-is.
-      let storedAt = null;
-      if (notes.reviewScheduledFor) {
-        const raw = String(notes.reviewScheduledFor);
-        storedAt = /Z$|[+-]\d{2}:?\d{2}$/.test(raw) ? new Date(raw) : parseETDateTime(raw);
-      }
-      if (storedAt && !Number.isNaN(storedAt.getTime())) {
-        delayMinutes = Math.max(0, Math.round((storedAt.getTime() - Date.now()) / 60000));
-      } else if (notes.reviewDelayMinutes != null && Number.isFinite(Number(notes.reviewDelayMinutes))) {
-        delayMinutes = Math.max(0, Number(notes.reviewDelayMinutes));
-      }
+      const delayMinutes = this.completionReviewDelay(notes);
       // Legacy create() dedupes by service_record_id; the cadence path
       // dedupes per service record too (startReviewSequence) on top of the
       // active-sequence + cap/cooldown guards — safe under webhook retries

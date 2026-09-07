@@ -137,6 +137,18 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
   await trx('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('scheduled_service_id', billed.map(({ member }) => member.id))
     .update({ invoice_id: invoice.id, updated_at: trx.fn.now() });
+  // Server-owned charge ceiling survives invoice edits and closeout retries.
+  // It is recorded beside the submitted forms, never accepted from a client.
+  await trx('visit_completion_packets').where({ id: packet.id }).update({
+    payload: trx.raw('payload || ?::jsonb', [JSON.stringify({ billingSnapshot: {
+      invoiceId: invoice.id, totalCents: Math.round(Number(invoice.total) * 100),
+      netSubtotalCents: Math.round((Number(invoice.subtotal) - Number(invoice.discount_amount || 0)) * 100),
+      billedServiceIds: billed.map(({ member }) => member.id),
+      billingLane: resolveBillingLane(customer).mode,
+      memberPricing: billed.map(({ member }) => ({ id: member.id, price: Number(member.estimated_price),
+        isCallback: Boolean(member.is_callback), invoiceOnComplete: Boolean(member.create_invoice_on_complete) })),
+    } })]), updated_at: trx.fn.now(),
+  });
   return { state: 'invoice_ready', invoiceId: invoice.id, total: Number(invoice.total) };
 }
 

@@ -4004,6 +4004,16 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 5 MIN — Retry queued service report v1 email deliveries
   // =========================================================================
+  // Saved visit packets outlive their creation gate. Resume through the
+  // canonical member, invoice and effect claims after a process restart.
+  cron.schedule('2-57/5 * * * *', async () => {
+    try {
+      await runExclusive('visit-closeout-resume', () => require('./visit-completion-packets').resumePendingVisitCompletions());
+    } catch (err) {
+      logger.error(`[visit-closeout] resume sweep failed (${err.name || 'Error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('*/5 * * * *', async () => {
     try {
       const { processDueServiceReportDeliveries } = require('./service-report/delivery-queue');

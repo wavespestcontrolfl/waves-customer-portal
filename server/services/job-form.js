@@ -8,9 +8,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-async function getTemplateForServiceType(serviceType) {
+async function getTemplateForServiceType(serviceType, database = db) {
   if (!serviceType) return null;
-  return db('job_form_templates')
+  return database('job_form_templates')
     .where({ service_type: serviceType, is_active: true })
     .first();
 }
@@ -53,13 +53,13 @@ function computeCompletion(template, responses) {
 /**
  * saveSubmission({ scheduledServiceId, serviceRecordId, technicianId, customerId, serviceType, responses, startedAt })
  */
-async function saveSubmission(opts) {
+async function saveSubmission(opts, database = db) {
   const {
     scheduledServiceId, serviceRecordId, technicianId, customerId,
     serviceType, responses, startedAt,
   } = opts;
 
-  const template = await getTemplateForServiceType(serviceType);
+  const template = await getTemplateForServiceType(serviceType, database);
   if (!template) {
     logger.warn(`[job-form] No active template for service_type=${serviceType}`);
     return null;
@@ -81,14 +81,14 @@ async function saveSubmission(opts) {
 
   // One submission per scheduled_service — upsert
   const existing = scheduledServiceId
-    ? await db('job_form_submissions').where({ scheduled_service_id: scheduledServiceId }).first()
+    ? await database('job_form_submissions').where({ scheduled_service_id: scheduledServiceId }).first()
     : null;
 
   if (existing) {
-    await db('job_form_submissions').where({ id: existing.id }).update(row);
+    await database('job_form_submissions').where({ id: existing.id }).update(row);
     return { ...existing, ...row, id: existing.id };
   } else {
-    const [inserted] = await db('job_form_submissions').insert(row).returning('*');
+    const [inserted] = await database('job_form_submissions').insert(row).returning('*');
     return inserted;
   }
 }

@@ -380,6 +380,13 @@ async function submitRecap({
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
     recapPriorCompleted = lockedStatus === COMPLETED_STATUS;
+    if (locked?.visit_id) {
+      const allowed = await require('./visit-groups').ensureLegacyCompletable(serviceId, trx);
+      if (!allowed.ok) {
+        rejectReason = 'visit_grouped';
+        return;
+      }
+    }
 
     // 0b. Reject a recap on a cancelled/skipped visit before writing any
     //     artifact. Returning here aborts the transaction body with nothing

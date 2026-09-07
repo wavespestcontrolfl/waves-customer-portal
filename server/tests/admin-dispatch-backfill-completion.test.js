@@ -2162,7 +2162,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(source).toMatch(/const mintInvoiceAmount = backfillReviewMintRequired && backfillFrozenMintAmount != null\s*\n\s*\? backfillFrozenMintAmount\s*\n\s*: invoiceAmount;/);
       expect(source).toMatch(/const resolveMintInvoiceTaxRate = async \(\) => \(\s*\n\s*backfillReviewMintRequired && backfillFrozenMintTaxRate != null\s*\n\s*\? backfillFrozenMintTaxRate\s*\n\s*: deriveCompletionTaxRate\(\)\s*\n\s*\);/);
       // …the decision's amount guard reads it…
-      expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?invoiceAmount: mintInvoiceAmount,[\s\S]*?\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
+      expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?invoiceAmount: mintInvoiceAmount,[\s\S]*?\};\s*\n\s*const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
       // …and the mint itself reads the SAME pair — never the live values.
       expect(source).toMatch(/const mintOptions = \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*amount: mintInvoiceAmount,\s*\n\s*description: svc\.service_type,\s*\n\s*taxRate: mintInvoiceTaxRate,/);
       expect(source).not.toMatch(/amount: invoiceAmount,/);
@@ -2196,10 +2196,10 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       const resumeAssignAt = source.indexOf(resumeAssign);
       expect(resumeAssignAt).toBeGreaterThan(source.indexOf('const frozenResume = frozenResumeCompletionState('));
       // …before the invoice decision reads it…
-      const invoiceDecisionAt = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
+      const invoiceDecisionAt = source.indexOf('const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
       expect(invoiceDecisionAt).toBeGreaterThan(resumeAssignAt);
       // …and the decision call carries the effective posture.
-      expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?backfillMintRequired: backfillReviewMintRequired,[\s\S]*?\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
+      expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?backfillMintRequired: backfillReviewMintRequired,[\s\S]*?\};\s*\n\s*const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
       // No consumer recomputes the posture from live state past the commit
       // derivation: the broadened commit posture is called only at the
       // single freeze site (plus its definition), and the retired narrow
@@ -2340,7 +2340,7 @@ describe('completion route wiring (source contracts)', () => {
     // …and the stray body flag's intake suppression is undone from the SAME
     // posture source the intake used, only when the frozen record says the
     // completion was normal.
-    expect(source).toMatch(/if \(!frozenResume\.isBackfillCompletion\) \{[\s\S]{0,700}suppressTypedCustomerComms = deliveryPosture\.suppressCustomerComms;\s*\n\s*effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms;\s*\n\s*\}/);
+    expect(source).toMatch(/if \(!frozenResume\.isBackfillCompletion\) \{[\s\S]{0,700}suppressTypedCustomerComms = deliveryPosture\.suppressCustomerComms;\s*\n\s*effectiveSendCompletionSms = sendCompletionSms && !suppressTypedCustomerComms && !packetEffects;\s*\n\s*\}/);
     // Ordering: the restore happens before the frozen-delivery re-derivation
     // and the backfill re-force — i.e. before ANY read of the comms flags —
     // so the two later corrections still own the final posture. (Anchor on
@@ -2504,12 +2504,12 @@ describe('completion route wiring (source contracts)', () => {
     // shouldAutoInvoiceCompletion (behavioral coverage above): out-of-band
     // prepaid coverage stops suppressing, annual-prepay coverage keeps
     // suppressing.
-    expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?visitPerformed,[\s\S]*?isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
+    expect(source).toMatch(/const completionInvoiceGateInput = \{[\s\S]*?visitPerformed,[\s\S]*?isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\};\s*\n\s*const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
     // And the structured_notes resume re-derivation sits BEFORE the invoice
     // decision, so a crash-resumed retry (body flag absent) reaches the same
     // override instead of silently re-suppressing the invoice.
     const rederivation = source.indexOf('const frozenResume = frozenResumeCompletionState(');
-    const invoiceDecision = source.indexOf('const shouldInvoice = shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
+    const invoiceDecision = source.indexOf('const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
     expect(rederivation).toBeGreaterThan(-1);
     expect(invoiceDecision).toBeGreaterThan(rederivation);
     // The minted invoice is OPEN by construction ('draft' from
@@ -2573,7 +2573,7 @@ describe('completion route wiring (source contracts)', () => {
     // The population is fed into the in-transaction invoice decision, where
     // the typed branch mints the invoice live and under backfill alike
     // (behavioral coverage above).
-    expect(source).toMatch(/typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n(\s*\/\/[^\n]*\n)*\s*isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\};\s*\n\s*const shouldInvoice = shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
+    expect(source).toMatch(/typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n(\s*\/\/[^\n]*\n)*\s*isBackfillCompletion,\s*\n\s*annualPrepayCovered,\s*\n\s*\};\s*\n\s*const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion\(completionInvoiceGateInput\);/);
   });
 
   test('live typed REQUIRED mint: fail-closed lookups + serialized find-or-create (gate-removal round 2)', () => {
@@ -2680,7 +2680,7 @@ describe('completion route wiring (source contracts)', () => {
     // log + job_complete notification block directly above still runs
     // first-run only.
     const before = source.slice(0, costingAt);
-    const activityGuardAt = before.lastIndexOf('if (!resumingCommittedCompletion) {');
+    const activityGuardAt = before.lastIndexOf('if (!resumingCommittedCompletion || firstPacketEffectsRun) {');
     const activityBlock = source.slice(activityGuardAt, costingAt);
     expect(activityBlock).toContain('Job form save failed');
   });
@@ -2767,7 +2767,7 @@ describe('completion route wiring (source contracts)', () => {
     // must not reach it. The guard also protects the reward's single-use
     // idempotency: firing here would burn it on a visit nobody announced.
     expect(source).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;/);
-    const referralBlock = source.match(/if \(referralVisitPerformed\) \{([\s\S]*?)\n {4}\}/);
+    const referralBlock = source.match(/if \(referralVisitPerformed && !packetEffects\) \{([\s\S]*?)\n {4}\}/);
     expect(referralBlock).not.toBeNull();
     expect(referralBlock[1]).toContain('creditReferralOnFirstService');
   });

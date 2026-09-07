@@ -226,6 +226,17 @@ async function probe(label, unavailable, fn) {
 // ---------------------------------------------------------------------------
 // Loader — every DB read for one service, each individually fallible.
 // ---------------------------------------------------------------------------
+function visitSummaryDeliveryFact(effects) {
+  const delivered = effects.find((effect) => effect.status === 'sent');
+  if (delivered) return fact('done', 'visit_summary_delivered', { channel: delivered.effect_type,
+    sentAt: isoOrNull(delivered.sent_at), source: 'visit_effects' });
+  if (effects.some((effect) => effect.status === 'unknown_delivery')) return fact('unknown', 'visit_summary_delivery_unknown');
+  if (effects.length === 2 && effects.every((effect) => effect.status === 'suppressed')) {
+    return fact('not_required', 'visit_summary_suppressed', { ruleSource: 'visit_effects' });
+  }
+  return fact('pending', 'visit_summary_delivery_pending');
+}
+
 async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _restarts = 0 } = {}) {
   const unavailable = [];
   const inputs = { serviceId, now, unavailable };
@@ -307,6 +318,19 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   const record = inputs.record;
   const recordId = record?.id || null;
   const recordIds = (inputs.records || []).map((r) => r.id).filter(Boolean);
+  if (visit.visit_id && recordId) {
+    const summary = await probe('visit summary delivery', unavailable, () => knex('visit_completion_packet_items as i')
+      .join('visit_completion_packets as p', 'p.id', 'i.packet_id')
+      .join('service_visits as v', 'v.id', 'p.visit_id')
+      .join('visit_effects as e', 'e.visit_id', 'v.id')
+      .where({ 'i.scheduled_service_id': serviceId, 'i.service_record_id': recordId, 'i.status': 'done', 'v.id': visit.visit_id })
+      .whereIn('p.status', ['processing', 'done']).whereIn('v.status', ['closing', 'closed'])
+      .whereNotNull('v.summary_token_issued_at').whereNull('v.summary_token_revoked_at')
+      .whereIn('e.effect_type', ['completion_sms', 'completion_email'])
+      .select('e.effect_type', 'e.status', 'e.sent_at'));
+    inputs.visitSummaryEffects = summary.value || [];
+    inputs.visitSummaryLookupFailed = Boolean(summary.error);
+  }
 
   // Project/WDO link: projects.scheduled_service_id (or service_record_id) —
   // never a column on the visit. Newest wins if a visit was ever re-linked.
@@ -753,6 +777,8 @@ function deriveCloseoutFacts(inputs) {
   } else if (report.state === 'not_required') reportDelivery = fact('not_required', report.reason, { ruleSource: report.ruleSource || 'frozen_record', posture });
   else if (reportPosture === 'internal_only') reportDelivery = fact('not_required', 'frozen_posture_internal_only', { ruleSource: 'frozen_record', posture: reportPosture, audience: 'internal' });
   else if (report.state !== 'done') reportDelivery = fact(report.state === 'unknown' ? 'unknown' : 'pending', 'report_not_published', { posture: reportPosture });
+  else if (inputs.visitSummaryLookupFailed) reportDelivery = fact('unknown', 'visit_summary_lookup_failed');
+  else if (inputs.visitSummaryEffects?.length) reportDelivery = visitSummaryDeliveryFact(inputs.visitSummaryEffects);
   else if (delivery) {
     const status = String(delivery.status || '').toLowerCase();
     const evidence = {
@@ -970,6 +996,8 @@ function deriveCloseoutFacts(inputs) {
   if (!completed) comms = awaiting();
   else if (isBackfill) comms = fact('not_required', 'backfill_completion', { ruleSource: 'frozen_record' });
   else if (posture !== 'auto_send') comms = fact('not_required', `frozen_posture_${posture}`, { ruleSource: 'frozen_record', posture });
+  else if (inputs.visitSummaryLookupFailed) comms = fact('unknown', 'visit_summary_lookup_failed');
+  else if (inputs.visitSummaryEffects?.length) comms = visitSummaryDeliveryFact(inputs.visitSummaryEffects);
   // completionSmsStatus vocabulary (admin-dispatch.js completion SMS block +
   // dispatch-completion-deferred.js): sending | sent | deferred | failed |
   // blocked (opt-out / no consent) | skipped_recap_sms_already_sent.
@@ -1065,7 +1093,7 @@ function deriveCloseoutFacts(inputs) {
       memberServiceIds: Array.isArray(inputs.packetMemberIds) ? inputs.packetMemberIds : null,
       activePacket: packets ? packets.some((p) => ACTIVE_PACKET_STATUSES.has(String(p.status))) : null,
       packetStatuses: packets ? packets.map((p) => String(p.status)) : null,
-      note: 'facts above are resolved PER SERVICE (each member owns its own service_records row); the packet only says whether a grouped completion is still processing',
+      note: 'Treatment facts belong to each service record; invoice ownership and summary delivery recognize the saved packet.',
     };
   }
 

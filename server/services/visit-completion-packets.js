@@ -1,9 +1,9 @@
 'use strict';
 
 /**
- * The durable phase of grouped closeout (visit-closeout-phase2.md, stages 3–4).
- * No route or worker invokes this prerequisite yet. Shared effects and delivery
- * must be complete before a production entry point is connected.
+ * The durable grouped closeout and effect coordinator (stages 3–5).
+ * The recovery worker resumes saved packets; the gated production submission
+ * entry point and technician screen are connected in the next stage.
  *
  * The existing stop lock serializes membership, legacy claims and packets.
  * Every member uses the canonical completion validator/writer on one outer
@@ -119,7 +119,7 @@ async function saveVisitCompletionPacket(input, database = db) {
         const result = await completeScheduledService({
           serviceId: item.serviceId, idempotencyKey: key,
           body: structuredClone(item.body), actor: input.actor,
-        }, { trx, itemId: packetItem.id, uploadedPhotoRows });
+        }, { phase: 'records', trx, itemId: packetItem.id, uploadedPhotoRows });
         if (result.status !== 202 || !result.body.serviceRecordId) {
           const rejected = new Error('Visit member completion rejected');
           rejected.completionResult = { ...result, body: { ...result.body, serviceId: item.serviceId } };
@@ -149,4 +149,144 @@ async function saveVisitCompletionPacket(input, database = db) {
   }
 }
 
-module.exports = { saveVisitCompletionPacket };
+/** Resume the existing member claims; the saved packet owns every form/key. */
+async function runVisitCompletionPacketEffects(packetId, database = db) {
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first();
+  if (!packet) return failure(404, 'visit_closeout_not_found', 'Saved visit closeout not found.');
+  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const items = await database('visit_completion_packet_items').where({ packet_id: packet.id }).orderBy('scheduled_service_id');
+  if (!items.length || items.some((item) => !item.service_record_id)) {
+    return failure(409, 'visit_closeout_pending', 'The saved closeout has not finished recording its services.');
+  }
+  const { completeScheduledService } = require('./complete-scheduled-service');
+  for (const item of items) {
+    if (item.status === 'done') continue;
+    const savedForm = payload.items.find((form) => form.serviceId === item.scheduled_service_id);
+    if (!savedForm) throw new Error('Saved visit closeout is missing a member form');
+    const result = await completeScheduledService({
+      serviceId: item.scheduled_service_id, idempotencyKey: item.derived_idempotency_key,
+      body: structuredClone(savedForm.body), actor: payload.actor,
+    }, { phase: 'effects', itemId: item.id });
+    if (result.status !== 200 || result.body.serviceRecordId !== item.service_record_id) {
+      await database('visit_completion_packet_items').where({ id: item.id }).update({
+        last_error: result.body.code || 'member_effects_pending', updated_at: database.fn.now(),
+      });
+      return { status: 202, body: {
+        visitId: packet.visit_id, packetId: packet.id, state: 'service_effects_pending',
+        serviceId: item.scheduled_service_id, code: result.body.code || 'member_effects_pending',
+      } };
+    }
+    await database('visit_completion_packet_items').where({ id: item.id, service_record_id: item.service_record_id }).update({
+      status: 'done', completed_at: database.fn.now(), last_error: null, updated_at: database.fn.now(),
+    });
+  }
+  const Summary = require('./visit-completion-summary');
+  const token = await Summary.ensureVisitSummaryToken(packet.id, database);
+  const payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
+  // Unpaid invoices use the existing scheduled invoice sender and its
+  // durable send claim. Billing contacts receive their financial document;
+  // service contacts' summary token never grants access to billing details.
+  if (['payment_needed', 'payment_failed'].includes(payment.state)) {
+    await database('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
+      .whereNull('payer_id').whereNull('payer_statement_id').update({
+        status: 'scheduled', scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
+        updated_at: database.fn.now(),
+      });
+  }
+  const delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
+  const performed = await database('visit_completion_packet_items as i')
+    .join('service_records as r', 'r.id', 'i.service_record_id')
+    .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+    .where('i.packet_id', packet.id).where('r.status', 'completed')
+    .whereRaw("COALESCE(r.structured_notes->>'visitOutcome', 'completed') NOT IN ('inspection_only', 'customer_declined', 'incomplete')")
+    .whereRaw("COALESCE(r.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'")
+    .orderBy('s.window_start').orderBy('s.id')
+    .select('s.id', 's.customer_id', 's.is_recurring', 's.recurring_pattern', 'r.id as record_id');
+  if (performed.length) {
+    const first = performed[0];
+    // These existing helpers own their customer-level single-use guards.
+    // A retry cannot issue a second card or referral credit.
+    await require('./customer-card').ensureCardForCompletion({
+      customerId: first.customer_id, serviceRecordId: first.record_id, scheduledServiceId: first.id,
+    });
+    const recurring = performed.find((member) => member.is_recurring || member.recurring_pattern);
+    if (recurring) await require('./referral-engine').creditReferralOnFirstService({ customerId: recurring.customer_id, serviceId: recurring.id });
+  }
+  await enrollVisitCompletionReview(packet.id, database);
+  const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
+  const pending = paymentPending || delivery.state === 'delivery_pending';
+  const review = payment.state === 'office_required' || delivery.state === 'delivery_review';
+  const state = pending ? 'effects_pending' : review ? 'office_required' : 'done';
+  if (!pending) await database.transaction(async (trx) => {
+    const locked = await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first();
+    if (locked.status !== 'done') {
+      if (review) {
+        const member = await trx('scheduled_services').where({ id: items[0].scheduled_service_id }).first();
+        await require('./dispatch-alerts').createAlert({
+          type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
+          payload: { visitId: packet.visit_id, packetId: packet.id, payment: payment.state, delivery: delivery.state },
+        });
+      }
+      await trx('visit_completion_packets').where({ id: packet.id }).update({
+        status: 'done', error: review ? JSON.stringify({ payment: payment.state, delivery: delivery.state }) : null,
+        updated_at: trx.fn.now(),
+      });
+      await trx('service_visits').where({ id: packet.visit_id }).update({
+        status: 'closed', closed_at: trx.fn.now(), close_reason: review ? 'office_review' : 'completed', updated_at: trx.fn.now(),
+      });
+    }
+  });
+  return { status: pending ? 202 : 200, body: {
+    visitId: packet.visit_id, packetId: packet.id, state, payment, delivery, summaryUrl: `/visit/${token}`,
+  } };
+}
+
+/** Completion and a later paid webhook share the same representative record. */
+async function enrollVisitCompletionReview(packetId, database = db) {
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first();
+  if (!packet) return { enrolled: false, reason: 'packet_missing' };
+  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const requested = payload.items.every(({ body }) => body.requestReview === true
+    && (!body.reviewSuppression || body.reviewSuppression === 'invoice_created'));
+  const visit = await database('service_visits').where({ id: packet.visit_id }).first();
+  if (!requested || visit.billing_hold) return { enrolled: false, reason: 'visit_review_suppressed' };
+  const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
+  if (invoice && !['paid', 'prepaid'].includes(invoice.status)) return { enrolled: false, reason: 'invoice_unpaid' };
+  const members = await database('visit_completion_packet_items as i')
+    .join('service_records as r', 'r.id', 'i.service_record_id')
+    .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+    .where('i.packet_id', packet.id).orderBy('s.window_start').orderBy('s.id')
+    .select('i.status', 's.id', 'r.id as record_id', 'r.structured_notes', 'r.service_type');
+  if (members.length < 2 || members.some((member) => member.status !== 'done'
+      || member.structured_notes?.visitOutcome !== 'completed'
+      || member.structured_notes?.requestReview !== true
+      || (member.structured_notes?.reviewSuppression && member.structured_notes.reviewSuppression !== 'invoice_created')
+      || (member.structured_notes?.typedReportDelivery && member.structured_notes.typedReportDelivery !== 'auto_send'))) {
+    return { enrolled: false, reason: 'visit_outcome' };
+  }
+  const first = members[0];
+  const result = await require('./review-request').enrollPostService({
+    customerId: visit.customer_id, serviceRecordId: first.record_id, scheduledServiceId: first.id,
+    serviceType: first.service_type, technicianId: visit.technician_id,
+    completedAt: visit.completion_submitted_at, triggeredBy: 'auto',
+    delayMinutes: require('./review-request').completionReviewDelay(first.structured_notes), legacyDelayMinutes: 120,
+  });
+  return { enrolled: true, result };
+}
+
+/** Existing completion/effect claims own retries; this sweep only resumes them. */
+async function resumePendingVisitCompletions({ limit = 3 } = {}) {
+  const packets = await db('visit_completion_packets').where({ status: 'processing' })
+    .where('updated_at', '<', new Date(Date.now() - 60 * 1000)).orderBy('updated_at').limit(limit).select('id');
+  for (const packet of packets) {
+    try { await runVisitCompletionPacketEffects(packet.id); }
+    catch (err) {
+      require('./logger').warn(`[visit-closeout] retry pending for packet ${packet.id} (${err.name || 'Error'})`);
+    }
+    // A persistently blocked packet must not monopolize the oldest-first batch.
+    await db('visit_completion_packets').where({ id: packet.id, status: 'processing' }).update({ updated_at: db.fn.now() });
+  }
+  return { checked: packets.length };
+}
+
+module.exports = { saveVisitCompletionPacket, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
