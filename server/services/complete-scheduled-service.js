@@ -4781,10 +4781,14 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
             const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
             const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);
+            // property_id: the lawn actuals ledger and lawn_assessments freeze
+            // the service property at completion — an address edit that
+            // committed before this lock must win, not the handler-entry row.
             for (const field of [
               'actual_end_time', 'check_out_time', 'completed_at',
               'service_time_minutes', 'actual_duration_minutes',
               'time_on_site_adjusted_minutes', 'time_on_site_correction_seq',
+              'property_id',
             ]) {
               if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];
             }

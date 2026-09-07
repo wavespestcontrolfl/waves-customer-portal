@@ -106,8 +106,8 @@ const gates = {
   lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
-  // Registered for startup logging; the completion writer reads it at call time.
-  lawnActualsLedger: gateEnvValue('GATE_LAWN_ACTUALS_LEDGER'),
+  // Registered for startup logging; the completion writer reads it at call time (strict 'true').
+  lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.

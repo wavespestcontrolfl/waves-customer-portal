@@ -1,12 +1,13 @@
 const { addETDays, etDateString } = require('../utils/datetime-et');
-const { gateEnvValue } = require('../config/feature-gates');
 
 // GATE_LAWN_ACTUALS_LEDGER (dark): the ledger records EVERY lawn visit —
 // member, one-time, commercial, and incomplete visits that applied product —
 // with protocol attribution left absent when the visit has none. Read at call
-// time so unsetting the var is a live kill. Off = the WaveGuard-only writer.
+// time so unsetting the var is a live kill; strict `=== 'true'` so an
+// inherited '1' / 'on' cannot open a new write path. Off = the WaveGuard-only
+// writer.
 function lawnActualsLedgerEnabled() {
-  return gateEnvValue('GATE_LAWN_ACTUALS_LEDGER');
+  return process.env.GATE_LAWN_ACTUALS_LEDGER === 'true';
 }
 
 function parseJson(value, fallback) {

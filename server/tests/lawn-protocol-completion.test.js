@@ -203,6 +203,13 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     application_area: 'Front yard, Side yards', zone_ids: ['zone-a'],
   };
 
+  test.each(['1', 'on', 'TRUE', 'yes'])('only the exact string true opens the dark gate — %s stays off', (value) => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = value;
+    expect(lawnActualsLedgerEnabled()).toBe(false);
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    expect(lawnActualsLedgerEnabled()).toBe(true);
+  });
+
   test('gate off: a visit without a structured protocol window leaves no row (legacy WaveGuard-only writer)', async () => {
     expect(lawnActualsLedgerEnabled()).toBe(false);
     const completions = [];
