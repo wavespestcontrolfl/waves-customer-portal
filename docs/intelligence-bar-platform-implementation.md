@@ -146,7 +146,7 @@ unsupported/unverified sites, including four partially verified inventory sites.
 ## Verification evidence
 
 - Real Express route + bearer authentication + domain executor + isolated Railway
-  development Postgres, scripted model and controlled Gmail: twenty-four tests pass in
+  development Postgres, scripted model and controlled Gmail: twenty-five tests pass in
   `server/tests/intelligence-bar-platform-db.test.js`. Independent row reads verify
   A changes while viewed B remains unchanged. Cases include ID tampering, bulk
   targeting, message-body names, surname mismatch, request replay, stale runner,
@@ -196,6 +196,13 @@ unsupported/unverified sites, including four partially verified inventory sites.
   After the Pipeline main integration, the 24 foundation database cases and 34
   reviewed-send regressions pass together (58 total); bar, UUID, shared send dialog
   and layout badge suites pass 25 client tests. Build and brand checks pass.
+  Recovery review adds a passing database case for completed-read non-resumability
+  and interrupted attachment requests: missing images require a new request.
+  All 25 foundation database cases and 25 bar/card client tests pass. Expired
+  proposals retain their expiry state, hide approval controls and explain renewal.
+  Desktop/mobile Chrome verifies that recovered expired proposals show neither
+  awaiting-confirmation copy nor an executable approval; no JS exceptions.
+  Artifacts: `.local/ib-recovery-{desktop,mobile}-expired.png`.
 - Chrome via Playwright rendered the actual Customers page at 1440×1050 and
   390×844 against the isolated database. Confirmation used the real route and
   database; only the model and ancillary feature/notification/usage responses were

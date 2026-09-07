@@ -94,3 +94,13 @@ test('renders the saved request lifecycle and link from a verified receipt, incl
   render(<PendingActionsCard actions={[{ ...action, receipt }]} variant="light" />);
   expect(screen.getByText('Restock request saved')).toBeVisible();
 });
+
+test('a recovered expired receipt asks for a fresh proposal without implying execution failed', () => {
+  render(<PendingActionsCard actions={[{ ...action, contract: { action_label: 'Save request', approval: { required: true, reason: 'Confirm to run' } }, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
+  expect(screen.getByText('Expired proposal: Save request')).toBeTruthy();
+  expect(screen.getByText(/no longer confirmable/)).toBeTruthy();
+  expect(screen.queryByText(/Awaiting your confirmation/)).toBeNull();
+  expect(screen.queryByText('Confirm to run')).toBeNull();
+  expect(screen.queryByText('Failed')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+});

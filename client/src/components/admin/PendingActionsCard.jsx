@@ -50,7 +50,7 @@ const TIER_LABEL = { yellow: "Confirm to run", red: "Owner confirm — exact eff
 const KIND_LABEL = { operational: "Operations", customer: "Customer record", billing: "Billing", comms: "Messages" };
 const KIND_ORDER = ["comms", "billing", "customer", "operational"];
 const RECEIPT_STATES = { completed: 'confirmed', partially_completed: 'partial', provider_accepted: 'accepted',
-  failed: 'failed', blocked: 'failed', canceled: 'cancelled', expired: 'failed', awaiting_approval: undefined, outcome_unknown: 'unknown' };
+  failed: 'failed', blocked: 'failed', canceled: 'cancelled', expired: 'expired', awaiting_approval: undefined, outcome_unknown: 'unknown' };
 
 function receiptState(receipt) {
   const outcome = receipt.outcome || (receipt.success === true ? 'completed' : receipt.success === false ? 'failed' : 'outcome_unknown');
@@ -269,7 +269,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown"].includes(status);
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);
-        const expired = !settled && !busy && remaining !== null && remaining <= 0;
+        const expired = status === 'expired' || (!settled && !busy && remaining !== null && remaining <= 0);
 
         return (
           <div
@@ -288,10 +288,10 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               style={dark ? { color: D.text, fontSize: 14, fontWeight: 500, marginBottom: 6 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-900 font-medium mb-1.5"}
             >
-              {settled ? "Action result: " : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
+              {expired ? "Expired proposal: " : settled ? "Action result: " : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
             </div>
 
-            {settled ? <details style={{ marginBottom: 8, fontSize: 14 }}>
+            {settled || expired ? <details style={{ marginBottom: 8, fontSize: 14 }}>
               <summary style={{ cursor: 'pointer', minHeight: 44, paddingTop: 8 }}>Action details</summary>
               <ContractView contract={action.contract} dark={dark} showApproval={false} />
             </details> : <ContractView contract={action.contract} dark={dark} />}

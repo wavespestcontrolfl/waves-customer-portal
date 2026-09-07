@@ -58,14 +58,34 @@ async function claimResume(id, actorId, sessionId, { selectedTarget } = {}) {
   if (!task) return { error: 'Task not found', code: 'not_found' };
   if (selectedTarget && task.state !== 'needs_information') return { error: 'This task is not awaiting a target choice', code: 'not_awaiting_target' };
   const saved = await snapshot(task, actorId);
-  if (saved.receipts.some(r => !['completed', 'provider_accepted'].includes(r.outcome))) return { error: 'Resolve the saved action outcomes before continuing', code: 'steps_unresolved' };
+  const blocked = continuationError(task, saved.receipts, { selectedTarget });
+  if (blocked) return blocked;
   const [claimed] = await db('ib_tasks').where({ id, actor_id: String(actorId), runner_token: task.runner_token })
+    .where('state', task.state)
     .where(q => q.whereNot('state', 'running').orWhere('lease_expires_at', '<', db.fn.now()))
     .update({ state: 'running', runner_token: crypto.randomUUID(), lease_expires_at: leaseExpiry(), updated_at: db.fn.now(),
       ...(selectedTarget ? { request: JSON.stringify({ ...task.request, selectedTarget }) } : {}),
     }).returning('*');
   return claimed ? { task: claimed, receipts: saved.receipts.map(({ tool, outcome, result }) => ({ tool, outcome, result })) }
     : { error: 'This task is already running', code: 'already_running' };
+}
+
+function continuationError(task, receipts, { selectedTarget } = {}) {
+  if (receipts.some(r => !['completed', 'provider_accepted'].includes(r.outcome))) {
+    return { error: 'Resolve the saved action outcomes before continuing', code: 'steps_unresolved' };
+  }
+  if (task.request?.had_images && !task.checkpoint?.length) {
+    return { error: 'The attachments were not saved before this request stopped. Reattach them in a new request.', code: 'attachments_required' };
+  }
+  if (['responded', 'canceled'].includes(task.state)
+      || (task.state === 'needs_information' && !selectedTarget)
+      || (task.state === 'awaiting_approval' && !receipts.length)) {
+    return { error: 'This task has no interrupted step to continue.', code: 'not_resumable' };
+  }
+  if (task.state === 'running' && new Date(task.lease_expires_at).getTime() >= Date.now()) {
+    return { error: 'This task is already running', code: 'already_running' };
+  }
+  return null;
 }
 
 async function snapshot(task, actorId) {
@@ -84,9 +104,10 @@ async function snapshot(task, actorId) {
   }
   return { ...(task.response || {}), taskId: task.id, taskState: exposedTaskState(task, receipts),
     taskTarget: task.target?.target || null, pendingActions, receipts,
-    canContinue: (task.state !== 'running' || new Date(task.lease_expires_at).getTime() < Date.now())
-      && receipts.every(r => ['completed', 'provider_accepted'].includes(r.outcome)),
-    response: task.response?.response || 'This request has not returned a final answer. Its saved actions are shown below.',
+    canContinue: !continuationError(task, receipts),
+    response: task.response?.response || (task.request?.had_images && !task.checkpoint?.length
+      ? 'The attachments were not saved before this request stopped. Reattach them in a new request.'
+      : 'This request has not returned a final answer. Its saved actions are shown below.'),
   };
 }
 
