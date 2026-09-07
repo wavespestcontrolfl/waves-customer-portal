@@ -628,13 +628,15 @@ that call settles, so upload-and-hang-up loops cannot exceed the cap, and an
 upload deadline (`POSTHOG_INGEST_UPLOAD_TIMEOUT_MS`, default 15 s) tears down
 a body that has not fully arrived so stalled uploads cannot sit on the slots;
 2 MB raw body cap (413); 10 s upstream timeout (502).
-Inbound `cookie`, `authorization`, `referer`, `content-encoding` (the raw
-body parser has already inflated the bytes), hop-by-hop, `Via` and every
-client-IP / proxy-chain header — RFC 7239 `Forwarded`, `X-Forwarded-*`,
-`X-Real-IP`, CDN client-IP variants — are stripped and `X-Forwarded-For` is set to `req.ip`
-(trust-proxy aware) so PostHog GeoIP survives; `origin` and `content-type`
-pass through so PostHog's own CORS reflection answers the browser (spoke
-origins never touch the portal allowlist). Outbound `set-cookie`,
+Inbound request headers are ALLOWLISTED — only `content-type`, `accept`,
+`accept-language`, `origin`, `user-agent` and the preflight
+`access-control-request-*` pair cross — so cookies, authorization, referer,
+content-encoding (the raw body parser has already inflated the bytes) and
+every proxy-chain / client-IP header of any spelling (RFC 7239 `Forwarded`,
+`X-Forwarded-*`, `X-Real-IP`, mesh / CDN variants) never reach PostHog;
+`X-Forwarded-For` is set to `req.ip` (trust-proxy aware) so PostHog GeoIP
+survives, and `origin` passing through lets PostHog's own CORS reflection
+answer the browser (spoke origins never touch the portal allowlist). Outbound `set-cookie`,
 `content-encoding`, `content-length` and HSTS are dropped and
 `Cross-Origin-Resource-Policy: cross-origin` is set so the hub can load
 `array.js` cross-origin. Nothing from the request is logged — not the body

@@ -5,8 +5,8 @@
  *    env change after the router loaded flips it); 405 for non GET/POST/OPTIONS
  *  - upstream host is FIXED: /static/* and /array/* → assets host, everything else → API host,
  *    query string preserved, ../ cannot escape the host
- *  - cookies / authorization / referer / Forwarded / every client-IP header never reach PostHog; origin + content-type
- *    do; X-Forwarded-For carries the visitor IP; raw POST body forwarded byte-for-byte;
+ *  - request headers are ALLOWLISTED: only content-type / accept / accept-language / origin /
+ *    user-agent / the preflight pair cross, plus X-Forwarded-For from req.ip; raw POST body forwarded byte-for-byte;
  *    a gzip-encoded body arrives inflated WITHOUT a content-encoding label
  *  - upstream status/body/CORS headers pass through; set-cookie and
  *    content-encoding do not; CORP is cross-origin (hub loads array.js from here)
@@ -165,6 +165,14 @@ describe('request boundary', () => {
         forwarded: 'for=198.51.100.99;host=evil.example;proto=https',
         'x-real-ip': '198.51.100.98',
         via: '1.1 something',
+        'x-forwarded-server': 'edge.example',
+        'x-forwarded-prefix': '/ingest',
+        'x-forwarded-client-cert': 'cert',
+        'x-envoy-external-address': '198.51.100.97',
+        'cf-ray': 'abc',
+        'x-anything-else': 'nope',
+        accept: '*/*',
+        'user-agent': 'harness/1.0',
       },
       body: payload,
     });
@@ -180,10 +188,9 @@ describe('request boundary', () => {
     expect(init.headers.host).toBeUndefined();
     // trust proxy on → req.ip is the client behind the edge, not the edge.
     expect(init.headers['x-forwarded-for']).toBe('203.0.113.9');
-    // No other attribution header survives — the RFC 7239 one included.
-    expect(init.headers.forwarded).toBeUndefined();
-    expect(init.headers['x-real-ip']).toBeUndefined();
-    expect(init.headers.via).toBeUndefined();
+    // Allowlist: NOTHING else survives — not Forwarded, not any X-Forwarded-*
+    // spelling, not CDN / mesh headers, not arbitrary caller headers.
+    expect(Object.keys(init.headers).sort()).toEqual(['accept', 'content-type', 'origin', 'user-agent', 'x-forwarded-for']);
     expect(init.redirect).toBe('manual');
   });
 

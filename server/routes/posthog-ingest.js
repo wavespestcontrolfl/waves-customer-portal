@@ -25,9 +25,10 @@
  *    per-IP limiter (POSTHOG_INGEST_RATE_MAX/min, default 300; IPv6 collapsed
  *    to /64 via the shared unauthenticated key) sits AFTER the gate so
  *    gate-off probes stay an unobservable 404 and never spend budget.
- *  - Cookies and Authorization never cross in either direction; Referer is
- *    dropped (a tokenized portal URL is not PostHog's business); every
- *    client-IP / proxy-chain header (incl. RFC 7239 Forwarded) is dropped.
+ *  - Request headers are ALLOWLISTED (content-type, accept, accept-language,
+ *    origin, user-agent, the preflight pair): cookies, authorization,
+ *    referer, content-encoding and every proxy-chain / client-IP header of
+ *    any spelling never reach PostHog.
  *  - X-Forwarded-For carries the visitor IP (req.ip, trust-proxy aware) so
  *    PostHog's GeoIP keeps working — otherwise every event geolocates to
  *    Railway.
@@ -74,21 +75,19 @@ const inFlightByKey = new Map();
 const UPLOAD_TIMEOUT_MS = Math.max(100, parseInt(process.env.POSTHOG_INGEST_UPLOAD_TIMEOUT_MS, 10) || 15000);
 let inFlight = 0;
 
-// Hop-by-hop headers plus everything that must not cross the boundary.
-// content-encoding: express.raw() inflates a gzip/deflate request body before
-// we see it, so the bytes we forward are already decoded — forwarding the
-// original label would make PostHog try to decode them twice. (posthog-js's
-// own payload compression rides in `?compression=gzip-js`, not this header.)
-const DROP_REQUEST_HEADERS = new Set([
-  'host', 'cookie', 'authorization', 'referer', 'connection', 'content-length',
-  'content-encoding', 'transfer-encoding', 'keep-alive', 'upgrade', 'te', 'trailer',
-  'proxy-authorization', 'proxy-connection', 'accept-encoding',
-  // Every client-IP / proxy-chain header, the RFC 7239 `Forwarded` one
-  // included: the ONLY attribution PostHog sees is the X-Forwarded-For we
-  // set from req.ip below.
-  'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto',
-  'x-forwarded-port', 'x-real-ip', 'x-client-ip', 'x-cluster-client-ip',
-  'cf-connecting-ip', 'true-client-ip', 'fastly-client-ip', 'fly-client-ip', 'via',
+// Request headers forwarded upstream — an ALLOWLIST, so nothing a caller
+// invents (proxy-chain headers of any spelling, client-IP variants, auth,
+// cookies, referer, content-encoding) can reach PostHog. posthog-js sends
+// only content-type / origin on its own; accept, accept-language and
+// user-agent are harmless and keep the assets host serving the right thing;
+// the access-control-request-* pair is the preflight. The only attribution
+// PostHog sees is the X-Forwarded-For set from req.ip below. (content-
+// encoding is deliberately absent: express.raw() has already inflated the
+// body, so posthog-js's own payload compression, which rides in
+// `?compression=gzip-js`, is unaffected and the bytes forwarded are plain.)
+const FORWARD_REQUEST_HEADERS = new Set([
+  'content-type', 'accept', 'accept-language', 'origin', 'user-agent',
+  'access-control-request-method', 'access-control-request-headers',
 ]);
 // fetch() hands back a DECODED body, so the upstream encoding/length headers
 // would lie; set-cookie and HSTS are PostHog's, not ours.
@@ -117,7 +116,7 @@ function upstreamUrl(req) {
 function upstreamHeaders(req) {
   const out = {};
   for (const [name, value] of Object.entries(req.headers)) {
-    if (DROP_REQUEST_HEADERS.has(name)) continue;
+    if (!FORWARD_REQUEST_HEADERS.has(name)) continue;
     if (typeof value === 'string') out[name] = value;
   }
   if (req.ip) out['x-forwarded-for'] = req.ip;
