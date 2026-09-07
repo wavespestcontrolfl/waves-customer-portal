@@ -178,7 +178,7 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
     conn.state = state;
     return conn;
   };
-  const addressed = { id: 'c1', address_line1: '6136 46th Ln E', city: 'Bradenton', state: 'FL', zip: '34203', contact_role: null };
+  const addressed = { id: 'c1', address_line1: '100 Main St', city: 'Sampleville', state: 'FL', zip: '34200', contact_role: null };
 
   test('no property row + an on-file address → backfills the primary and anchors to it', async () => {
     const conn = fakeConn({ customer: addressed });
@@ -186,7 +186,7 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
     expect(conn.state.inserted).toHaveLength(1);
     expect(conn.state.inserted[0]).toMatchObject({
       customer_id: 'c1', is_primary: true, active: true, source: 'backfill',
-      address_line1: '6136 46th Ln E', city: 'Bradenton', zip: '34203', occupancy_type: 'owner_occupied',
+      address_line1: '100 Main St', city: 'Sampleville', zip: '34200', occupancy_type: 'owner_occupied',
     });
   });
   test('backfill runs inside the caller transaction as a savepoint', async () => {

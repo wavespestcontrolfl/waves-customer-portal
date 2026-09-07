@@ -88,10 +88,21 @@ const limit = limitIdx > -1 ? Math.max(0, parseInt(process.argv[limitIdx + 1], 1
   console.log(`[primary-property-backfill] done — created ${createdIds.length}, skipped ${skipped}, failed ${failed} (started ${startedAt.toISOString()})`);
   if (createdIds.length) {
     console.log(`[primary-property-backfill] created property ids: ${createdIds.join(',')}`);
-    console.log("[primary-property-backfill] rollback (this run's rows only, still unreferenced): "
-      + `DELETE FROM customer_properties WHERE id = ANY('{${createdIds.join(',')}}'::uuid[]) AND source='backfill'`
-      + ' AND NOT EXISTS (SELECT 1 FROM scheduled_services s WHERE s.property_id = customer_properties.id)'
-      + ' AND NOT EXISTS (SELECT 1 FROM estimates e WHERE e.property_id = customer_properties.id)');
+    // Every FK that points at customer_properties(id), read from the
+    // catalog at run time so a table added later is guarded too: the
+    // rollback must not erase a property association some row picked up
+    // after the backfill (those FKs are ON DELETE SET NULL, so a plain
+    // DELETE would silently clear them).
+    const refs = await db.raw(`
+      SELECT c.conrelid::regclass::text AS tbl, a.attname AS col
+      FROM pg_constraint c
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+      WHERE c.contype = 'f' AND c.confrelid = 'customer_properties'::regclass`);
+    const guards = refs.rows
+      .map(({ tbl, col }) => ` AND NOT EXISTS (SELECT 1 FROM ${tbl} r WHERE r.${col} = customer_properties.id)`)
+      .join('');
+    console.log(`[primary-property-backfill] rollback (this run's rows only, unreferenced by any of ${refs.rows.length} FK(s)): `
+      + `DELETE FROM customer_properties WHERE id = ANY('{${createdIds.join(',')}}'::uuid[]) AND source='backfill'${guards}`);
   }
 })()
   .catch((e) => { console.error('[primary-property-backfill] failed:', e.message); process.exitCode = 1; })
