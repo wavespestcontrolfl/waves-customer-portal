@@ -4,7 +4,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Any api method not explicitly mocked returns a forever-pending promise, so
@@ -64,6 +64,27 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe('dashboard appointment confirmation', () => {
+  it('does not confirm a replacement appointment when an earlier confirmation finishes', async () => {
+    let finishConfirmation;
+    api.confirmAppointment.mockImplementationOnce(() => new Promise(resolve => { finishConfirmation = resolve; }));
+    api.getNextService.mockResolvedValueOnce({ next: {
+      id: 'visit-a', date: futureDate, serviceType: 'First appointment', customerConfirmed: false,
+    } }).mockResolvedValue({ next: {
+      id: 'visit-b', date: futureDate, serviceType: 'Replacement appointment', customerConfirmed: false,
+    } });
+    render(<PortalReadProvider enabled><PortalRefreshArea><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></PortalRefreshArea></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Visit', exact: true }));
+    expect(api.confirmAppointment).toHaveBeenCalledWith('visit-a');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    expect(await screen.findByText('Replacement appointment')).toBeInTheDocument();
+    await act(async () => { finishConfirmation({ success: true }); });
+    await waitFor(() => expect(api.getNextService).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole('button', { name: 'Confirm Visit', exact: true })).toBeEnabled();
+    expect(screen.queryByText('Confirmed', { exact: true })).not.toBeInTheDocument();
+  });
 });
 
 describe('schedule survives notification-preference failures', () => {

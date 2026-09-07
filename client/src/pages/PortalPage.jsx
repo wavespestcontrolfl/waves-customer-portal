@@ -3142,7 +3142,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   setConfirmingVisit(true);
                   try {
                     await api.confirmAppointment(nextService.id);
-                    nextRead.update(previous => ({ ...previous, next: { ...previous.next, customerConfirmed: true, status: 'confirmed' } }));
+                    await nextRead.refresh();
                   } catch (err) {
                     console.error(err);
                     showCustomerAlert('Could not confirm this visit. Please try again.');
