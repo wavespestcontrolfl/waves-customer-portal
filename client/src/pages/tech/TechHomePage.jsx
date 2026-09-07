@@ -1548,7 +1548,7 @@ function RainOutSheet({ service, onClose, onDone }) {
         onClick={(e) => e.stopPropagation()}
         style={{
           background: DARK.card, borderRadius: '16px 16px 0 0', width: '100%',
-          maxWidth: 560, maxHeight: 'min(85vh, 85dvh)', overflowY: 'auto', padding: 20, paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
+          maxWidth: 560, boxSizing: 'border-box', maxHeight: '85vh', overflowY: 'auto', padding: 20, paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
           border: `1px solid ${DARK.border}`, borderBottom: 'none',
         }}
       >

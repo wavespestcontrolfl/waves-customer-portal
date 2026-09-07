@@ -384,7 +384,7 @@ export default function ServiceRecapModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%', maxWidth: 520, maxHeight: 'min(92vh, 92dvh)', overflowY: 'auto',
+          width: '100%', maxWidth: 520, maxHeight: '92vh', overflowY: 'auto',
           background: P.bg, borderTopLeftRadius: 18, borderTopRightRadius: 18,
           border: `1px solid ${P.border}`, boxShadow: '0 -8px 40px rgba(0,0,0,0.35)',
         }}

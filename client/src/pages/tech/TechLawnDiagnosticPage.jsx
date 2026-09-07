@@ -260,7 +260,7 @@ export default function TechLawnDiagnosticPage() {
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', color: D.text, fontFamily: BODY }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <button type="button" onClick={() => navigate('/tech')} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '6px 10px', borderRadius: 8, fontSize: 12, cursor: 'pointer' }}>
+        <button type="button" onClick={() => navigate('/tech')} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>
           ← Back
         </button>
         <h1 style={{ fontFamily: HEAD, fontSize: 20, fontWeight: 700, color: D.white, margin: 0 }}>Lawn Diagnostic</h1>
