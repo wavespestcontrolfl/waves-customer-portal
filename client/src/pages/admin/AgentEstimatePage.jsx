@@ -889,7 +889,7 @@ export default function AgentEstimatePage() {
       </p>
 
       <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.55fr)]">
-        <main className="min-w-0 space-y-4">
+        <div className="min-w-0 space-y-4">
           <SectionCard title="1 · Choose a lead" subtitle="Open leads include new prospects and existing-customer expansion requests.">
             <LeadPicker
               selectedId={selectedLeadId}
@@ -1110,7 +1110,7 @@ export default function AgentEstimatePage() {
               </SectionCard>
             </>
           )}
-        </main>
+        </div>
 
         <aside className="min-w-0 space-y-4 xl:sticky xl:top-0">
           <SectionCard title="Draft + send" subtitle="The customer receives nothing until you tap a send button.">
