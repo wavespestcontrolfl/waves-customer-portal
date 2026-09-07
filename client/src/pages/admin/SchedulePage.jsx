@@ -34,6 +34,7 @@ import lawnScores from '@lawn-scores';
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
@@ -637,7 +638,7 @@ export function shouldResetCompletionIdempotencyKey(error) {
   const status = Number(error?.status);
   if (!Number.isFinite(status) || status < 400 || status >= 500) return false;
   if (status !== 409) return true;
-  return error?.code === "lawn_assessment_stale";
+  return ["lawn_assessment_stale", "completion_pricing_changed"].includes(error?.code);
 }
 
 // completion_side_effects_running means the completion COMMITTED (the claim
@@ -10362,6 +10363,8 @@ export function CompletionPanel({
 }) {
   const { enabled: completionImprovements } = useFeatureFlagReady("lawn-completion-improvements");
   const [notes, setNotes] = useState("");
+  const [completionPricing, setCompletionPricing] = useState(null);
+  const [pricingReloadKey, setPricingReloadKey] = useState(0);
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
   // taps the mic again to stop. (Phase 2: the single notes box is the tech's
   // only free-text input — the AI report copy is generated from it + photos.)
@@ -11722,15 +11725,21 @@ export function CompletionPanel({
     svcTypeLower.includes("re-service") ||
     svcTypeLower.includes("callback") ||
     service.isCallback;
-  const hasVisitPrice =
-    service.estimatedPrice != null && Number(service.estimatedPrice) > 0;
+  const completionPricingPending = visitOutcome === "completed" && !backfillCloseout
+    && (completionPricing?.serviceId !== service.id || completionPricing?.ready !== true);
+  const reviewedPricing = completionPricing?.serviceId === service.id && completionPricing?.review
+    && visitOutcome === "completed" && !backfillCloseout ? completionPricing : null;
+  const applyingCompletionDiscounts = reviewedPricing?.apply === true;
+  const completionVisitPrice = applyingCompletionDiscounts ? reviewedPricing.amount : service.estimatedPrice;
+  const hasVisitPrice = applyingCompletionDiscounts
+    || (completionVisitPrice != null && Number(completionVisitPrice) > 0);
   // Callbacks (re-services) are free by definition for recurring/WaveGuard
   // customers — the server suppresses the monthly_rate fallback for them
   // (admin-dispatch completion + Charge-now). Mirror that here so the tech UI's
   // willInvoice / pay-link prediction, AI recap framing, and review suppression
   // match the report-only/no-invoice completion the server actually performs.
   const invoiceAmount = hasVisitPrice
-    ? Number(service.estimatedPrice)
+    ? Number(completionVisitPrice)
     : isCallback
       ? 0
       : Number(service.monthlyRate || 0);
@@ -12096,10 +12105,12 @@ export function CompletionPanel({
     treeShrubCloseoutRequired && !isIncompleteVisit && treeShrubCloseoutBlocks.length > 0;
   const structuredCloseoutRequired =
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
-  const completionCtaLabel = submitting
+  const baseCompletionCtaLabel = submitting
     ? "Completing..."
     : committedReplayReady
       ? "Resume Closeout"
+      : completionPricingPending
+        ? "Review pricing to complete"
     : closeoutAdvisoriesPending
       ? "Loading plan…"
     : protocolActualsCompletionBlocked
@@ -12117,6 +12128,14 @@ export function CompletionPanel({
             : willInvoice
               ? "Complete & Send Invoice"
               : "Complete & Send Recap";
+  const discountCompletionLabels = {
+    "Complete Service": "Apply discounts & complete",
+    "Complete & Send Invoice": "Apply discounts & send invoice",
+    "Complete & Send Recap": "Apply discounts & send recap",
+  };
+  const completionCtaLabel = applyingCompletionDiscounts
+    ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
+    : baseCompletionCtaLabel;
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -14164,6 +14183,7 @@ export function CompletionPanel({
       // released for its own validation returns.
       setSubmitting(false);
     }
+    if (completionPricingPending) return;
     // Upload-mode dictation lands asynchronously after the mic stops; a
     // completion posted now would ship notes without it (pre-push P1).
     if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
@@ -14651,6 +14671,7 @@ export function CompletionPanel({
           : []),
       ];
       const body = {
+        ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
         // Tips from your tech — ids only; the server resolves the copy and
@@ -14963,6 +14984,10 @@ export function CompletionPanel({
     sideEffectsRetryRef.current = 0;
     if (shouldResetCompletionIdempotencyKey(e)) {
       completionIdempotencyKeyRef.current = null;
+      if (e?.code === "completion_pricing_changed") {
+        setCompletionPricing(null);
+        setPricingReloadKey((value) => value + 1);
+      }
     }
     // Reconciliation prompt (409, key preserved): the tech either
     // confirms — one resubmit with the flag set — or goes back to fix
@@ -16024,6 +16049,10 @@ export function CompletionPanel({
                 </a>
               ) : null}
             </div>
+            <CompletionPricingCard service={service} adminFetch={adminFetch}
+              onReviewChange={setCompletionPricing} reloadKey={pricingReloadKey}
+              allowDiscounts={visitOutcome === "completed" && !backfillCloseout}
+              disabled={submitting || committedReplayReady || isIncompleteVisit || backfillCloseout} />
             {/* Time on-site */}
             {onSiteTime && (
               <div
@@ -17970,7 +17999,7 @@ export function CompletionPanel({
                 submitting ||
                 generating ||
                 (!committedReplayReady &&
-                  (closeoutAdvisoriesPending ||
+                  (completionPricingPending || closeoutAdvisoriesPending ||
                     treeShrubCompletionBlocked ||
                     protocolActualsCompletionBlocked))
               }
@@ -17979,7 +18008,7 @@ export function CompletionPanel({
                 opacity:
                   submitting ||
                   (!committedReplayReady &&
-                    (closeoutAdvisoriesPending ||
+                    (completionPricingPending || closeoutAdvisoriesPending ||
                       treeShrubCompletionBlocked ||
                       protocolActualsCompletionBlocked))
                     ? 0.5
@@ -18314,6 +18343,10 @@ export function CompletionPanel({
         )}
         {/* Body */}
         <div style={{ flex: 1, padding: 24, overflowY: "auto" }}>
+          <CompletionPricingCard service={service} adminFetch={adminFetch}
+              onReviewChange={setCompletionPricing} reloadKey={pricingReloadKey}
+              allowDiscounts={visitOutcome === "completed" && !backfillCloseout}
+              disabled={submitting || committedReplayReady || isIncompleteVisit || backfillCloseout} />
           {showDraftPrompt && (
             <div
               style={{
@@ -20123,7 +20156,7 @@ export function CompletionPanel({
               submitting ||
               generating ||
               (!committedReplayReady &&
-                (closeoutAdvisoriesPending ||
+                (completionPricingPending || closeoutAdvisoriesPending ||
                   treeShrubCompletionBlocked ||
                   protocolActualsCompletionBlocked))
             }
@@ -20140,7 +20173,7 @@ export function CompletionPanel({
               opacity:
                 submitting ||
                 (!committedReplayReady &&
-                  (closeoutAdvisoriesPending ||
+                  (completionPricingPending || closeoutAdvisoriesPending ||
                     treeShrubCompletionBlocked ||
                     protocolActualsCompletionBlocked))
                   ? 0.6

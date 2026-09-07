@@ -93,6 +93,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Complete Service: job-matched estimate evidence and reviewed discounts.
+  completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
   customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).

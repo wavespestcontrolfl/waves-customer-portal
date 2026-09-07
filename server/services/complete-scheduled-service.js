@@ -27,7 +27,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
@@ -2289,6 +2289,7 @@ async function completeScheduledService(completionInput) {
   try {
     const {
       idempotencyKey: bodyIdempotencyKey,
+      pricingReview = null,
       technicianNotes,
       customerConcernText,
       customerRecap,
@@ -3617,7 +3618,30 @@ async function completeScheduledService(completionInput) {
     // Hoisted here (from the invoice block below) so the commit-time
     // REQUIRED-mint posture can read the same authorities the invoice
     // decision reads — one derivation each, no drift.
-    const hasVisitPrice = svc.estimated_price != null && Number(svc.estimated_price) > 0;
+    let completionPricingPlan = null;
+    if (pricingReview && claim.action === 'proceed') {
+      if (!isEnabled('completionServicePricing')) {
+        throw Object.assign(new Error('Service pricing changed. Reload the completion form.'), { statusCode: 409, code: 'completion_pricing_changed', isOperational: true });
+      }
+      if (pricingReview.applyDiscounts && (backfill || visitOutcome !== 'completed')) {
+        throw Object.assign(new Error('Discounts can only be applied to a performed application.'), { statusCode: 409, code: 'completion_pricing_changed', isOperational: true });
+      }
+      completionPricingPlan = await require('../services/completion-pricing').prepareCompletionPricingReview(
+        svc.id, pricingReview, { role: completionInput.actor.techRole },
+      );
+      if (completionPricingPlan.apply) Object.assign(svc, completionPricingPlan.patch);
+    }
+    // Freeze reviewed money on the service record too: a resumed $0
+    // completion must never fall back to dues or a subsequently edited price.
+    let reviewedPriceAmount = completionPricingPlan?.apply ? Number(svc.estimated_price) : null;
+    if (resumingCommittedCompletion && pricingReview?.applyDiscounts === true) {
+      reviewedPriceAmount = await require('../services/completion-pricing').committedCompletionPrice(
+        db, claim.serviceRecordId, pricingReview,
+      );
+      svc.estimated_price = reviewedPriceAmount;
+    }
+    const reviewedVisitPrice = reviewedPriceAmount !== null;
+    const hasVisitPrice = reviewedVisitPrice || (svc.estimated_price != null && Number(svc.estimated_price) > 0);
     // inspection_only / customer_declined = no application performed —
     // nothing bills for the visit (mirrors referralVisitPerformed;
     // 'incomplete' returns early below). Shared by the auto-invoice gate AND
@@ -3638,7 +3662,7 @@ async function completeScheduledService(completionInput) {
     const annualPrepayBilling = svc.cust_billing_mode === 'annual_prepay';
     const explicitMembershipLane = svc.cust_billing_mode === 'monthly_membership';
     const explicitPerVisitLane = ['per_visit', 'one_time'].includes(svc.cust_billing_mode);
-    const invoiceAmount = completionInvoiceAmount({
+    const invoiceAmount = reviewedVisitPrice ? reviewedPriceAmount : completionInvoiceAmount({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,
       perApplicationBilling,
@@ -4583,6 +4607,11 @@ async function completeScheduledService(completionInput) {
 
         completionTimerEntriesSnapshot = null;
         await db.transaction(async (trx) => {
+          // Estimate -> customer -> visit is also acceptance's lock order.
+          // Keep the reviewed quote stable without a visit/estimate deadlock.
+          if (completionPricingPlan) {
+            await require('../services/completion-pricing').lockCompletionPricingEstimate(trx, completionPricingPlan);
+          }
           // The finalization takes the scheduled_services row lock FIRST
           // (codex P2 #3152 round 14): the time-on-site PATCH serializes on
           // this lock, and without it the finalizer's service_records
@@ -4600,7 +4629,16 @@ async function completeScheduledService(completionInput) {
             .where({ id: svc.customer_id })
             .forShare()
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+          if (completionPricingPlan) {
+            await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
+          }
           const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+          if (completionPricingPlan) {
+            await require('../services/completion-pricing').commitCompletionPricingReview(trx, completionPricingPlan, {
+              role: completionInput.actor.techRole, technicianId: completionInput.actor.technicianId,
+            });
+            if (completionPricingPlan.apply) Object.assign(lockedSvcRow, completionPricingPlan.patch);
+          }
           // Linked-timer snapshot under the same lock (codex P2 #3152
           // round 23): the post-commit sync's version boundary is THIS
           // transaction — a payroll edit landing after the commit outdates
@@ -4832,6 +4870,10 @@ async function completeScheduledService(completionInput) {
               backfillMintPayerId: completionResolvedPayer?.payerId != null
                 ? String(completionResolvedPayer.payerId)
                 : null,
+            } : {}),
+            ...(completionPricingPlan?.apply ? {
+              completionPricing: { witness: completionPricingPlan.review.witness,
+                amountCents: Math.round(reviewedPriceAmount * 100) },
             } : {}),
             areasTreated: completionAreas,
             waveguardEquipmentSystemId,
@@ -7126,7 +7168,7 @@ async function completeScheduledService(completionInput) {
     // A billable per-application visit with no amount on file (multi-service
     // accept: fee + row prices intentionally NULL) completes UNINVOICED — flag
     // it loudly so the visit gets billed manually instead of leaking.
-    if (perApplicationBilling && !(invoiceAmount > 0)
+    if (perApplicationBilling && !reviewedVisitPrice && !(invoiceAmount > 0)
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       logger.warn(`[dispatch] per-application visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (no visit price, no per_application_fee — multi-service plan?) — invoice manually`);
     }
@@ -7134,7 +7176,7 @@ async function completeScheduledService(completionInput) {
     // their monthly-rate fallback is suppressed (the dues number is not a
     // per-visit price — Codex r4), so an unpriced billable visit completes
     // uninvoiced and must be billed manually.
-    if (['per_visit', 'one_time'].includes(svc.cust_billing_mode || '') && !perApplicationBilling
+    if (['per_visit', 'one_time'].includes(svc.cust_billing_mode || '') && !perApplicationBilling && !reviewedVisitPrice
       && !(invoiceAmount > 0) && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       logger.warn(`[dispatch] ${svc.cust_billing_mode} visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (monthly-rate fallback suppressed for explicit non-monthly lanes) — invoice manually`);
     }

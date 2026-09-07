@@ -2124,7 +2124,8 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect((source.match(/const visitPerformed = /g) || []).length).toBe(1);
       expect((source.match(/const perApplicationBilling = /g) || []).length).toBe(1);
       expect((source.match(/const annualPrepayBilling = /g) || []).length).toBe(1);
-      expect((source.match(/const invoiceAmount = completionInvoiceAmount\(\{/g) || []).length).toBe(1);
+      expect((source.match(/const invoiceAmount = /g) || []).length).toBe(1);
+      expect((source.match(/completionInvoiceAmount\(\{/g) || []).length).toBe(1);
       expect((source.match(/const explicitPerVisitLane = /g) || []).length).toBe(1);
       expect((source.match(/const explicitMembershipLane = /g) || []).length).toBe(1);
       // The derivation is the mint decision itself: backfillExpectedMintAtCommit
