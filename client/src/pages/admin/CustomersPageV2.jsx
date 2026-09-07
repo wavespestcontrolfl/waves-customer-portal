@@ -40,6 +40,7 @@ import {
   MapPinned,
   MessageSquare,
   Phone,
+  Search,
   Sparkles,
   Trash2,
   UserPlus,
@@ -70,6 +71,7 @@ import {
   DialogTitle,
   DialogBody,
   DialogFooter,
+  Input,
   cn,
 } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
@@ -147,13 +149,6 @@ function TierBadgeV2({ tier }) {
   return <Badge tone="neutral">{tier}</Badge>;
 }
 
-function StageBadgeV2({ stage }) {
-  const s = STAGE_MAP[stage];
-  if (!s) return null;
-  const isAlert = stage === "at_risk" || stage === "churned";
-  return <Badge tone={isAlert ? "alert" : "neutral"}>{s.label}</Badge>;
-}
-
 function formatCustomerAddress(address) {
   if (!address) return "";
   if (typeof address === "string")
@@ -170,68 +165,6 @@ function formatCustomerAddress(address) {
   return "";
 }
 
-// Health-score dot. Single color for valid score, alert red only for
-// critical (<40). Amber is collapsed to neutral per the alert-reservation
-// rule — the numeric score still communicates severity.
-// Small ring+number — visually matches Customer 360 HealthCircle, scaled
-// down for row density. Color tier: ≥70 green, 40–69 amber, <40 red.
-function HealthDot({ score }) {
-  if (score == null) {
-    return (
-      <span
-        className="inline-block w-6 h-6 rounded-full border-hairline border-zinc-200"
-        title="No score"
-      />
-    );
-  }
-  const stroke = score >= 70 ? "#10B981" : score >= 40 ? "#F59E0B" : "#C8312F";
-  const r = 10,
-    circ = 2 * Math.PI * r,
-    offset = circ - (score / 100) * circ;
-  return (
-    <svg
-      width={26}
-      height={26}
-      viewBox="0 0 26 26"
-      className="flex-shrink-0"
-      aria-label={`Health: ${score}`}
-    >
-      {" "}
-      <circle
-        cx={13}
-        cy={13}
-        r={r}
-        fill="none"
-        stroke="#E4E4E7"
-        strokeWidth={2}
-      />{" "}
-      <circle
-        cx={13}
-        cy={13}
-        r={r}
-        fill="none"
-        stroke={stroke}
-        strokeWidth={2}
-        strokeDasharray={circ}
-        strokeDashoffset={offset}
-        strokeLinecap="round"
-        transform="rotate(-90 13 13)"
-      />{" "}
-      <text
-        x={13}
-        y={16}
-        textAnchor="middle"
-        fill={stroke}
-        fontSize={9}
-        fontWeight={500}
-        fontFamily="ui-monospace, monospace"
-      >
-        {score}
-      </text>{" "}
-    </svg>
-  );
-}
-
 function getAdminRole() {
   try {
     return (
@@ -243,9 +176,7 @@ function getAdminRole() {
 }
 
 // --- Pipeline card (V2) ---
-// Monochrome card. alert-fg reserved for the delete-confirm state only —
-// the stage's own "urgency" color is collapsed to neutral chrome; the column
-// header handles the at-risk signal via StageBadgeV2.
+// Monochrome card. alert-fg is reserved for the delete-confirm state.
 function PipelineCardV2({ customer, onDelete, canDelete = false }) {
   const [confirming, setConfirming] = useState(false);
   const daysInStage = customer.stageEnteredAt
@@ -328,7 +259,7 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
       )}
       <div className="flex items-center gap-2 flex-wrap">
         {" "}
-        <HealthDot score={customer.leadScore} />
+        <CustomerHealthGrade score={customer.leadScore} label="Lead score" />
         {tier && <TierBadgeV2 tier={tier} />}
         {customer.monthlyRate > 0 && (
           <span className="font-mono u-nums text-12 text-ink-primary">
@@ -1000,25 +931,6 @@ function FilterPill({ active, onClick, alert = false, children }) {
   );
 }
 
-// Service-type initials (tone-collapsed to neutral zinc)
-function serviceInitials(c) {
-  const t = (c.serviceTypes || c.service_types || "").toLowerCase();
-  const out = [];
-  if (t.includes("pest")) out.push("P");
-  if (t.includes("lawn")) out.push("L");
-  if (t.includes("mosquito")) out.push("M");
-  if (t.includes("termite")) out.push("T");
-  return out;
-}
-
-function detectTier(c) {
-  if (c.tier && c.tier !== "Bronze") return c.tier;
-  if (c.monthlyRate > 200) return "Platinum";
-  if (c.monthlyRate > 100) return "Gold";
-  if (c.monthlyRate > 50) return "Silver";
-  return c.tier || "Bronze";
-}
-
 function pipelineCustomersFrom(data) {
   if (Array.isArray(data?.customers)) return data.customers;
   if (!data?.pipeline) return [];
@@ -1683,68 +1595,30 @@ export default function CustomersPageV2() {
         canAdd={isAdmin}
       />
       {view === "directory" && (
-        <div className="hidden sm:flex items-center justify-between gap-3 mb-4">
-          {" "}
-          <input
-            id="customers-search-desktop"
-            name="customerSearch"
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search customers..."
-            className="bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-3 w-full max-w-md focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-          />{" "}
-          <button
-            type="button"
-            onClick={() => setShowFilters(true)}
-            className="inline-flex items-center gap-1.5 h-9 px-3 u-label border-hairline border-zinc-300 rounded-sm text-ink-secondary bg-white hover:bg-zinc-50"
-          >
-            {" "}
-            <Filter size={14} strokeWidth={1.75} />
+        <div className="customer-directory-tools flex items-center gap-2 mb-4">
+          <label className="c360-search-field min-w-0 flex-1 sm:max-w-md">
+            <Search size={17} aria-hidden />
+            <Input
+              id="customers-search"
+              name="customerSearch"
+              type="search"
+              aria-label="Search customers"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search customers..."
+              className="pl-10"
+            />
+          </label>
+          <Button variant="secondary" onClick={() => setShowFilters(true)} aria-label="Filter customers" className="shrink-0 gap-2">
+            <Filter size={16} strokeWidth={1.75} />
             Filter
-            {activeFilterCount > 0 && (
-              <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-zinc-900 text-white u-nums text-11">
-                {activeFilterCount}
-              </span>
-            )}
-          </button>{" "}
+            {activeFilterCount > 0 && <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-zinc-900 text-white font-mono text-14">{activeFilterCount}</span>}
+          </Button>
         </div>
       )}
 
-      {/* Context-specific mobile stack (search/filter/stage picker) */}
-      <div className="sm:hidden mb-3">
-        {view === "directory" && (
-          <>
-            {" "}
-            <input
-              id="customers-search-mobile"
-              name="customerSearchMobile"
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search customer by name, phone number"
-              className="block w-full bg-white text-16 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-            />{" "}
-            <div className="mt-3 flex items-center gap-2">
-              {" "}
-              <button
-                type="button"
-                onClick={() => setShowFilters(true)}
-                aria-label="Filter customers"
-                className="inline-flex items-center justify-center gap-1.5 u-label px-3 h-11 bg-white text-ink-secondary border-hairline border-zinc-300 rounded-sm transition-colors u-focus-ring"
-              >
-                {" "}
-                <Filter size={14} strokeWidth={1.75} />
-                Filter
-                {activeFilterCount > 0 && (
-                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-zinc-900 text-white u-nums text-11">
-                    {activeFilterCount}
-                  </span>
-                )}
-              </button>{" "}
-            </div>{" "}
-          </>
-        )}
+      {/* Context-specific mobile stage picker */}
+      <div className="sm:hidden">
         {view === "pipeline" && (
           <>
             {" "}
@@ -1810,7 +1684,7 @@ export default function CustomersPageV2() {
                 />{" "}
               </div>{" "}
               <div className="text-center">Address</div>{" "}
-              <div className="text-center">Grade</div>{" "}
+              <div className="text-center">Score</div>{" "}
               <div className="text-center">Next Svc</div> <div />{" "}
             </div>
           )}
@@ -1862,7 +1736,7 @@ export default function CustomersPageV2() {
                           style={{ height: 64 }}
                         >
                           {" "}
-                          <CustomerHealthGrade grade={c.healthGrade} score={c.healthScore} />{" "}
+                          <CustomerHealthGrade score={c.healthScore} />{" "}
                           <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                             {" "}
                             <button
@@ -1961,7 +1835,7 @@ export default function CustomersPageV2() {
                       </div>{" "}
                       <div className="flex items-center justify-center">
                         {" "}
-                        <CustomerHealthGrade grade={c.healthGrade} score={c.healthScore} />{" "}
+                        <CustomerHealthGrade score={c.healthScore} />{" "}
                       </div>{" "}
                       <div className="u-nums text-11 text-ink-secondary text-center">
                         {c.nextServiceDate ? (

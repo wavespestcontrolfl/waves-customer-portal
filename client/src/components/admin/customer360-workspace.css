@@ -236,10 +236,16 @@
 
 .c360-directory-page > div:first-child > .overflow-hidden { border: 0; border-radius: 0; background: transparent; }
 .c360-directory-page > div:first-child > .overflow-hidden > div:first-child { border: 0; padding: 8px 0 18px; }
-.c360-directory-page nav[aria-label="Customers section"] { display: flex; gap: 24px; padding: 0; border-bottom: 1px solid #e4e4e7; }
-.c360-directory-page nav[aria-label="Customers section"] button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 12px 2px; flex: 0 0 auto; background: transparent; }
-.c360-directory-page nav[aria-label="Customers section"] button[aria-current="page"] { border-bottom-color: #27272a; }
-.c360-directory-page nav[aria-label="Customers section"] button > svg { display: none; }
+.c360-directory-page nav[aria-label="Customers section"] { display: inline-flex; gap: 3px; max-width: 100%; padding: 4px; border: 1px solid #e4e4e7; border-radius: 7px; background: #fafafa; }
+.c360-directory-page nav[aria-label="Customers section"] button { flex: 0 0 auto; gap: 6px; height: 40px; padding: 0 12px; border: 1px solid transparent; border-radius: 4px; background: transparent; font-size: 14px; text-transform: none; letter-spacing: 0; white-space: nowrap; }
+.c360-directory-page nav[aria-label="Customers section"] button[aria-current="page"] { border-color: #e4e4e7; background: #fff; }
+.c360-directory-page nav[aria-label="Customers section"] button > svg { display: block; flex-shrink: 0; }
+.customer-directory-tools input { height: 44px; font-size: 16px; }
+.customer-directory-tools > button { min-height: 44px; font-size: 14px; text-transform: none; letter-spacing: 0; }
+@media (max-width: 767px) {
+  .c360-directory-page nav[aria-label="Customers section"] { display: flex; width: 100%; gap: 2px; }
+  .c360-directory-page nav[aria-label="Customers section"] button { flex: 1 0 auto; justify-content: center; gap: 5px; height: 44px; padding: 0 7px; }
+}
 
 /* Operational summary follows the office's next-action order. */
 .c360-operational-summary { order: -1; display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 0 32px; margin-bottom: 24px; }

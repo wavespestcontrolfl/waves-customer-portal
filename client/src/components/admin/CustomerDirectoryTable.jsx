@@ -35,9 +35,9 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
         return <Fragment key={customer.id}>
           <TR className="customer-directory-record">
             <TD className="customer-directory-identity">
-              <div className="flex items-baseline gap-2">
+              <div className="flex items-center gap-2">
                 <button type="button" className="customer-directory-name u-focus-ring" onClick={() => onOpen(customer.id)} aria-label={`Open ${name} customer profile`}>{name}</button>
-                <CustomerHealthGrade grade={customer.healthGrade} score={customer.healthScore} />
+                <CustomerHealthGrade score={customer.healthScore} />
               </div>
               <span>{customer.email || customer.phone || "No contact on file"}</span>
               {customer.profileLabel && customer.profileLabel !== "Primary" && <span>{customer.profileLabel}</span>}

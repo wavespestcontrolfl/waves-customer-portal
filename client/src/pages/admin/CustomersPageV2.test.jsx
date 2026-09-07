@@ -53,7 +53,7 @@ function NavigateToCustomerButton() {
 }
 
 describe('CustomersPageV2 workflow state', () => {
-  it('shows recorded grades beside names and composes server filters with search and pagination', async () => {
+  it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
       const parsed = new URL(String(url), 'http://fixture.invalid');
@@ -64,8 +64,8 @@ describe('CustomersPageV2 workflow state', () => {
       return response({});
     }));
     render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
-    const grade = await screen.findByLabelText('Health grade A · score 90/100');
-    expect(grade.parentElement).toContainElement(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    const score = await screen.findByRole('img', { name: 'Health score: 90/100' });
+    expect(score.parentElement).toContainElement(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
     expect(screen.queryByRole('button', { name: 'Health', exact: true })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
     await waitFor(() => expect(requests.at(-1).get('page')).toBe('2'));
@@ -88,10 +88,10 @@ describe('CustomersPageV2 workflow state', () => {
     expect(requests.at(-1).has('retention')).toBe(false);
   });
 
-  it('opens old health links in the Directory and leaves unrecorded grades unknown', async () => {
-    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+  it.each([null, 0])('opens old health links in the Directory and preserves a recorded score of %s', async (healthScore) => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response({ ...list, customers: [{ ...list.customers[0], healthScore }] }) : response({})));
     render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&view=health']}><CustomersPageV2 /></MemoryRouter>);
-    expect(await screen.findByLabelText('Health grade not recorded')).toHaveTextContent('—');
+    expect(await screen.findByRole('img', { name: healthScore == null ? 'Health score not recorded' : 'Health score: 0/100' })).toHaveTextContent(healthScore == null ? '—' : '0');
     expect(screen.getByRole('button', { name: 'Open Avery Customer customer profile' })).toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/admin/health/'))).toBe(false);
   });

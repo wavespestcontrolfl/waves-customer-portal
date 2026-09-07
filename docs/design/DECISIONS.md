@@ -2205,3 +2205,8 @@ in the later UI PR, which is a documented P2 deferral here.
 **Safari.** The workspace inherits the admin shell's `useAdminViewport` sizing. The directory drawer accounts for visual viewport offsets and safe areas; form inputs are at least 16px. Contract forms respond to the profile container width so the Waves sidebar does not force tablet overflow.
 
 **Verification.** Synthetic fixtures rendered the real Customers route and Waves shell at desktop, phone, and tablet widths in Chromium and WebKit. All sections, full history, directory selection/filtering, modal dismissal, and simulated keyboard viewport changes passed; screenshots were inspected. Focused client tests and the production build passed. No migrations or database integration checks were run. Physical iPhone home-screen behavior was not device-tested. This entry records a local implementation, not a deployment.
+
+
+### Customer directory controls and numeric scores (2026-09-07)
+
+Directory, Map, and Outreach & Upsells use a compact outlined toolbar with their existing icons. A single responsive search and Filter row replaces separate desktop/mobile controls. Customer names show the recorded numeric health score in a circle using the existing score color bands; zero and missing values remain distinct, and stored letter grades remain filterable.
