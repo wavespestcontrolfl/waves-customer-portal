@@ -57,6 +57,40 @@ describe('prepaid-series helpers', () => {
   });
 
   describe('stampSeriesPrepaid', () => {
+    test.each([null, undefined, '', ' ', false, true, NaN, Infinity, -1, 0])('refuses invalid payment %p before any database work', async (totalAmount) => {
+      const db = jest.fn();
+      await expect(stampSeriesPrepaid(db, { anchorServiceId: 's-1', totalAmount, method: 'cash' }))
+        .rejects.toMatchObject({ status: 400 });
+      expect(db).not.toHaveBeenCalled();
+    });
+
+    test('manual input cannot create an annual coverage stamp', async () => {
+      const db = jest.fn();
+      await expect(stampSeriesPrepaid(db, { anchorServiceId: 's-1', totalAmount: 400, method: 'annual_prepay_invoice' }))
+        .rejects.toMatchObject({ status: 409 });
+      expect(db).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      [{ customer_id: 'another-customer' }, 200, 409],
+      [{ annual_prepay_term_id: 'pending-term' }, 200, 409],
+      [{ prepaid_method: 'annual_prepay_invoice', prepaid_amount: 0 }, 200, 409],
+      [{}, 0.01, 400],
+    ])('refuses incompatible locked coverage before writing any sibling (%p)', async (overrides, amount, status) => {
+      const anchor = { id: 's-1', customer_id: 'c-1', status: 'pending' };
+      const rows = [anchor, { id: 's-2', recurring_parent_id: 's-1', customer_id: 'c-1', status: 'pending', ...overrides }];
+      const update = jest.fn();
+      const query = { where: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn().mockReturnThis(), first: jest.fn(async () => anchor), update,
+        then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) };
+      const conn = Object.assign(jest.fn(() => query), { transaction: async (fn) => fn(conn) });
+      await expect(stampSeriesPrepaid(conn, { anchorServiceId: anchor.id, totalAmount: amount, method: 'cash' }))
+        .rejects.toMatchObject({ status });
+      expect(query.forUpdate).toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    });
+
     it('uses the caller transaction when requested', async () => {
       const rows = [
         { id: 'svc-1', recurring_parent_id: null, status: 'pending', scheduled_date: '2026-06-15' },

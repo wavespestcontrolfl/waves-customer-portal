@@ -23,12 +23,16 @@ jest.mock('../services/irrigation-weekly-email', () => ({
   findLawnEmailAudienceGaps: jest.fn(async () => []),
   findUnstampedRecurringLawnMembers: jest.fn(async () => []),
 }));
+jest.mock('../services/recurring-schedule-audit', () => ({
+  findAcceptedRecurringScheduleGaps: jest.fn(async () => []),
+}));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
 const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
 const { findLawnEmailAudienceGaps, findUnstampedRecurringLawnMembers } = require('../services/irrigation-weekly-email');
+const { findAcceptedRecurringScheduleGaps } = require('../services/recurring-schedule-audit');
 const {
   runScheduleIntegrityWatchdog,
   runInner,
@@ -37,6 +41,7 @@ const {
   isUnpricedSeriesVisit,
   seriesRootId,
   MAX_ALERTS_PER_RUN,
+  hasMissingManualSeriesStamp,
 } = require('../services/schedule-integrity-watchdog');
 
 // 2026-08-04 noon ET.
@@ -224,7 +229,7 @@ describe('runInner alerting', () => {
     annualPrepayCoversVisit.mockResolvedValueOnce(false);
     makeDbMock({ upcomingRows: [stamped] });
     result = await runInner({ now: NOW });
-    expect(result).toMatchObject({ unpricedSeries: 1, alerted: 1 });
+    expect(result).toMatchObject({ unpricedSeries: 1, prepayCoverageGaps: 1, alerted: 2 });
   });
 
   test('per-run cap stops at MAX_ALERTS_PER_RUN and leaves the rest for next tick', async () => {
@@ -318,5 +323,60 @@ describe('runInner alerting', () => {
     makeDbMock({ staleRows: [staleVisit()] });
     NotificationService.notifyAdmin.mockImplementation(async () => null);
     await expect(runInner({ now: NOW })).rejects.toThrow('pager output lost');
+  });
+});
+
+describe('accepted-plan and prepay coverage detection', () => {
+  test('a priced annual stamp still requires valid coverage', async () => {
+    makeDbMock({ upcomingRows: [unpricedChild({ estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100 })] });
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ unpricedSeries: 0, prepayCoverageGaps: 1, alerted: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.issue).toBe('annual_coverage_unverified');
+  });
+
+  test('unchanged prepay evidence dedupes but a later funding regression rings again', async () => {
+    const row = unpricedChild({ estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100,
+      annual_prepay_term_id: 'term-1', prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-01T12:00:00Z']] });
+    makeDbMock({ upcomingRows: [row] });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 1 });
+    const key = NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey;
+    const alertedKeys = new Set([key]);
+    makeDbMock({ upcomingRows: [row], alertedKeys });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0 });
+    annualPrepayCoversVisit.mockResolvedValueOnce(true);
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0, prepayCoverageGaps: 0 });
+    makeDbMock({ upcomingRows: [{ ...row, prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-03T12:00:00Z']] }], alertedKeys });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 1, prepayCoverageGaps: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.dedupeKey).not.toBe(key);
+  });
+
+  test('manual coverage flags only children already present when the payment was allocated', () => {
+    const row = unpricedChild({ parent_prepaid_amount: 400, parent_prepaid_method: 'check',
+      parent_prepaid_at: '2026-08-01T16:00:00Z', created_at: '2026-08-01T15:59:00Z', parent_series_payment_evidence: true });
+    expect(hasMissingManualSeriesStamp(row)).toBe(true);
+    expect(hasMissingManualSeriesStamp({ ...row, prepaid_amount: 100 })).toBe(false);
+    expect(hasMissingManualSeriesStamp({ ...row, created_at: '2026-08-02T16:00:00Z' })).toBe(false);
+    expect(hasMissingManualSeriesStamp({ ...row, parent_prepaid_method: 'annual_prepay_invoice' })).toBe(false);
+    expect(hasMissingManualSeriesStamp({ ...row, is_recurring: false })).toBe(false);
+    expect(hasMissingManualSeriesStamp({ ...row, parent_series_payment_evidence: false })).toBe(false);
+  });
+
+  test('acceptance findings use the existing admin bell and evidence dedupe', async () => {
+    const gap = { estimateId: 'e-1', customerId: 'c-1', serviceFamily: 'pest_control', pattern: 'monthly',
+      expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', appointmentIds: ['s-1'] };
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
+    makeDbMock();
+    expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleGaps: 1, acceptedScheduleCheckFailed: false, alerted: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true,
+      link: '/admin/customers?customerId=c-1', metadata: { dedupeKey: 'accepted-schedule:e-1:pest_control:evidence-1' } });
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
+    makeDbMock({ alertedKeys: new Set(['accepted-schedule:e-1:pest_control:evidence-1']) });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0 });
+  });
+
+  test('an unavailable acceptance check is reported while existing checks keep running', async () => {
+    findAcceptedRecurringScheduleGaps.mockRejectedValueOnce(new Error('read failed'));
+    makeDbMock({ staleRows: [staleVisit()] });
+    expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleCheckFailed: true, alerted: 1 });
   });
 });

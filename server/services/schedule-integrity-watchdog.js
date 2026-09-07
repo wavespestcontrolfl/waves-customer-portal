@@ -9,7 +9,7 @@
  * past-dated visits parked in on_site/en_route the same way. Nothing in the
  * portal surfaces either state; both classes silently cost money.
  *
- * Three exception classes, one pager:
+ * Exception classes, one pager:
  *  1. STALE IN-PROGRESS — a visit whose scheduled_date is before today (ET)
  *     still sitting in on_site/en_route. The tech went out; the completion
  *     never happened in the system.
@@ -24,6 +24,10 @@
  *     no coordinates / lead-stage / inactive). The email's audience is
  *     computed at send time via the same predicate this check reuses, so
  *     adds and drops are automatic — only prerequisite failures page.
+ *  4. ACCEPTED PLAN GAPS — missing recurrence, applications or matching
+ *     cadence/property evidence, starting from the accepted estimate.
+ *  5. PREPAY COVERAGE GAPS — annual stamps the completion validator cannot
+ *     verify, or an unstamped child present during a recorded series payment.
  *
  * Alerting mirrors call-booking-miss-watchdog: one bell per subject, deduped
  * forever via the notifications metadata dedupeKey, with a per-run cap so
@@ -34,6 +38,7 @@
  */
 
 const db = require('../models/db');
+const { createHash } = require('node:crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { etDateString } = require('../utils/datetime-et');
@@ -105,6 +110,18 @@ function hasAnnualPrepaidStamp(row) {
     && row?.prepaid_method === ANNUAL_PREPAY_METHOD;
 }
 
+function hasMissingManualSeriesStamp(row) {
+  // Extensions made AFTER the payment are not assumed covered. The manual
+  // series writer only allocates over the visits present when it runs.
+  return !!row?.recurring_parent_id && row.is_recurring === true
+    && row.parent_series_payment_evidence === true
+    && Number(row.parent_prepaid_amount) > 0
+    && row.parent_prepaid_method !== ANNUAL_PREPAY_METHOD
+    && !(Number(row.prepaid_amount) > 0)
+    && row.parent_prepaid_at != null && row.created_at != null
+    && new Date(row.created_at).getTime() <= new Date(row.parent_prepaid_at).getTime();
+}
+
 function isUnpricedSeriesVisit(row) {
   if (!row) return false;
   if (rowHasPrice(row)) return false;
@@ -165,30 +182,67 @@ async function runInner({ now = new Date() } = {}) {
   const horizon = new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 24 * 3600 * 1000);
   const upcomingRows = await db('scheduled_services as ss')
     .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
+    .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.id', 'ss.annual_prepay_term_id')
+    .leftJoin('invoices as prepay_invoice', 'prepay_invoice.id', 'prepay_term.prepay_invoice_id')
     .whereNotIn('ss.status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
     .where('ss.scheduled_date', '>=', todayET)
     .where('ss.scheduled_date', '<=', etDateString(horizon))
     .where(function whereRecurring() {
-      this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_parent_id');
+      this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_parent_id')
+        .orWhere('ss.prepaid_method', ANNUAL_PREPAY_METHOD);
     })
     .select(
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
       'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount',
       'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.recurring_parent_id',
+      'ss.created_at',
+      db.raw('ss.xmin::text as row_revision'),
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',
+      'parent.prepaid_amount as parent_prepaid_amount',
+      'parent.prepaid_method as parent_prepaid_method',
+      'parent.prepaid_at as parent_prepaid_at',
+      db.raw('parent.xmin::text as parent_row_revision'),
+      // Fingerprints only: coverage authority remains annualPrepayCoversVisit.
+      // Include funding revisions so a repaired term can alert again after
+      // a later refund/void even when best-effort visit cleanup did not run.
+      db.raw(`jsonb_build_array(prepay_term.id, prepay_term.customer_id, prepay_term.status,
+        prepay_term.coverage_service_type, prepay_term.renewal_decision,
+        prepay_term.xmin::text) as prepay_term_evidence`),
+      db.raw(`jsonb_build_array(prepay_invoice.id, prepay_invoice.status,
+        prepay_invoice.paid_at, prepay_invoice.xmin::text) as prepay_invoice_evidence`),
+      db.raw(`(SELECT jsonb_agg(jsonb_build_array(p.id, p.status, p.refund_status,
+          p.xmin::text) ORDER BY p.id)
+        FROM payments p
+        WHERE (p.stripe_payment_intent_id IS NOT NULL
+          AND p.stripe_payment_intent_id = prepay_invoice.stripe_payment_intent_id)
+          OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = prepay_invoice.stripe_charge_id)
+      ) as prepay_payment_evidence`),
+      // Parent-only payment is a legitimate single-visit action. A sibling
+      // sharing the writer's exact prepaid_at stamp establishes series scope.
+      db.raw(`EXISTS (SELECT 1 FROM scheduled_services paid_sibling
+        WHERE paid_sibling.recurring_parent_id = parent.id
+          AND paid_sibling.customer_id = ss.customer_id
+          AND paid_sibling.prepaid_at = parent.prepaid_at
+          AND paid_sibling.prepaid_method IS NOT DISTINCT FROM parent.prepaid_method
+          AND paid_sibling.prepaid_amount > 0) as parent_series_payment_evidence`),
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date"),
     )
     .orderBy('ss.scheduled_date', 'asc');
   const unpricedByRoot = new Map();
+  const prepayGaps = [];
   // Same validator the completion-billing gate uses (fail-closed): an
   // annual-prepay stamp suppresses only when its linked term is live,
   // customer-matched, and coverage-service-matched. Lazy require mirrors the
   // feature-gates pattern and keeps module load light.
   const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
   for (const row of upcomingRows) {
+    const annualStamp = row.prepaid_method === ANNUAL_PREPAY_METHOD;
+    const annualCovered = annualStamp && await annualPrepayCoversVisit(row, db);
+    if (annualStamp && !annualCovered) prepayGaps.push({ row, issue: 'annual_coverage_unverified' });
+    if (hasMissingManualSeriesStamp(row)) prepayGaps.push({ row, issue: 'manual_series_stamp_missing' });
     if (!isUnpricedSeriesVisit(row)) continue;
-    if (hasAnnualPrepaidStamp(row) && await annualPrepayCoversVisit(row, db)) continue;
+    if (annualCovered) continue;
     const root = seriesRootId(row);
     if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
   }
@@ -225,17 +279,51 @@ async function runInner({ now = new Date() } = {}) {
   // complete and invoice at $0 today), while the stale backlog is historic
   // and safely drains across ticks. On first enable the 89-row stale backlog
   // would otherwise consume the whole per-run cap for days and starve these.
-  for (const [root, v] of unpricedByRoot) {
-    if (capped()) break;
+  const alerts = Array.from(unpricedByRoot, ([root, v]) => {
     const d = v.service_date;
-    await ring(
+    return [
       `unpriced-series:${root}`,
       `Recurring ${v.service_type || 'service'} has no price — next visit ${d}`,
       `The recurring ${v.service_type || 'service'} series has no price on any row (parent or child). ` +
       `Its next visit is ${d}; it will complete and invoice at $0 unless the series is priced first.`,
       { scheduled_service_id: v.id, series_root_id: root, customer_id: v.customer_id || null, next_visit_date: d },
-    );
+    ];
+  });
+
+  alerts.push(...prepayGaps.map(({ row, issue }) => {
+    const evidenceKey = createHash('sha256').update(JSON.stringify([
+      row.row_revision, row.service_type, row.prepaid_amount, row.prepaid_method, row.annual_prepay_term_id,
+      row.parent_prepaid_amount, row.parent_prepaid_method, row.parent_prepaid_at, row.parent_row_revision,
+      row.prepay_term_evidence, row.prepay_invoice_evidence, row.prepay_payment_evidence,
+    ])).digest('hex').slice(0, 20);
+    return [
+      `prepay-coverage:${row.id}:${issue}:${evidenceKey}`,
+      `Prepaid coverage needs review before ${row.service_date}`,
+      issue === 'annual_coverage_unverified'
+        ? 'This visit carries an annual-prepay stamp that the completion coverage check cannot validate. Reconcile the payment, term and covered service before billing; a stamp alone does not prove payment.'
+        : 'This recurring child existed when its parent and siblings received the same manual series-payment stamp, but has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
+      { scheduled_service_id: row.id, customer_id: row.customer_id, issue },
+    ];
+  }));
+
+  let acceptedGaps = [];
+  let acceptedScheduleCheckFailed = false;
+  try {
+    acceptedGaps = await require('./recurring-schedule-audit').findAcceptedRecurringScheduleGaps({ now });
+  } catch (err) {
+    acceptedScheduleCheckFailed = true;
+    logger.error(`[schedule-integrity] accepted-plan check failed: ${err.message}`);
   }
+  alerts.push(...acceptedGaps.map((gap) => [
+      `accepted-schedule:${gap.estimateId}:${gap.serviceFamily}:${gap.evidenceKey}`,
+      'Accepted recurring plan needs schedule review',
+      `The accepted ${gap.serviceFamily.replace(/_/g, ' ')} plan calls for ${gap.pattern.replace(/_/g, ' ')} service (${gap.expectedVisits} applications). ` +
+        `The linked schedule has ${gap.recordedVisits} working/completed applications. Review: ${gap.issues.map((issue) => issue.replace(/_/g, ' ')).join('; ')}. ` +
+        'Check any later amendment or cancellation before changing appointments or prices.',
+      { estimate_id: gap.estimateId, customer_id: gap.customerId, issues: gap.issues,
+        expected_pattern: gap.pattern, expected_visits: gap.expectedVisits, appointment_ids: gap.appointmentIds },
+      { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}` },
+  ]));
 
   // Class 3 — recurring-lawn customers invisible to the Monday irrigation
   // email (owner directive 2026-08-05: check daily). The email's audience is
@@ -260,8 +348,7 @@ async function runInner({ now = new Date() } = {}) {
     lawnGapCheckFailed = true;
     logger.error(`[schedule-integrity] lawn-email audience-gap check failed: ${e.message}`);
   }
-  for (const g of lawnGaps) {
-    if (capped()) break;
+  alerts.push(...lawnGaps.map((g) => {
     if (g.kind === 'unstamped_member') {
       // Stamping alone only helps if the sender's other prerequisites hold —
       // the leg validates them too (codex #3341 r1 P2), so one card lists
@@ -271,7 +358,7 @@ async function runInner({ now = new Date() } = {}) {
       // (codex #3341 r3 P2): alreadyAlerted has no expiry, so a customer
       // fixed once and regressed later — new one-time booking after the
       // stamped series was cancelled — must mint a NEW key and page again.
-      await ring(
+      return [
         `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}${g.triggerVisitId ? `:${g.triggerVisitId}` : ''}`,
         `${g.name || 'A recurring member'}'s lawn visits aren't stamped as a recurring series`,
         `${g.name || 'This customer'} was enrolled as a recurring member and has lawn service on the ` +
@@ -283,10 +370,9 @@ async function runInner({ now = new Date() } = {}) {
           : ' and they are included automatically next Monday.'),
         { customer_id: g.customerId, fixable: g.fixable },
         { link: `/admin/customers?customerId=${encodeURIComponent(g.customerId)}` },
-      );
-      continue;
+      ];
     }
-    await ring(
+    return [
       `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}`,
       `${g.name || 'A recurring-lawn customer'} is missing from the Monday watering email`,
       `${g.name || 'This customer'} has live recurring lawn service but cannot receive the Monday ` +
@@ -299,20 +385,24 @@ async function runInner({ now = new Date() } = {}) {
       // the SPA registers no path route for a bare id — CustomersPageV2
       // opens Customer 360 from the customerId query param (Codex #3215).
       { link: `/admin/customers?customerId=${encodeURIComponent(g.customerId)}` },
-    );
-  }
+    ];
+  }));
 
-  for (const v of stale) {
-    if (capped()) break;
+  alerts.push(...stale.map((v) => {
     const d = v.service_date;
-    await ring(
+    return [
       `stale-visit:${v.id}`,
       `Visit stuck ${v.status} since ${d} — never completed`,
       `${v.service_type || 'A visit'} on ${d} is still "${v.status}". If it was performed, complete it so the ` +
       'service record, invoice, and report fire; if it never happened, cancel it from admin dispatch ' +
       '(admin path — not the customer app).',
       { scheduled_service_id: v.id, customer_id: v.customer_id || null, stale_status: v.status, service_date: d },
-    );
+    ];
+  }));
+
+  for (const alert of alerts) {
+    if (capped()) break;
+    await ring(...alert);
   }
 
   return {
@@ -322,11 +412,15 @@ async function runInner({ now = new Date() } = {}) {
     unpricedSeries: unpricedByRoot.size,
     lawnEmailGaps: lawnGaps.length,
     lawnGapCheckFailed,
+    acceptedScheduleGaps: acceptedGaps.length,
+    acceptedScheduleCheckFailed,
+    prepayCoverageGaps: prepayGaps.length,
     alerted,
   };
 }
 
 module.exports = {
+  hasMissingManualSeriesStamp,
   runScheduleIntegrityWatchdog,
   runInner,
   rowHasPrice,
