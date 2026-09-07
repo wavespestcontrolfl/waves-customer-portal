@@ -112,7 +112,9 @@ async function catalogue() {
   return {templates:tables.sms_templates, migrations:files, events};
 }
 if (require.main === module) catalogue().then(result => {
-  const out=path.join(__dirname,'sms-template-audit-2026-09-07-catalogue.json');
+  const outDir=path.join(root,'.tmp/sms-audit');
+  fs.mkdirSync(outDir,{recursive:true});
+  const out=path.join(outDir,'catalogue.json');
   fs.writeFileSync(out,JSON.stringify(result,null,2)+'\n');
   console.log(JSON.stringify({templates:result.templates.length,migrations:result.migrations.length,out}));
 }).catch(e => { console.error(e.message); process.exitCode=1; });

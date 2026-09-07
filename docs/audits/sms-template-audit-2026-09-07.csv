@@ -4,20 +4,18 @@
 Reschedule here: portal.wavespestcontrol.com/l/abcdefghjk","Hello Testname! Your Quarterly Pest Control is confirmed for September 15 at 9:00 AM.
 
 Reschedule here: portal.wavespestcontrol.com/l/abcdefghjk"
-"sms_templates","reminder_72h","appointments","true","1","1","3","3","3","3","149","0","20260801000001_sms_house_voice_sweep.js","Hello Testname! Your Quarterly Pest Control is this Tuesday, between 9:00 AM and 11:00 AM.
+"sms_templates","reminder_72h","appointments","true","1","1","3","3","3","3","149","12","20260907000070_shorten_long_sms_templates.js","Hello Testname! Your Quarterly Pest Control is this Tuesday, between 9:00 AM and 11:00 AM.
 
-Reschedule here: portal.wavespestcontrol.com/l/abcdefghjk","Hello Testname! Your Quarterly Pest Control is this Tuesday, between 9:00 AM and 11:00 AM.
+Reschedule here: portal.wavespestcontrol.com/l/abcdefghjk","Hello Testname! Quarterly Pest Control: Tuesday, between 9:00 AM and 11:00 AM.
 
 Reschedule here: portal.wavespestcontrol.com/l/abcdefghjk"
-"sms_templates","reminder_24h","appointments","true","2","2","3","3","4","4","254","0","20260730000020_sms_template_audit.js","Hello Testname! Reminder: your Quarterly Pest Control with Waves is tomorrow at 9:00 AM. Your technician will arrive within a two-hour window and text when 15 minutes out.
+"sms_templates","reminder_24h","appointments","true","2","1","3","3","4","3","254","116","20260907000070_shorten_long_sms_templates.js","Hello Testname! Reminder: your Quarterly Pest Control with Waves is tomorrow at 9:00 AM. Your technician will arrive within a two-hour window and text when 15 minutes out.
 
 Reschedule here: portal.wavespestcontrol.com/l/abcdefghjk
 
-Questions? Reply here.","Hello Testname! Reminder: your Quarterly Pest Control with Waves is tomorrow at 9:00 AM. Your technician will arrive within a two-hour window and text when 15 minutes out.
+Questions? Reply here.","Hello Testname! Quarterly Pest Control: tomorrow, between 9:00 AM and 11:00 AM.
 
-Reschedule here: portal.wavespestcontrol.com/l/abcdefghjk
-
-Questions? Reply here."
+Reschedule here: portal.wavespestcontrol.com/l/abcdefghjk"
 "sms_templates","service_complete","service-reports","true","1","1","1","1","1","1","86","0","20260808060000_remove_reservice_line_sms_templates.js","Hello Testname! Your service report is ready: portal.wavespestcontrol.com/l/abcdefghjk","Hello Testname! Your service report is ready: portal.wavespestcontrol.com/l/abcdefghjk"
 "sms_templates","invoice_sent","invoices","true","1","1","1","1","2","2","141","0","20260801000001_sms_house_voice_sweep.js","Hello Testname! Your invoice for Quarterly Pest Control on September 15 is ready: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk","Hello Testname! Your invoice for Quarterly Pest Control on September 15 is ready: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk"
 "sms_templates","payment_failed","invoices","true","2","2","2","2","2","2","244","0","20260730000020_sms_template_audit.js","Hello Testname! Your payment for Quarterly Pest Control completed on September 15 did not go through. Please update your payment method or pay here: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk
@@ -151,11 +149,11 @@ Reply STOP to opt out.","No pressure, Testname. If you have a minute, your revie
 
 Reply STOP to opt out."
 "sms_templates","health_retention_offer","system","false","1","1","1","1","1","1","127","0","20260730000020_sms_template_audit.js","Hello Testname! Adam from Waves. We value your business and want to make sure service is working for you. Open to a quick call?","Hello Testname! Adam from Waves. We value your business and want to make sure service is working for you. Open to a quick call?"
-"sms_templates","service_complete_with_invoice","service-reports","true","2","2","3","3","3","3","189","0","20260815000010_past_due_line_sms_templates.js","Hello Testname! Your Quarterly Pest Control report is ready: portal.wavespestcontrol.com/l/abcdefghjk
+"sms_templates","service_complete_with_invoice","service-reports","true","2","1","3","2","3","3","189","32","20260907000070_shorten_long_sms_templates.js","Hello Testname! Your Quarterly Pest Control report is ready: portal.wavespestcontrol.com/l/abcdefghjk
 
-Invoice for today's visit: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk","Hello Testname! Your Quarterly Pest Control report is ready: portal.wavespestcontrol.com/l/abcdefghjk
+Invoice for today's visit: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk","Hello Testname! Quarterly Pest Control report: portal.wavespestcontrol.com/l/abcdefghjk
 
-Invoice for today's visit: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk"
+Invoice: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk"
 "sms_templates","autopay_charge_success","autopay","false","1","1","1","1","2","2","152","0","20260801000001_sms_house_voice_sweep.js","Hello Testname! Your WaveGuard monthly payment of $100.00 went through. Thank you.
 
 Receipt: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk","Hello Testname! Your WaveGuard monthly payment of $100.00 went through. Thank you.
@@ -345,11 +343,11 @@ We'll remind you before each visit.","Hello Testname! Your recurring appointment
 
 We'll remind you before each visit."
 "sms_templates","service_report_v1","service-reports","true","1","1","1","1","2","2","101","0","20260808060000_remove_reservice_line_sms_templates.js","Hello Testname! Your Quarterly Pest Control report is ready: portal.wavespestcontrol.com/l/abcdefghjk","Hello Testname! Your Quarterly Pest Control report is ready: portal.wavespestcontrol.com/l/abcdefghjk"
-"sms_templates","service_report_v1_with_invoice","service-reports","true","2","2","3","3","3","3","189","0","20260815000010_past_due_line_sms_templates.js","Hello Testname! Your Quarterly Pest Control report is ready: portal.wavespestcontrol.com/l/abcdefghjk
+"sms_templates","service_report_v1_with_invoice","service-reports","true","2","1","3","2","3","3","189","32","20260907000070_shorten_long_sms_templates.js","Hello Testname! Your Quarterly Pest Control report is ready: portal.wavespestcontrol.com/l/abcdefghjk
 
-Invoice for today's visit: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk","Hello Testname! Your Quarterly Pest Control report is ready: portal.wavespestcontrol.com/l/abcdefghjk
+Invoice for today's visit: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk","Hello Testname! Quarterly Pest Control report: portal.wavespestcontrol.com/l/abcdefghjk
 
-Invoice for today's visit: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk"
+Invoice: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk"
 "sms_templates","project_report_ready","service-reports","true","1","1","1","1","1","1","86","0","20260801000001_sms_house_voice_sweep.js","Hello Testname! Your termite report is ready: portal.wavespestcontrol.com/l/abcdefghjk","Hello Testname! Your termite report is ready: portal.wavespestcontrol.com/l/abcdefghjk"
 "sms_templates","service_request_confirmation","requests","true","1","1","1","1","1","1","134","0","20260808020000_service_request_confirmation_copy.js","Hello Testname! We got your re-service request and will review it within 1 business day. We'll follow up as soon as we've reviewed it.","Hello Testname! We got your re-service request and will review it within 1 business day. We'll follow up as soon as we've reviewed it."
 "sms_templates","lawn_health_report_ready","service-reports","true","1","1","2","2","2","2","123","0","20260801000001_sms_house_voice_sweep.js","Hello Testname! Your lawn health report is ready. You scored 85/100.
@@ -472,11 +470,11 @@ Receipt: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk","Hello Tes
 Your Quarterly Pest Control report: portal.wavespestcontrol.com/l/abcdefghjk
 
 Receipt: portal.wavespestcontrol.com/l/xxxxxxxxxxxxx-0915-abcdefghjk"
-"sms_templates","secure_appointment_card","billing","true","2","2","2","2","3","3","221","0","20260812000010_shorten_secure_card_invite_sms.js","Hi Testname! To finish booking your Quarterly Pest Control on September 15, add a card on file: portal.wavespestcontrol.com/l/abcdefghjk
+"sms_templates","secure_appointment_card","billing","true","2","2","2","2","3","3","238","0","20260812000010_shorten_secure_card_invite_sms.js","Hi Testname! To finish booking your Quarterly Pest Control on September 15, add a card on file: portal.wavespestcontrol.com/secure/aaaaaaaaaaaaaaaaaaaaaa
 
 Nothing is charged today, only after service.
 
-We never take card numbers by phone.","Hi Testname! To finish booking your Quarterly Pest Control on September 15, add a card on file: portal.wavespestcontrol.com/l/abcdefghjk
+We never take card numbers by phone.","Hi Testname! To finish booking your Quarterly Pest Control on September 15, add a card on file: portal.wavespestcontrol.com/secure/aaaaaaaaaaaaaaaaaaaaaa
 
 Nothing is charged today, only after service.
 
@@ -492,19 +490,20 @@ Pay here: portal.wavespestcontrol.com/billing"
 Reply YES to confirm, STOP to opt out, HELP for help. Msg frequency varies. Msg & data rates may apply.","Hello Testname! Testname added you to receive appointment and service texts from Waves Pest Control for 100 Example Street.
 
 Reply YES to confirm, STOP to opt out, HELP for help. Msg frequency varies. Msg & data rates may apply."
-"sms_templates","secure_appointment_card_plans","billing","true","2","2","3","3","3","3","288","0","20260811000010_secure_card_plan_choice_spacing.js","Hi Testname! To finish booking your Quarterly Pest Control on September 15, choose how to pay: prepay the year and save, or pay per application with a card on file.
+"sms_templates","secure_appointment_card_plans","billing","true","2","2","3","3","3","3","305","51","20260907000070_shorten_long_sms_templates.js","Hi Testname! To finish booking your Quarterly Pest Control on September 15, choose how to pay: prepay the year and save, or pay per application with a card on file.
 
-Nothing is charged today unless you prepay: portal.wavespestcontrol.com/l/abcdefghjk
+Nothing is charged today unless you prepay: portal.wavespestcontrol.com/secure/aaaaaaaaaaaaaaaaaaaaaa
 
-We never take card numbers by phone.","Hi Testname! To finish booking your Quarterly Pest Control on September 15, choose how to pay: prepay the year and save, or pay per application with a card on file.
+We never take card numbers by phone.","Hello Testname! Quarterly Pest Control on September 15: prepay the year and save, or pay per application by card.
 
-Nothing is charged today unless you prepay: portal.wavespestcontrol.com/l/abcdefghjk
+portal.wavespestcontrol.com/secure/aaaaaaaaaaaaaaaaaaaaaa
+Nothing is charged today unless you prepay.
 
 We never take card numbers by phone."
 "sms_templates","rain_out_moved_v3","service","true","2","2","2","2","2","2","166","0","20260810000060_stop_line_off_customer_transactional.js","Hi Testname, rain is expected, so we moved your Quarterly Pest Control to Tuesday, September 15, 9:00 AM - 11:00 AM. Details: portal.wavespestcontrol.com/l/abcdefghjk","Hi Testname, rain is expected, so we moved your Quarterly Pest Control to Tuesday, September 15, 9:00 AM - 11:00 AM. Details: portal.wavespestcontrol.com/l/abcdefghjk"
-"sms_templates","reminder_24h_v2","service","true","1","1","3","3","3","3","157","0","20260801000010_appointment_page_sms_templates.js","Hello Testname! Your Quarterly Pest Control is tomorrow, between 9:00 AM and 11:00 AM.
+"sms_templates","reminder_24h_v2","service","true","1","1","3","3","3","3","157","7","20260907000070_shorten_long_sms_templates.js","Hello Testname! Your Quarterly Pest Control is tomorrow, between 9:00 AM and 11:00 AM.
 
-Everything about your visit: portal.wavespestcontrol.com/l/abcdefghjk","Hello Testname! Your Quarterly Pest Control is tomorrow, between 9:00 AM and 11:00 AM.
+Everything about your visit: portal.wavespestcontrol.com/l/abcdefghjk","Hello Testname! Quarterly Pest Control: tomorrow, between 9:00 AM and 11:00 AM.
 
 Everything about your visit: portal.wavespestcontrol.com/l/abcdefghjk"
 "sms_templates","appointment_confirmation_v2","service","true","2","2","2","2","2","2","172","0","20260810000060_stop_line_off_customer_transactional.js","Hello Testname! Your Quarterly Pest Control is booked for September 15, between 9:00 AM and 11:00 AM.
@@ -527,9 +526,20 @@ We've moved your Quarterly Pest Control to Tuesday, September 15, 9:00 AM - 11:0
 "sms_templates","service_resolution_confirmation","automations","true","1","1","1","1","1","1","139","0","20260831000040_cancellation_scoped_sms_template.js","Hello Testname! Done: Your pest control service is paused. Reference DEMO1234. Nothing else about your plan changes. Questions? Reply here.","Hello Testname! Done: Your pest control service is paused. Reference DEMO1234. Nothing else about your plan changes. Questions? Reply here."
 "sms_templates","plan_hold_resume_reminder","automations","true","1","1","1","1","1","1","136","0","20260831000040_cancellation_scoped_sms_template.js","Hello Testname! Your Pest Control hold ends October 15 and visits restart then. Want a different date, or to cancel instead? Reply here.","Hello Testname! Your Pest Control hold ends October 15 and visits restart then. Want a different date, or to cancel instead? Reply here."
 "sms_templates","service_cancellation_end_of_term_confirmation","automations","true","2","2","2","2","2","2","272","0","20260831000070_cancellation_end_of_term_sms_template.js","Hello Testname! Your Waves plan is cancelled and will not renew. Paid-for visits stay on the calendar through September 15, 2026; after that nothing new is scheduled or charged. Charges for completed visits remain payable. Changed your mind or have a question? Reply here.","Hello Testname! Your Waves plan is cancelled and will not renew. Paid-for visits stay on the calendar through September 15, 2026; after that nothing new is scheduled or charged. Charges for completed visits remain payable. Changed your mind or have a question? Reply here."
-"sms_templates","autopay_setup_link","billing","false","2","2","2","2","3","3","256","0","20260903000040_autopay_setup_link_template_lane_neutral.js","Hi Testname! Set up Auto Pay for your Waves service here: portal.wavespestcontrol.com/l/abcdefghjk
-Save a payment method and each completed service is paid automatically. Nothing is charged today. We never take card numbers by phone. Reply STOP to opt out.","Hi Testname! Set up Auto Pay for your Waves service here: portal.wavespestcontrol.com/l/abcdefghjk
+"sms_templates","autopay_setup_link","billing","false","2","2","2","2","3","3","273","0","20260903000040_autopay_setup_link_template_lane_neutral.js","Hi Testname! Set up Auto Pay for your Waves service here: portal.wavespestcontrol.com/secure/aaaaaaaaaaaaaaaaaaaaaa
+Save a payment method and each completed service is paid automatically. Nothing is charged today. We never take card numbers by phone. Reply STOP to opt out.","Hi Testname! Set up Auto Pay for your Waves service here: portal.wavespestcontrol.com/secure/aaaaaaaaaaaaaaaaaaaaaa
 Save a payment method and each completed service is paid automatically. Nothing is charged today. We never take card numbers by phone. Reply STOP to opt out."
+"sms_templates","auto_prep_guide_link","onboarding","true","2","2","2","2","2","2","256","0","20260904000001_seed_prep_guide_link_sms.js","Hello Testname! Your Pest Control prep guide is here: portal.wavespestcontrol.com/prep/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+Please read it before your visit so everything goes as smoothly as possible.
+
+Questions or requests? Reply here. Reply STOP to opt out.","Hello Testname! Your Pest Control prep guide is here: portal.wavespestcontrol.com/prep/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+Please read it before your visit so everything goes as smoothly as possible.
+
+Questions or requests? Reply here. Reply STOP to opt out."
+"sms_templates","auto_sprinkler_timer","onboarding","true","3","2","3","2","3","2","328","102","20260907000070_shorten_long_sms_templates.js","Hello Testname! Here's a short guide for running your sprinklers by hand from your Monday watering plan - find the brand on your timer box, tap it, and follow the photos: https://www.wavespestcontrol.com/sprinkler-timers/ Stuck? Reply here with a photo of your timer and we'll point you to the right page. Reply STOP to opt out.","Hello Testname! Run your sprinklers by hand for your Monday watering plan: www.wavespestcontrol.com/sprinkler-timers/ Tap your timer brand and follow the photos. Stuck? Reply with a timer photo for help. Reply STOP to opt out."
+"sms_templates","appointment_recurring_placement_confirmed","service","true","2","2","2","2","2","2","247","0","20260906000040_recurring_dispatch_sms.js","Hello Testname! Your next Waves visit is set for September 15 between 9:00 AM and 11:00 AM. Later visits will be arranged within 3 days of each new due date. Existing commitments stay unchanged until we review them with you. Reply STOP to opt out.","Hello Testname! Your next Waves visit is set for September 15 between 9:00 AM and 11:00 AM. Later visits will be arranged within 3 days of each new due date. Existing commitments stay unchanged until we review them with you. Reply STOP to opt out."
 "code-registry","friendly_ask","review-outreach","","1","1","1","1","2","2","146","8","server/services/review-outreach-templates.js","Hey Testname! Adam with Waves here. If we earned it, a quick Google review would mean the world:
 
 https://portal.wavespestcontrol.com/l/abcdefghjk","Hey Testname! Adam with Waves here. If we earned it, a quick Google review would mean the world:

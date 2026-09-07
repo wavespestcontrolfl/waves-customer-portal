@@ -7,12 +7,15 @@ const { stripSmsUrlScheme } = require('../../server/services/messaging/sms-link-
 const { countSegments } = require('../../server/services/messaging/segment-counter');
 const { formatSmsTemplateVars } = require('../../server/utils/sms-time-format');
 const { OUTREACH_TEMPLATES, renderOutreachBody } = require('../../server/services/review-outreach-templates');
+const { _SWAPS: copySwaps } = require('../../server/models/migrations/20260907000070_shorten_long_sms_templates');
+const originalBodies = new Map(copySwaps.map(([key, before]) => [key, before]));
 const base = 'https://portal.wavespestcontrol.com';
 const short = `${base}/l/abcdefghjk`;
 // Same length and shape as an invoice-number/date-prefixed short code;
 // these are synthetic placeholders, never live invoice identifiers.
 const invoiceShort = `${base}/l/xxxxxxxxxxxxx-0915-abcdefghjk`;
 const vars = {
+  prep_label:'Pest Control', prep_url:`${base}/prep/${'a'.repeat(32)}`,
   first_name:'Testname', account_first_name:'Testname', recipient_first_name:'Testname', referee_name:'Testname', referrer_name:'Testname',
   first:'Testname', name:'Testname', tech:'Tech', tech_name:'Tech',
   service_type:'Quarterly Pest Control', service:'Pest Control', service_label:'Quarterly Pest Control', service_name:'Lawn Care', invoice_title:'Quarterly Pest Control',
@@ -29,7 +32,7 @@ const vars = {
   appointment_line:`Everything about your visit: ${short}\n\n`, reschedule_line:`Reschedule here: ${short}\n\n`, track_clause:`Track live: ${short}\n\n`, eta_line:'About 15 minutes away.\n\n',
   link_clause:` Details: ${short}`, receipt_line:`\n\nReceipt: ${invoiceShort}`, service_date_clause:' on September 15', date_line:' on September 15', first_visit_clause:' Your first visit is September 15.',
   address_clause:'', alt_clause:'', better_day_clause:'', callback_clause:'', cancel_fee_line:'', card_hold_policy_line:'', card_line:'', charge_note:'', delta_line:'', efficacy_clause:'', forecast_clause:'', last_service_sentence:'', past_due_line:'', tip_line:'',
-  billing_url:`${base}/billing`, portal_url:short, report_url:short, price_change_url:short, quote_url:short, estimate_url:short, booking_url:short, referral_link:short, secure_link:short,
+  billing_url:`${base}/billing`, portal_url:short, report_url:short, price_change_url:short, quote_url:short, estimate_url:short, booking_url:short, referral_link:short, secure_link:`${base}/secure/${'a'.repeat(22)}`,
   pay_link:invoiceShort, pay_url:invoiceShort, receipt_url:invoiceShort, update_card_url:`${base}/billing`, review_url:short, google_review_url:'https://g.page/r/abcdefghijklmnop/review',
 };
 const expanded = {
@@ -62,9 +65,9 @@ function render(body, values) {
     return formatted[key];
   });
 }
-function describe(raw, templatePath) {
+function describe(raw, templatePath, originalRaw = raw) {
   const tidy = s => templatePath ? s.replace(/\n{3,}/g,'\n\n').trim() : s;
-  const before = normalizeGsmPunctuation(tidy(templatePath ? oldStrip(raw) : raw));
+  const before = normalizeGsmPunctuation(tidy(templatePath ? oldStrip(originalRaw) : originalRaw));
   const after = normalizeGsmPunctuation(tidy(stripSmsUrlScheme(raw)));
   return { before:countSegments(before), after:countSegments(after), beforeText:before, afterText:after, savedCharacters:before.length-after.length };
 }
@@ -74,7 +77,7 @@ function dist(rows, scenario, state) {
 (async()=>{
   const model=await catalogue();
   const rows=model.templates.map(t=>({key:t.template_key, category:t.category, source:t._bodySource||t._source, sourceEnabled:t.is_active, scope:'sms_templates', template:t.body,
-    standard:describe(render(t.body,vars),true), expanded:describe(render(t.body,expanded),true), fallback:describe(render(t.body,longLinks),true)}));
+    standard:describe(render(t.body,vars),true,render(originalBodies.get(t.template_key)||t.body,vars)), expanded:describe(render(t.body,expanded),true,render(originalBodies.get(t.template_key)||t.body,expanded)), fallback:describe(render(t.body,longLinks),true,render(originalBodies.get(t.template_key)||t.body,longLinks))}));
   const outreach=OUTREACH_TEMPLATES.map(t=>({key:t.id,category:'review-outreach',scope:'code-registry',source:'server/services/review-outreach-templates.js',template:t.body,
     standard:describe(renderOutreachBody(t.body,vars),false), expanded:describe(renderOutreachBody(t.body,expanded),false),fallback:describe(renderOutreachBody(t.body,longLinks),false)}));
   const summary={templates:rows.length,sourceEnabled:rows.filter(r=>r.sourceEnabled).length,outreachTemplates:outreach.length};
@@ -83,7 +86,9 @@ function dist(rows, scenario, state) {
     for(const scenario of ['standard','expanded','fallback']) summary[scope][scenario]={before:dist(set,scenario,'before'),after:dist(set,scenario,'after')};
   }
   const result={asOf:'2026-09-07',scope:'OFFLINE SOURCE MODEL, NOT LIVE DATABASE OR SENT-MESSAGE COUNTS',summary,variables:{standard:vars,expanded,fallback:longLinks},rows,outreach};
-  fs.writeFileSync(path.join(__dirname,'sms-template-audit-2026-09-07-evidence.json'),JSON.stringify(result,null,2)+'\n');
+  const evidenceDir = path.resolve(__dirname, '../../.tmp/sms-audit');
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  fs.writeFileSync(path.join(evidenceDir, 'evidence.json'),JSON.stringify(result,null,2)+'\n');
   const quote=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
   const csv=[['scope','template_key','category','source_enabled','standard_segments_current','standard_segments_after','expanded_segments_current','expanded_segments_after','fallback_segments_current','fallback_segments_after','standard_slots_current','standard_characters_saved','source','standard_render_current','standard_render_after']];
   for(const r of [...rows,...outreach]) csv.push([r.scope,r.key,r.category,r.sourceEnabled,r.standard.before.segmentCount,r.standard.after.segmentCount,r.expanded.before.segmentCount,r.expanded.after.segmentCount,r.fallback.before.segmentCount,r.fallback.after.segmentCount,r.standard.before.gsmSlotCount,r.standard.savedCharacters,r.source,r.standard.beforeText,r.standard.afterText]);
