@@ -513,6 +513,9 @@ describe('closeout-status: grouped summary evidence', () => {
     [['unknown_delivery', 'suppressed'], 'unknown'],
     [['suppressed', 'suppressed'], 'not_required'],
     [['failed', 'claimed'], 'pending'],
+    [['unknown_delivery', 'failed'], 'pending'],
+    [['claimed', 'unknown_delivery'], 'pending'],
+    [['unknown_delivery'], 'pending'],
   ])('uses the packet delivery outcomes %j for the member report', (statuses, expected) => {
     const { facts } = deriveCloseoutFacts(closedOutInputs({ delivery: null,
       visitSummaryEffects: statuses.map((status, index) => ({ effect_type: index ? 'completion_email' : 'completion_sms', status })),

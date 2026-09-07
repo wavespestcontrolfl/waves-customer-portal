@@ -88,6 +88,66 @@ async function getVisitCompletionSummary(token, database = db) {
   };
 }
 
+// Queue ownership and the visit marker commit together. Packet recovery then
+// waits on this row; only the existing scheduled-SMS worker dispatches it.
+async function deferSummarySms({ visit, customer, recipient, body, claim, nextAllowedAt }) {
+  await db.transaction(async (trx) => {
+    const owned = await trx('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
+      claim_token: claim.token }).whereIn('status', ['claimed', 'unknown_delivery'])
+      .update({ status: 'pending', scheduled_at: new Date(nextAllowedAt), updated_at: trx.fn.now() });
+    if (!owned) return;
+    await trx('sms_log').insert({ customer_id: customer.id, direction: 'outbound',
+      from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: recipient.phone,
+      message_body: body, message_type: 'visit_summary', status: 'scheduled', scheduled_for: new Date(nextAllowedAt),
+      metadata: JSON.stringify({ entry_point: 'visit_summary_deferred', visit_id: visit.id,
+        visit_summary_claim_token: claim.token, summary_token_hash: visit.summary_token_hash,
+        customer_id: customer.id, to_phone: recipient.phone, resolve_from_by_customer: true }),
+    });
+  });
+}
+
+// A frozen bearer-link recipient must still be authorized when the queue runs.
+async function recheckDeferredSummarySms(meta) {
+  const visit = await db('service_visits').where({ id: meta.visit_id, customer_id: meta.customer_id,
+    summary_token_hash: meta.summary_token_hash }).whereNull('summary_token_revoked_at')
+    .whereIn('status', ['closing', 'closed']).first('id');
+  if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
+  const customer = await withAccountPrimaryContact(await db('customers').where({ id: meta.customer_id }).first());
+  const recipient = getServiceContactSmsRecipient(customer);
+  if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
+  const effect = await db('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
+    claim_token: meta.visit_summary_claim_token }).first();
+  // A late provider-boundary quiet-hours block proves no send occurred.
+  // Its durable scheduler stamp allows exactly that handoff to be retried.
+  if (effect?.status === 'unknown_delivery' && meta.quiet_hours_hold_at
+    && new Date(meta.quiet_hours_hold_at) >= new Date(effect.claimed_at)) {
+    await db('visit_effects').where({ id: effect.id, status: 'unknown_delivery', claimed_at: effect.claimed_at,
+      claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', updated_at: db.fn.now() });
+    effect.status = 'pending';
+  }
+  return { eligible: effect?.status === 'pending', reason: 'visit_summary_claim_unavailable' };
+}
+
+async function beginDeferredSummarySms(meta) {
+  if (!(await recheckDeferredSummarySms(meta)).eligible) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+  const owned = await VisitGroups.beginVisitNotificationDispatch(meta.visit_id, 'completion_sms',
+    meta.visit_summary_claim_token, { scheduled: true });
+  return { ok: owned, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+}
+
+async function finalizeDeferredSummarySms(meta) {
+  return VisitGroups.finalizeVisitNotification(meta.visit_id, 'completion_sms', 'sent', new Date(), meta.visit_summary_claim_token);
+}
+
+async function terminalDeferredSummarySms(meta) {
+  const effect = await db('visit_effects').where({ visit_id: meta.visit_id, effect_type: 'completion_sms',
+    claim_token: meta.visit_summary_claim_token }).first('status');
+  if (!effect || ['sent', 'suppressed'].includes(effect.status)) return;
+  const result = await VisitGroups.finalizeVisitNotification(meta.visit_id, 'completion_sms',
+    effect.status === 'unknown_delivery' ? 'unknown_delivery' : 'suppressed', new Date(), meta.visit_summary_claim_token);
+  if (!result.ok) throw new Error('Visit summary terminal state could not be saved');
+}
+
 async function sendSummarySms({ visit, member, customer, summaryUrl, requested }) {
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
   if (claim?.state !== 'owner') return;
@@ -98,16 +158,22 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'suppressed', new Date(), claim.token);
       return;
     }
+    const body = `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${summaryUrl}`;
     const result = await require('./messaging/send-customer-message').sendCustomerMessage({
       channel: 'sms', audience: 'customer', purpose: 'service_completion',
       to: recipient.phone, customerId: customer.id, appointmentId: member.id,
-      body: `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${summaryUrl}`,
+      body,
       identityTrustLevel: 'service_contact_authorized', entryPoint: 'visit_closeout_summary',
       preDispatchCheck: async () => {
         dispatched = await VisitGroups.beginVisitNotificationDispatch(visit.id, 'completion_sms', claim.token);
         return { ok: dispatched, code: 'VISIT_SUMMARY_CLAIM_LOST' };
       },
     });
+    if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
+      dispatched = false; // The provider boundary can also prove it held before sending.
+      await deferSummarySms({ visit, customer, recipient, body, claim, nextAllowedAt: result.nextAllowedAt });
+      return;
+    }
     // Once handed to a non-idempotent provider, an ambiguous result stays
     // unknown for office reconciliation. Never reclaim it after a timeout.
     if (!result.sent && !result.blocked && dispatched) {
@@ -125,10 +191,9 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
 // absent row or its explicit pre-dispatch abort proves another send is safe.
 function summaryEmailState(message) {
   if (!message) return 'retry';
-  if (message.sent_at || message.provider_message_id
-    || ['sent', 'delivered', 'opened', 'clicked'].includes(message.status)) return 'sent';
+  if (['sent', 'delivered', 'opened', 'clicked'].includes(message.status)) return 'sent';
   if (message.status === 'blocked') return 'suppressed';
-  if (message.status === 'failed'
+  if (message.status === 'failed' && !message.sent_at && !message.provider_message_id
     && message.error_message === require('./email-template-library').ABORTED_BEFORE_DISPATCH) return 'retry';
   return 'unknown_delivery';
 }
@@ -216,4 +281,5 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   return { state: pending ? 'delivery_pending' : unknown ? 'delivery_review' : 'delivered' };
 }
 
-module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, getVisitCompletionSummary, deliverVisitCompletionSummary };
+module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, getVisitCompletionSummary, deliverVisitCompletionSummary,
+  recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms };
