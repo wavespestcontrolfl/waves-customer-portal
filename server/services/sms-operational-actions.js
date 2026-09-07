@@ -270,6 +270,23 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       properties, current: current || {}, expectedCurrent: matchedContext.preferences, senderIsPrimary, messageBody: message.message_body,
       replayAppliedFields,
     });
+    // The existing notifier writes only through trx. Preview rolls this back
+    // with the proposals, while execution hashes the same dedupe decision.
+    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome));
+    let notification = null;
+    if (exceptions.length + extracted.dropped) {
+      const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
+        'Part of this message needs an evidence, property, or existing-value check. Open the customer profile to review the source conversation.',
+        { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
+          link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+          metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
+            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
+            reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
+      if (!notif.id) throw new Error('sms_operations_bell_not_persisted');
+      notification = notif.deduped
+        ? { action: 'preserve_notification', notification_id: notif.id }
+        : { action: 'create_notification' };
+    }
     let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
     if (replay) {
       // Bind the actual locked decisions, including private values, to the
@@ -280,10 +297,11 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         facts: facts.map((fact) => ({ field: fact.field, value: fact.value, quote: fact.quote,
           duration: fact.duration, property_id: fact.property_id, outcome: fact.outcome,
           proposal_created: fact.proposal_created, retired_proposal_ids: fact.retired_proposal_ids,
-          proposal_id: fact.proposal_created ? null : fact.proposal_id ?? null })), dropped: extracted.dropped });
+          proposal_id: fact.proposal_created ? null : fact.proposal_id ?? null })), dropped: extracted.dropped, notification });
       if (!matchedContext.dryRun && matchedContext.previewHash !== analysis.preview_hash) {
         throw Object.assign(new Error('sms_profile_replay_preview_changed'), { code: 'SMS_REPLAY_PREVIEW_CHANGED' });
       }
+      analysis.notification = notification;
       await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.profile.replayed',
         resource_type: 'sms_log', resource_id: message.id,
         metadata: { initiated_by: 'operator', extractor_version: VERSION, preview_hash: analysis.preview_hash,
@@ -292,17 +310,6 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     }
     await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
     await recordExtractionAttempt({ ...receipt, status: 'ok', proposal_count: facts.length });
-    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome));
-    if (!matchedContext.dryRun && exceptions.length + extracted.dropped) {
-      const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
-        'Part of this message needs an evidence, property, or existing-value check. Open the customer profile to review the source conversation.',
-        { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
-          link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
-          metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
-            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
-            reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
-      if (!notif.id) throw new Error('sms_operations_bell_not_persisted');
-    }
     return { applied: facts.filter((f) => f.outcome === 'applied').length,
       proposed: facts.filter((f) => f.outcome === 'proposed').length,
       preserved: facts.filter((f) => f.outcome === 'previously_applied').length };
@@ -404,7 +411,8 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
           ...(fact.retired_proposal_ids?.length ? { retired_proposal_ids: fact.retired_proposal_ids } : {}),
         }));
         return { dry_run: true, sms_log_id: smsLogId, preview_hash: simulated.operational_analysis.replay.preview_hash, ...outcome,
-          unverified_count: simulated.operational_analysis.replay.dropped, outcomes };
+          unverified_count: simulated.operational_analysis.replay.dropped, outcomes,
+          ...(simulated.operational_analysis.replay.notification ? { notification: simulated.operational_analysis.replay.notification } : {}) };
       } finally {
         await preview.rollback();
       }

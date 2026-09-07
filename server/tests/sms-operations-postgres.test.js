@@ -243,6 +243,37 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await replaySmsProfile({ ...args, previewHash })).toMatchObject({ proposed: 1 });
   });
 
+  test('replay previews exception bells transactionally and rejects changed notification dedupe', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const notifier = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [], dropped: 1 }) };
+    const preview = await replaySmsProfile(args);
+    expect(preview).toMatchObject({ dry_run: true, notification: { action: 'create_notification' } });
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis).not.toHaveProperty('replay');
+    const [existing] = await mockPg('notifications').insert({ recipient_type: 'admin', category: 'alert',
+      title: 'Synthetic exception', metadata: JSON.stringify({ dedupeKey: `sms-property-instructions:${message.id}` }) }).returning('*');
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toEqual({ skipped: 'preview_changed' });
+    const refreshed = await replaySmsProfile(args);
+    expect(refreshed.notification).toEqual({ action: 'preserve_notification', notification_id: existing.id });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: refreshed.preview_hash })).toMatchObject({ applied: 0, proposed: 0 });
+    expect(await mockPg('notifications')).toHaveLength(1);
+    expect((await mockPg('sms_log').first()).operational_analysis.replay.notification).toEqual(refreshed.notification);
+  });
+
+  test('executing an exception preview creates exactly its one previewed bell', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const notifier = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => ({ facts: [], dropped: 1 }) };
+    const preview = await replaySmsProfile(args);
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toMatchObject({ applied: 0, proposed: 0 });
+    expect(await mockPg('notifications')).toHaveLength(1);
+    expect((await mockPg('sms_log').first()).operational_analysis.replay.notification).toEqual(preview.notification);
+  });
+
   test('provider object key order does not change an otherwise identical replay preview', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const previewHash = await replayPreviewHash();
@@ -318,13 +349,16 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test('preview exposes validation dispositions without persisting an exception bell or failed receipt', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const notifier = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation((...args) => notifier.notifyAdmin(...args));
     const before = await mockPg('sms_log').first();
     const extract = async () => ({ ...result, facts: [{ ...result.facts[0], duration: 'visit_only' }] });
     expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract }))
       .toMatchObject({ dry_run: true, applied: 0, proposed: 0, outcomes: [
         { field: 'irrigation_controller_location', action: 'temporary_instruction' },
       ] });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(await mockPg('notifications')).toHaveLength(0);
     expect(await mockPg('sms_log').first()).toEqual(before);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
     expect(await mockPg('audit_log')).toHaveLength(0);

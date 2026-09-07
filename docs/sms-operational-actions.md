@@ -53,3 +53,5 @@ only in database selection, outside model prompts. Conversation history keeps
 its existing endpoint-based selection so the actual delivered message remains
 available after a send-time phone or location-number refresh. Send/retry writers
 are unchanged. Outbound commitment capture remains a separate gated follow-up.
+
+Replay previews also simulate exception-notification creation or deduplication through the existing notifier inside the rolled-back transaction. The result identifies a new bell or the preserved notification ID, and the preview hash binds that disposition. If it changes before execution, the transaction rolls back with `preview_changed`. Preview sends no pushes or messages and leaves no notification row.
