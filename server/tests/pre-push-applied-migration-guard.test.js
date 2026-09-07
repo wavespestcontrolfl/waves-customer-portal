@@ -369,4 +369,32 @@ describe('pre-push applied-migration guard', () => {
     expect(r2.stderr).toMatch(/\[migration-guard\] BLOCKED/);
     expect(r2.stderr).toContain('vs origin/main tip: M\t' + migRel);
   });
+
+  // The identical-to-main exception is for in-place modifications only:
+  // a rename whose destination matches a file main carries still removes
+  // a filename the branch's preview has run (pre-push hook P1 on this
+  // change) — knex would fail that preview's next deploy.
+  test('renaming a preview-run migration onto a name main carries with identical content is still BLOCKED (R100)', () => {
+    const MIG_OLD = path.join(MIGRATIONS, '20260101000014_branch_stamped.js');
+    const MIG_NEW = path.join(MIGRATIONS, '20260101000015_main_stamped.js');
+    const body = migBody('same_ddl_two_names');
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['checkout', '-q', '-b', 'rename-onto-main', 'origin/main']);
+    writeAndCommit(work, { [MIG_OLD]: body }, 'branch migration, preview runs it');
+    expect(pushResult(work, {}, 'HEAD:refs/heads/rename-onto-main').ok).toBe(true);
+    // main lands the same DDL under its own name (from another clone).
+    git(other, ['checkout', '-q', 'main']);
+    git(other, ['pull', '-q', '--ff-only', 'origin', 'main']);
+    writeAndCommit(other, { [MIG_NEW]: body }, 'main migration with the same content');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    // The branch merges main forward and drops its own copy: vs its remote
+    // tip that is R100 old→new, and new matches main byte for byte.
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['merge', '-q', '--no-edit', 'origin/main']);
+    writeAndCommit(work, { [MIG_OLD]: null }, 'drop the branch copy');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/rename-onto-main');
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('R100\t' + MIG_OLD.split(path.sep).join('/') + '\t' + MIG_NEW.split(path.sep).join('/'));
+  });
 });
