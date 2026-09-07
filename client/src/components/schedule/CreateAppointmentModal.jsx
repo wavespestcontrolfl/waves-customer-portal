@@ -137,6 +137,20 @@ const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', l
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
 
+// Second line of a Find-a-Time result: the drive the van makes INTO the
+// stop from the anchor it leaves (home base for the first stop), then what
+// the insertion adds to the route — same wording as the picker hint, so
+// "+57 min" never reads as a drive time. A result without a single
+// insertion leg (arrival-window mode) keeps the detour-only form.
+export function findTimeSlotDetail(slot) {
+  const detour = Math.round(Number(slot.detour_minutes) || 0);
+  const added = detour > 0 ? `+${detour} min added to route` : 'no added drive';
+  const driveIn = Math.round(Number(slot.drive_in_minutes));
+  if (slot.drive_in_minutes == null || !Number.isFinite(driveIn) || !slot.insertion) return added;
+  const from = slot.insertion.after_stop_id ? (slot.insertion.after_name || 'the previous stop') : 'home base';
+  return `${driveIn} min drive from ${from} · ${added} · before ${slot.insertion.before}`;
+}
+
 function normalizeHourTime(value, fallback = '09:00') {
   const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
   if (!match) return fallback;
@@ -3351,7 +3365,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
                         </div>
                         <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
+                          {findTimeSlotDetail(slot)}
                         </div>
                       </div>
                       <div style={{ fontSize: 11, color: D.teal, fontWeight: 500 }}>Use →</div>

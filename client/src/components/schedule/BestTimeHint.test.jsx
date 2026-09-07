@@ -52,3 +52,14 @@ describe('pickedLabel', () => {
       .toBe('11:00 AM: +9 min added to route');
   });
 });
+
+describe('findTimeSlotDetail (Find-a-Time results list)', () => {
+  it('reads like the picker hint: drive in, route cost, next anchor', async () => {
+    const { findTimeSlotDetail } = await import('./CreateAppointmentModal');
+    expect(findTimeSlotDetail({ detour_minutes: 57, drive_in_minutes: 37, insertion: { after_stop_id: null, after_name: null, before: 'Stop B (11:00)' } }))
+      .toBe('37 min drive from home base · +57 min added to route · before Stop B (11:00)');
+    expect(findTimeSlotDetail({ detour_minutes: 0, drive_in_minutes: 6, insertion: { after_stop_id: 's-c', after_name: 'Stop C', before: 'HQ (end of day)' } }))
+      .toBe('6 min drive from Stop C · no added drive · before HQ (end of day)');
+    expect(findTimeSlotDetail({ detour_minutes: 9, route_mode: 'arrival_windows' })).toBe('+9 min added to route');
+  });
+});
