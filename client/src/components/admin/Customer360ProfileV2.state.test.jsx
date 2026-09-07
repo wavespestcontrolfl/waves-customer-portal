@@ -193,6 +193,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(estimateParams.get('customerName')).toBe('Avery Customer');
     expect(estimateParams.get('address')).toContain('Unit 4');
     fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
+    expect(screen.getByRole('link', { name: 'Invoices', exact: true })).toHaveAttribute('href', '/admin/invoices?customer=customer-a');
     fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
     expect(screen.getByRole('dialog', { name: 'Edit customer' })).toBeInTheDocument();
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -208,6 +209,7 @@ describe('Customer360ProfileV2 profile state', () => {
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
     await screen.findByRole('heading', { name: 'Avery Customer' });
     fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
+    expect(screen.queryByRole('link', { name: 'Invoices', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit customer' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Prepay invoice' })).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Customer activity history' })).not.toBeInTheDocument();

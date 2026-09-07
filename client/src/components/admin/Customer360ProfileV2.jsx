@@ -5079,7 +5079,7 @@ function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTa
   })).filter((contact) => contact.phone || contact.email);
   const actions = [
     { label: "Book appointment", href: `/admin/schedule?customer=${c.id}` },
-    { label: "Invoices", href: `/admin/invoices?customer=${c.id}` },
+    ...(isAdmin ? [{ label: "Invoices", href: `/admin/invoices?customer=${c.id}` }] : []),
     { label: "Activity & notes", onClick: () => onTab("comms") },
     ...(c.phone && isAdmin ? [{ label: "Send link", onClick: onSendLink }] : []),
     ...(isAdmin ? [{ label: "Edit customer", onClick: onEdit }] : []),
