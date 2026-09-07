@@ -168,7 +168,6 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.whereNull = jest.fn(() => b);
   b.whereNotNull = jest.fn(() => b);
   b.whereRaw = jest.fn(() => b);
-  b.whereExists = jest.fn(() => b);
   b.join = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
   b.orderByRaw = jest.fn(() => b);
@@ -179,15 +178,6 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.select = jest.fn(() => Object.assign(Promise.resolve(rows), b));
   b.first = jest.fn(async () => firstRow);
   b.update = jest.fn(async () => 1);
-  return b;
-}
-
-// Records the predicates a nested where(cb) tree adds, invoking callbacks.
-function nestedRecorder(calls = []) {
-  const b = { calls };
-  for (const m of ['where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNull', 'whereNotNull']) {
-    b[m] = jest.fn((...args) => { if (typeof args[0] === 'function') args[0](b); else calls.push([m, ...args]); return b; });
-  }
   return b;
 }
 
