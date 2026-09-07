@@ -75,6 +75,8 @@ test('markdown, bulleted lists and label-value answers score like plain prose', 
   expect(score('E6', 'Waves does not offer:\n* Insulation\n* Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves does not offer the following:\n- Fumigation\n- Insulation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Services not offered:\n- Fumigation\n- Insulation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves does not offer:\n\n- Insulation\n\n- Fumigation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves does not offer:\n\n- Insulation\n\nFumigation is available on request.').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Services offered:\n- Fumigation').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Waves offers the following:\n- Pest control\n- Fumigation').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Waves does not offer:\n- wildlife trapping or removal\n- attic insulation installation or replacement\n- tent fumigation for drywood termite colonies').forbidden.fumigation_offered).toBe(false);
@@ -120,6 +122,7 @@ test('a claim about a competitor is not a wrong claim about Waves', () => {
   expect(score('E6', 'Orkin is a national chain and it offers fumigation. Waves does not.').forbidden.fumigation_offered).toBe(false);
   expect(score('E5', 'Orkin is national. It serves Manatee County. Waves is based in Lakewood Ranch.')).toMatchObject({ expected: { manatee: false, hq_lakewood_ranch: true } });
   expect(score('E6', 'Waves is family-owned. It offers pest control and lawn care.')).toMatchObject({ expected: { pest_control: true, lawn_care: true } });
+  expect(score('E5', 'Waves is based in Lakewood Ranch. Unlike Orkin, it serves Manatee, Sarasota and Charlotte counties.')).toMatchObject({ right: 4, missing: 0 });
 });
 
 test('the founding-year fact needs founding context, but a bare year answer still counts', () => {

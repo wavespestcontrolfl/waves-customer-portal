@@ -103,7 +103,9 @@ function normalizeAnswer(text) {
     // Detect the list marker BEFORE stripping emphasis: "* item" is a bullet.
     const isItem = LIST_MARKER_RE.test(raw);
     const line = stripEmphasis(raw.replace(LIST_MARKER_RE, '')).trim();
-    if (!line) { governed = false; continue; }
+    // A blank line between an intro and its items, or between items, does
+    // not end the governed list; only a following non-item line does.
+    if (!line) continue;
     if (isItem && governed) { lines[lines.length - 1] += `, ${line}`; continue; }
     if (!isItem) {
       const intro = line.replace(/:\s*$/, '');
@@ -125,8 +127,10 @@ function normalizeAnswer(text) {
 // named party at all the answer is taken to be about Waves.
 const OTHER_ENTITY_RE = new RegExp(`\\b(?:${cohort.other_entities.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'gi');
 const WAVES_NAMED_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b/gi;
-const COMPARISON_PHRASE_RE = /\b(?:unlike|like|such as|compared (?:to|with)|versus|vs\.?|rather than|instead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?/g;
-const COMPARISON_INTRO_RE = /\b(?:unlike|like|such as|compared (?:to|with)|versus|vs\.?|rather than|instead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?\s*$/;
+// Sentence-initial capitalization is accepted for the intro word; the
+// compared party must still be a proper name.
+const COMPARISON_PHRASE_RE = /\b(?:[Uu]nlike|[Ll]ike|[Ss]uch as|[Cc]ompared (?:to|with)|[Vv]ersus|[Vv]s\.?|[Rr]ather than|[Ii]nstead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?/g;
+const COMPARISON_INTRO_RE = /\b(?:[Uu]nlike|[Ll]ike|[Ss]uch as|[Cc]ompared (?:to|with)|[Vv]ersus|[Vv]s\.?|[Rr]ather than|[Ii]nstead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?\s*$/;
 
 function lastIndexOfMatch(re, text) {
   let last = -1;
