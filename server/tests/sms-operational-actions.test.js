@@ -77,6 +77,34 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts).toEqual([]);
   });
 
+  test.each(['Should I call you tomorrow at 9am?', 'Should I call you tomorrow at 9am'])('an outbound question cannot be recorded as a promise: %s', (body) => {
+    const message = source(body, 'outbound');
+    const result = groundExtraction(extracted([obligation('call you tomorrow at 9am', {
+      basis: 'promise', kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+    })]), { message, properties });
+    expect(result).toMatchObject({ obligations: [], dropped: 1 });
+  });
+
+  test('an inbound question still creates a customer request for staff', () => {
+    const message = source('Could you call me tomorrow at 9am?');
+    const result = groundExtraction(extracted([obligation(message.message_body, {
+      kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+    })]), { message, properties });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.obligations[0]).toMatchObject({ party: 'waves', basis: 'request', due_at: '2040-03-11T13:00:00.000Z' });
+  });
+
+  test.each(['Please send the estimate for 100 Example Lane', 'Please send estimates for all properties'])(
+    'multiple-property requests remain visible without accepting a guessed property: %s', (body) => {
+      const multiple = [...properties, { id: '00000000-0000-4000-8000-000000000104' }];
+      const result = groundExtraction(extracted([obligation(body)]), { message: source(body), properties: multiple });
+      expect(result.obligations).toHaveLength(1);
+      expect(result.obligations[0]).toMatchObject({ property_id: null, quote: body });
+      expect(admissibleWitness({ ...result.obligations[0], sms_context: { property_id: null } },
+        { type: 'estimate', property_id: PROPERTY_ID, status: 'sent', sent_at: '2040-03-11T14:00:00Z' })).toBe(false);
+    },
+  );
+
   test('drops hallucinated evidence and foreign property ids', () => {
     const message = source('Please send the lawn estimate');
     const result = groundExtraction(extracted([

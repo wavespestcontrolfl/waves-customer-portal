@@ -305,15 +305,15 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       replayAppliedFields,
     });
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
-      const propertyValid = properties.some((p) => p.id === item.property_id);
+      const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
       return {
-        sms_log_id: message.id, commitment_key: keyOf(item), party: item.party, kind: item.kind,
+        sms_log_id: message.id, commitment_key: keyOf({ ...item, property_id: propertyId }), party: item.party, kind: item.kind,
         description: item.description, channel: 'sms', due_at: item.due_at,
         due_basis: item.due_at ? 'stated' : null, source: 'ai', extractor_version: VERSION,
         evidence: JSON.stringify([{ quote: item.quote, sms_log_id: message.id, matched: true,
           speaker: { inbound: 'caller', outbound: 'agent' }[message.direction] }]),
-        sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyValid ? item.property_id : null,
-          property_ambiguous: !propertyValid, customer_id: customer.id, source_at: message.created_at },
+        sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
+          property_ambiguous: !propertyId, customer_id: customer.id, source_at: message.created_at },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };

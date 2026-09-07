@@ -9,7 +9,7 @@ const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
-const VERSION = 'sms-ops-v12';
+const VERSION = 'sms-ops-v13';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -55,7 +55,7 @@ const normalize = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim
 // check, automatic SMS obligations require their typed deliverable in the
 // literal description. Generic "send" cannot establish a report or a call.
 const KIND_EVIDENCE = {
-  send_estimate: /\b(?:estimate|quote|pricing|price|proposal)\b/i,
+  send_estimate: /\b(?:estimates?|quotes?|pricing|prices?|proposals?)\b/i,
   send_appointment_confirmation: /\bconfirm(?:ation)?\b/i,
   callback: /\b(?:call|phone|ring)\b/i,
   call_back: /\b(?:call|phone|ring)\b/i,
@@ -140,7 +140,7 @@ Facts:
 - For EVERY fact, quote must retain the whole CURRENT message, including every sentence and qualifier. For controller locations, notes, instructions, pet details and irrigation issues, value MUST equal quote. Never shorten a message to a standalone instruction that omits another clause. If separate topics do not belong together in the field, mark duration uncertain for staff review.
 - Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.
 - An instruction for today/one visit/vacation is visit_only, not durable. Ambiguous duration is uncertain. A change to payment, billing, ownership or communication consent is an obligation to resolve, never a profile fact.
-- property_id must come from the provided properties and be unambiguous from context, otherwise null. Never infer another person's authority or merge accounts.
+- property_id may identify the sole provided property. With zero or multiple properties, use null, including requests covering all properties; opaque ids alone cannot prove which address the customer means. Never infer another person's authority or merge accounts.
 
 Return only JSON matching the supplied schema.
 ${stringifySmsEvidence({ current_message: sanitized[sanitized.length - 1], prior_messages: sanitized.slice(0, -1), properties: properties.map((property) => ({ id: property.id })) })}`;
@@ -155,6 +155,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     && (!item.property_id || propertyIds.has(item.property_id));
   const obligations = (captureCommitments ? parsed.obligations : []).filter((item) => {
     if (!grounded(item) || !kindBelongsToParty(item.party, item.kind)) return false;
+    if (item.basis === 'promise' && isQuestionSource(message.message_body)) return false;
     // Mixed/negated instructions need a human reading of scope; a keyword
     // in an affirmative substring cannot authorize the opposite action.
     if (/\b(?:not|never|no|cannot|unable|instead|unless|rather|but|if|when|after|once|until|provided|assuming|only)\b|n['’]t/i.test(body)) return false;
@@ -171,7 +172,8 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     const resolved = timingGrounded && clockStated ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
     const proposed = item.due_at ? parseDueAt(item.due_at) : resolved;
     const due = resolved && proposed instanceof Date && proposed.getTime() === resolved.getTime() ? resolved : null;
-    return { ...item, due_text: timingGrounded ? item.due_text : null,
+    return { ...item, property_id: properties.length === 1 ? item.property_id : null,
+      due_text: timingGrounded ? item.due_text : null,
       due_at: due instanceof Date ? due.toISOString() : null,
       timing_unverified: !!clockStated && !(due instanceof Date) };
   });

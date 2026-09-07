@@ -89,6 +89,16 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   
 
+  test('the locked writer retains a multiple-property request without assigning a model-selected property', async () => {
+    await mockPg('customer_properties').insert({ id: randomUUID(), customer_id: message.customer_id,
+      address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+    await recordMessageOperations(mockPg, message, result, context);
+    const commitment = await mockPg('call_commitments').first();
+    expect(commitment.sms_context).toMatchObject({ property_id: null, property_ambiguous: true });
+    expect(commitment.evidence[0].quote).toBe(result.obligations[0].quote);
+    expect(await listSmsCommitments(mockPg, { customerId: message.customer_id })).toHaveLength(1);
+  });
+
   test.each([false, true])('profile replay with commitment capture enabled never records obligations (execute=%s)', async (execute) => {
     await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'previous' } });
     const extract = jest.fn(async (input) => {
@@ -415,7 +425,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     }
   });
 
-  test('the same sentence can request estimates for two properties without dropping either', async () => {
+  test('an all-property request is retained once without accepting two guessed property assignments', async () => {
     const secondProperty = randomUUID();
     await mockPg('customer_properties').insert({ id: secondProperty, customer_id: message.customer_id,
       address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
@@ -425,8 +435,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     result = { dropped: 0, facts: [], obligations: [first, { ...first, property_id: secondProperty }] };
     await recordMessageOperations(mockPg, message, result, context);
     const rows = await mockPg('call_commitments');
-    expect(rows).toHaveLength(2);
-    expect(new Set(rows.map((r) => r.sms_context.property_id))).toEqual(new Set([first.property_id, secondProperty]));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sms_context).toMatchObject({ property_id: null, property_ambiguous: true });
+    expect(rows[0].evidence[0].quote).toBe(message.message_body);
   });
 
   test('different deliverables in the same quote retain separate obligations', async () => {
