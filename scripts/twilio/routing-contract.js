@@ -60,17 +60,23 @@ const APP_ROUTING = Object.freeze({
 // that deliberately routes elsewhere: POST /relay-sandbox on the same portal.
 const SANDBOX_VOICE_URL = `${PORTAL_ORIGIN}/api/webhooks/twilio/relay-sandbox`;
 
-// Field names on an IncomingPhoneNumber resource that differ from APP_ROUTING.
-function routingDrift(number) {
-  return Object.entries(APP_ROUTING)
-    .filter(([field, expected]) => String(number[field] == null ? '' : number[field]) !== expected)
-    .map(([field]) => field);
+// The SMS half of the contract. When a Messaging Service has
+// useInboundWebhookOnNumber=false, ITS inbound/fallback URL + method replace these
+// four fields for every number in its pool.
+const SMS_ROUTING_FIELDS = Object.freeze(['smsUrl', 'smsMethod', 'smsFallbackUrl', 'smsFallbackMethod']);
+
+// Names of the given contract fields whose value on `resource` differs from
+// APP_ROUTING — exact string comparison, so an http:// URL never passes for the
+// https:// contract. Defaults to every field (an IncomingPhoneNumber resource).
+function routingDrift(resource, fields = Object.keys(APP_ROUTING)) {
+  return fields.filter((field) => String(resource[field] == null ? '' : resource[field]) !== APP_ROUTING[field]);
 }
 
 module.exports = {
   FLOW_SID,
   APP_VOICE_URL,
   APP_ROUTING,
+  SMS_ROUTING_FIELDS,
   SANDBOX_VOICE_URL,
   studioVoiceUrl,
   expectedVoiceUrl,

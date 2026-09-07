@@ -39,7 +39,7 @@
 const path = require('path');
 const twilio = require('twilio');
 const REGISTRY = require(path.join(__dirname, '..', '..', 'server', 'config', 'twilio-numbers.js'));
-const { APP_ROUTING, SANDBOX_VOICE_URL, routingDrift } = require(path.join(__dirname, '..', '..', 'scripts', 'twilio', 'routing-contract.js'));
+const { APP_ROUTING, SMS_ROUTING_FIELDS, SANDBOX_VOICE_URL, routingDrift } = require(path.join(__dirname, '..', '..', 'scripts', 'twilio', 'routing-contract.js'));
 
 const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
 // Twilio's fixed Trust Hub policy SIDs. The A2P Messaging Profile bundle never
@@ -132,11 +132,14 @@ async function auditMessaging(client, fleet, numberBySid) {
     const verified = campaigns.some(c => c.campaignStatus === 'VERIFIED');
     console.log(`  service ${s.sid}  "${s.friendlyName}"  senders=${senders.length}  inbound_webhook_on_number=${s.useInboundWebhookOnNumber}  service_inbound=${short(s.inboundRequestUrl)} [${s.inboundMethod}]  campaigns=[${campaigns.map(c => `${c.sid}:${c.campaignStatus}/${c.usAppToPersonUsecase}`).join(',')}]`);
     if (!carriesFleet) continue;
-    // With useInboundWebhookOnNumber off, the SERVICE's inbound URL replaces every
-    // pool number's smsUrl — the per-number contract above would pass while texts
-    // went to a null or foreign URL.
-    if (!s.useInboundWebhookOnNumber && (short(s.inboundRequestUrl) !== short(APP_ROUTING.smsUrl) || s.inboundMethod !== APP_ROUTING.smsMethod)) {
-      defects.push(`service ${s.sid}  overrides inbound SMS for its ${senders.length} senders with ${short(s.inboundRequestUrl)} [${s.inboundMethod}] — expected ${short(APP_ROUTING.smsUrl)} [${APP_ROUTING.smsMethod}] or useInboundWebhookOnNumber=true`);
+    // With useInboundWebhookOnNumber off, the SERVICE's inbound + fallback URL and
+    // method replace every pool number's SMS fields — the per-number contract
+    // above would pass while texts went to a null or foreign URL. Same exact
+    // comparison as the number check, on the service's effective values.
+    if (!s.useInboundWebhookOnNumber) {
+      const effective = { smsUrl: s.inboundRequestUrl, smsMethod: s.inboundMethod, smsFallbackUrl: s.fallbackUrl, smsFallbackMethod: s.fallbackMethod };
+      const drift = routingDrift(effective, SMS_ROUTING_FIELDS);
+      if (drift.length) defects.push(`service ${s.sid}  overrides inbound SMS for its ${senders.length} senders — ${drift.map(f => `${f}=${short(effective[f])} (expected ${short(APP_ROUTING[f]) || 'empty'})`).join(', ')}; set useInboundWebhookOnNumber=true or match the contract`);
     }
     // A service without a VERIFIED campaign registers nothing: its fleet numbers
     // surface individually in the per-number verdict below.
