@@ -79,11 +79,11 @@ function normalizedEndpoint(text) {
   return text.slice(text.indexOf('/admin/')).split('?')[0].replace(/:[a-zA-Z_$][\w$]*/g, ':param').replace(/(?<!\/):param$/, '');
 }
 
-// A literal path outside `/admin/` (the tech router, public routes) is resolved
-// and out of this manifest's scope. A bare `/api` mount followed by a dynamic
-// segment still names no router, so it stays an unresolved request.
+// The tech router is the one literal prefix proven outside this manifest's
+// scope (rule 3: the tech portal is isolated). Admin operations mounted
+// elsewhere (Terminal, dispatch visual moments) stay in the denominator.
 function outOfScopeLiteral(text) {
-  return typeof text === 'string' && text.startsWith('/') && !text.includes('/admin/') && !/^\/api\/?(?::param)?$/.test(text);
+  return typeof text === 'string' && /^(?:\/api)?\/tech\//.test(text);
 }
 
 function frontendSourceCensus(source, relative) {

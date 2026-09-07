@@ -120,6 +120,7 @@ test('state setters, out-of-scope literal routes and glued query suffixes do not
         await adminFetch(\`/admin/customers/\${id}\`);
         await adminFetch(dynamic);
         await fetch(\`/api\${path}\`);
+        await adminFetch('/stripe/terminal/handoff', { method: 'POST' });
       };
     }
   `, 'client/src/components/admin/Fixture.jsx');
@@ -128,6 +129,7 @@ test('state setters, out-of-scope literal routes and glued query suffixes do not
     ['GET', '/admin/customers/:param', 'literal_or_template'],
     ['GET', null, 'unresolved'],
     ['GET', null, 'unresolved'],
+    ['POST', null, 'unresolved'],
   ].sort());
 });
 
