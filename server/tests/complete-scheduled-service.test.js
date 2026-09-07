@@ -94,6 +94,20 @@ test.each([
   expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });
 
+test.each([-1, 2500.5, 10000001, 'front'])('invalid lawn visit area %j is rejected under the ledger gate alone (defaults gates off)', async treatedSqft => {
+  delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+  delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+  try {
+    const result = await complete({ lawnProtocolCompletion: { treatedSqft } });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_completion_area_invalid' } });
+    expect(db).not.toHaveBeenCalled();
+    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+  } finally {
+    delete process.env.GATE_LAWN_ACTUALS_LEDGER;
+  }
+});
+
 test.each([undefined, null, 2500, '2500'])('valid or omitted lawn visit area %j preserves completion replay', async treatedSqft => {
   process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
   process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';

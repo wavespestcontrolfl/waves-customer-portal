@@ -2363,8 +2363,12 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
     const lawnDefaultsEnabled = lawnCompletionDefaultsEnabled();
+    // Validated whenever a consumer exists: the completion defaults planner
+    // (defaults gates) or the all-lawn actuals ledger (ledger gate). Neither
+    // ever receives the raw field.
+    const lawnVisitAreaConsumed = lawnDefaultsEnabled || lawnActualsLedgerEnabled();
     const { value: lawnCompletionArea, error: lawnCompletionAreaError } = Joi.number().integer().min(1).max(10000000).allow(null)
-      .validate(lawnDefaultsEnabled ? lawnProtocolCompletion?.treatedSqft : undefined);
+      .validate(lawnVisitAreaConsumed ? lawnProtocolCompletion?.treatedSqft : undefined);
     if (lawnCompletionAreaError) {
       return { status: 400, body: { error: 'treatedSqft must be a positive whole number, or null to clear the visit area.', code: 'lawn_completion_area_invalid' } };
     }
@@ -6150,6 +6154,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             serviceProducts: insertedServiceProducts,
             completionInput: {
               ...(lawnProtocolCompletion || {}),
+              // The validated visit area (or undefined when no consumer gate
+              // is on) — never the raw client field.
+              treatedSqft: lawnCompletionArea,
               incompleteVisit: isIncompleteVisit,
               inventoryDeductions,
             },
