@@ -125,7 +125,14 @@ The `bd735bc42` main integration adds the completion pricing source reader;
 its exact upstream fingerprint is recorded as unmapped. No scheduling parity is
 claimed by importing this already-merged portal action.
 
-Current foundation census: 1,715 UI sites; ten transport exceptions; 1,705 domain
+The `f2e61b677` integration imports the upstream Pipeline estimate lifecycle,
+reviewed send dialog and customer SMS consolidation. Seventeen additional sites
+and one changed customer-search fingerprint were checked against that exact
+source commit and remain **unmapped**. The prior fingerprint and retired sites
+remain recorded. This addresses CI's merged-main census drift without claiming
+support for those new portal actions.
+
+Current foundation census: 1,732 UI sites; ten transport exceptions; 1,722 domain
 sites still unsupported/unverified in the matrix. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 
@@ -179,6 +186,9 @@ has deliberately not been relabeled as verified application parity.
 - `npm run build` passes, including blog/affiliate vendor checks, portal brand,
   and domain rules. ESLint reports no errors; large legacy route/card functions
   still have structural warnings. Refactoring the rewritten route remains work.
+  After the Pipeline main integration, the 24 foundation database cases and 34
+  reviewed-send regressions pass together (58 total); bar, UUID, shared send dialog
+  and layout badge suites pass 25 client tests. Build and brand checks pass.
 - Chrome via Playwright rendered the actual Customers page at 1440×1050 and
   390×844 against the isolated database. Confirmation used the real route and
   database; only the model and ancillary feature/notification/usage responses were
