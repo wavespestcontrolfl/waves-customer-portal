@@ -201,20 +201,27 @@ async function stalePendingNormalizationForResource({
 // just filled: approve would fail their before-value check anyway, and the
 // live value is the customer's own message. Same status the normalization
 // sweep uses when a live value moves under a proposal.
-async function stalePendingExtractionProposals({ trx = null, scope_id, field, source = 'message-extraction' }) {
+// `notNewerThan` limits the retirement to siblings whose source evidence is
+// no newer than the given instant (evidence without a source_at counts as
+// older), so a retried older message cannot displace a newer proposal.
+async function stalePendingExtractionProposals({ trx = null, scope_id, field, source = 'message-extraction', notNewerThan = null }) {
   const client = trx || db;
-  const updated = await client('data_hygiene_proposals')
-    .where({ resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source, status: 'pending' })
-    .update({ status: 'stale', updated_at: client.fn.now() });
+  const query = client('data_hygiene_proposals')
+    .where({ resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source, status: 'pending' });
+  if (notNewerThan) {
+    query.whereRaw("(evidence->>'source_at') IS NULL OR (evidence->>'source_at')::timestamptz <= ?", [new Date(notNewerThan)]);
+  }
+  const updated = await query.update({ status: 'stale', updated_at: client.fn.now() });
   return Number(updated) || 0;
 }
 
 // The pending sibling an extraction writer must not stack a second entry on.
-async function findPendingExtractionProposal({ trx = null, scope_id, field, source = 'message-extraction' }) {
+async function findPendingExtractionProposal({ trx = null, scope_id, field, source = 'message-extraction', newerThan = null }) {
   const client = trx || db;
-  return client('data_hygiene_proposals')
-    .where({ resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source, status: 'pending' })
-    .first('id');
+  const query = client('data_hygiene_proposals')
+    .where({ resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source, status: 'pending' });
+  if (newerThan) query.whereRaw("(evidence->>'source_at')::timestamptz > ?", [new Date(newerThan)]);
+  return query.first('id');
 }
 
 module.exports = {

@@ -39,10 +39,20 @@ async function resolvePropertyPreferencesTarget({ trx, proposal, currentRaw }) {
 
 // An irrigation input implies an active system. The flip is reported back so
 // the apply audit can record it and a revert can restore it.
+const hasValue = (value) => !(value === null || value === undefined || value === '' || value === false
+  || (Array.isArray(value) && value.length === 0));
+
+const irrigationEvidence = (target, field) => ({
+  inputs: IRRIGATION_INPUT_FIELDS.filter((candidate) => candidate !== field && hasValue(target[candidate])),
+  confirmed: parseConfirmedFields(target.irrigation_confirmed_fields),
+});
+
 async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw }) {
   const irrigation = IRRIGATION_INPUT_FIELDS.includes(proposal.field);
+  // The baseline lets a revert tell evidence that already existed (a legacy
+  // row can hold inputs with the flag off) from evidence added afterwards.
   const companions = irrigation && target.irrigation_system !== true
-    ? { irrigation_system: target.irrigation_system ?? null } : {};
+    ? { irrigation_system: target.irrigation_system ?? null, irrigation_baseline: irrigationEvidence(target, proposal.field) } : {};
   const updated = await trx('property_preferences')
     .where({ id: target.id, customer_id: proposal.scope_id })
     .update({
@@ -58,16 +68,15 @@ async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw
   return { companions };
 }
 
-const hasValue = (value) => !(value === null || value === undefined || value === '' || value === false
-  || (Array.isArray(value) && value.length === 0));
-
 // Undo a companion flip recorded at apply time, only while the flag still
 // holds the value apply set and nothing later confirmed irrigation: another
 // irrigation input on the row or a portal confirmation keeps the system on.
 async function revertPropertyPreferenceCompanions({ trx, proposal, target, companions = {} }) {
   if (!('irrigation_system' in companions) || target.irrigation_system !== true) return { reverted: [] };
-  const laterEvidence = IRRIGATION_INPUT_FIELDS.some((field) => field !== proposal.field && hasValue(target[field]))
-    || parseConfirmedFields(target.irrigation_confirmed_fields).length > 0;
+  const now = irrigationEvidence(target, proposal.field);
+  const baseline = companions.irrigation_baseline || { inputs: [], confirmed: [] };
+  const laterEvidence = now.inputs.some((field) => !baseline.inputs.includes(field))
+    || now.confirmed.some((field) => !baseline.confirmed.includes(field));
   if (laterEvidence) return { reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } };
   await trx('property_preferences')
     .where({ id: target.id, customer_id: proposal.scope_id })

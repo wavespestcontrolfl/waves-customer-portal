@@ -217,6 +217,26 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(rows.filter((row) => row.status === 'pending')).toHaveLength(3);
   });
 
+  test('a retried older SMS never displaces a newer pending proposal for the field', async () => {
+    const newer = new Date(message.created_at.getTime() + 3600_000).toISOString();
+    await mockPg('data_hygiene_proposals').insert({ rule_id: 'extract.sms_profile', rule_version: 'sms-profile-v5',
+      resource_type: 'property_preferences', scope_type: 'customer', scope_id: message.customer_id, field: 'pet_details',
+      source: 'message-extraction', proposed_value: JSON.stringify({ masked: 'O***.', length: 12 }), confidence: 0.9,
+      tier: 'medium', is_sensitive: true, status: 'pending', idempotency_key: randomUUID(),
+      evidence: JSON.stringify({ evidence_source_type: 'message', evidence_source_id: randomUUID(), source_at: newer }) });
+    const quote = 'Two friendly dogs in the yard.';
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = [{ field: 'pet_details', quote, value: quote, property_id: context.properties[0].id, duration: 'durable' }];
+    await recordMessageOperations(mockPg, message, result, context);
+    const rows = await mockPg('data_hygiene_proposals').where({ field: 'pet_details' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'pending' });
+    expect(rows[0].evidence.source_at).toBe(newer);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('superseded');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('the extraction phase does not stack a second proposal on a pending SMS proposal', async () => {
     const { runMessageExtractionPhase } = require('../services/data-hygiene/message-extractor');
     const quote = 'Two friendly dogs in the yard.';
@@ -376,17 +396,22 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test('the irrigation companion flip is reported on apply and restored on revert only while it holds', async () => {
     const writer = require('../services/data-hygiene/property-preferences');
-    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false }).returning('*');
+    // A legacy row can hold an irrigation input with the flag off; that
+    // pre-existing evidence must not block the revert later.
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false,
+      irrigation_zones: 6 }).returning('*');
     const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
+    let recorded;
     await mockPg.transaction(async (trx) => {
       const target = await writer.resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: null });
       const { companions } = await writer.applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: 'Beside the garage.' });
-      expect(companions).toEqual({ irrigation_system: false });
+      expect(companions).toEqual({ irrigation_system: false, irrigation_baseline: { inputs: ['irrigation_zones'], confirmed: [] } });
+      recorded = companions;
     });
     expect(await mockPg('property_preferences').first()).toMatchObject({ irrigation_system: true, irrigation_controller_location: 'Beside the garage.' });
     const revert = () => mockPg.transaction(async (trx) => {
       const target = await trx('property_preferences').where({ id: row.id }).forUpdate().first();
-      return writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions: { irrigation_system: false } });
+      return writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions: recorded });
     });
     // A deliberate change after approval is not clobbered by the revert.
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: false });

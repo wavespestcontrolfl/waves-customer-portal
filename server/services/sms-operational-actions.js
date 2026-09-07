@@ -11,7 +11,7 @@ const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
-const { stalePendingExtractionProposals, upsertSensitiveProposal } = require('./data-hygiene/proposal-store');
+const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
@@ -106,9 +106,11 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
 async function proposeFact(trx, message, fact, current) {
   // The same SMS is also dual-written to the unified inbox, where the admin
   // extraction phase may already have proposed this field from a regex
-  // fragment. The customer's latest whole message supersedes it: retire any
-  // pending sibling first so the queue holds one entry per field.
-  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field });
+  // fragment, and an older SMS can be retried after a newer one succeeded.
+  // The customer's newest statement wins: a pending sibling newer than this
+  // message supersedes it; otherwise retire the older siblings first.
+  if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field, newerThan: message.created_at })) return null;
+  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field, notNewerThan: message.created_at });
   const proposal = await upsertSensitiveProposal({
     rule_id: 'extract.sms_profile', rule_version: VERSION, resource_type: 'property_preferences',
     resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
@@ -117,7 +119,7 @@ async function proposeFact(trx, message, fact, current) {
     // The proposals API returns evidence without the audited reveal step, so
     // the text itself stays in the vault and the customer conversation.
     evidence: { evidence_source_type: 'message', evidence_source_id: message.id, sms_log_id: message.id,
-      channel: 'sms', property_id: fact.property_id, extractor_version: VERSION,
+      channel: 'sms', source_at: new Date(message.created_at).toISOString(), property_id: fact.property_id, extractor_version: VERSION,
       source_excerpt: 'Customer SMS; the text is in the vault and the customer conversation.' },
   }, { trx });
   return proposal.id;
@@ -138,7 +140,7 @@ async function applyFacts(trx, message, facts, context) {
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
     if (!AUTO_APPLY_FIELDS.has(fact.field)) {
       const proposalId = await proposeFact(trx, message, fact, persistedCurrent);
-      outcomes.push({ ...fact, outcome: 'proposed', proposal_id: proposalId });
+      outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId });
       continue;
     }
     const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: persistedCurrent?.id || null };
@@ -201,7 +203,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
     await recordExtractionAttempt({ trx, source_type: 'message', source_id: message.id, extractor_version: VERSION,
       source_hash: hashExtractionSource(message.message_body), status: 'ok', proposal_count: facts.length });
-    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed'].includes(f.outcome));
+    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded'].includes(f.outcome));
     if (exceptions.length + extracted.dropped) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
         'Part of this message needs an evidence, property, or existing-value check. Open the customer profile to review the source conversation.',
