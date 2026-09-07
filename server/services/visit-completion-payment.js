@@ -39,10 +39,12 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   }
   const customer = await trx('customers').where({ id: invoice.customer_id }).first();
   if (!customer || resolveBillingLane(customer).mode !== frozen.billingLane) refuse('billing_lane_changed');
+  // Schedule conversions lock the service before its invoice. As in
+  // lockVisitForSettlement, never wait on that row while holding the invoice.
   const members = await trx('visit_completion_packet_items as i')
     .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
     .join('service_records as r', 'r.id', 'i.service_record_id')
-    .where('i.packet_id', packet.id).orderBy('s.id').forUpdate('s', 'i')
+    .where('i.packet_id', packet.id).orderBy('s.id').forUpdate('s', 'i').noWait()
     .select('s.*', 'i.status as item_status', 'i.invoice_id', 'r.id as record_id',
       'r.status as record_status', 'r.customer_id as record_customer_id',
       'r.scheduled_service_id as record_service_id', 'r.structured_notes as record_notes');
@@ -115,13 +117,26 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
         billing_hold: true, updated_at: database.fn.now(),
       });
     }
-    const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'suppressed');
+    const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'suppressed', new Date(), null, {
+      lastError: 'office_required', providerId: invoice?.stripe_payment_intent_id || null,
+    });
     return { state: finalized.ok ? 'office_required' : 'payment_pending', invoiceId: invoice?.id || null };
   }
   if (!invoice) return { state: 'no_charge', invoiceId: null };
   if (!isInvoiceCollectibleStatus(invoice.status)) {
+    // Processing also parks ambiguous saved-card requests. Only a durable
+    // payment matching this invoice's bound PI proves accepted money in flight.
+    if (invoice.status === 'processing') {
+      const payment = invoice.stripe_payment_intent_id && await database('payments')
+        .where({ customer_id: invoice.customer_id, stripe_payment_intent_id: invoice.stripe_payment_intent_id })
+        .whereNull('payer_id').where('amount', invoiceAmountDue(invoice))
+        .whereIn('status', ['paid', 'processing']).first('id');
+      if (!payment) return { state: 'payment_pending', invoiceId: invoice.id };
+    }
     if (['paid', 'prepaid', 'processing'].includes(invoice.status)) {
-      const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'sent');
+      const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'sent', new Date(), null, {
+        lastError: null, providerId: invoice.stripe_payment_intent_id || null,
+      });
       if (!finalized.ok) return { state: 'payment_pending', invoiceId: invoice.id };
       await database('service_visits').where({ id: visit.id }).update({
         payment_intent_id: invoice.stripe_payment_intent_id || null, updated_at: database.fn.now(),
@@ -182,12 +197,11 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
       reason = 'payment_pending';
     }
   }
-  const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', outcome, new Date(), claim.token);
-  if (!finalized.ok) return { state: 'payment_pending', invoiceId: invoice.id };
   const current = await database('invoices').where({ id: invoice.id }).first();
-  await database('visit_effects').where({ visit_id: visit.id, effect_type: 'visit_payment', claim_token: claim.token }).update({
-    provider_id: current.stripe_payment_intent_id || null, last_error: reason, updated_at: database.fn.now(),
+  const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', outcome, new Date(), claim.token, {
+    lastError: reason, providerId: current.stripe_payment_intent_id || null,
   });
+  if (!finalized.ok) return { state: 'payment_pending', invoiceId: invoice.id };
   if (current.stripe_payment_intent_id) {
     await database('service_visits').where({ id: visit.id }).update({ payment_intent_id: current.stripe_payment_intent_id, updated_at: database.fn.now() });
   }

@@ -5020,6 +5020,7 @@ const InvoiceService = {
       const validAmounts = [totalCents, creditCents].every((cents) => Number.isSafeInteger(cents) && cents >= 0);
       if (invoice.total == null || !validAmounts || creditCents > totalCents) return skip("invalid_balance");
       if (totalCents !== creditCents) return skip("balance_due");
+      await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
       if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
         invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
         return skip("existing_payment_work");
