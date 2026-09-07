@@ -83,18 +83,13 @@ test.each([false, '', 0, -1, 2500.5, 10000001, {}, []])('invalid lawn visit area
 
 test.each([
   'front', [{ productId: 'p1' }], [{ productName: 'Iron' }], [{ productId: 'p1', productName: 'Iron', extra: true }], [{ productId: true, productName: 'Iron' }],
-])('malformed skipped plan defaults %j are rejected before a completion claim or database read', async skippedProducts => {
-  process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
-  process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
-  try {
-    const result = await complete({ lawnProtocolCompletion: { treatedSqft: 2500, skippedProducts } });
-    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_skipped_products_invalid' } });
-    expect(db).not.toHaveBeenCalled();
-    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
-  } finally {
-    delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
-    delete process.env.GATE_LAWN_PROPERTY_HISTORY;
-  }
+])('malformed skipped plan defaults %j are rejected before a completion claim or database read, whatever the UI gates', async skippedProducts => {
+  delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+  delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  const result = await complete({ lawnProtocolCompletion: { treatedSqft: 2500, skippedProducts } });
+  expect(result).toMatchObject({ status: 400, body: { code: 'lawn_skipped_products_invalid' } });
+  expect(db).not.toHaveBeenCalled();
+  expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });
 
 test.each([undefined, null, 2500, '2500'])('valid or omitted lawn visit area %j preserves completion replay', async treatedSqft => {

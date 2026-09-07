@@ -18,7 +18,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
-const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies } = require('../services/lawn-completion-defaults');
+const { lawnCompletionDefaultsEnabled, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -2370,12 +2370,15 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     }
     // Plan defaults the technician removed, recorded as skipped on the lawn
     // actuals ledger. No reason is required (owner ruling: no skip-reason
-    // checklist); an optional typed reason is kept verbatim.
-    const { value: lawnSkippedProducts, error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
+    // checklist); an optional typed reason is kept verbatim. Validated
+    // whenever submitted — independent of the UI-defaults gates — and left
+    // on the payload untouched, so a form opened before a gate rollback
+    // still records its skips.
+    const { error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
       productId: Joi.alternatives(Joi.string().max(80), Joi.number().integer().positive()).required(),
       productName: Joi.string().trim().max(180).required(),
       reason: Joi.string().trim().max(500).allow(null, ''),
-    })).allow(null).validate(lawnDefaultsEnabled ? lawnProtocolCompletion?.skippedProducts : undefined);
+    })).allow(null).validate(lawnProtocolCompletion?.skippedProducts);
     if (lawnSkippedProductsError) {
       return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId, productName, reason? }.', code: 'lawn_skipped_products_invalid' } };
     }
@@ -6109,13 +6112,13 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           const protocolCompletion = await recordLawnProtocolCompletion(trx, {
             service: svc,
             serviceRecord: record,
-            // A track-resolved protocol on a visit with no program is not the
+            // A track-resolved protocol on a visit with no program, or a plan
+            // that did not resolve the visit's explicit assignment, is not the
             // visit's protocol — record the actuals without attribution.
-            plan: lawnLedgerVisit && waveguardPlan && !lawnPlanProgramApplies(waveguardPlan) ? null : waveguardPlan,
+            plan: lawnLedgerVisit && waveguardPlan && !lawnPlanAttributesVisit(waveguardPlan) ? null : waveguardPlan,
             serviceProducts: insertedServiceProducts,
             completionInput: {
               ...(lawnProtocolCompletion || {}),
-              skippedProducts: lawnSkippedProducts || [],
               incompleteVisit: isIncompleteVisit,
               inventoryDeductions,
             },

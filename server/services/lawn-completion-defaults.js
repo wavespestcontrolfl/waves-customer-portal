@@ -141,6 +141,17 @@ function lawnPlanProgramApplies(plan) {
     || !!plan?.appointmentAssignment?.windowKey;
 }
 
+// The ledger stamps a visit's protocol only when a program applies AND the
+// plan the completion built actually resolved that visit's assignment
+// (key / version / window, exact archived version included). With the
+// completion-defaults gates off the planner resolves by calendar, so an
+// explicitly assigned visit would otherwise be stamped with the wrong
+// protocol; withholding attribution is the honest record.
+function lawnPlanAttributesVisit(plan) {
+  return lawnPlanProgramApplies(plan)
+    && matchesLawnCompletionProtocol(plan?.protocol?.structured, plan?.appointmentAssignment || {}, plan?.propertyGate?.trackKey);
+}
+
 function buildLawnCompletionDefaults(plan, context) {
   const protocol = plan.protocol.structured;
   const assigned = plan.appointmentAssignment;
@@ -171,4 +182,4 @@ function buildLawnCompletionDefaults(plan, context) {
   };
 }
 
-module.exports = { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };
+module.exports = { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };

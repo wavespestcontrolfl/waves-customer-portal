@@ -1,4 +1,4 @@
-const { buildLawnCompletionDefaults, lawnCompletionDefaultsEnabled, archivedLawnRecipeMatches } = require('../services/lawn-completion-defaults');
+const { buildLawnCompletionDefaults, lawnCompletionDefaultsEnabled, archivedLawnRecipeMatches, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 
 function fixture() {
   return {
@@ -130,4 +130,19 @@ test('an archived recipe accepts derived-rate defaults only inside the archived 
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 2.5, rateUnit: 'fl oz', rateSource: 'catalog_default_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: 0, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: null, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
+});
+
+test.each([
+  ['member without an assignment', {}, 'Silver', true],
+  ['nonmember without a program', {}, null, false],
+  ['nonmember whose assignment the plan resolved', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, null, true],
+  ['member whose assignment the plan did NOT resolve (defaults gate off → calendar protocol)', { protocolKey: 'protocol', protocolVersion: '2', windowKey: 'september' }, 'Silver', false],
+  ['assignment on a plan with no structured window', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'no-window'],
+])('ledger attribution — %s', (_label, assignment, tier, expected) => {
+  const { plan } = fixture();
+  plan.appointmentAssignment = assignment;
+  plan.propertyGate.serviceTier = tier;
+  if (expected === 'no-window') { plan.protocol.structured = null; expected = false; }
+  expect(lawnPlanAttributesVisit(plan)).toBe(expected);
+  expect(lawnPlanAttributesVisit(null)).toBe(false);
 });

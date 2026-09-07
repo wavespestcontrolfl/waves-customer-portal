@@ -253,8 +253,8 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
       const record = await f.record(visit);
       let plan = null;
       try { plan = await buildPlanForService(visit.id, { db: knex }); } catch { plan = null; }
-      const { lawnPlanProgramApplies } = require('../services/lawn-completion-defaults');
-      expect(plan === null || lawnPlanProgramApplies(plan)).toBe(false);
+      const { lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
+      expect(plan === null || lawnPlanAttributesVisit(plan)).toBe(false);
       const [product] = await knex('products_catalog').insert({ name: 'Fixture one-time iron', category: 'micronutrient', rate_unit: 'fl oz', active: true }).returning('*');
       const [applied] = await knex('service_products').insert({
         service_record_id: record.id, product_id: product.id, product_name: product.name, application_rate: 3, rate_unit: 'fl oz',
