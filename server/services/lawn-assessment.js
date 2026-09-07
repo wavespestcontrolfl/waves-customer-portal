@@ -442,6 +442,15 @@ function getSeason(month) {
  * Get full assessment history for a customer, ordered by date.
  */
 async function getCustomerHistory(customerId) {
+  if (require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) {
+    const history = require('./lawn-assessment-history');
+    const rows = await history.assessmentQuery(customerId, db, { confirmed: false });
+    const installed = new Set(history.installedRows(rows).map((row) => row.id));
+    return rows.map((row) => ({
+      ...row, appointment_date: row.history_visit_date,
+      visit_identity: history.resolveVisit(row).identity, installed: installed.has(row.id),
+    })).sort((a, b) => history.resolveVisit(a).visitDate.localeCompare(history.resolveVisit(b).visitDate));
+  }
   return db('lawn_assessments as la')
     .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
     .select('la.*', 'ss.scheduled_date as appointment_date')
@@ -452,7 +461,11 @@ async function getCustomerHistory(customerId) {
 /**
  * Get the baseline assessment for a customer.
  */
-async function getBaseline(customerId) {
+async function getBaseline(customerId, { propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
+  if (propertyHistoryEnabled) {
+    const rows = await require('./lawn-assessment-history').latestForCustomer(customerId);
+    return rows[0] || null;
+  }
   return db('lawn_assessments')
     .where({ customer_id: customerId, is_baseline: true })
     .first();
@@ -462,8 +475,9 @@ async function getBaseline(customerId) {
  * Reset the baseline: unmark old baseline, mark the next available
  * assessment as the new baseline, and log the reset.
  */
-async function resetBaseline(customerId, adminName, reason) {
-  const oldBaseline = await getBaseline(customerId);
+async function resetBaseline(customerId, adminName, reason, { propertyId, knex = db, propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
+  if (propertyHistoryEnabled) return resetPropertyBaseline(customerId, adminName, reason, { propertyId, knex });
+  const oldBaseline = await getBaseline(customerId, { propertyHistoryEnabled });
 
   // Find the next assessment after the old baseline (or the earliest if none)
   let newBaselineQuery = db('lawn_assessments')
@@ -505,7 +519,129 @@ async function resetBaseline(customerId, adminName, reason) {
   return { oldBaselineId: oldBaseline?.id, newBaselineId: newBaseline?.id };
 }
 
+/** Called under the existing property-preferences/turf fence after analysis. */
+async function assessInsertFields({ customerId, scheduledService, preAnalysisMoveStamp, premiseProven }, knex = db) {
+  const history = require('./lawn-assessment-history');
+  const scope = await history.visitEligibility({ customerId, propertyId: scheduledService?.property_id, allowPrimary: false }, knex);
+  const evidence = history.visitEvidence(customerId, scheduledService);
+  const provenVisit = !!scheduledService?.property_id && history.isEligible(evidence, scope);
+  const provenFallback = premiseProven && !preAnalysisMoveStamp && !scope.movedAt && history.isEligible(evidence, scope);
+  return { property_id: provenVisit || provenFallback ? scope.propertyId : null };
+}
+
+async function setBaselineFlag(customerId, scope, target, knex) {
+  const history = require('./lawn-assessment-history');
+  const rows = await history.assessmentQuery(customerId, knex, { confirmed: false });
+  const ids = rows.filter((row) => history.isEligible(row, scope)).map((row) => row.id);
+  if (ids.length) {
+    const clear = knex('lawn_assessments').whereIn('id', ids).where({ is_baseline: true });
+    if (target) clear.whereNot('id', target.id);
+    await clear.update({ is_baseline: false });
+  }
+  if (target && !target.is_baseline) await knex('lawn_assessments').where({ id: target.id }).update({ is_baseline: true });
+}
+
+async function refreshPropertyBaseline(customerId, scope, knex) {
+  const history = require('./lawn-assessment-history');
+  const { etDateString } = require('../utils/datetime-et');
+  // Flags describe the ACTIVE window. Reconfirming an old visit must not undo
+  // a later reset; historical renders independently resolve their own window.
+  const reset = await history.applicableReset({ customerId, propertyId: scope.propertyId, throughVisitDate: etDateString() }, knex);
+  const rows = await history.propertyHistory({ customerId, scope, reset }, knex);
+  await setBaselineFlag(customerId, scope, rows[0], knex);
+  return rows[0] || null;
+}
+
+function lockCustomerBaseline(customerId, knex) {
+  return knex.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['lawn-baseline', String(customerId)]);
+}
+
+/** Backlinks change installed-row priority, so update their flags atomically. */
+async function linkAssessmentServiceRecord({ assessment, serviceRecordId, onlyIfUnlinked = false }, { knex = db } = {}) {
+  const history = require('./lawn-assessment-history');
+  return knex.transaction(async (trx) => {
+    await lockCustomerBaseline(assessment.customer_id, trx);
+    const record = await trx('service_records').where({ id: serviceRecordId, customer_id: assessment.customer_id }).first();
+    if (!record || (assessment.service_id && record.scheduled_service_id !== assessment.service_id)) {
+      throw new Error('Assessment service record is inconsistent');
+    }
+    const visit = record.scheduled_service_id
+      ? await trx('scheduled_services').where({ id: record.scheduled_service_id, customer_id: assessment.customer_id }).first('property_id') : null;
+    const query = trx('lawn_assessments').where({ id: assessment.id, customer_id: assessment.customer_id });
+    if (assessment.service_id) query.where({ service_id: assessment.service_id });
+    if (onlyIfUnlinked) query.whereNull('service_record_id');
+    await query.update({
+      service_record_id: record.id, updated_at: trx.raw('clock_timestamp()'),
+      property_id: trx.raw('COALESCE(lawn_assessments.property_id, ?::uuid)', [visit?.property_id || null]),
+    });
+    const row = await history.assessmentQuery(assessment.customer_id, trx, { confirmed: false }).where('la.id', assessment.id).first();
+    if (row) await refreshPropertyBaseline(assessment.customer_id, await history.scopeForAssessment(row, trx), trx);
+    return trx('lawn_assessments').where({ id: assessment.id, customer_id: assessment.customer_id }).first();
+  });
+}
+
+/** Confirm and baseline installation commit together; no model or comms here. */
+async function installConfirmedBaseline({ assessmentId, updateData }, { knex = db } = {}) {
+  const history = require('./lawn-assessment-history');
+  return knex.transaction(async (trx) => {
+    const original = await trx('lawn_assessments').where({ id: assessmentId }).first('customer_id');
+    if (!original) throw Object.assign(new Error('Assessment not found'), { statusCode: 404 });
+    const customerId = original.customer_id;
+    await lockCustomerBaseline(customerId, trx);
+    const { withTurfProfileFence } = require('./customer-pricing-ai');
+    return withTurfProfileFence(trx, customerId, async (locked) => {
+      const before = await history.assessmentQuery(customerId, locked, { confirmed: false }).where('la.id', assessmentId).first();
+      if (!before) throw Object.assign(new Error('Assessment ownership changed'), { statusCode: 409 });
+      const visit = history.resolveVisit(before);
+      if (visit.conflict || visit.invalidLink) throw Object.assign(new Error('Assessment visit link is inconsistent'), { statusCode: 409 });
+      const scope = await history.scopeForAssessment(before, locked);
+      const propertyId = history.isEligible(before, scope) ? scope.propertyId : null;
+      await locked('lawn_assessments').where({ id: assessmentId, customer_id: customerId }).update({
+        ...updateData, property_id: propertyId, confirmed_by_tech: true,
+        confirmed_at: locked.raw('clock_timestamp()'), updated_at: locked.raw('clock_timestamp()'),
+        // An invalidated fallback must not remain a baseline for the new lawn.
+        ...(propertyId ? {} : { is_baseline: false }),
+      });
+      await refreshPropertyBaseline(customerId, scope, locked);
+      return locked('lawn_assessments').where({ id: assessmentId }).first();
+    });
+  });
+}
+
+async function resetPropertyBaseline(customerId, adminName, reason, { propertyId, knex }) {
+  const history = require('./lawn-assessment-history');
+  const { etDateString } = require('../utils/datetime-et');
+  return knex.transaction(async (trx) => {
+    await lockCustomerBaseline(customerId, trx);
+    const { withTurfProfileFence } = require('./customer-pricing-ai');
+    return withTurfProfileFence(trx, customerId, async (locked) => {
+      const scope = await history.visitEligibility({ customerId, propertyId }, locked);
+      if (propertyId && !scope.propertyId) throw Object.assign(new Error('Property does not belong to this customer'), { statusCode: 400 });
+      const reset = await history.applicableReset({ customerId, propertyId: scope.propertyId, throughVisitDate: etDateString() }, locked);
+      const rows = await history.propertyHistory({ customerId, scope, reset }, locked);
+      const oldBaseline = rows[0];
+      const newBaseline = rows.find((row) => row.visit_date > oldBaseline.visit_date);
+      await locked('lawn_baseline_resets').insert({
+        customer_id: customerId, property_id: propertyId || null, reset_by: adminName, reason,
+        old_baseline_id: oldBaseline?.id || null, new_baseline_id: newBaseline?.id || null,
+        created_at: locked.raw('clock_timestamp()'),
+      });
+      const properties = propertyId ? [{ id: propertyId }] : await locked('customer_properties').where({ customer_id: customerId }).select('id');
+      for (const property of properties) {
+        const affectedScope = await history.visitEligibility({ customerId, propertyId: property.id }, locked);
+        await refreshPropertyBaseline(customerId, affectedScope, locked);
+      }
+      return { oldBaselineId: oldBaseline?.id, newBaselineId: newBaseline?.id };
+    });
+  });
+}
+
 module.exports = {
+  lockCustomerBaseline,
+  refreshPropertyBaseline,
+  linkAssessmentServiceRecord,
+  assessInsertFields,
+  installConfirmedBaseline,
   VISION_PROMPT,
   buildVisionPrompt,
   analyzePhoto,

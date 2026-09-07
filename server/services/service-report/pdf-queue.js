@@ -171,7 +171,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // (#3172 r1). Two lookups can straddle a selection change, pinning the
   // render to B while caching it under A's key — the race this closes,
   // reintroduced by resolving twice.
-  const canonical = await resolveCanonicalLawnRender(service, knex);
+  const propertyHistoryEnabled = require('../../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+  const canonical = await resolveCanonicalLawnRender(service, knex, { propertyHistoryEnabled });
   const laSignature = canonical.signature;
   // DELIVERY pin vs CANONICAL pin (#3172).
   //
@@ -184,6 +185,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // describe the same assessment.
   const isDeliveryPin = !!pinnedLawnAssessmentId;
   const effectivePin = pinnedLawnAssessmentId || canonical.pin;
+  const lawnHistory = propertyHistoryEnabled && isDeliveryPin && effectivePin !== canonical.pin
+    ? await require('../lawn-assessment-history').historyForReport(service, {
+      assessment: effectivePin === 'none' ? null : await require('./report-data').loadPinnedLawnAssessment(service, effectivePin, knex),
+      pinned: true,
+    }, knex) : canonical.lawnHistory;
+  const pinnedLawnHistoryIdentity = lawnHistory?.identity;
   let pdf;
   // The page's own image-load failure count (null = unknown provider).
   let renderImageFailures = null;
@@ -211,7 +218,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const reserviceTrendsBefore = await reserviceTrendsPdfSignature(service, knex);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
@@ -245,6 +252,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       serviceRecordId: recordId,
       pinnedLawnAssessmentId: effectivePin,
       pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
+      pinnedLawnHistoryIdentity,
     });
     pdf = rendered.pdf;
     renderImageFailures = rendered.imageFailures ?? null;
@@ -408,6 +416,12 @@ async function lawnRecommendationVersion(assessmentId, knex = db) {
 }
 
 async function lawnAssessmentIdForRecord(recordId, knex = db) {
+  if (require('../../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) {
+    const record = await knex('service_records').where({ id: recordId }).first('id', 'customer_id', 'scheduled_service_id');
+    if (!record) return null;
+    const row = await require('../lawn-assessment-history').installedForVisit({ customerId: record.customer_id, serviceRecordId: record.id, serviceId: record.scheduled_service_id }, knex);
+    return row?.id || null;
+  }
   // Deterministic newest-row selection matching loadLinkedLawnAssessment
   // (codex P1 r36): the back-link index is non-unique, and an unordered
   // .first() could fence against an OLDER assessment while the actual one

@@ -224,7 +224,7 @@ function hasAssessmentServiceRecordColumn() {
   return hasServiceRecordColumnPromise;
 }
 
-async function resolveAssessmentServiceRecordId(assessment) {
+async function resolveAssessmentServiceRecordId(assessment, { propertyHistoryEnabled } = {}) {
   if (!assessment) return null;
   if (assessment.service_record_id) return assessment.service_record_id;
   if (!assessment.service_id) return null;
@@ -236,7 +236,10 @@ async function resolveAssessmentServiceRecordId(assessment) {
   if (!serviceRecord?.id) return null;
 
   if (await hasAssessmentServiceRecordColumn()) {
-    await db('lawn_assessments')
+    if (propertyHistoryEnabled) {
+      const linked = await lawnAssessment.linkAssessmentServiceRecord({ assessment, serviceRecordId: serviceRecord.id }, { knex: db });
+      if (linked) Object.assign(assessment, linked);
+    } else await db('lawn_assessments')
       .where({ id: assessment.id })
       .update({ service_record_id: serviceRecord.id, updated_at: new Date() })
       .catch((err) => logger.error(`[lawn-assessment] service_record_id back-link failed: ${err.message}`));
@@ -349,6 +352,7 @@ router.get('/customers', async (req, res, next) => {
 router.post('/assess', async (req, res, next) => {
   try {
     const { customerId, serviceId, photos } = req.body;
+    const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
 
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
@@ -505,7 +509,10 @@ router.post('/assess', async (req, res, next) => {
       // .scheduled_date (falling back to service_date only for rows with no
       // service_id), and never this same service, so a later/same-visit summary
       // can't leak in and bias the new score.
-      const prior = await db('lawn_assessments as la')
+      const scopedPrior = propertyHistoryEnabled
+        ? await require('../services/lawn-assessment-history').historyBeforeVisit({ customerId, scheduledService, throughVisitDate: visitServiceDateStr }, db)
+        : null;
+      const prior = propertyHistoryEnabled ? scopedPrior.previous : await db('lawn_assessments as la')
         .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
         .where('la.customer_id', customerId)
         .whereNotNull('la.ai_summary')
@@ -647,11 +654,21 @@ router.post('/assess', async (req, res, next) => {
       : lawnAssessment.applySeasonalAdjustment(displayScores, month);
 
     // Check if this is the first assessment (baseline)
-    const existingCount = await db('lawn_assessments')
-      .where({ customer_id: customerId })
-      .count('id as cnt')
-      .first();
-    const isBaseline = parseInt(existingCount.cnt) === 0;
+    let isBaseline;
+    if (propertyHistoryEnabled) {
+      const history = require('../services/lawn-assessment-history');
+      const scope = await history.scopeForAssessment(history.visitEvidence(customerId, scheduledService), db);
+      const reset = await history.applicableReset({ customerId, propertyId: scope.propertyId, throughVisitDate: visitServiceDateStr }, db);
+      const rows = await history.propertyHistory({ customerId, scope, throughVisitDate: visitServiceDateStr, reset }, db);
+      isBaseline = !!scope.propertyId && rows.length === 0;
+    } else {
+      const existingCount = await db('lawn_assessments')
+        .where({ customer_id: customerId })
+        .count('id as cnt')
+        .first();
+      isBaseline = parseInt(existingCount.cnt) === 0;
+    }
+    const canStampProperty = await db.schema.hasColumn('lawn_assessments', 'property_id');
 
     // Collect divergence flags from all photo analyses
     const allDivergences = validResults.flatMap(r => r.divergenceFlags || []);
@@ -685,20 +702,26 @@ router.post('/assess', async (req, res, next) => {
       stress_damage: adjustedScores.stress_damage,
       observations: adjustedScores.observations,
       overall_score: overallScore,
-      is_baseline: isBaseline,
+      is_baseline: propertyHistoryEnabled ? false : isBaseline,
     }).returning('*');
 
     // Auto-capture grass type from the AI read into the turf profile so lawn
     // reports use the real turf instead of the St. Augustine default. COALESCE-
     // guarded: only fills a blank value, never overrides a real one (tech/admin
     // edit or estimate). Fail-soft — never break the assessment.
-    if (mergedComposite.grass_type) {
+    if (canStampProperty || mergedComposite.grass_type) {
       try {
         // Customer-lock fence (#3391): a first-profile insert must not race
         // the click-to-estimate mint's turf revalidation — every
         // price-bearing turf writer takes the shared fence.
         const { withTurfProfileFence } = require('../services/customer-pricing-ai');
         await withTurfProfileFence(db, customerId, async (trx) => {
+          if (canStampProperty) {
+            const fields = await lawnAssessment.assessInsertFields({ customerId, scheduledService, preAnalysisMoveStamp, premiseProven }, trx);
+            await trx('lawn_assessments').where({ id: assessment.id }).whereNull('property_id').update(fields);
+            Object.assign(assessment, fields);
+          }
+          if (!mergedComposite.grass_type) return;
           const prior = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type');
           await trx('customer_turf_profiles')
             .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
@@ -903,6 +926,7 @@ function normalizeStressFlags(input) {
 
 router.post('/confirm', async (req, res, next) => {
   try {
+    const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
     const {
       assessmentId,
       adjustedScores,
@@ -983,10 +1007,15 @@ router.post('/confirm', async (req, res, next) => {
       updateData.stress_flags = JSON.stringify(normalizedStressFlags);
     }
 
-    const [updated] = await db('lawn_assessments')
-      .where({ id: assessmentId })
-      .update(updateData)
-      .returning('*');
+    let updated;
+    if (propertyHistoryEnabled) {
+      updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
+    } else {
+      [updated] = await db('lawn_assessments')
+        .where({ id: assessmentId })
+        .update(updateData)
+        .returning('*');
+    }
     if (protocolFieldChecksProvided) {
       await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
       Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
@@ -998,7 +1027,7 @@ router.post('/confirm', async (req, res, next) => {
     let resolvedServiceRecordId = updated.service_record_id || null;
     try {
       const wiki = require('../services/agronomic-wiki');
-      const serviceRecordId = await resolveAssessmentServiceRecordId(updated);
+      const serviceRecordId = await resolveAssessmentServiceRecordId(updated, { propertyHistoryEnabled });
       if (serviceRecordId) {
         resolvedServiceRecordId = serviceRecordId;
         updated.service_record_id = serviceRecordId;
@@ -1133,11 +1162,15 @@ router.get('/baseline/:customerId', async (req, res, next) => {
 // =========================================================================
 router.post('/reset-baseline/:customerId', async (req, res, next) => {
   try {
-    const { reason } = req.body;
+    const { reason, propertyId } = req.body;
+    const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+    if (propertyHistoryEnabled && propertyId != null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
+      return res.status(400).json({ error: 'Invalid propertyId' });
+    }
     if (!reason) return res.status(400).json({ error: 'reason is required' });
 
     const adminName = req.technician?.name || req.technician?.email || 'Unknown';
-    const result = await lawnAssessment.resetBaseline(req.params.customerId, adminName, reason);
+    const result = await lawnAssessment.resetBaseline(req.params.customerId, adminName, reason, { propertyId, propertyHistoryEnabled });
 
     // Flag that next visit needs fresh baseline photos
     try {
