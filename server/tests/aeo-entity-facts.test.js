@@ -315,6 +315,8 @@ test('a bare name answers the ownership question directly, and URL dots are not 
   expect(score('E1', 'Rentokil.').forbidden.wrong_owner_bare).toBe(true);
   expect(score('E1', 'Not John Smith.').forbidden.wrong_owner_bare).toBe(false);
   expect(score('E1', 'Family Owned.').forbidden.wrong_owner_bare).toBe(false);
+  expect(score('E1', 'Adam Benetti.\n\n[Business Profile](https://www.wavespestcontrol.com/business-profile/)')).toMatchObject({ expected: { founder: true }, forbidden: { wrong_owner_bare: false } });
+  expect(score('E1', 'Waves is owned by Adam Benetti.\n\nSources\nFlorida Division of Corporations').forbidden.wrong_owner_bare).toBe(false);
   expect(score('E5', 'Lakewood Ranch, Florida.').forbidden).not.toHaveProperty('wrong_owner_bare');
   expect(score('E10', 'Do not visit https://www.wavespestcontrol.com/.').expected.website).toBe(false);
   expect(score('E10', 'Do not call 941.297.5749.').expected.phone).toBe(false);

@@ -5,7 +5,7 @@
   "facts": {
     "founder": {
       "label": "Names Adam Benetti",
-      "pattern": "(?<=\\b(?:own(?:s|ed|er)|found(?:ed|er)|start(?:ed)?|establish(?:ed)?|operat(?:es|ed|or)|runs?|proprietor|president|ceo|led|headed)\\b[^.;!?\\n]{0,80})\\badam\\s+benetti\\b|\\badam\\s+benetti\\b(?='s\\s+(?:company|business)\\b|[^.;!?\\n]{0,80}\\b(?:own(?:s|ed|er)|found(?:ed|er)|start(?:ed)?|establish(?:ed)?|operat(?:es|ed|or)|runs?|proprietor|president|ceo|led|headed)\\b)|(?<=^|\\n)\\s*adam\\s+benetti\\b(?=\\s*(?:[.,;:!(\\-–—]|$|\\n))"
+      "pattern": "(?<=\\b(?:own(?:s|ed|er)|found(?:ed|er)|start(?:ed)?|establish(?:ed)?|operat(?:es|ed|or)|runs?|proprietor|president|ceo|led|headed)\\b[^.;!?\\n]{0,80})\\badam\\s+benetti\\b|\\badam\\s+benetti\\b(?='s\\s+(?:company|business)\\b|[^.;!?\\n]{0,80}\\b(?:own(?:s|ed|er)|found(?:ed|er)|start(?:ed)?|establish(?:ed)?|operat(?:es|ed|or)|runs?|proprietor|president|ceo|led|headed)\\b)|^\\s*adam\\s+benetti\\b(?=\\s*(?:[.,;:!(\\-–—]|$|\\n))"
     },
     "founded_2024": {
       "label": "Founded 2024",
@@ -99,7 +99,7 @@
     },
     "wrong_owner_bare": {
       "label": "Names someone else as the owner outright",
-      "pattern": "(?<=^|\\n)\\s*(?!Waves\\b|Adam\\b|Not?\\b|Neither\\b|Never\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)(?=\\s*(?:[.,;:!(\\-\u2013\u2014]|$|\\n))",
+      "pattern": "^\\s*(?!Waves\\b|Adam\\b|Not?\\b|Neither\\b|Never\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)(?=\\s*(?:[.,;:!(\\-\u2013\u2014]|$|\\n))",
       "reject_pattern": "benetti|waves|family|locally|independent|owner|operator|private|unknown|unclear|none|n/?a",
       "flags": ""
     },
