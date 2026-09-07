@@ -328,7 +328,8 @@ describe('handleClarifyReply', () => {
 
   test('an address-only reply records onto the lead and resumes with gate + cooldown bypassed', async () => {
     mockState.existingDraft = AWAITING(['street_address']);
-    const result = await handleClarifyReply({ phone: '+19415550142', body: "It's 123 Main St, Sarasota" });
+    const result = await handleClarifyReply({ phone: '+19415550142', body: "It's 123 Main St, Sarasota",
+      triggerSmsLogId: '00000000-0000-4000-8000-000000000103' });
     expect(result.handled).toBe(true);
     const leadUpdate = mockState.updates.find((u) => u.table === 'leads');
     expect(leadUpdate.payload.address).toBe('123 Main St, Sarasota');
@@ -337,6 +338,7 @@ describe('handleClarifyReply', () => {
     expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({
       skipIntentGate: true,
       skipCooldown: true,
+      triggerSmsLogId: '00000000-0000-4000-8000-000000000103',
     }));
   });
 

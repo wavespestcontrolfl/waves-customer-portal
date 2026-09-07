@@ -24,6 +24,7 @@ jest.mock('../services/contact-correction', () => ({ detectContactCorrectionInte
 jest.mock('../services/contact-correction-queue', () => ({}));
 jest.mock('../services/reschedule-sms', () => ({ handleRescheduleReply: jest.fn() }));
 jest.mock('../services/lead-intake', () => ({ handleIntakeReply: jest.fn() }));
+jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/estimator-engine/context-builder', () => ({ loadCustomerByPhone: jest.fn(async () => null) }));
 jest.mock('../services/sms-operational-actions', () => ({ runSmsOperationalActions: jest.fn(async () => ({})) }));
 
@@ -110,7 +111,7 @@ postgres('consumed inbound replies on PostgreSQL', () => {
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
 
-  test('persisted intake trigger leaves all five prior messages in estimator context', async () => {
+  test.each(['intake', 'clarify'])('persisted %s trigger leaves all five prior messages in estimator context', async (consumer) => {
     const now = Date.now();
     const olderBodies = ['Earlier service details', 'Earlier note two', 'Earlier note three', 'Earlier note four', 'How much?'];
     await mockPg('sms_log').insert(olderBodies.map((message_body, index) => ({
@@ -119,12 +120,18 @@ postgres('consumed inbound replies on PostgreSQL', () => {
     })));
     request.body.Body = 'How much?';
     let triage;
-    LeadIntake.handleIntakeReply.mockImplementation(async (_customer, triggerBody, { triggerSmsLogId }) => {
+    const loadTriage = async (triggerBody, triggerSmsLogId) => {
       triage = await require('../services/estimator-engine/scope-guards').loadThreadTriageContext({
         phone: request.body.From, triggerBody, triggerSmsLogId,
       });
       return { handled: true, next: 'awaiting_address' };
-    });
+    };
+    if (consumer === 'intake') {
+      LeadIntake.handleIntakeReply.mockImplementation((_customer, triggerBody, { triggerSmsLogId }) => loadTriage(triggerBody, triggerSmsLogId));
+    } else {
+      await mockPg('customers').update({ lead_intake_status: null });
+      require('../services/estimate-clarify-asks').handleClarifyReply.mockImplementationOnce(({ body, triggerSmsLogId }) => loadTriage(body, triggerSmsLogId));
+    }
     await handler(request, response());
     expect(triage.recentTexts).toEqual(olderBodies.reverse().map((body) => `[sender] ${body}`));
     expect(await mockPg('sms_log')).toHaveLength(6);
