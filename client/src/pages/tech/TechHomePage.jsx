@@ -218,11 +218,13 @@ export default function TechHomePage() {
   // dispatch broadcast, retry): a line cleared or reassigned — or the gate
   // switched off — while the PWA stays open must bring the personal-phone
   // links back instead of buttons that only 409 (codex #4072 r3 P2). A
-  // failed read keeps the last known answer — on first load that is
-  // `{ unknown: true }`, which the brief renders as "line couldn't be
-  // checked" with NO contact links (never the personal phone on a lookup
-  // error, codex #4072 r5 P2); only an authoritative { line: null } shows
-  // the personal links.
+  // failed read keeps a KNOWN LINE (buttons that may 409 are the safe
+  // side) but never a cached { line: null }: a line assigned since that
+  // answer must not stay hidden behind the personal links, so the failure
+  // falls back to `{ unknown: true }` — "line couldn't be checked", NO
+  // contact links (never the personal phone on a lookup error, codex #4072
+  // r5 + r14 P2); only an authoritative { line: null } shows the personal
+  // links.
   const [techLine, setTechLine] = useState({ unknown: true });
   // Overlapping refreshes start overlapping lookups; only the NEWEST one
   // may set state — an older `{ line: null }` landing last would expose
@@ -235,7 +237,10 @@ export default function TechHomePage() {
       const d = await techRequest('/tech/line');
       if (seq !== lineLookupSeq.current) return;
       setTechLine(d?.line ? d : null);
-    } catch { /* keep the last known line */ }
+    } catch {
+      if (seq !== lineLookupSeq.current) return;
+      setTechLine((prev) => (prev?.line ? prev : { unknown: true }));
+    }
   }, []);
   const [loading, setLoading] = useState(true);
   const [scheduleError, setScheduleError] = useState('');
