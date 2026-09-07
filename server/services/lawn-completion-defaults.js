@@ -7,6 +7,7 @@ const history = require('./lawn-assessment-history');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { calculateLawnOverallScore, resolveStressDamage } = require('../../shared/lawn-scores.cjs');
 const { detectServiceLine } = require('./service-report/service-line-configs');
+const { normalizeInventoryUnit } = require('./inventory-units');
 
 function lawnCompletionDefaultsEnabled() {
   return gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS') && gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
@@ -94,7 +95,10 @@ function targetRange(text) {
 
 function archivedRateMatches(product, mix) {
   if (product.ratePer1000 != null) {
-    return Number(product.ratePer1000) > 0 && Number(product.ratePer1000) === mix?.ratePer1000 && product.rateUnit === mix?.rateUnit;
+    // Protocol rows and the catalog spell the same unit differently ('fl oz'
+    // vs 'fl_oz'); only a different physical unit is recipe drift.
+    return Number(product.ratePer1000) > 0 && Number(product.ratePer1000) === mix?.ratePer1000
+      && normalizeInventoryUnit(product.rateUnit) === normalizeInventoryUnit(mix?.rateUnit);
   }
   const unit = String(product.rateUnit || '').toLowerCase();
   const nutrient = unit === 'lb_n' ? ['target_n_analysis', 'targetN', 'targetNPer1000']

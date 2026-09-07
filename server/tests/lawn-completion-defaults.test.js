@@ -128,6 +128,9 @@ test('an archived recipe accepts derived-rate defaults only inside the archived 
   const stored = { ratePer1000: 3, rateUnit: 'fl oz', gates: {} };
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'fl oz', rateSource: 'catalog_default_rate' }))).toBe(true);
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 2.5, rateUnit: 'fl oz', rateSource: 'catalog_default_rate' }))).toBe(false);
+  // The catalog spells the protocol row's 'fl oz' as 'fl_oz' — same unit, not drift; a different unit still is.
+  expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'fl_oz', rateSource: 'catalog_default_rate' }))).toBe(true);
+  expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'oz', rateSource: 'catalog_default_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: 0, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: null, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
 });
