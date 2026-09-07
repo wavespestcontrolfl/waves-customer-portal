@@ -81,6 +81,7 @@ import {
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import useModalFocus from '../hooks/useModalFocus';
+import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import { canonicalShareUrl, shareDocumentLink } from '../components/DocumentActionBar';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
@@ -2421,7 +2422,9 @@ function ExistingAppointmentCard({ appointment }) {
 // in an Express Checkout element above the card form and confirm the PI at
 // FACE value — Phase-1, the same wallets-surcharge-free rule as PayPageV2.
 function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
-  const dialogRef = useModalFocus();
+  // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
+  const dialogRef = useModalFocus(true, () => { if (!submitting) onCancel(); });
+  useLockBodyScroll(true);
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const stripeRef = useRef(null);
@@ -2634,7 +2637,6 @@ function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"
-      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
       style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
@@ -2681,7 +2683,9 @@ function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your
 // charged the final total on completion, and a flat fee only on a no-show /
 // late cancel.
 function CardHoldModal({ intent, onSuccess, onCancel }) {
-  const dialogRef = useModalFocus();
+  // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
+  const dialogRef = useModalFocus(true, () => { if (!submitting) onCancel(); });
+  useLockBodyScroll(true);
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -2755,7 +2759,6 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"
-      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
       style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
@@ -2799,7 +2802,9 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // and the recorded consent variant must say so (the exact surcharged total
 // is quoted in the PREPAY_CHARGE_QUOTE step before any charge).
 function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
-  const dialogRef = useModalFocus();
+  // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
+  const dialogRef = useModalFocus(true, () => { if (!submitting) onCancel(); });
+  useLockBodyScroll(true);
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -2917,7 +2922,6 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"
-      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
       data-glass-scrim=""
       style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
@@ -3000,6 +3004,8 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState('');
+  const dialogRef = useModalFocus(true, () => { if (!submitting) onClose(); });
+  useLockBodyScroll(true);
 
   const toggle = (key) => setSelected((prev) => {
     const next = new Set(prev);
@@ -3040,11 +3046,10 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
       role="dialog"
       aria-modal="true"
       aria-label="Does the lawn size look off?"
-      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onClose(); }}
       data-glass-scrim=""
       style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
-      <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+      <div ref={dialogRef} data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         {done ? (
           <>
             <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.glassNavy }}>Got it — we&rsquo;ll re-check the lawn size</div>
@@ -3248,6 +3253,7 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
   // the opener, document-level Escape (GH codex P1 — the partial onKeyDown
   // only saw Escape once focus happened to enter the sheet).
   const dialogRef = useModalFocus(true, close);
+  useLockBodyScroll(true);
   // Branch-specific fields never cross branches: a decline explanation must
   // not become a change request, and vice versa (GH codex P2).
   const goTo = (next) => {

@@ -14,6 +14,7 @@ const { validate: isUuid } = require('uuid');
 const db = require('../models/db');
 const { hashCompletionRequest } = require('./completion-attempts');
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
+const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
 
 function failure(status, code, error) {
@@ -25,19 +26,43 @@ function packetRequest({ visitId, idempotencyKey, items }) {
       || !idempotencyKey.trim() || idempotencyKey.length > 120) {
     return { error: failure(400, 'visit_closeout_invalid', 'A visit and an idempotency key are required.') };
   }
-  if (!Array.isArray(items) || items.length < 2 || items.some((item) => (
+  if (!Array.isArray(items) || items.length < 1 || items.some((item) => (
     !isUuid(item?.serviceId) || !item.body || typeof item.body !== 'object' || Array.isArray(item.body)
-  )) || new Set(items.map((item) => item.serviceId)).size !== items.length) {
+  )) || new Set(items.map((item) => item.serviceId.toLowerCase())).size !== items.length) {
     return { error: failure(400, 'visit_closeout_members_invalid', 'Submit each visit service once with its completion form.') };
   }
   // Canonical completion normalizes some form fields in place. Keep the
   // submitted snapshot immutable, and use its existing semantic hash rules
   // so a ticking panel timer does not invalidate a retry of the same packet.
-  const ordered = structuredClone(items).sort((a, b) => a.serviceId.localeCompare(b.serviceId));
+  // PostgreSQL returns uuid columns lowercase; look up, compare, sort and
+  // hash every submitted id in that same canonical form, so a retry built
+  // from a response's ids replays instead of mismatching.
+  const canonicalVisitId = visitId.toLowerCase();
+  const ordered = structuredClone(items)
+    .map((item) => ({ ...item, serviceId: item.serviceId.toLowerCase() }))
+    .sort((a, b) => a.serviceId.localeCompare(b.serviceId));
   const hash = crypto.createHash('sha256').update(JSON.stringify({
-    visitId, items: ordered.map((item) => ({ serviceId: item.serviceId, hash: hashCompletionRequest(item.body) })),
+    visitId: canonicalVisitId,
+    items: ordered.map((item) => ({ serviceId: item.serviceId, hash: hashCompletionRequest(item.body) })),
   })).digest('hex');
-  return { visitId, key: idempotencyKey.trim(), items: ordered, hash };
+  return { visitId: canonicalVisitId, key: idempotencyKey.trim(), items: ordered, hash };
+}
+
+function packetSnapshot(request, actor, members, existing) {
+  if (existing) return { ...existing.payload, retainedMembers: existing.payload.retainedMembers || [] };
+  const retainedMembers = members.filter((member) => TERMINAL_ROW_STATUSES.includes(member.status))
+    .map((member) => ({ serviceId: member.id, status: member.status }));
+  const items = structuredClone(request.items);
+  for (const item of items) {
+    if (item.body.gaugePhoto && typeof item.body.gaugePhoto === 'object') delete item.body.gaugePhoto.data;
+    if (!Array.isArray(item.body.completionPhotos)) continue;
+    for (const photo of item.body.completionPhotos) {
+      if (photo && typeof photo === 'object') delete photo.data;
+    }
+  }
+  // The request hash still covers the original photo bytes. Uploaded objects
+  // belong to each service record; packet retries never upload them again.
+  return { items, actor, retainedMembers };
 }
 
 function recordsResult(packet, items, billing, replayed = false) {
@@ -47,18 +72,20 @@ function recordsResult(packet, items, billing, replayed = false) {
   } };
 }
 
-/** Authenticated actor is supplied by the caller, separately from the forms. */
+/** Owns the commit/rollback boundary; callers must supply a root Knex handle. */
 async function saveVisitCompletionPacket(input, database = db) {
+  if (database.isTransaction) throw new TypeError('Visit completion requires a root database connection');
   const request = packetRequest(input);
   if (request.error) return request.error;
+  const actor = input.actor || {};
   const uploadedPhotoRows = [];
   let readyToCommit = false;
   try {
     return await database.transaction(async (trx) => {
       const peek = await trx('service_visits').where({ id: request.visitId }).first();
       if (!peek) return failure(404, 'visit_not_found', 'Visit not found.');
-      // Canonical completion and baseline confirmation take this fence before
-      // customer rows. Acquire it before the packet's estimate/mint/row locks.
+      // Baseline confirmation and canonical completion take this fence before
+      // estimate, invoice-mint and customer locks.
       if (require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) {
         await require('./lawn-assessment').lockCustomerBaseline(peek.customer_id, trx);
       }
@@ -73,18 +100,17 @@ async function saveVisitCompletionPacket(input, database = db) {
         const candidates = await trx('scheduled_services').where({ visit_id: peek.id })
           .whereIn('id', reviewed.map((item) => item.serviceId)).orderBy('id');
         for (const member of candidates) {
-          const denied = completionOwnershipError({ role: input.actor?.techRole,
-            actorTechnicianId: input.actor?.technicianId, assignedTechnicianId: member.technician_id });
+          const denied = completionOwnershipError({ role: actor.techRole,
+            actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id });
           if (denied) return { status: denied.status, body: denied.payload };
           const form = reviewed.find((item) => item.serviceId === member.id);
           pricingPlans.push(await pricing.prepareCompletionPricingReview(member.id, form.body.pricingReview,
-            { database: trx, role: input.actor?.techRole }));
+            { database: trx, role: actor.techRole }));
         }
         pricingPlans.sort((a, b) => (a.source.estimate?.id || '').localeCompare(b.source.estimate?.id || ''));
         for (const plan of pricingPlans) await pricing.lockCompletionPricingEstimate(trx, plan);
       }
-      // Same mint identities/order as invoice creation. The member comparison
-      // below refuses a stale submitted set after the stop lock is acquired.
+      // Use the canonical invoice-mint identities before customer/stop locks.
       const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
       for (const item of request.items) await acquireScheduledInvoiceMintLock(trx, item.serviceId);
       // Same customer -> stop -> visit/member order as grouping. Customer
@@ -93,18 +119,27 @@ async function saveVisitCompletionPacket(input, database = db) {
       pricingPlans.sort((a, b) => (a.source.parent?.id || '').localeCompare(b.source.parent?.id || ''));
       for (const plan of pricingPlans) await pricing.lockCompletionPricingParent(trx, plan);
       await lockStop(trx, peek.stop_base_key);
-      const visit = await trx('service_visits').where({ id: peek.id }).forUpdate().first();
-      if (!visit || visit.stop_base_key !== peek.stop_base_key || visit.customer_id !== peek.customer_id) {
-        return failure(409, 'visit_changed', 'The visit moved. Refresh before closing it.');
-      }
+      // Re-read under the lock with the peeked identity in the predicate: a
+      // visit that moved stop or customer in between is simply not found.
+      const visit = await trx('service_visits')
+        .where({ id: peek.id, stop_base_key: peek.stop_base_key, customer_id: peek.customer_id })
+        .forUpdate().first();
+      if (!visit) return failure(409, 'visit_changed', 'The visit moved. Refresh before closing it.');
       const members = await trx('scheduled_services').where({ visit_id: visit.id }).orderBy('id').forUpdate();
       const ownership = members.map((member) => completionOwnershipError({
-        role: input.actor?.techRole, actorTechnicianId: input.actor?.technicianId,
-        assignedTechnicianId: member.technician_id,
+        role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
       })).find(Boolean);
       if (ownership) return { status: ownership.status, body: ownership.payload };
-      if (members.length !== request.items.length
-          || members.some((member, index) => member.id !== request.items[index].serviceId)) {
+      const existing = await trx('visit_completion_packets').where({ visit_id: visit.id }).first();
+      const snapshot = packetSnapshot(request, actor, members, existing);
+      const retainedIds = new Set(snapshot.retainedMembers.map((member) => member.serviceId));
+      // Frozen visits retain terminal children as history. Only live children
+      // need forms on the first submit. Replays use saved form membership,
+      // since recording those services has already made them terminal too.
+      const formMemberIds = members.filter((member) => !retainedIds.has(member.id)).map((member) => member.id);
+      const frozenMemberIds = [...snapshot.items.map((item) => item.serviceId), ...retainedIds].sort();
+      if (formMemberIds.join() !== request.items.map((item) => item.serviceId).join()
+          || frozenMemberIds.join() !== members.map((member) => member.id).join()) {
         return failure(409, 'visit_members_changed', 'The visit service list changed. Refresh all service forms.');
       }
       if (members.some((member) => member.customer_id !== visit.customer_id
@@ -114,13 +149,13 @@ async function saveVisitCompletionPacket(input, database = db) {
           || stopBaseKey({ propertyId: member.property_id, customerId: member.customer_id, scheduledDate: member.scheduled_date }) !== visit.stop_base_key)) {
         return failure(409, 'visit_members_incompatible', 'These services no longer share one property, date and technician.');
       }
-      const existing = await trx('visit_completion_packets').where({ visit_id: visit.id }).first();
       if (existing) {
         if (existing.idempotency_key !== request.key || existing.request_hash !== request.hash) {
           return failure(409, 'visit_closeout_payload_mismatch', 'A saved closeout already owns this visit. Resume that closeout.');
         }
-        const saved = await trx('visit_completion_packet_items').where({ packet_id: existing.id }).orderBy('scheduled_service_id');
-        if (saved.length !== members.length || saved.some((item) => !item.service_record_id)) {
+        const saved = await trx('visit_completion_packet_items').where({ packet_id: existing.id })
+          .whereNotNull('service_record_id').orderBy('scheduled_service_id');
+        if (saved.map((item) => item.scheduled_service_id).join() !== formMemberIds.join()) {
           return failure(409, 'visit_closeout_pending', 'The saved closeout has not finished recording its services.');
         }
         const billing = await require('./visit-completion-invoice').createVisitCompletionInvoice(existing.id, trx);
@@ -131,7 +166,7 @@ async function saveVisitCompletionPacket(input, database = db) {
       if (keyOwner) return failure(409, 'visit_closeout_key_reused', 'The idempotency key belongs to another visit.');
       const [packet] = await trx('visit_completion_packets').insert({
         visit_id: visit.id, idempotency_key: request.key, request_hash: request.hash,
-        payload: JSON.stringify({ items: request.items, actor: input.actor }), status: 'processing',
+        payload: JSON.stringify(snapshot), status: 'processing',
       }).returning('*');
       await trx('service_visits').where({ id: visit.id }).update({
         status: 'closing', completion_submitted_at: trx.fn.now(), updated_at: trx.fn.now(),
@@ -145,7 +180,7 @@ async function saveVisitCompletionPacket(input, database = db) {
         }).returning('*');
         const result = await completeScheduledService({
           serviceId: item.serviceId, idempotencyKey: key,
-          body: structuredClone(item.body), actor: input.actor,
+          body: structuredClone(item.body), actor,
         }, { trx, itemId: packetItem.id, uploadedPhotoRows });
         if (result.status !== 202 || !result.body.serviceRecordId) {
           const rejected = new Error('Visit member completion rejected');

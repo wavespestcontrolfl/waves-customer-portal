@@ -24,6 +24,9 @@
  *     no coordinates / lead-stage / inactive). The email's audience is
  *     computed at send time via the same predicate this check reuses, so
  *     adds and drops are automatic — only prerequisite failures page.
+ *  4. PREPAY COVERAGE GAPS — annual stamps the completion validator cannot
+ *     verify, missing or conflicting stamps on linked paid terms, or a missing
+ *     or replaced manual series allocation. Includes overdue live visits.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
@@ -37,6 +40,7 @@
  */
 
 const db = require('../models/db');
+const { createHash } = require('node:crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { etDateString } = require('../utils/datetime-et');
@@ -98,6 +102,10 @@ function isStaleInProgress(row, todayET) {
 // bell.
 const ANNUAL_PREPAY_METHOD = 'annual_prepay_invoice';
 
+// The annual writer's live-status rule: NULL is live, these are not. Shared
+// by the coverage candidate scan and the inferred family-payment groups.
+const LIVE_STATUS_EXCLUSIONS = ['cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show'];
+
 function hasOutOfBandPrepaidStamp(row) {
   return toMoney(row?.prepaid_amount) != null
     && row?.prepaid_method !== ANNUAL_PREPAY_METHOD;
@@ -108,8 +116,36 @@ function hasAnnualPrepaidStamp(row) {
     && row?.prepaid_method === ANNUAL_PREPAY_METHOD;
 }
 
+function manualSeriesStampIssue(row) {
+  // Explicit allocation audits cover even a one-visit series. Historical rows
+  // without audits still require two matching survivors to prove series scope.
+  // Inferred groups: [paid_at, method, members, live_members]; allocation
+  // audits: [paid_at, method, audit_id, amount].
+  const inferred = row?.manual_series_payment_evidence || [];
+  const allocations = row?.manual_series_allocation_evidence || [];
+  if (!inferred.length && !allocations.length) return null;
+  if (!(Number(row?.prepaid_amount) > 0)) return 'manual_series_stamp_missing';
+  // A different payment cannot silently replace the original allocation.
+  const stampedAt = new Date(row.prepaid_at).getTime();
+  const matchesStamp = (paidAt, method) => method === row.prepaid_method
+    && new Date(paidAt).getTime() === stampedAt;
+  const allocationsMatch = allocations.every(([paidAt, method, , amount]) => matchesStamp(paidAt, method)
+    && (amount == null || Number(amount) === Number(row.prepaid_amount)));
+  // A family payment whose stamped members are all terminal has closed its
+  // books: a live row carrying a later explicit series stamp was amended, not
+  // silently replaced (Codex #4030 r7 P2). A group with a live member still
+  // holds that payment on a sibling sharing this row's coverage, so this
+  // row's different stamp must be reconciled against it.
+  const inferredMatch = inferred
+    .filter(([, , , liveMembers]) => liveMembers == null || Number(liveMembers) > 0)
+    .every(([paidAt, method]) => matchesStamp(paidAt, method));
+  return allocationsMatch && inferredMatch ? null : 'manual_series_stamp_conflict';
+}
+
 function isUnpricedSeriesVisit(row) {
-  if (!row) return false;
+  // Preserve the original pricing query's status eligibility; the broader
+  // coverage scan also handles legacy null-status visits.
+  if (row?.status == null) return false;
   if (rowHasPrice(row)) return false;
   if (hasOutOfBandPrepaidStamp(row)) return false;
   const inheritsFromParent = !!row.recurring_parent_id && row.is_recurring !== false;
@@ -161,37 +197,117 @@ async function runInner({ now = new Date() } = {}) {
     .orderBy('scheduled_date', 'asc');
   const stale = staleRows.filter((r) => isStaleInProgress(r, todayET));
 
-  // Class 2 — unpriced recurring series with a visit inside the window.
-  // Exclude every status that will never bill (rescheduled rows are
-  // phantom/non-working appointments; skipped and no_show never complete) —
-  // only pending/confirmed/en_route/on_site visits are headed for an invoice.
+  // Coverage can still be lost on an overdue visit that staff complete later.
+  // Match the annual writer's null-or-live status predicate. The existing
+  // unpriced-series class keeps its upcoming-only window below.
   const horizon = new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 24 * 3600 * 1000);
-  const upcomingRows = await db('scheduled_services as ss')
+  const coverageCandidates = await db('scheduled_services as ss')
     .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
-    .whereNotIn('ss.status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
-    .where('ss.scheduled_date', '>=', todayET)
+    .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.id', 'ss.annual_prepay_term_id')
+    .leftJoin('invoices as prepay_invoice', 'prepay_invoice.id', 'prepay_term.prepay_invoice_id')
+    .where(function whereLive() {
+      this.whereNull('ss.status').orWhereNotIn('ss.status', LIVE_STATUS_EXCLUSIONS);
+    })
     .where('ss.scheduled_date', '<=', etDateString(horizon))
     .where(function whereRecurring() {
-      this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_parent_id');
+      this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_parent_id')
+        .orWhere('ss.prepaid_method', ANNUAL_PREPAY_METHOD).orWhereNotNull('ss.annual_prepay_term_id')
+        .orWhereExists(function hasFamily() {
+          this.select(db.raw('1')).from('scheduled_services as child')
+            .whereRaw('child.recurring_parent_id = ss.id AND child.customer_id = ss.customer_id');
+        }).orWhereExists(function hasAllocation() {
+          this.select(db.raw('1')).from('audit_log as allocation')
+            .where({ 'allocation.action': 'prepaid_series.allocated', 'allocation.resource_type': 'scheduled_service' })
+            .whereRaw('allocation.resource_id = ss.id');
+        });
     })
     .select(
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
       'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount',
       'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.recurring_parent_id',
+      'ss.created_at', 'ss.prepaid_at',
+      db.raw('ss.xmin::text as row_revision'),
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',
+      // Fingerprints only: coverage authority remains annualPrepayCoversVisit.
+      // Include funding revisions so a repaired term can alert again after
+      // a later refund/void even when best-effort visit cleanup did not run.
+      db.raw(`jsonb_build_array(prepay_term.id, prepay_term.customer_id, prepay_term.status,
+        prepay_term.coverage_service_type, prepay_term.renewal_decision,
+        prepay_term.xmin::text) as prepay_term_evidence`),
+      db.raw(`jsonb_build_array(prepay_invoice.id, prepay_invoice.status,
+        prepay_invoice.paid_at, prepay_invoice.xmin::text) as prepay_invoice_evidence`),
+      db.raw(`(SELECT jsonb_agg(jsonb_build_array(p.id, p.status, p.refund_status,
+          p.xmin::text) ORDER BY p.id)
+        FROM payments p
+        WHERE (p.stripe_payment_intent_id IS NOT NULL
+          AND p.stripe_payment_intent_id = prepay_invoice.stripe_payment_intent_id)
+          OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = prepay_invoice.stripe_charge_id)
+      ) as prepay_payment_evidence`),
+      db.raw(`(SELECT jsonb_agg(jsonb_build_array(allocation.metadata->>'prepaid_at',
+          allocation.metadata->>'prepaid_method', allocation.id, allocation.metadata->>'prepaid_amount')
+          ORDER BY allocation.id)
+        FROM audit_log allocation
+        WHERE allocation.resource_type = 'scheduled_service' AND allocation.resource_id = ss.id
+          AND allocation.action = 'prepaid_series.allocated'
+          AND allocation.metadata->>'customer_id' = ss.customer_id::text
+          AND NOT EXISTS (SELECT 1 FROM audit_log cleared
+            WHERE cleared.resource_type = 'prepaid_series_allocation'
+              AND cleared.resource_id = allocation.id AND cleared.action = 'prepaid_series.cleared')
+      ) as manual_series_allocation_evidence`),
+      // Two matching payment stamps prove series scope even if the ROOT's
+      // stamp was cleared. Keep every evidentiary tuple version in the key:
+      // clearing/restoring a paid sibling must reopen an unchanged gap.
+      // live_members counts the group's still-live stamped rows (same
+      // predicate as whereLive) so manualSeriesStampIssue can tell a
+      // closed-books payment from one a live sibling still carries.
+      db.raw(`(SELECT jsonb_agg(jsonb_build_array(g.prepaid_at, g.prepaid_method, g.members, g.live_members)
+          ORDER BY g.prepaid_at, g.prepaid_method)
+        FROM (SELECT paid.prepaid_at, paid.prepaid_method,
+            jsonb_agg(jsonb_build_array(paid.id, paid.xmin::text) ORDER BY paid.id) AS members,
+            count(*) FILTER (WHERE paid.status IS NULL
+              OR paid.status NOT IN (${LIVE_STATUS_EXCLUSIONS.map(() => '?').join(', ')})) AS live_members
+          FROM scheduled_services paid
+          WHERE (paid.recurring_parent_id = coalesce(ss.recurring_parent_id, ss.id)
+            OR paid.id = coalesce(ss.recurring_parent_id, ss.id))
+            AND paid.customer_id = ss.customer_id
+            AND paid.prepaid_at >= ss.created_at
+            AND paid.prepaid_amount > 0
+            AND paid.prepaid_method IS DISTINCT FROM 'annual_prepay_invoice'
+          GROUP BY paid.prepaid_at, paid.prepaid_method HAVING count(*) >= 2
+        ) g) as manual_series_payment_evidence`, LIVE_STATUS_EXCLUSIONS),
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date"),
     )
+    // Preserve near-term coverage alert priority while adding past backlog.
+    .orderByRaw('ss.scheduled_date >= ? DESC', [todayET])
     .orderBy('ss.scheduled_date', 'asc');
   const unpricedByRoot = new Map();
+  const prepayGaps = [];
   // Same validator the completion-billing gate uses (fail-closed): an
   // annual-prepay stamp suppresses only when its linked term is live,
   // customer-matched, and coverage-service-matched. Lazy require mirrors the
   // feature-gates pattern and keeps module load light.
-  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
-  for (const row of upcomingRows) {
+  const { annualPrepayCoversVisit, coveredTermsAsOf, serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  const linkedTermIds = [...new Set(coverageCandidates.map((row) => row.annual_prepay_term_id).filter(Boolean))];
+  const paidTerms = linkedTermIds.length ? await coveredTermsAsOf(db, null).whereIn('t.id', linkedTermIds)
+    .select('t.id', 't.customer_id', 't.coverage_service_type') : [];
+  const paidTermById = new Map(paidTerms.map((term) => [term.id, term]));
+  for (const row of coverageCandidates) {
+    const annualStamp = row.prepaid_method === ANNUAL_PREPAY_METHOD;
+    const annualCovered = annualStamp && await annualPrepayCoversVisit(row, db);
+    const term = paidTermById.get(row.annual_prepay_term_id);
+    const linkedCoverage = term && term.customer_id === row.customer_id
+      && (!term.coverage_service_type || serviceMatchesCoverage(row, term.coverage_service_type));
+    // A manual override of a linked paid annual term conflicts with that
+    // allocation authority, even when positive. In particular a partial
+    // cash/check stamp cannot hide already-paid coverage before completion.
+    const annualCoverageGap = annualStamp ? !annualCovered : linkedCoverage;
+    if (annualCoverageGap) prepayGaps.push({ row, issue: 'annual_coverage_unverified' });
+    const manualIssue = manualSeriesStampIssue(row);
+    if (manualIssue) prepayGaps.push({ row, issue: manualIssue });
+    if (row.service_date < todayET) continue;
     if (!isUnpricedSeriesVisit(row)) continue;
-    if (hasAnnualPrepaidStamp(row) && await annualPrepayCoversVisit(row, db)) continue;
+    if (annualCovered) continue;
     const root = seriesRootId(row);
     if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
   }
@@ -302,6 +418,25 @@ async function runInner({ now = new Date() } = {}) {
     ];
   }));
 
+  // Preserve the morning lawn-email class before adding coverage-review volume.
+  alerts.push(...prepayGaps.map(({ row, issue }) => {
+    const evidenceKey = createHash('sha256').update(JSON.stringify([
+      row.row_revision, row.service_type, row.prepaid_amount, row.prepaid_method, row.prepaid_at, row.annual_prepay_term_id,
+      row.manual_series_payment_evidence, row.manual_series_allocation_evidence,
+      row.prepay_term_evidence, row.prepay_invoice_evidence, row.prepay_payment_evidence,
+    ])).digest('hex').slice(0, 20);
+    return [
+      `prepay-coverage:${row.id}:${issue}:${evidenceKey}`,
+      `Prepaid coverage needs review for ${row.service_date}`,
+      {
+        annual_coverage_unverified: 'This visit has an unverifiable annual-prepay stamp, or is linked to valid paid coverage with a missing or conflicting stamp. Reconcile the payment, term and intended allocation before billing; a stamp alone does not prove payment.',
+        manual_series_stamp_missing: 'A recorded manual series allocation or matching family payment stamps indicate coverage for this visit, but it has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
+        manual_series_stamp_conflict: 'This visit has a different payment stamp from a manual payment recorded across its recurring family. Reconcile the payments and the original allocation before billing.',
+      }[issue],
+      { scheduled_service_id: row.id, customer_id: row.customer_id, issue },
+    ];
+  }));
+
   // Morning lawn-email gaps must page before any historical acceptance backlog.
   let acceptedGaps = [];
   let acceptedScheduleCheckFailed = false;
@@ -346,6 +481,8 @@ async function runInner({ now = new Date() } = {}) {
     unpricedSeries: unpricedByRoot.size,
     lawnEmailGaps: lawnGaps.length,
     lawnGapCheckFailed,
+    prepayCoverageGaps: prepayGaps.length,
+
     acceptedScheduleGaps: acceptedGaps.length,
     acceptedScheduleCheckFailed,
     alerted,
@@ -353,6 +490,7 @@ async function runInner({ now = new Date() } = {}) {
 }
 
 module.exports = {
+  manualSeriesStampIssue,
   runScheduleIntegrityWatchdog,
   runInner,
   rowHasPrice,

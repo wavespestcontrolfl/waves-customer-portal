@@ -116,7 +116,7 @@ describe("CustomerSmsPanel", () => {
     let loads = 0;
     adminFetch.mockImplementation(async (path) => {
       if (path.includes("/comms")) { loads += 1; return { comms: [] }; }
-      if (path === "/admin/communications/sms") return { sent: true, providerMessageId: "SM_qa_fixture" };
+      if (path === "/admin/communications/sms") return { sent: true, providerMessageId: "SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
       return {};
     });
     const onSent = vi.fn();
@@ -179,7 +179,7 @@ describe("CustomerSmsPanel", () => {
 
   it("uses the lead outreach route and retains its provider outcome boundary", async () => {
     adminFetch.mockImplementation(async (path) => path.endsWith("/send-sms")
-      ? { sent: true, providerMessageId: "SM_qa_lead" } : { messages: [] });
+      ? { sent: true, providerMessageId: "SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } : { messages: [] });
     const onSent = vi.fn();
     render(<CustomerSmsPanel customer={{ firstName: "QA lead", phone: "+19415550103" }} leadId="lead-qa" open onClose={vi.fn()} onSent={onSent} />);
     fireEvent.change(await screen.findByLabelText("Message to QA lead"), { target: { value: "Hello lead" } });
@@ -207,7 +207,7 @@ describe("CustomerSmsPanel", () => {
     expect(fireEvent.click(screen.getByRole("link", { name: "Open full conversation" }))).toBe(false);
     expect(onClose).not.toHaveBeenCalled();
     expect(adminFetch.mock.calls.filter(([path]) => path.endsWith("/sms"))).toHaveLength(1);
-    await act(async () => pending.resolve({ sent: true, providerMessageId: "SM_qa_pending" }));
+    await act(async () => pending.resolve({ sent: true, providerMessageId: "SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }));
     await waitFor(() => expect(onSent).toHaveBeenCalledTimes(1));
     expect(close).not.toBeDisabled();
     fireEvent.click(close);
