@@ -57,6 +57,22 @@ test('a numeric combination inside a product annotation does not become a combin
   expect(row.issues).toEqual([]);
 });
 
+test.each(['Synthetic Macro + Micro ($3)', 'MACRO + MICRO ($3)'])(
+  'a plus belonging to the matched canonical name or alias is one product: %s', (primary) => {
+    const combinedName = { ...product, name: 'Synthetic Macro + Micro', aliases: ['Macro', 'Macro + Micro'] };
+    const row = reportFor([{ ...visit, primary }], [combinedName]).rows[0];
+    expect(row.catalogSelectedAnnual).toBe(162);
+    expect(row.issues).toEqual([]);
+  },
+);
+
+test('a canonical plus name followed by another ingredient still remains incomplete', () => {
+  const combinedName = { ...product, name: 'Synthetic Macro + Micro', aliases: ['Macro', 'Macro + Micro'] };
+  const row = reportFor([{ ...visit, primary: 'Macro + Micro + NIS ($3)' }], [combinedName]).rows[0];
+  expect(row.catalogSelectedAnnual).toBeNull();
+  expect(row.issues).toContainEqual(expect.objectContaining({ reason: 'combined_products_unresolved' }));
+});
+
 test.each([
   [{ default_rate_per_1000: null }, 'missing_rate'],
   [{ cost_per_unit: null, best_price: null }, 'missing_cost'],

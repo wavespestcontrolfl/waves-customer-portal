@@ -48,7 +48,8 @@ Unselected rescue work is excluded from the catalog subtotal, so it is not the
 same scope as the static allowance, which includes conditional reserves.
 The matcher resolves one product per reference line. Selected lines joining
 materials with `+` remain incomplete until the ingredients are independently
-resolved; numeric annotations such as `(FRAC 11+3)` do not trigger that issue.
+resolved; numeric annotations such as `(FRAC 11+3)` and plus signs inside the
+matched product's canonical name or alias do not trigger that issue.
 
 Plain `oz` stays ambiguous. Explicit `fl_oz` is recognized as volume; weight and
 volume families must agree between the application and its selected cost source.

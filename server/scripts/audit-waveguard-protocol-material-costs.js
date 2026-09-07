@@ -121,9 +121,14 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
   const unmatched = items.filter((item) => !item.product && isMaterialIntentLine(item));
   // The reference matcher returns one catalog product per line. A '+' outside
   // annotations can name another material; do not certify that partial match.
-  const selectedCombinedProducts = selectedItems.filter((item) => (
-    isMaterialIntentLine(item) && /\+/.test(String(item.raw || '').replace(/\([^)]*\)/g, ''))
-  ));
+  const selectedCombinedProducts = selectedItems.filter((item) => {
+    if (!isMaterialIntentLine(item)) return false;
+    const text = String(item.raw || '').replace(/\([^)]*\)/g, '').toLowerCase();
+    const productNames = [item.product?.name, ...(item.product?.aliases || [])]
+      .filter((name) => name?.includes('+')).sort((a, b) => b.length - a.length);
+    const remaining = productNames.reduce((rest, name) => rest.replace(name.toLowerCase(), ''), text);
+    return /\+/.test(remaining);
+  });
   const selectedMissingMaterialCost = selectedItems.filter((item) => (
     item.product
     && item.mix?.amount
