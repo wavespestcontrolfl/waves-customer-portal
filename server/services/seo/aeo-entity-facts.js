@@ -61,14 +61,27 @@ const QUESTION_AHEAD_RE = /^[^.!?;\n]*\?/;
 // does not offer fumigation"). A bare "or" inside a noun list ("insulation or
 // fumigation") is not a boundary, so a negated list stays negated.
 const PREDICATE_VERB = '(?:is|are|was|were|does|do|did|offers?|provides?|has|have|will|can|covers?|includes?|charges?|treats?|serves?|handles?|performs?|operates?|holds?|specializ(?:es|e)|focus(?:es)?|excels?|delivers?|carr(?:ies|y)|sells?|uses?|maintains?|guarantees?|promises?|claims?|states?|says?|remains?|continues?|employs?|runs?|owns?|works?|also)';
-const CLAUSE_BOUNDARY_RE = new RegExp(`[.!?;\\n]|,?\\s+(?:but|however|whereas|although|though|yet)\\b|,?\\s+(?:and|or)\\s+(?=(?:\\w+\\s+){0,2}${PREDICATE_VERB}\\b)`, 'i');
+// A period ends a clause only before whitespace or the end of the text: the
+// dots inside "www.wavespestcontrol.com" or "941.297.5749" are not boundaries,
+// so "Do not visit www.wavespestcontrol.com" keeps its negation.
+const CLAUSE_BOUNDARY_RE = new RegExp(`[!?;\\n]|\\.(?!\\S)|,?\\s+(?:but|however|whereas|although|though|yet)\\b|,?\\s+(?:and|or)\\s+(?=(?:\\w+\\s+){0,2}${PREDICATE_VERB}\\b)`, 'i');
 // "does not offer: fumigation, insulation" — a negated verb right before a
 // colon governs the list that follows; "is not a franchise: it offers …" does not.
 // Active ("does not offer:") and passive ("Services not offered:") intros.
 const LIST_INTRO_RE = /\b(?:offer|offers|offered|include|includes|included|provide|provides|provided|cover|covers|covered|do|does|perform|performs|performed|treat|treats|treated|handle|handles|handled|sell|sells|sold|service|services|serviced|available|are|is)\s*(?:(?:any of |all of )?(?:the following|these|those|the below|this list))?\s*$/i;
 
-function leadClause(text) {
-  const clause = text.split(CLAUSE_BOUNDARY_RE).pop();
+// Boundaries are found on the full answer, not the prefix slice: the dot in
+// "www.wavespestcontrol.com" is followed by a word, so it is not a boundary
+// even when the slice ends right after it.
+const CLAUSE_BOUNDARY_ALL_RE = new RegExp(CLAUSE_BOUNDARY_RE.source, 'gi');
+
+function leadClause(answer, start) {
+  let from = 0;
+  for (const m of answer.matchAll(CLAUSE_BOUNDARY_ALL_RE)) {
+    if (m.index >= start) break;
+    from = Math.min(start, m.index + m[0].length);
+  }
+  const clause = answer.slice(from, start);
   const colon = clause.lastIndexOf(':');
   if (colon < 0) return clause;
   const head = clause.slice(0, colon);
@@ -245,7 +258,7 @@ function asserted(compiled, answer) {
     // governed list can run well past 80 characters before its last item.
     // A standalone "Yes," / "No," opener answers the question; it does not
     // negate the assertion that follows ("No, they are not the same company").
-    const before = leadClause(answer.slice(0, start)).replace(/^\s*(?:yes|no)\s*[,.!:;-]\s*/i, '');
+    const before = leadClause(answer, start).replace(/^\s*(?:yes|no)\s*[,.!:;-]\s*/i, '');
     const after = trailClause(answer.slice(end), before.trim() === '');
     // Facts and claims alike must be about Waves: "Orkin serves Manatee"
     // earns no footprint credit and "Orkin is a franchise" is no wrong claim.

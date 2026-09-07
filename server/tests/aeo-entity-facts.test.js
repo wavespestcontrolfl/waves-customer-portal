@@ -308,6 +308,19 @@ test('facts need their relation or context; forbidden claims cover equivalent wo
   expect(score('E9', 'Waves is not affiliated with Orkin; the two names are the same business.')).toMatchObject({ expected: { alias_same: true }, forbidden: { alias_different: false } });
 });
 
+test('a bare name answers the ownership question directly, and URL dots are not clause boundaries', () => {
+  expect(score('E1', 'Adam Benetti.')).toMatchObject({ expected: { founder: true }, wrong: 0 });
+  expect(score('E1', 'Adam Benetti, a licensed operator.').expected.founder).toBe(true);
+  expect(score('E1', 'John Smith.')).toMatchObject({ expected: { founder: false }, forbidden: { wrong_owner_bare: true }, wrong: 1 });
+  expect(score('E1', 'Rentokil.').forbidden.wrong_owner_bare).toBe(true);
+  expect(score('E1', 'Not John Smith.').forbidden.wrong_owner_bare).toBe(false);
+  expect(score('E1', 'Family Owned.').forbidden.wrong_owner_bare).toBe(false);
+  expect(score('E5', 'Lakewood Ranch, Florida.').forbidden).not.toHaveProperty('wrong_owner_bare');
+  expect(score('E10', 'Do not visit https://www.wavespestcontrol.com/.').expected.website).toBe(false);
+  expect(score('E10', 'Do not call 941.297.5749.').expected.phone).toBe(false);
+  expect(score('E10', 'Visit www.wavespestcontrol.com or call 941.297.5749.')).toMatchObject({ right: 2 });
+});
+
 test('a row scored under another cohort version stays out of the dashboard', () => {
   const current = row(byId('E1').query, { text: 'Founded by Adam Benetti.' });
   const stale = { ...current, entity_facts: { ...current.entity_facts, cohort: 'entity-2026-01-v0' } };

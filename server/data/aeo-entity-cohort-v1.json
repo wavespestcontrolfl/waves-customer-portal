@@ -5,7 +5,7 @@
   "facts": {
     "founder": {
       "label": "Names Adam Benetti",
-      "pattern": "(?<=\\b(?:own(?:s|ed|er)|found(?:ed|er)|start(?:ed)?|establish(?:ed)?|operat(?:es|ed|or)|runs?|proprietor|president|ceo|led|headed)\\b[^.;!?\\n]{0,80})\\badam\\s+benetti\\b|\\badam\\s+benetti\\b(?='s\\s+(?:company|business)\\b|[^.;!?\\n]{0,80}\\b(?:own(?:s|ed|er)|found(?:ed|er)|start(?:ed)?|establish(?:ed)?|operat(?:es|ed|or)|runs?|proprietor|president|ceo|led|headed)\\b)"
+      "pattern": "(?<=\\b(?:own(?:s|ed|er)|found(?:ed|er)|start(?:ed)?|establish(?:ed)?|operat(?:es|ed|or)|runs?|proprietor|president|ceo|led|headed)\\b[^.;!?\\n]{0,80})\\badam\\s+benetti\\b|\\badam\\s+benetti\\b(?='s\\s+(?:company|business)\\b|[^.;!?\\n]{0,80}\\b(?:own(?:s|ed|er)|found(?:ed|er)|start(?:ed)?|establish(?:ed)?|operat(?:es|ed|or)|runs?|proprietor|president|ceo|led|headed)\\b)|(?<=^|\\n)\\s*adam\\s+benetti\\b(?=\\s*(?:[.,;:!(\\-–—]|$|\\n))"
     },
     "founded_2024": {
       "label": "Founded 2024",
@@ -97,6 +97,12 @@
       "pattern": "(?:^|\\n)\\s*(?:in\\s+)?(?:\\w+\\s+\\d{1,2},?\\s+)?((?:19|20)\\d\\d)\\b",
       "reject_value": "2024"
     },
+    "wrong_owner_bare": {
+      "label": "Names someone else as the owner outright",
+      "pattern": "(?<=^|\\n)\\s*(?!Waves\\b|Adam\\b|Not?\\b|Neither\\b|Never\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)(?=\\s*(?:[.,;:!(\\-\u2013\u2014]|$|\\n))",
+      "reject_pattern": "benetti|waves|family|locally|independent|owner|operator|private|unknown|unclear|none|n/?a",
+      "flags": ""
+    },
     "wrong_founder": {
       "label": "Attributes ownership to someone else",
       "pattern": "(?:[Ff]ounded|[Oo]wned|[Ss]tarted|[Ee]stablished|[Rr]un|[Oo]perated|[Ll]ed|[Aa]cquired) by (?!Waves\\b|The\\b|Florida\\b|FDACS\\b|the Benetti|a family|a local|its founder|the owner)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)|\\b(?!Waves\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)\\s+(?:owns|founded|started|established|runs|operates|leads|co-founded|acquired)\\s+(?:Waves\\b|the (?:company|business)\\b|it\\b)|\\b[Tt]he (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))? of (?:Waves(?: Pest Control(?:,? LLC)?)?|the (?:company|business)) (?:is|was|remains) (?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)|\\b(?!Waves\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b) (?:is|was|remains) (?:the |its |a )?(?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))? of (?:Waves(?: Pest Control(?:,? LLC)?)?|the (?:company|business))|(?:^|\\n)\\s*(?:(?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))?|[Oo]wned by|[Ff]ounded by)\\s*:\\s*(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)",
@@ -150,7 +156,9 @@
       "expect": [
         "founder"
       ],
-      "forbid": []
+      "forbid": [
+        "wrong_owner_bare"
+      ]
     },
     {
       "id": "E2",
