@@ -201,6 +201,29 @@ async function recordLawnProtocolCompletion(trx, {
       .filter((sub) => sub.substituteProductId)
       .map((sub) => [String(sub.substituteProductId), sub]),
   );
+  // calibrationCleared means the tech completed without field-verified
+  // equipment (calibration advisory bypass) — record "none" rather than
+  // falling back to the stale assigned system carried on the plan. An
+  // inferred rig (the engine's pick, not the visit's) is mix math only:
+  // it is never recorded as equipment used (Codex #4124 r2 P1).
+  const planEquipmentUsable = !calibrationCleared && !plan?.equipmentCalibration?.inferred;
+  // Skipped rows are part of the all-lawn ledger: with the gate off the
+  // legacy WaveGuard writer must stay byte-identical even though Complete
+  // Service (defaults gates on) now submits removed defaults. A skipped row
+  // is only ever a default of the plan THIS completion attributed — a
+  // protocol product or its approved substitute. A default the form showed
+  // from a plan that changed before submit, or an id retired meanwhile, is
+  // not this protocol's skip: it stays on the completion's metadata and never
+  // becomes a `skipped` actual that Command Center would count.
+  const planProductIds = new Set([
+    ...substitutionBySubstituteProductId.keys(),
+    ...protocolProducts.map((row) => row.product_id).filter(Boolean).map(String),
+  ]);
+  const submittedSkips = allLawn ? normalizeSkippedProducts(completionInput.skippedProducts) : [];
+  const skippedProducts = submittedSkips.filter((row) => planProductIds.has(String(row.productId)));
+  const unlistedSkippedProducts = submittedSkips
+    .filter((row) => !planProductIds.has(String(row.productId)))
+    .map(({ productId, productName }) => ({ productId, productName }));
 
   const [completion] = await trx('lawn_protocol_service_completions')
     .insert({
@@ -215,13 +238,8 @@ async function recordLawnProtocolCompletion(trx, {
       protocol_version: structured?.version || null,
       window_key: window?.key || null,
       window_title: window?.title || null,
-      // calibrationCleared means the tech completed without field-verified
-      // equipment (calibration advisory bypass) — record "none" rather than
-      // falling back to the stale assigned system carried on the plan. An
-      // inferred rig (the engine's pick, not the visit's) is mix math only:
-      // it is never recorded as equipment used (Codex #4124 r2 P1).
-      equipment_system_id: equipmentSystemId || (calibrationCleared || plan?.equipmentCalibration?.inferred ? null : plan?.mixCalculator?.equipmentSystemId) || null,
-      calibration_id: calibrationId || (calibrationCleared || plan?.equipmentCalibration?.inferred ? null : plan?.equipmentCalibration?.selected?.id) || null,
+      equipment_system_id: equipmentSystemId || (planEquipmentUsable ? plan?.mixCalculator?.equipmentSystemId : null) || null,
+      calibration_id: calibrationId || (planEquipmentUsable ? plan?.equipmentCalibration?.selected?.id : null) || null,
       treated_sqft: treatedSqft,
       carrier_gal_per_1000: carrier,
       total_carrier_gal: totalCarrier,
@@ -246,6 +264,7 @@ async function recordLawnProtocolCompletion(trx, {
         serviceReportContext: window?.serviceReportContext || {},
         assessmentBridge: window?.assessmentBridge || {},
         substitutions,
+        unlistedSkippedProducts,
         inventoryDeductions: Array.isArray(completionInput.inventoryDeductions)
           ? completionInput.inventoryDeductions
           : [],
@@ -314,23 +333,6 @@ async function recordLawnProtocolCompletion(trx, {
     });
   }
 
-  // A skipped product id must resolve before it lands in the uuid FK column —
-  // a product retired while the form was open would otherwise fail the whole
-  // closeout. Known = catalog row, an approved substitute on this plan, or a
-  // protocol product; anything else keeps its name with product_id NULL.
-  // Skipped rows are part of the all-lawn ledger: with the gate off the
-  // legacy WaveGuard writer must stay byte-identical even though Complete
-  // Service (defaults gates on) now submits removed defaults.
-  const skippedProducts = allLawn ? normalizeSkippedProducts(completionInput.skippedProducts) : [];
-  const skippedIds = [...new Set(skippedProducts.map((row) => row.productId).filter(Boolean).map(String))];
-  const catalogIds = skippedIds.length
-    ? await trx('products_catalog').whereIn('id', skippedIds).select('id').then((rows) => rows.map((row) => String(row.id))).catch(() => [])
-    : [];
-  const knownProductIds = new Set([
-    ...catalogIds,
-    ...substitutionBySubstituteProductId.keys(),
-    ...protocolProducts.map((row) => String(row.product_id || '')).filter(Boolean),
-  ]);
   for (const skipped of skippedProducts) {
     // A removed default may be an approved substitute: the closeout knows the
     // substitute catalog id, the protocol row holds the original. Resolve
@@ -338,21 +340,17 @@ async function recordLawnProtocolCompletion(trx, {
     // protocol identity, role, planned rate and substitution relationship.
     const substitution = substitutionBySubstituteProductId.get(String(skipped.productId)) || null;
     const protocolProduct = resolveProtocolProduct(protocolProducts, substitution, skipped);
-    const knownProductId = knownProductIds.has(String(skipped.productId)) ? skipped.productId : null;
     await trx('lawn_protocol_product_actuals').insert({
       lawn_protocol_service_completion_id: completion.id,
       protocol_product_id: protocolProduct?.id || null,
-      product_id: knownProductId || protocolProduct?.product_id || null,
+      product_id: skipped.productId,
       product_name: skipped.productName,
       role: protocolProduct?.role || null,
       status: 'skipped',
       planned_rate_per_1000: protocolProduct?.rate_per_1000 || null,
       planned_rate_unit: protocolProduct?.rate_unit || null,
       skip_reason: skipped.reason,
-      metadata: JSON.stringify({
-        source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied, substitution: substitution || null,
-        unresolvedProductId: knownProductId ? null : skipped.productId,
-      }),
+      metadata: JSON.stringify({ source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied, substitution: substitution || null }),
     });
   }
 

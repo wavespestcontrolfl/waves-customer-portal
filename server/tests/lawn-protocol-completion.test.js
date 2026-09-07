@@ -252,17 +252,17 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     expect(JSON.parse(row.metadata)).toMatchObject({ attribution: 'none', treatedSqftSource: 'visit', incompleteVisit: true });
     // Idempotent: the completion's earlier actual rows are cleared in the same trx before re-insert.
     expect(deletes).toEqual([{ table: 'lawn_protocol_product_actuals', criteria: { lawn_protocol_service_completion_id: 'completion-9' } }]);
-    expect(actuals).toHaveLength(2);
+    // No attributed plan → no plan default to skip: 'prod-2' is kept on the
+    // completion's metadata, never as a `skipped` actual Command Center counts.
+    expect(actuals).toHaveLength(1);
     expect(actuals[0]).toMatchObject({ service_product_id: 'sp-1', status: 'applied', protocol_product_id: null, actual_amount: 7.5 });
     expect(JSON.parse(actuals[0].metadata)).toMatchObject({
       applicationMethod: 'spot_spray', areaValue: 2500, areaUnit: 'sqft', applicationArea: 'Front yard, Side yards', zoneIds: ['zone-a'],
     });
-    // 'prod-2' resolves to nothing (no catalog row, no substitution, no protocol product) → name kept, uuid FK left NULL.
-    expect(actuals[1]).toMatchObject({ status: 'skipped', product_id: null, product_name: 'Fixture pre-emergent', skip_reason: 'Not applied' });
-    expect(JSON.parse(actuals[1].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false, substitution: null, unresolvedProductId: 'prod-2' });
+    expect(JSON.parse(row.metadata).unlistedSkippedProducts).toEqual([{ productId: 'prod-2', productName: 'Fixture pre-emergent' }]);
   });
 
-  test('gate on: a removed substitute resolves to its original protocol product', async () => {
+  test('gate on: a removed substitute resolves to its original protocol product; a default from a plan that changed before submit is not this protocol\'s skip', async () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const protocolRow = { id: 'pp-1', product_id: 'orig-1', catalog_product_name: 'Original iron', role: 'micronutrient', rate_per_1000: 3, rate_unit: 'fl oz' };
     const trx = (table) => ({
@@ -271,6 +271,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([protocolRow]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
+          completionOut = row;
           return { onConflict: () => ({ merge: () => ({ returning: () => Promise.resolve([{ id: 'completion-10', ...row }]) }) }) };
         }
         actualsOut.push(row);
@@ -278,17 +279,23 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
       },
     });
     const actualsOut = [];
+    let completionOut = null;
     await recordLawnProtocolCompletion(trx, {
       service: oneTimeVisit, serviceRecord: { id: 'record-5' }, serviceProducts: [],
       plan: {
         protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] } } },
         mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [{ substitution: { originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' } }] },
       },
-      completionInput: { skippedProducts: [{ productId: 'sub-1', productName: 'Substitute iron' }] },
+      completionInput: { skippedProducts: [
+        { productId: 'sub-1', productName: 'Substitute iron' },
+        // Shown by the form from the protocol active at load time, replaced before submit.
+        { productId: 'stale-1', productName: 'Yesterday\'s default' },
+      ] },
     });
     expect(actualsOut).toHaveLength(1);
     expect(actualsOut[0]).toMatchObject({ status: 'skipped', product_id: 'sub-1', protocol_product_id: 'pp-1', role: 'micronutrient', planned_rate_per_1000: 3 });
-    expect(JSON.parse(actualsOut[0].metadata).substitution).toEqual({ originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' });
+    expect(JSON.parse(actualsOut[0].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false, substitution: { originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' } });
+    expect(JSON.parse(completionOut.metadata).unlistedSkippedProducts).toEqual([{ productId: 'stale-1', productName: 'Yesterday\'s default' }]);
   });
 
   test('gate on: a missing visit area stays NULL instead of the planned turf area, and a plan-attributed visit keeps its protocol', async () => {

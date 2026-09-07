@@ -264,27 +264,28 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
       const args = {
         service: visit, serviceRecord: record, plan: null, serviceProducts: [applied],
         completionInput: { treatedSqft: null, incompleteVisit: true, skippedProducts: [
+          // Defaults a form showed from a plan this completion did not attribute
+          // (one retired meanwhile): neither is this visit's protocol skip, so
+          // neither lands as a `skipped` actual — no FK 500, no false skip count.
           { productId: product.id, productName: 'Fixture removed default' },
-          // A product retired while the form was open: name kept, uuid FK NULL, no 500.
           { productId: '00000000-0000-4000-8000-00000000dead', productName: 'Fixture retired default' },
         ] },
       };
       const completion = await recordLawnProtocolCompletion(knex, args);
       expect(completion).toMatchObject({ property_id: visit.property_id, customer_id: f.customerId, protocol_key: null, window_key: null, treated_sqft: null, total_carrier_gal: null });
-      expect(completion.metadata).toMatchObject({ attribution: 'none', treatedSqftSource: 'missing', incompleteVisit: true });
+      expect(completion.metadata).toMatchObject({ attribution: 'none', treatedSqftSource: 'missing', incompleteVisit: true, unlistedSkippedProducts: [
+        { productId: product.id, productName: 'Fixture removed default' },
+        { productId: '00000000-0000-4000-8000-00000000dead', productName: 'Fixture retired default' },
+      ] });
       const actuals = () => knex('lawn_protocol_product_actuals').where({ lawn_protocol_service_completion_id: completion.id }).orderBy('status').orderBy('product_name');
       const first = await actuals();
-      expect(first.map(row => row.status)).toEqual(['applied', 'skipped', 'skipped']);
+      expect(first.map(row => row.status)).toEqual(['applied']);
       expect(first[0]).toMatchObject({ service_product_id: applied.id, protocol_product_id: null });
       expect(first[0].metadata).toMatchObject({ areaValue: 1500, areaUnit: 'sqft', applicationArea: 'Front yard', applicationMethod: 'spot_spray' });
-      expect(first[1]).toMatchObject({ product_name: 'Fixture removed default', product_id: product.id });
-      expect(first[1].metadata).toEqual({ source: 'tech_closeout', reasonSupplied: false, substitution: null, unresolvedProductId: null });
-      expect(first[2]).toMatchObject({ product_name: 'Fixture retired default', product_id: null });
-      expect(first[2].metadata).toMatchObject({ unresolvedProductId: '00000000-0000-4000-8000-00000000dead' });
-      // A retry re-runs the same writer: one completion row, the same three actual rows.
+      // A retry re-runs the same writer: one completion row, the same actual row.
       const again = await recordLawnProtocolCompletion(knex, args);
       expect(again.id).toBe(completion.id);
-      expect((await actuals()).length).toBe(3);
+      expect((await actuals()).length).toBe(1);
       expect(await knex('lawn_protocol_service_completions').where({ service_record_id: record.id }).count('id as count').first()).toMatchObject({ count: '1' });
     });
 

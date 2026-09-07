@@ -68,12 +68,21 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
 });
 
-test('a nonmember can use an explicitly assigned window; a spot default stays spot work', () => {
+test('a nonmember can use a complete explicit assignment; a spot default stays spot work', () => {
   const { plan, context } = fixture();
   plan.propertyGate.serviceTier = null;
-  plan.appointmentAssignment.windowKey = 'june';
+  plan.appointmentAssignment = { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' };
   plan.protocol.structured.products[0].applicationMode = 'spot';
   expect(buildLawnCompletionDefaults(plan, context).items[0].applicationMethod).toBe('spot_treatment');
+});
+
+test('a nonmember with a partial assignment (window only) has no program: the calendar-resolved protocol is not adopted', () => {
+  const { plan, context } = fixture();
+  plan.propertyGate.serviceTier = null;
+  plan.appointmentAssignment = { windowKey: 'june' };
+  const defaults = buildLawnCompletionDefaults(plan, context);
+  expect(defaults.items).toEqual([]);
+  expect(defaults.message).toBe('No assigned lawn plan for this visit. Add the products actually applied.');
 });
 
 test.each(['WDG', 'WG', 'WP', 'liquid', 'granular', 'G', 'Granule (G)', 'Granule (restricted-use)', 'Granular pre-emergent on fertilizer', 'Granular bait', 'Water-dispersible granule (WDG)', 'Water-soluble granule (WSG)', 'Water-dispersible granule (WG)', 'Suspension concentrate (SC)'])('formulation %s determines the default application method, not its weight unit', formulation => {
@@ -136,6 +145,8 @@ test.each([
   ['member without an assignment', {}, 'Silver', true],
   ['nonmember without a program', {}, null, false],
   ['nonmember whose assignment the plan resolved', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, null, true],
+  ['nonmember with a partial assignment (window only, key/version wildcards)', { windowKey: 'june' }, null, false],
+  ['nonmember with a partial assignment (key + window, no version)', { protocolKey: 'protocol', windowKey: 'june' }, null, false],
   ['member whose assignment the plan did NOT resolve (defaults gate off → calendar protocol)', { protocolKey: 'protocol', protocolVersion: '2', windowKey: 'september' }, 'Silver', false],
   ['assignment on a plan with no structured window', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'no-window'],
   ['member whose turf profile does NOT prove this property', {}, 'Silver', 'unproven'],

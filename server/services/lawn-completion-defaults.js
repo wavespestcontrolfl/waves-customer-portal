@@ -138,12 +138,15 @@ function completionItem(item, protocolProduct, amountsAllowed) {
 }
 
 // A lawn plan attributes the visit only when a program actually applies: a
-// WaveGuard tier or an explicit appointment assignment. The planner can still
-// resolve an active protocol by grass track for anyone; that resolution must
-// not become a one-time or commercial visit's protocol.
+// WaveGuard tier or a COMPLETE explicit appointment assignment (key, version
+// and window). The planner can still resolve an active protocol by grass
+// track for anyone; that resolution must not become a one-time or commercial
+// visit's protocol — and a partial assignment (window only) must not let the
+// matcher's wildcards adopt the calendar-resolved protocol either.
 function lawnPlanProgramApplies(plan) {
+  const assigned = plan?.appointmentAssignment || {};
   return ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
-    || !!plan?.appointmentAssignment?.windowKey;
+    || !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
 }
 
 // The ledger stamps a visit's protocol only when a program applies, the
