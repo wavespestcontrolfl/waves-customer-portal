@@ -57,3 +57,13 @@ unmapped, for 1,736 cumulative unsupported/unverified sites. The existing
 write-gate scanner now recognizes `action-registry.js` as a non-tool helper;
 catalog, coverage, and write-gate suites pass all 46 tests. These resolve the
 first CI run's exact failures (new upstream sites and the helper allowlist).
+
+Part A review remediation validates arguments again inside registry execution.
+Trusted confirmation and private version pins use the server action context;
+model-supplied approval or private fields fail schema validation. Discovery is
+not offered on the technician surface. The coverage gate now proves baseline
+IDs and fingerprints against source at a commit already merged on main and
+retains dynamic admin verb-wrapper calls. All 1,736 recorded sites remain
+unsupported/unverified. Backend registrations remain a manual inventory in
+this split; automated backend drift enforcement is deferred to the final
+capability reconciliation, so this gate currently enforces frontend sites only.
