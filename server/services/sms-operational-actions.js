@@ -277,8 +277,10 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       // across rollback; preserved and retired proposal identities must still match.
       analysis.preview_hash = hashSensitiveValue({ purpose: 'sms-profile-replay', version: VERSION,
         source: SOURCE_COLUMNS.map((column) => [column, live[column] ?? null]),
-        facts: facts.map(({ proposal_id, ...fact }) => ({ ...fact,
-          proposal_id: fact.proposal_created ? null : proposal_id ?? null })), dropped: extracted.dropped });
+        facts: facts.map((fact) => ({ field: fact.field, value: fact.value, quote: fact.quote,
+          duration: fact.duration, property_id: fact.property_id, outcome: fact.outcome,
+          proposal_created: fact.proposal_created, retired_proposal_ids: fact.retired_proposal_ids,
+          proposal_id: fact.proposal_created ? null : fact.proposal_id ?? null })), dropped: extracted.dropped });
       if (!matchedContext.dryRun && matchedContext.previewHash !== analysis.preview_hash) {
         throw Object.assign(new Error('sms_profile_replay_preview_changed'), { code: 'SMS_REPLAY_PREVIEW_CHANGED' });
       }

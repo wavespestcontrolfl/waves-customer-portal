@@ -243,6 +243,15 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await replaySmsProfile({ ...args, previewHash })).toMatchObject({ proposed: 1 });
   });
 
+  test('provider object key order does not change an otherwise identical replay preview', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const previewHash = await replayPreviewHash();
+    const reordered = { ...result, facts: result.facts.map((fact) => Object.fromEntries(Object.entries(fact).reverse())) };
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash, extract: async () => reordered }))
+      .toMatchObject({ proposed: 1 });
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
+  });
+
   test('a pending sibling added after preview cannot be retired without a new preview', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const args = { conn: mockPg, smsLogId: message.id, extract: async () => result };
