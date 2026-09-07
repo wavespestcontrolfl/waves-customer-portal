@@ -291,6 +291,10 @@ describe('annual prepay renewal helpers', () => {
     });
     const rows = [
       quarterly('svc-jun', '2026-06-12', 'completed'),
+      // Completed BEFORE the scheduler auto-flag shipped: is_callback is still
+      // false (the backfill flagged non-terminal rows only), so the label is
+      // the only evidence — the runtime re-service classifier must catch it.
+      { id: 'svc-legacy-callback', customer_id: 'c1', scheduled_date: '2026-07-20', status: 'completed', service_type: 'Pest Control Re-Service', is_callback: false, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null },
       { id: 'svc-callback', customer_id: 'c1', scheduled_date: '2026-08-30', status: 'completed', service_type: 'Pest Control Re-Service', is_callback: true, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null },
       quarterly('svc-sep', '2026-09-11'),
       quarterly('svc-dec', '2026-12-11'),
@@ -1082,8 +1086,8 @@ describe('annual prepay renewal helpers', () => {
     // is never billing truth — but a cash/Zelle stamp is not ours to clear.
     const columnQuery = query({
       columnInfo: {
-        status: {}, is_callback: {}, prepaid_amount: {}, prepaid_method: {},
-        prepaid_at: {}, prepaid_note: {}, annual_prepay_term_id: {}, updated_at: {},
+        status: {}, is_callback: {}, service_type: {}, service_key_snapshot: {}, prepaid_amount: {},
+        prepaid_method: {}, prepaid_at: {}, prepaid_note: {}, annual_prepay_term_id: {}, updated_at: {},
       },
     });
     const stampClear = query({ rows: 1 });
@@ -1094,13 +1098,20 @@ describe('annual prepay renewal helpers', () => {
 
     expect(detached).toBe(1);
     expect(stampClear.where).toHaveBeenCalledWith({
-      annual_prepay_term_id: 'term-1', is_callback: true, prepaid_method: 'annual_prepay_invoice',
+      annual_prepay_term_id: 'term-1', prepaid_method: 'annual_prepay_invoice',
     });
     expect(stampClear.whereNotIn).not.toHaveBeenCalled();
     expect(stampClear.update).toHaveBeenCalledWith(expect.objectContaining({
       prepaid_amount: null, prepaid_method: null, prepaid_at: null, prepaid_note: null,
     }));
-    expect(unlink.where).toHaveBeenCalledWith({ annual_prepay_term_id: 'term-1', is_callback: true });
+    expect(unlink.where).toHaveBeenCalledWith({ annual_prepay_term_id: 'term-1' });
+    // Callback identity = the persisted flag OR the re-service label / catalog
+    // key, so a legacy completed re-service (is_callback still false) detaches too.
+    for (const q of [stampClear, unlink]) {
+      expect(q.where).toHaveBeenCalledWith('is_callback', true);
+      expect(q.orWhereRaw).toHaveBeenCalledWith('service_type ILIKE ?', ['%re-service%']);
+      expect(q.orWhereIn).toHaveBeenCalledWith('service_key_snapshot', expect.arrayContaining(['pest_re_service', 'lawn_re_service']));
+    }
     expect(unlink.update).toHaveBeenCalledWith(expect.objectContaining({ annual_prepay_term_id: null }));
   });
 

@@ -25,6 +25,28 @@ const NOTICE_CLAIM_TTL_MS = 15 * 60 * 1000;
 // cleanup filters on this so it never clears an independent cash/Zelle/etc.
 // prepayment made through the regular schedule prepay route.
 const ANNUAL_PREPAY_PREPAID_METHOD = 'annual_prepay_invoice';
+
+// A callback is never a SOLD visit. The persisted flag is authoritative for
+// rows the scheduler auto-flagged, but a re-service COMPLETED before the
+// auto-flag shipped keeps is_callback=false (the 20260618000002 backfill
+// flagged non-terminal rows only), so the runtime classifier (re-service.js:
+// catalog key or "re-service" label) is consulted too — the same pair the
+// backfill and the completion path use (GH Codex #4105 r3 P1).
+const { isReService, RE_SERVICE_SERVICE_KEYS } = require('./re-service');
+function isCallbackRow(row) {
+  return row?.is_callback === true
+    || isReService({ serviceKey: row?.service_key_snapshot, serviceType: row?.service_type });
+}
+// SQL twin of isCallbackRow for the detach UPDATE (mirrors the backfill
+// migration's reServiceMatch). Column presence is checked by the caller.
+function whereCallbackRow(cols) {
+  return function callbackWhere() {
+    this.where('is_callback', true)
+      .orWhereRaw('service_type ILIKE ?', ['%re-service%'])
+      .orWhereRaw('service_type ILIKE ?', ['%reservice%']);
+    if (cols.service_key_snapshot) this.orWhereIn('service_key_snapshot', Array.from(RE_SERVICE_SERVICE_KEYS));
+  };
+}
 const INVOICE_CANCELLED_STATUSES = new Set(['void', 'cancelled', 'canceled', 'refunded']);
 const COVERAGE_EXCLUDED_STATUSES = new Set(['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']);
 const PREPAID_UPDATE_EXCLUDED_STATUSES = new Set([...COVERAGE_EXCLUDED_STATUSES, 'completed']);
@@ -490,7 +512,7 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // pushed the customer's real fourth quarterly visit out of coverage
   // (2026-09-07, prod). Excluded up front, in every mode — a callback must
   // neither consume a sold slot nor count toward the seeder's existing rows.
-  const nonCallbackRows = rows.filter((row) => row.is_callback !== true);
+  const nonCallbackRows = rows.filter((row) => !isCallbackRow(row));
   const filtered = includeTerminalStatuses
     ? nonCallbackRows
     : nonCallbackRows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
@@ -1104,7 +1126,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // #4105 P1): a same-day callback adopted under the lock would skip the
   // insert while every later attach/stamp pass filters it back out — the
   // paid term would stay one visit short on every refresh.
-  const adoptableCoverageRow = (row) => row.is_callback !== true
+  const adoptableCoverageRow = (row) => !isCallbackRow(row)
     && serviceMatchesCoverage(row, coverageServiceType)
     && !rowLinkedToAnotherTerm(term, row)
     && (!coverageIsPalm || (() => {
@@ -2403,7 +2425,7 @@ async function finishDisputeRecoveryForTerm(term, conn = db) {
 async function detachCallbacksFromTerm(term, conn = db) {
   if (!term?.id) return 0;
   const cols = await scheduledServiceColumns();
-  if (!cols.annual_prepay_term_id || !cols.is_callback) return 0;
+  if (!cols.annual_prepay_term_id || !cols.is_callback || !cols.service_type) return 0;
   try {
     const now = new Date();
     if (cols.prepaid_amount && cols.prepaid_method) {
@@ -2412,13 +2434,15 @@ async function detachCallbacksFromTerm(term, conn = db) {
       if (cols.prepaid_note) stampClear.prepaid_note = null;
       if (cols.updated_at) stampClear.updated_at = now;
       await conn('scheduled_services')
-        .where({ annual_prepay_term_id: term.id, is_callback: true, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD })
+        .where({ annual_prepay_term_id: term.id, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD })
+        .where(whereCallbackRow(cols))
         .update(stampClear);
     }
     const unlink = { annual_prepay_term_id: null };
     if (cols.updated_at) unlink.updated_at = now;
     const unlinked = await conn('scheduled_services')
-      .where({ annual_prepay_term_id: term.id, is_callback: true })
+      .where({ annual_prepay_term_id: term.id })
+      .where(whereCallbackRow(cols))
       .update(unlink);
     const count = Array.isArray(unlinked) ? unlinked.length : Number(unlinked) || 0;
     if (count > 0) {
