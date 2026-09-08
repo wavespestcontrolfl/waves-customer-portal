@@ -1237,6 +1237,65 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    test('a pinned send held by the 3-day rule keeps its pin: the scheduler retry refuses a recipient changed during the hold (codex #4156 r3 P1)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'pp-1', first_name: 'Ida', last_name: 'V', phone: '+19410000169', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-pp1', customer_id: 'pp-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tpp1', location_id: 'venice', created_at: new Date() }],
+        sms_log: [{ id: 'sms-pp1', customer_id: 'pp-1', direction: 'outbound', status: 'delivered', message_body: 'Here is our Google review link https://g.page/r/waves/review', created_at: new Date(Date.now() - 3 * 3600000) }],
+      });
+      db.mockImplementation(mock);
+
+      const held = await ReviewService.sendSMS('rr-pp1', { expectedPhone: '+19410000169' });
+      expect(held).toMatchObject({ deferred: 'spacing' });
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.approved_phone).toBe('+19410000169');
+
+      // The hold elapses; the customer's number changed meanwhile; the scheduler re-sends with no pin argument.
+      mock.__state.rows.sms_log.length = 0;
+      row.scheduled_for = new Date(Date.now() - 60000);
+      mock.__state.rows.customers[0].phone = '+15550009999';
+      const retry = await ReviewService.sendSMS('rr-pp1');
+
+      expect(retry).toEqual({ refused: 'approved_phone_drift' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('an unpinned send with no consented recipient is suppressed before the 3-day hold can leave it queued (codex #4156 r3 P2)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'nr-1', first_name: 'Uma', last_name: 'P', phone: null, nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-nr1', customer_id: 'nr-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tnr1', location_id: 'venice', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() }],
+        sms_log: [{ id: 'sms-nr1', customer_id: 'nr-1', direction: 'outbound', status: 'delivered', message_body: 'Here is our Google review link https://g.page/r/waves/review', created_at: new Date(Date.now() - 3 * 3600000) }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-nr1');
+
+      expect(out).toBeUndefined();
+      expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+      expect(mock.__state.rows.review_requests[0].scheduled_for.getTime()).toBeLessThan(Date.now());
+    });
+
+    test('an idempotent tech re-trigger that finds a suppressed, failed or email-only row reports it unsent (codex #4156 r3 P2)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'ir-1', first_name: 'Ona', last_name: 'P', phone: '+19410000170', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-ir-s', customer_id: 'ir-1', service_record_id: 'sr-ir-s', status: 'suppressed', channel: 'sms', token: 'tirs', created_at: new Date() },
+          { id: 'rr-ir-e', customer_id: 'ir-1', service_record_id: 'sr-ir-e', status: 'sent', channel: 'email', sent_at: new Date(), token: 'tire', created_at: new Date() },
+          { id: 'rr-ir-d', customer_id: 'ir-1', service_record_id: 'sr-ir-d', status: 'sent', channel: 'sms', sms_sent_at: new Date(), token: 'tird', created_at: new Date() },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      const suppressed = await ReviewService.create({ customerId: 'ir-1', serviceRecordId: 'sr-ir-s', triggeredBy: 'tech' });
+      const emailOnly = await ReviewService.create({ customerId: 'ir-1', serviceRecordId: 'sr-ir-e', triggeredBy: 'tech' });
+      const delivered = await ReviewService.create({ customerId: 'ir-1', serviceRecordId: 'sr-ir-d', triggeredBy: 'tech' });
+
+      expect(suppressed.sendOutcome).toEqual({ sent: false, failed: 'suppressed', nextAllowedAt: null });
+      expect(emailOnly.sendOutcome).toEqual({ sent: false, failed: 'email_only', nextAllowedAt: null });
+      expect(delivered.sendOutcome).toBeUndefined();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
     test('a provider failure on an immediate send reports the queued retry, so create() can attach it (codex #4141 r5 P2)', async () => {
       const mock = makeMock({
         customers: [{ id: 'pf-1', first_name: 'Ida', last_name: 'V', phone: '+19410000163', nearest_location_id: 'venice' }],

@@ -775,7 +775,19 @@ const ReviewService = {
       const manualTrigger = triggeredBy !== "auto";
       const pendingResend = existing && manualTrigger
         && String(existing.status || "").toLowerCase() === "pending" && !existing.sms_sent_at;
-      if (existing && !pendingResend) return existing;
+      if (existing && !pendingResend) {
+        // Nothing is sent on this path; say what the row's state is so a
+        // caller's `sent` is SMS delivery evidence, not the absence of a
+        // held outcome (codex #4156 r3 P2). A delivered row carries no
+        // outcome — its sms_sent_at is the evidence.
+        if (!existing.sms_sent_at) {
+          const status = String(existing.status || "").toLowerCase();
+          existing.sendOutcome = status === "pending"
+            ? { sent: false, deferred: "queued", nextAllowedAt: existing.scheduled_for || null }
+            : { sent: false, failed: existing.sent_at ? "email_only" : status || "not_sent", nextAllowedAt: null };
+        }
+        return existing;
+      }
     }
 
     let gate = { allowed: true };
@@ -1728,6 +1740,43 @@ const ReviewService = {
   },
 
   /**
+   * The 3-day rule at the shared sender (codex #4141 r2): a legacy queued
+   * ask (two completions for one customer create separate pending rows) or
+   * a retried row must not land inside 72 h of another delivered ask —
+   * including a staff-sent one with no request row. Returns the deferred
+   * outcome after pushing scheduled_for out, or null when the send may
+   * proceed. An unavailable lookup holds 30 min (fail closed). Asks only: a
+   * private no-link check-in (resolution_check / satisfaction_confirm)
+   * retrying through here is a support message. The hold is only real once
+   * scheduled_for is stored (codex #4141 r5 P1): an immediate row has
+   * scheduled_for = null and processScheduled never selects a null
+   * schedule, so a failed write propagates instead of reporting a queued
+   * send no job would pick up.
+   */
+  async _askSpacingHold(request) {
+    if (!OUTREACH.isAskTemplate(request.template_key)) return null;
+    const requestId = request.id;
+    try {
+      const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: requestId });
+      const manualAt = await this.manualReviewAskSentRecently(request.customer_id, {
+        since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
+      });
+      const anchorMs = Math.max(lastAsk ? lastAsk.getTime() : 0, manualAt ? manualAt.getTime() : 0);
+      if (!anchorMs || Date.now() - anchorMs >= ASK_SPACING_MS) return null;
+      const holdUntil = new Date(anchorMs + ASK_SPACING_MS);
+      await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: holdUntil });
+      logger.info(`[review] Held request for the 3-day rule (requestId=${requestId} until=${holdUntil.toISOString()})`);
+      return { deferred: "spacing", nextAllowedAt: holdUntil };
+    } catch (err) {
+      const retryAt = new Date(Date.now() + 30 * 60 * 1000);
+      const stored = await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: retryAt });
+      if (!stored) throw new Error(`3-day rule lookup failed and the retry could not be stored (requestId=${requestId})`);
+      logger.warn(`[review] 3-day rule lookup failed, holding request (requestId=${requestId}): ${err.message}`);
+      return { deferred: "spacing_lookup_unavailable", nextAllowedAt: retryAt };
+    }
+  },
+
+  /**
    * Send the review request SMS.
    */
   async sendSMS(requestId, { expectedPhone = null } = {}) {
@@ -1782,7 +1831,11 @@ const ReviewService = {
     // (instead of falling to the suppression below) keeps the fresh-create
     // path deleting its row and the resend path parking its row, so the
     // scheduler cannot later text a number added meanwhile without the pin.
-    if (expectedPhone && String(contact.phone || "") !== String(expectedPhone)) {
+    // The pin outlives the in-process attempt (codex #4156 r3 P1): a row the
+    // 3-day rule holds for up to 72 h is re-sent by processScheduled with no
+    // expectedPhone, so the approved number is read back from the row.
+    const pin = expectedPhone || request.approved_phone || null;
+    if (pin && String(contact.phone || "") !== String(pin)) {
       // No row mutation here (pre-push r15 P1): the caller decides — the
       // fresh-create path DELETES its just-created row (so the scheduler
       // can never later send it to the unapproved number and the 30-day
@@ -1795,48 +1848,25 @@ const ReviewService = {
     // The pinned-recipient check above runs BEFORE any branch that leaves the
     // row queued (codex #4141 r4 P1): a spacing hold that returned first left a
     // drifted number for processScheduled to text without the pin.
-    // The 3-day rule at the shared sender (codex #4141 r2): a legacy queued
-    // ask (two completions for one customer create separate pending rows)
-    // or a retried row must not land inside 72 h of another delivered ask —
-    // including a staff-sent one with no request row. Held rows stay
-    // pending with scheduled_for pushed out; an unavailable lookup holds
-    // 30 min (fail closed).
-    // Asks only: a private no-link check-in (resolution_check /
-    // satisfaction_confirm) retrying through here is a support message.
-    if (OUTREACH.isAskTemplate(request.template_key)) {
-      try {
-      const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: requestId });
-      const manualAt = await this.manualReviewAskSentRecently(request.customer_id, {
-        since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
-      });
-      const anchorMs = Math.max(lastAsk ? lastAsk.getTime() : 0, manualAt ? manualAt.getTime() : 0);
-      const holdUntil = anchorMs && Date.now() - anchorMs < ASK_SPACING_MS ? new Date(anchorMs + ASK_SPACING_MS) : null;
-      if (holdUntil) {
-        await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: holdUntil });
-        logger.info(`[review] Held request for the 3-day rule (requestId=${requestId} until=${holdUntil.toISOString()})`);
-        return { deferred: "spacing", nextAllowedAt: holdUntil };
-      }
-    } catch (err) {
-      // The hold is only real once scheduled_for is stored (codex #4141 r5
-      // P1): an immediate row has scheduled_for = null, and processScheduled
-      // never selects a null schedule. A failed write propagates instead of
-      // reporting a queued send that no job would ever pick up.
-      const retryAt = new Date(Date.now() + 30 * 60 * 1000);
-      const stored = await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: retryAt });
-      if (!stored) throw new Error(`3-day rule lookup failed and the retry could not be stored (requestId=${requestId})`);
-      logger.warn(`[review] 3-day rule lookup failed, holding request (requestId=${requestId}): ${err.message}`);
-      return { deferred: "spacing_lookup_unavailable", nextAllowedAt: retryAt };
-      }
+    if (expectedPhone && request.approved_phone !== expectedPhone) {
+      // Persist the approval before any hold can queue the row; a failed
+      // write propagates (no unpinned row may be left for the scheduler).
+      await db("review_requests").where({ id: requestId }).update({ approved_phone: expectedPhone });
     }
-
     if (!contact.phone) {
       // No consented SMS recipient (e.g. unstamped contact phone and no
       // primary phone): mark the row so the scheduler's 20-row batch can't
-      // be starved by the same unsendable rows every run (#2955 r3).
+      // be starved by the same unsendable rows every run (#2955 r3). Before
+      // the spacing hold (codex #4156 r3 P2): a hold would leave the row
+      // pending for a phone added later to revive.
       await db("review_requests").where({ id: requestId }).update({ status: "suppressed" }).catch(() => {});
       logger.info(`[review] Suppressed request (requestId=${requestId} reason=no-consented-sms-recipient)`);
       return;
     }
+    // The 3-day rule at the shared sender (codex #4141 r2) — asks only; the
+    // hold leaves the row pending with scheduled_for pushed out.
+    const spacingHold = await this._askSpacingHold(request);
+    if (spacingHold) return spacingHold;
 
     const reviewUrl = await buildReviewUrl(request, customer.id);
     const techName = request.tech_name || "Our team";
