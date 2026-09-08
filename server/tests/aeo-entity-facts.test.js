@@ -1053,3 +1053,27 @@ test('years read against frozen_on, an ended status survives descriptive modifie
   expect(score('E6', 'Waves prevents termites from being killed.').expected.termite).toBe(false);
   expect(score('E6', 'Waves prevents termites from damaging your home.').expected.termite).toBe(true);
 });
+
+test('a fronted clause hands back to the subject, a quantity is no date, the copula skips no preposition, a hyphenated qualifier before a service head counts, a generic third party owns its pronoun, "prevents" governs no service noun, and a label continuation is current (#4155 r9)', () => {
+  expect(score('E5', 'While it plans to expand, Waves serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Although Waves formerly served Tampa, it serves Manatee County today.').expected.manatee).toBe(true);
+  expect(score('E8', 'Though formerly independent, Waves is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Despite formerly being independent, Waves is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves offers fumigation for 2030-square-foot homes.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves provides tenting for 2030-square-foot houses.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves offers fumigation in 2030.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E8', 'Waves has been a vendor to franchise businesses for years.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves has been a franchise for years.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves offers termite-specific treatments.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves performs mosquito-specific treatments.').expected.mosquito).toBe(true);
+  expect(score('E6', 'Waves offers rodent-focused exclusion services.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves hires a vendor. Its technicians control mosquitoes.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves hires a vendor. They control mosquitoes.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves is a family company. Its technicians control mosquitoes.').expected.mosquito).toBe(true);
+  expect(score('E6', 'Waves prevents termite extermination.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termite infestations.').expected.termite).toBe(true);
+  for (const text of ['Fumigation: will continue', 'Fumigation: will remain available', 'Fumigation: will always be offered']) {
+    expect(score('E6', text).forbidden.fumigation_offered).toBe(true);
+  }
+  expect(score('E6', 'Fumigation: will start next year').forbidden.fumigation_offered).toBe(false);
+});
