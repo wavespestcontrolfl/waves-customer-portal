@@ -205,8 +205,9 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(visit.photoRowInputs(result).qualityResults.map((q) => q.passed)).toEqual([false, false]);
   });
 
-  test('the chain validator rejects a malformed answer so the fallback leg runs', () => {
+  test('the chain validator rejects a malformed or finding-less answer so the fallback leg runs', () => {
     expect(visit.validateAssessmentJson({ json: answer() })).toBeNull();
+    expect(visit.validateAssessmentJson({ json: answer({ findings: [] }) })).toBe('empty_findings');
     expect(visit.validateAssessmentJson({ json: { findings: 'x', severities: {}, scores: {} } })).toBe('malformed_assessment');
     expect(visit.validateAssessmentJson({ json: { findings: [], scores: {} } })).toBe('malformed_assessment');
     expect(visit.validateAssessmentJson({ json: null })).toBe('malformed_assessment');
@@ -227,6 +228,12 @@ describe('legacy column derivation — missing is not healthy', () => {
   const complete = (severities, scores) => ({ status: 'complete', observations: 'obs', severities, scores });
   const sev = (levels) => Object.fromEntries(Object.entries(levels).map(([k, v]) => [k, sig(v)]));
 
+  test('the customer-visible observations column is egress-scrubbed; the run keeps the raw text', () => {
+    const scores = visit.deriveLegacyScores({ status: 'complete', observations: 'Dense turf; call 941-555-0100 or see https://x.test — Celsius applied at 123 Main Street.', severities: sev({}), scores: {} });
+    expect(scores.observations).not.toMatch(/941|https|123 Main/);
+    expect(scores.observations).toMatch(/Dense turf/);
+  });
+
   test('stress is the worst KNOWN stressor; an unknown signal is left out, never 95', () => {
     const scores = visit.deriveLegacyScores(complete(
       sev({ fungal_activity: 'minor', insect_damage: 'unknown', drought_stress: 'moderate', mechanical_damage: 'none', thatch_visibility: 'moderate', overwatering_signal: 'yes' }),
@@ -237,6 +244,23 @@ describe('legacy column derivation — missing is not healthy', () => {
       stress_damage: 50, // drought moderate → 50 is the worst known; insect unknown ignored
       overwatering_signal: true, drought_stress: 'moderate', observations: 'obs',
     });
+  });
+
+  test('scoreVisit / photoFieldsFor / overallScoreFor carry the gate-on decisions out of the route', () => {
+    const analysis = complete(sev({ fungal_activity: 'minor', insect_damage: 'none', drought_stress: 'none', mechanical_damage: 'none', thatch_visibility: 'low', overwatering_signal: 'no' }), { turf_density: 70, weed_coverage: 20, color_health: 8 });
+    analysis.photoQuality = [{ photo: 1, quality: 'adequate', issue: '' }, { photo: 2, quality: 'poor', issue: 'blur' }];
+    const out = visit.scoreVisit(analysis, { seasonAdjust: (scores) => ({ ...scores, turf_density: scores.turf_density + 7 }), calculateOverallScore: () => 88 });
+    expect(out.adjustedScores.turf_density).toBe(77);
+    expect(out.overallScore).toBe(88);
+    expect(out.analyzedCount).toBe(2);
+    expect(out.mergedComposite.fungal_activity).toBe('minor');
+    const partial = visit.scoreVisit(complete(sev({}), { turf_density: 70, weed_coverage: 20, color_health: null }), { seasonAdjust: (s) => s, calculateOverallScore: () => 88 });
+    expect(partial.overallScore).toBeNull();
+    expect(visit.scoreVisit({ status: 'unavailable', photoQuality: [] }, { seasonAdjust: (s) => s, calculateOverallScore: () => 88 })).toMatchObject({ displayScores: null, adjustedScores: null, overallScore: null, analyzedCount: 0 });
+    expect(visit.photoFieldsFor('front')).toEqual({ photo_type: 'front_yard', zone: 'front' });
+    expect(visit.photoFieldsFor(null)).toEqual({ photo_type: 'general' });
+    expect(visit.overallScoreFor({ turf_density: 1, weed_suppression: 1, color_health: 1, stress_damage: null }, () => 5)).toBeNull();
+    expect(visit.overallScoreFor({ turf_density: 1, weed_suppression: 1, color_health: 1, stress_damage: 1 }, () => 5)).toBe(5);
   });
 
   test('every signal unknown → NULL stress, NULL fungus, NULL thatch; an undeterminable score stays NULL', () => {
@@ -300,7 +324,8 @@ describe('run row', () => {
     expect(JSON.parse(row.photo_ids)).toEqual(['p1', 'p2']);
     expect(JSON.parse(row.findings)).toEqual([{ finding_id: 'F1' }]);
     expect(JSON.parse(row.raw_response)).toEqual({ x: 1 });
-    const unavailable = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, status: 'unavailable', reason: 'all_providers_failed', provider: null, model: null, raw: null, severities: null, scores: null, usage: null } });
+    // An unavailable run stores SQL NULL for scores and severities even though the analysis object carries null-valued placeholders.
+    const unavailable = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, status: 'unavailable', reason: 'all_providers_failed', provider: null, model: null, raw: null, severities: null, scores: { turf_density: null, weed_coverage: null, color_health: null }, usage: null } });
     expect(unavailable).toMatchObject({ status: 'unavailable', unavailable_reason: 'all_providers_failed', service_id: null, provider: null, raw_response: null, severities: null, scores_raw: null, tokens_in: null });
   });
 });
@@ -352,6 +377,18 @@ describe('technician review on confirm', () => {
     expect(errors).toEqual([]);
     const built = visit.buildReview(run, review);
     expect(built.reviewed_findings[0]).toMatchObject({ finding_id: 'F1', name: 'weed pressure', label: 'weed pressure', keep: true, tech_note: 'sedge along the walk', source: 'model' });
+    // A canonical rename is the label as chosen — never re-mapped through the pattern list.
+    const generic = visit.buildReview(run, visit.validateReview({ reviewedFindings: [{ finding_id: 'F1', name: 'general lawn stress' }] }, run).review);
+    expect(generic.reviewed_findings[0].label).toBe('general lawn stress');
+  });
+
+  test('the reconciliation only ever sees allowlisted labels, never raw model or technician text', () => {
+    const leaky = { ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch damage near the gate (code 4471) per Mrs. Smith', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: 'float test', customer_wording: null, photo_refs: [1], zone: 'front', label: 'chinch bug activity', source: 'model' }]) };
+    const built = visit.buildReview(leaky, { reviewedFindings: [], addedDetails: [{ text: 'Gate code 4471, dog in back yard, chinch confirmed by float test' }], appliedProducts: [{ product_name: 'Bifen I/T', addresses_findings: ['F1', 'T1'] }] });
+    const rec = JSON.stringify(built.reconciliation);
+    expect(rec).not.toMatch(/4471|Smith|dog/);
+    expect(built.reconciliation.treatment_rationale[0].customer_explanation).toContain('chinch bug activity');
+    expect(built.reviewed_findings[0].name).toContain('Mrs. Smith'); // the review keeps the raw internal text
   });
 
   test('a dropped finding leaves the reconciliation; a technician detail joins it at moderate; products reconcile deterministically', () => {
