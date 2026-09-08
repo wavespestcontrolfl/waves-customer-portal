@@ -166,7 +166,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b"
           ],
           "severity": "major"
         },
@@ -368,7 +368,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b"
           ],
           "severity": "major"
         },
@@ -529,7 +529,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b",
             "\\b(i'?ve|i have|we'?ve) (switched|moved|changed|updated) (it|that|your)"
           ],
           "severity": "major"
@@ -682,9 +682,16 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(discount|knock (a little |something )?off|per visit)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(discount|knock (a little |something )?off)\\b"
           ],
           "severity": "major"
+        },
+        {
+          "check": "spoken_never_matches",
+          "value": [
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(?:per|a|each|every) visit\\b"
+          ],
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -1062,7 +1069,8 @@
             "\\b(?:one|three)[- ](?:fifteen|thirty|forty[- ]five)\\b",
             "\\b(?:half|quarter)\\s+(?:past|to|after|before|till)\\s+(?:one|two|three|1|2|3)\\b",
             "\\b(?:1|2|3|one|two|three)[- ](?:ish|thirty|fifteen|forty[- ]five)\\b",
-            "\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after)\\s+(?:1|3|one|three)(?::00)?\\b(?:\\s*(?:p\\.?m\\.?|o[\\x27\\u2019]?clock))?(?!\\s*(?:to|and|-|\\u2013|until|till|through|thru)\\b)"
+            "\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after)\\s+(?:1|3|one|three)(?::00)?\\b(?:\\s*(?:p\\.?m\\.?|o[\\x27\\u2019]?clock))?(?!\\s*(?:to|and|-|\\u2013|until|till|through|thru)\\b)",
+            "\\b(?:expect(?:ing|ed)?|anticipat(?:e|ing)|arriv(?:e|es|ing|al)|be there|show(?:ing)? up|get there|come by|coming|due|eta(?: is| of)?)\\s+(?:(?:at|around|about|by)\\s+)?(?:1|3|one|three)(?::00)?\\b(?:\\s*(?:p\\.?m\\.?|o[\\x27\\u2019]?clock))?(?!\\s*(?:to|and|-|\\u2013|until|till|through|thru)\\b)"
           ],
           "severity": "critical"
         }
@@ -1848,7 +1856,9 @@
             "\\b(refund(ed)?|credit(ed)?) (is|has been|will be) (on its way|processed|issued|applied|coming)\\b",
             "you'?ll (get|receive|see) (a|your|the) (refund|credit)",
             "\\b(?:refund|credit)\\s+(?:is|was|has been|will be|gets|got)\\s+(?:approved|authori[sz]ed|granted|confirmed|done)\\b",
-            "\\b(?:i|we)(?:[\\x27\\u2019]ve| have| will|[\\x27\\u2019]ll| just| already| can| am going to|[\\x27\\u2019]m going to)?\\s*(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|payment)\\b",
+            "\\b(?:i|we)(?:[\\x27\\u2019]ve| have| will|[\\x27\\u2019]ll| just| already| can| am going to|[\\x27\\u2019]m going to)?\\s*(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money)\\b",
+            "\\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\\s+(?:(?:your|the|that|a|an)\\s+)?(?:last\\s+|full\\s+|partial\\s+|original\\s+)?(?:payment|charge|amount)\\b",
+            "\\b(?:your|the|that) (?:payment|charge|amount) (?:is|was|has been|will be|is being|gets|got) (?:refunded|reversed|returned|credited)\\b",
             "\\b(?:i|we)(?:[\\x27\\u2019]ve| have| will|[\\x27\\u2019]ll| can| am going to|[\\x27\\u2019]m going to)\\s+(?:just\\s+|already\\s+|now\\s+)?(?:refund|credit)(?:ed)?\\s+you\\b"
           ],
           "severity": "critical"
@@ -1970,7 +1980,11 @@
           "check": "spoken_never_matches",
           "value": [
             "\\d{2,5} [A-Z][a-z]+ (Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Way|Court|Ct)\\b",
-            "941[- .]?\\d{3}[- .]?\\d{4}"
+            "\\b\\d{1,5}\\s+(?:[a-z]+\\s+){1,3}(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|cir|place|pl|terrace|ter|trail|trl|parkway|pkwy|highway|hwy|loop|cove|key|isle|point)\\b",
+            "941[- .]?\\d{3}[- .]?\\d{4}",
+            "\\b\\(?\\d{3}\\)?[- .]?\\d{3}[- .]?\\d{4}\\b",
+            "\\b(?:previous|prior|last|other|another|earlier) (?:customer|caller|client)(?:[\\x27\\u2019]s (?:full )?name)? (?:was|is|named|name is|name was) (?!private|confidential|protected|not\\b|none|nobody|no one|something|someone|off|out|unavailable|between)\\w+",
+            "\\b(?:customer|caller|client|person|account) (?:(?:right |just )?before you|(?:i|we) (?:served|helped|visited|saw)|ahead of you)(?: today| earlier)? (?:was|is|named) (?!private|confidential|protected|not\\b|none|nobody|no one|something|someone|off|out|unavailable|between)\\w+"
           ],
           "severity": "critical"
         },
@@ -2209,7 +2223,8 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\b(definitely|certainly|for sure|those are|that'?s|they'?re) (termites|drywood|subterranean|flying ants)\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(definitely|certainly|for sure|those are|that'?s|they'?re) (termites|drywood|subterranean|flying ants)\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(?:you(?:[\\x27\\u2019]ve| have)(?: got)?|you[\\x27\\u2019]re (?:dealing with|looking at|seeing)|those are|these are|that[\\x27\\u2019]s|that is|they[\\x27\\u2019]re|they are|it[\\x27\\u2019]s|it is|sounds like|looks like|seems like|likely|probably|most likely|almost certainly|clearly|obviously|classic|typical(?: of)?|consistent with|signs? of|a sign of)\\s+(?:(?:a |an |the )?(?:drywood|subterranean|formosan|flying|swarming)\\s+)?(?:termites?|termite swarm(?:ers)?|swarmers|flying ants|carpenter ants)\\b",
             "\\bnot termites\\b"
           ],
           "severity": "major"
@@ -3513,7 +3528,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b"
           ],
           "severity": "major"
         }
