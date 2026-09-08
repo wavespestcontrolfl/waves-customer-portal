@@ -1077,3 +1077,20 @@ test('a fronted clause hands back to the subject, a quantity is no date, the cop
   }
   expect(score('E6', 'Fumigation: will start next year').forbidden.fumigation_offered).toBe(false);
 });
+
+test('a year before a noun is a quantity, a planned withdrawal implies current service, modifiers may precede a service head, and a harm noun must end the phrase (#4155 r10)', () => {
+  expect(score('E5', 'Waves serves Manatee County for 2030 residents.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves offers fumigation for 2030 businesses.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County in 2027 and beyond.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves plans to stop serving Manatee County next year.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves will discontinue service to Manatee County next year.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves plans to stop offering fumigation next year.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E5', 'Waves stopped serving Manatee County.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves offers termite-focused integrated pest management.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves offers termite-specific residential treatments.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves manages termite infestation data for its research partners.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves controls mosquito population data.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves treats termite infestations in homes.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves handles termite infestation treatment.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves handles termite control services.').expected.termite).toBe(true);
+});
