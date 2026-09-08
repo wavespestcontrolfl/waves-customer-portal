@@ -569,6 +569,21 @@ function calculateReviewSendTime(completedAt, serviceType, opts) {
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
 // page shows that tick, not the eligibility instant (codex #4140 r4 P2).
 const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
+// The tick the Reviews page shows for a step: an SMS step's tick must also
+// clear the 8 AM–8 PM send window while GATE_SMS_SEND_WINDOW is on — a
+// 7:50 PM row's 8:14 PM tick is refused by checkSendWindow and held to the
+// next morning, so the displayed plan is the first tick after the window
+// reopens (codex #4140 r11 P2). Email steps are not windowed. A no-link
+// check-in labelled "email" is forced to SMS by sendOutreachTouch, so only
+// an ask step's own "email" channel is email here.
+function nextSendTickFor(step, from) {
+  const tick = nextCadenceTickAt(from);
+  if (!tick) return tick;
+  const isEmail = String(step?.channel || "sms").toLowerCase() === "email" && OUTREACH.isAskTemplate(step?.templateKey);
+  if (isEmail || !require("../config/feature-gates").isEnabled("smsSendWindow")) return tick;
+  const { isWithinSendWindowET, nextSendWindowOpenET } = require("./messaging/send-window");
+  return isWithinSendWindowET(tick) ? tick : nextCadenceTickAt(nextSendWindowOpenET(tick));
+}
 function nextCadenceTickAt(from) {
   const d = from instanceof Date ? from : new Date(from);
   if (Number.isNaN(d.getTime())) return null;
@@ -5322,7 +5337,7 @@ const ReviewService = {
         // runner holds the claim). An overdue row (missed tick, gate re-enabled
         // between ticks) is picked up at the next tick from NOW, not at a tick
         // that has already passed (codex #4140 r8).
-        nextSendTickAt: r.next_run_at ? nextCadenceTickAt(new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
+        nextSendTickAt: r.next_run_at ? nextSendTickFor(plan[r.current_step], new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon

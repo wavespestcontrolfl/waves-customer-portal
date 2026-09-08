@@ -923,6 +923,29 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       }
     });
 
+    test('an SMS step whose tick falls outside the 8 AM–8 PM window shows the first tick after it reopens; an email ask step is not windowed (codex #4140 r11 P2)', async () => {
+      mockGates.smsSendWindow = true;
+      // 7:50 PM ET on 2026-05-26 (EDT, UTC-4) = 23:50Z; the 8:14 PM tick is outside the window.
+      const eveningRow = new Date('2026-05-26T23:50:00Z');
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-w1', customer_id: 'w-1', status: 'active', current_step: 0, plan: '[{"day":0,"channel":"sms","templateKey":"day0_ask"}]', next_run_at: eveningRow },
+          { id: 'seq-w2', customer_id: 'w-2', status: 'active', current_step: 0, plan: '[{"day":0,"channel":"email","templateKey":"day0_ask"}]', next_run_at: eveningRow },
+        ],
+      });
+      db.mockImplementation(mock);
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T23:00:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['w-1', 'w-2']);
+        // Next morning 8:00 AM EDT = 12:00Z; first tick after it is 8:14.
+        expect(map['w-1'].nextSendTickAt.toISOString()).toBe('2026-05-27T12:14:00.000Z');
+        expect(map['w-2'].nextSendTickAt.toISOString()).toBe('2026-05-27T00:14:00.000Z');
+      } finally {
+        nowSpy.mockRestore();
+        mockGates.smsSendWindow = false;
+      }
+    });
+
     test('an overdue row (missed tick, gate re-enabled between ticks) shows the next tick from now, never one already past (codex #4140 r8)', async () => {
       const mock = makeMock({
         review_sequences: [
