@@ -233,13 +233,19 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
       if (result.status >= 400 && result.status < 500
           && ![408, 425, 429].includes(result.status) && !retryableConflict) {
         const code = result.body.code || 'member_effects_rejected';
-        await database.transaction(async (trx) => {
+        const finishedElsewhere = await database.transaction(async (trx) => {
           const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
           await trx('customers').where({ id: visit.customer_id }).forNoKeyUpdate().first('id');
           await lockStop(trx, visit.stop_base_key);
           await trx('service_visits').where({ id: visit.id }).forUpdate().first('id');
           const locked = await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first();
-          if (locked.status === 'failed') return;
+          if (locked.status === 'failed') return false;
+          // Two runners (the sweep and a Resume tap) can read the same
+          // processing item; the one whose claim lands second is refused
+          // ownership. That refusal is not the member's verdict when the
+          // other runner already finished it under the same record.
+          const current = await trx('visit_completion_packet_items').where({ id: item.id }).forUpdate().first();
+          if (current?.status === 'done' && current.service_record_id === item.service_record_id) return true;
           const member = await trx('scheduled_services').where({ id: item.scheduled_service_id }).first();
           await require('./dispatch-alerts').createAlert({
             type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
@@ -254,18 +260,21 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
           await trx('service_visits').where({ id: packet.visit_id }).update({
             billing_hold: true, updated_at: trx.fn.now(),
           });
+          return false;
         });
+        if (finishedElsewhere) continue;
         return { status: 200, body: {
           visitId: packet.visit_id, packetId: packet.id, state: 'office_required',
           serviceId: item.scheduled_service_id, code,
         } };
       }
+      const pendingCode = result.body.code || 'member_effects_pending';
       await database('visit_completion_packet_items').where({ id: item.id }).update({
-        last_error: result.body.code || 'member_effects_pending', updated_at: database.fn.now(),
+        last_error: pendingCode, updated_at: database.fn.now(),
       });
       return { status: 202, body: {
         visitId: packet.visit_id, packetId: packet.id, state: 'service_effects_pending',
-        serviceId: item.scheduled_service_id, code: result.body.code || 'member_effects_pending',
+        serviceId: item.scheduled_service_id, code: pendingCode,
       } };
     }
     await database('visit_completion_packet_items').where({ id: item.id, service_record_id: item.service_record_id }).update({
