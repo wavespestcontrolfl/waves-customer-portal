@@ -87,6 +87,24 @@ const ARGS = {
 beforeEach(() => jest.clearAllMocks());
 
 describe('convertCallLeadOnPhoneBooking', () => {
+  test('an assessment booking row: claims the lead, keeps it open, never promotes the customer (an assessment is not a win)', async () => {
+    const inner = makeInner({ convertible: { id: 'lead-1', status: 'new' } });
+    const trx = makeTrx(inner);
+
+    const converted = await convertCallLeadOnPhoneBooking(trx, { ...ARGS, booking: { id: 'svc-1', service_type: 'Waves Assessment', service_id: null } });
+
+    expect(converted).toBe(false);
+    const leadUpdate = inner._writes.updates.find((w) => w.table === 'leads');
+    expect(leadUpdate.payload).toMatchObject({ customer_id: 'cust-1' });
+    expect(leadUpdate.payload).not.toHaveProperty('status');
+    expect(leadUpdate.payload).not.toHaveProperty('converted_at');
+    expect(inner._writes.updates.find((w) => w.table === 'customers')).toBeUndefined();
+    const activity = inner._writes.inserts.find((w) => w.table === 'lead_activities');
+    expect(activity.payload).toMatchObject({ activity_type: 'appointment_booked' });
+    expect(JSON.parse(activity.payload.metadata)).toMatchObject({ triggerSource: 'appointment_booked_assessment' });
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('kept open (assessment booked)'));
+  });
+
   test('converts an open lead: won + converted_at + is_qualified + activity row, in the nested txn', async () => {
     const inner = makeInner();
     const trx = makeTrx(inner);

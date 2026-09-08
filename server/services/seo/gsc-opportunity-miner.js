@@ -74,6 +74,7 @@ const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const { observationDate, asJsonArray, isMeasuredAnswer, ownedCitations } = require('./aeo-measurement');
+const { isEntityQuestion } = require('./aeo-entity-facts');
 const { geoBlockReason } = require('../content/topic-targeting-gate');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTransactionalQuery } =
   require('../content/scoring-config');
@@ -2910,9 +2911,11 @@ class GscOpportunityMiner {
     const resolveService = (qService, query) =>
       (qService && (SERVICE_ALIAS[qService.toLowerCase()] || qService.toLowerCase())) || inferServiceFromQuery(query);
 
-    // Group by city×service.
+    // Group by city×service. Entity-cohort questions ask ABOUT Waves rather
+    // than for a provider in a city; their misses are identity gaps, not
+    // page-coverage gaps, so they never seed a city×service opportunity.
     const groups = new Map();
-    for (const r of rows.filter(isMeasuredAnswer)) {
+    for (const r of rows.filter(r => isMeasuredAnswer(r) && !isEntityQuestion(r.query))) {
       const city = normalizeCity(r.q_city) || inferCityFromQuery(r.query);
       const service = resolveService(r.q_service, r.query);
       if (!city || !service) continue;
