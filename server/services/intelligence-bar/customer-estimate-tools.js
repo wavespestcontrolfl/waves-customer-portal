@@ -8,6 +8,7 @@ const { storedManualDiscountForReplay } = require('../estimate-manual-discount-r
 const { perApplicationChargeAmount } = require('../billing-cadence');
 const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
 const { normalizePropertyType } = require('../pricing-engine/commercial-helpers');
+const { activeRecurringServices, duplicateCurrentServices } = require('./estimate-tools');
 
 const uuid = { type: 'string', format: 'uuid' };
 const CUSTOMER_ESTIMATE_TOOLS = [
@@ -99,6 +100,10 @@ function estimateBody(input, context) {
   if (property.occupancy_type === 'commercial' || normalizePropertyType(property.property_type) === 'commercial') {
     throw failure('This property needs the commercial estimate workflow.', 'capability_unimplemented');
   }
+  // Lawn service already active at this property is already priced: a second
+  // lawn estimate could be sent and accepted as duplicate service.
+  const duplicates = duplicateCurrentServices({ lawn: true }, activeRecurringServices(context.current_services), property.address);
+  if (duplicates.length) throw failure(`This property already has active ${duplicates.join(', ')} service. Quote only requested additions.`, 'duplicate_service');
   const applications = input.lawn_applications ?? 9;
   if (![6, 9, 12].includes(applications)) throw failure('Choose 6, 9 or 12 lawn applications per year.', 'invalid_input', 400);
   const engineInputs = { measuredTurfSf: Number(property.treatable_lawn_sqft), turfSource: 'measured',

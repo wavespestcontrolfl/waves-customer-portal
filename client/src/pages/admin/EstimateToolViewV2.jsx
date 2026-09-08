@@ -1813,13 +1813,15 @@ export default function EstimateToolViewV2({
   formRef.current = form;
   const dirty = JSON.stringify(form) !== savedFormRef.current;
   const { lastMutation } = useIntelligenceBarActions();
+  // PostgreSQL returns canonical lowercase UUIDs; the route may carry uppercase.
+  const sameEstimateId = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
   const [latestEstimateMutation, setLatestEstimateMutation] = useState(null);
   useEffect(() => {
-    if (lastMutation?.domain === "estimate" && lastMutation.estimate_id === editEstimateId) setLatestEstimateMutation(lastMutation);
+    if (lastMutation?.domain === "estimate" && sameEstimateId(lastMutation.estimate_id, editEstimateId)) setLatestEstimateMutation(lastMutation);
   }, [lastMutation, editEstimateId]);
-  const estimateRefresh = latestEstimateMutation?.estimate_id === editEstimateId ? latestEstimateMutation?.id : null;
+  const estimateRefresh = sameEstimateId(latestEstimateMutation?.estimate_id, editEstimateId) ? latestEstimateMutation?.id : null;
   const loadedEstimateRefresh = useRef(null);
-  const viewedEstimateReady = !editEstimateId || editMode?.id === editEstimateId;
+  const viewedEstimateReady = !editEstimateId || sameEstimateId(editMode?.id, editEstimateId);
   usePublishIntelligenceBarPageData({ customer_id: viewedEstimateReady ? form.customerId || null : null,
     property_id: viewedEstimateReady ? form.propertyId || null : null,
     estimate_id: viewedEstimateReady ? savedId || editMode?.id || editEstimateId || null : null });

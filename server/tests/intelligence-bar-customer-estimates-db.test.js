@@ -277,6 +277,19 @@ suite('existing-customer estimates from another workspace', () => {
     expect(await db('estimates').where({ customer_id: upper.customer.id, property_id: upper.property.id })).toHaveLength(1);
   }, 60000);
 
+  test('a property with active lawn service never receives a second lawn estimate', async () => {
+    const fixture = await customerFixture();
+    await db('scheduled_services').insert({ id: crypto.randomUUID(), customer_id: fixture.customer.id, service_type: 'Lawn Care', status: 'confirmed',
+      scheduled_date: require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000)), is_recurring: true, recurring_pattern: 'monthly',
+      service_address_line1: fixture.property.address_line1 });
+    const proposed = await propose(fixture);
+    expect(proposed.body.pendingActions || []).toHaveLength(0);
+    const result = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+      .find(block => block.type === 'tool_result' && block.tool_use_id === 'save');
+    expect(JSON.parse(result.content)).toMatchObject({ code: 'duplicate_service' });
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
+  }, 60000);
+
   test('an oversize lawn requiring field review never produces an ordinary price confirmation', async () => {
     const fixture = await customerFixture({ property_sqft: 25000, lot_sqft: 50000 });
     await db('customer_turf_profiles').insert({ id: crypto.randomUUID(), customer_id: fixture.customer.id,
