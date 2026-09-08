@@ -366,9 +366,31 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     if ((hour < 8 || hour >= 20) && preview?.smsSendWindowEnabled === true) {
       return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmt(iso)}.`;
     }
+    // In cadence mode the custom time is when the row becomes ELIGIBLE; the
+    // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
+    // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
+    const tick = preview?.reviewSequencesEnabled ? nextCadenceTickISO(iso, preview.cadenceTickMinutesOfHour) : null;
+    if (tick && tick !== iso) return `Review text goes out separately at the next cadence tick after ${fmt(iso)} — about ${fmt(tick)}.`;
     return `Review text goes out separately ${fmt(iso)}.`;
   }
   return "";
+}
+
+// The first worker tick on or after `iso` (ticks are minutes of the hour; every
+// ET offset is a whole hour, so UTC minutes are the same minutes). Null when
+// the server did not name the ticks.
+function nextCadenceTickISO(iso, tickMinutes) {
+  if (!Array.isArray(tickMinutes) || !tickMinutes.length) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const minute = d.getUTCMinutes();
+  const pastTheMinute = d.getUTCSeconds() > 0 || d.getUTCMilliseconds() > 0;
+  const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
+  const t = new Date(d.getTime());
+  t.setUTCSeconds(0, 0);
+  if (next != null) t.setUTCMinutes(next);
+  else t.setUTCHours(t.getUTCHours() + 1, tickMinutes[0]);
+  return t.toISOString();
 }
 
 // The key two "Automatic" previews are compared by: the server's `bucket`

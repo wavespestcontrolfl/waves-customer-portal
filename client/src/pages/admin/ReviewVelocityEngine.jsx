@@ -320,8 +320,11 @@ const DECISION_LABELS = {
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
   cap_stats_unavailable: "Re-checking the ask cap",
 };
-function decisionLine(seq) {
+function decisionLine(seq, sequencesEnabled) {
   if (!seq) return null;
+  // The worker skips every run while GATE_REVIEW_SEQUENCES is off, so an
+  // active row's next tick is not a plan — it is frozen (codex #4140 r5 P2).
+  if (sequencesEnabled === false) return "Paused — cadences are off (GATE_REVIEW_SEQUENCES) · Owner action: turn the gate on, or stop this cadence";
   if (seq.sending) return "Sending now · Owner action: none";
   if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
   const d = seq.decision || {};
@@ -1749,7 +1752,7 @@ function Pipeline({
                           Cadence {c.seqStep}/{c.seqTotal}
                         </Tag>
                         <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>
-                          {decisionLine(c.sequence)}
+                          {decisionLine(c.sequence, sequencesEnabled)}
                         </div>
                       </>
                     ) : c.seqStep > 0 ? (
@@ -2532,7 +2535,7 @@ function CustomerDrawer({
               ) : null}{" "}
               {c.sequence ? (
                 <div style={{ fontSize: 12, color: C.t3, marginTop: 6, flexBasis: "100%" }}>
-                  {decisionLine(c.sequence)}
+                  {decisionLine(c.sequence, sequencesEnabled)}
                 </div>
               ) : sequencesEnabled ? (
                 <Btn onClick={startSequence} disabled={seqStarting || !c.cadenceable}>

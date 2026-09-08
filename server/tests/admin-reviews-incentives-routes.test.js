@@ -61,5 +61,7 @@ describe('GET /api/admin/reviews/send-time-preview — staff-scoped', () => {
     expect(handler).toContain("smsSendWindowEnabled: isEnabled('smsSendWindow')");
     // Bundling is the server's verdict (legacy path AND no report-v1 delivery); unknown never claims a bundle.
     expect(handler).toContain('bundlesImmediateAsk: !reviewSequencesEnabled && serviceReportV1Delivery === false');
+    // The panel rounds a custom time to the worker tick the server names (r5 P2).
+    expect(handler).toContain('cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES');
   });
 });
