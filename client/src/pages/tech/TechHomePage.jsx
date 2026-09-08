@@ -947,6 +947,7 @@ export default function TechHomePage() {
 
       {recapService && (
         <ServiceRecapModal
+          key={recapService.id}
           theme="dark"
           service={{
             id: recapService.id,
@@ -961,6 +962,7 @@ export default function TechHomePage() {
 
       {photoTarget && (
         <TechServicePhotosModal
+          key={photoTarget.id}
           serviceId={photoTarget.id}
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
