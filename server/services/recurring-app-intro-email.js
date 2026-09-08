@@ -15,6 +15,7 @@
  *     next en-route after launch.
  */
 
+const db = require('../models/db');
 const logger = require('./logger');
 const AccountMembershipEmail = require('./account-membership-email');
 const { isFirstServiceVisit } = require('./customer-visit-history');
@@ -37,6 +38,20 @@ async function appIntroEligibility(svc) {
   if (!(await isFirstServiceVisit(svc.customer_id, svc.scheduled_date))) {
     return { eligible: false, reason: 'not_first_visit' };
   }
+  // Portal-wide "Email Messages" opt-out (Codex #4112 r4). sendAppIntro only
+  // applies the template suppression group and never reads
+  // notification_prefs, so the audience decision checks it here and fails
+  // CLOSED when the pref cannot be read — the same contract as the one-time
+  // welcome sender. The admin preview shares this reader, so it reports the
+  // opt-out instead of promising a send.
+  let prefs;
+  try {
+    prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first('email_enabled');
+  } catch (err) {
+    logger.warn(`[recurring-app-intro] prefs lookup failed for customer ${svc.customer_id} — not sending unverified: ${err.message}`);
+    return { eligible: false, reason: 'prefs_unavailable' };
+  }
+  if (prefs?.email_enabled === false) return { eligible: false, reason: 'email_opted_out' };
   return { eligible: true, reason: 'first_visit' };
 }
 

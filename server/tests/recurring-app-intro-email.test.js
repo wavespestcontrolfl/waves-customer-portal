@@ -6,7 +6,18 @@ const mockFirstServiceVisit = jest.fn(async () => true);
 jest.mock('../services/customer-visit-history', () => ({
   isFirstServiceVisit: (...args) => mockFirstServiceVisit(...args),
 }));
-jest.mock('../models/db', () => jest.fn());
+// notification_prefs reader: resolves to the row set by mockPrefs (null =
+// no row = allowed), or rejects when mockPrefsError is set (fail closed).
+let mockPrefs = null;
+let mockPrefsError = null;
+jest.mock('../models/db', () => jest.fn(() => ({
+  where: () => ({
+    first: async () => {
+      if (mockPrefsError) throw mockPrefsError;
+      return mockPrefs;
+    },
+  }),
+})));
 jest.mock('../services/account-membership-email', () => ({
   sendAppIntro: jest.fn(async () => ({ ok: true, messageId: 'm1' })),
 }));
@@ -30,6 +41,8 @@ describe('recurring-app-intro-email gating', () => {
     jest.clearAllMocks();
     mockFirstServiceVisit.mockResolvedValue(true);
     mockTierLabelStatus.mockResolvedValue('not_label');
+    mockPrefs = null;
+    mockPrefsError = null;
     process.env.GATE_APP_INTRO_EMAIL = 'true';
   });
   afterAll(() => { delete process.env.GATE_APP_INTRO_EMAIL; });
@@ -52,6 +65,24 @@ describe('recurring-app-intro-email gating', () => {
     const r = await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
     expect(r).toMatchObject({ sent: false, reason: 'label_only_tier' });
     expect(AccountMembershipEmail.sendAppIntro).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])('honors the portal-wide email opt-out for the expanded audience (recurring: %s)', async isRecurring => {
+    mockPrefs = { email_enabled: false };
+    const r = await RecurringAppIntro.maybeSendOnEnRoute({ ...recurringSvc, is_recurring: isRecurring });
+    expect(r).toMatchObject({ sent: false, skipped: true, reason: 'email_opted_out' });
+    expect(AccountMembershipEmail.sendAppIntro).not.toHaveBeenCalled();
+    expect(await RecurringAppIntro.appIntroEligibility(recurringSvc)).toEqual({ eligible: false, reason: 'email_opted_out' });
+  });
+
+  test('a missing prefs row or email_enabled=true still sends; an unreadable pref fails CLOSED', async () => {
+    mockPrefs = { email_enabled: true };
+    await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
+    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledTimes(1);
+    mockPrefsError = new Error('db down');
+    const r = await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
+    expect(r).toMatchObject({ sent: false, skipped: true, reason: 'prefs_unavailable' });
+    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledTimes(1);
   });
 
   test('skips when the customer already has a completed visit (not their first)', async () => {

@@ -106,7 +106,12 @@ async function hasWelcomeSequence(customerId, conn = db, sequenceType = SEQUENCE
 async function oneTimeWelcomeEligibility(service, customer) {
   if (!service?.id || !customer?.id || service.customer_id !== customer.id) return { eligible: false, reason: 'missing_booking' };
   if (service.is_recurring !== false) return { eligible: false, reason: 'not_one_time' };
-  if (!['pending', 'confirmed', 'rescheduled'].includes(service.status)) return { eligible: false, reason: 'booking_not_open' };
+  // 'rescheduled' is NOT open here (Codex #4112 r4): with the reschedule
+  // streamline dark, a reschedule request parks the visit as 'rescheduled'
+  // with no booked replacement until staff rebook it. The parked row drops at
+  // delivery; the rebooked visit re-enters through the tagger, and cancelled
+  // queue rows do not consume the once-per-customer guard.
+  if (!['pending', 'confirmed'].includes(service.status)) return { eligible: false, reason: 'booking_not_open' };
   if (customer.active === false || customer.deleted_at) return { eligible: false, reason: 'inactive_customer' };
   if (!String(customer.email || '').trim()) return { eligible: false, reason: 'no_email' };
   const { tierLabelStatus } = require('./self-booking-plan-sync');

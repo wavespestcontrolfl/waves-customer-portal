@@ -104,15 +104,28 @@ const welcome = require('../services/new-recurring-welcome-sms');
     expect(await mockDatabase('sms_sequences')).toHaveLength(0);
   });
 
-  test.each(['cancelled', 'gate_off'])('delivery rechecks %s before email', async mode => {
+  test.each(['cancelled', 'rescheduled', 'gate_off'])('delivery rechecks %s before email', async mode => {
     await welcome.queueOneTimeWelcomeEmail(service);
     await mockDatabase('sms_sequences').update({ next_send_at: new Date(Date.now() - 1000) });
     if (mode === 'gate_off') process.env.GATE_ONE_TIME_WELCOME_EMAIL = 'false';
-    else await mockDatabase('scheduled_services').where({ id: serviceId }).update({ status: 'cancelled' });
+    else await mockDatabase('scheduled_services').where({ id: serviceId }).update({ status: mode });
     await welcome.processDueWelcomes();
-    expect((await mockDatabase('sms_sequences').first()).status).toBe('cancelled');
+    const row = await mockDatabase('sms_sequences').first();
+    expect(row.status).toBe('cancelled');
+    // A parked reschedule request (legacy flip, no booked replacement) is
+    // not an open booking; the rebooked visit re-enters through the tagger.
+    if (mode === 'rescheduled') expect(row.metadata).toMatchObject({ skip_reason: 'booking_not_open' });
     expect(mockSendEmail).not.toHaveBeenCalled();
     expect(mockSendSms).not.toHaveBeenCalled();
+  });
+
+  test('a parked reschedule request is not enqueued, and the rebooked visit still is', async () => {
+    await mockDatabase('scheduled_services').where({ id: serviceId }).update({ status: 'rescheduled' });
+    expect(await welcome.queueOneTimeWelcomeEmail({ ...service, status: 'rescheduled' })).toMatchObject({ queued: false, reason: 'booking_not_open' });
+    expect(await mockDatabase('sms_sequences')).toHaveLength(0);
+    const rebookedId = randomUUID();
+    const [rebooked] = await mockDatabase('scheduled_services').insert({ id: rebookedId, customer_id: customerId, is_recurring: false, status: 'confirmed', scheduled_date: '2030-01-09' }).returning('*');
+    expect(await welcome.queueOneTimeWelcomeEmail(rebooked)).toMatchObject({ queued: true });
   });
 
   test('stale email claims use email proof, even if a welcome SMS already exists', async () => {
