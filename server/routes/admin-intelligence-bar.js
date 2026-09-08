@@ -88,6 +88,10 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
 const MAX_TOOL_ROUNDS = 8;
+// Model arguments that only pick WHICH task customer an operation targets.
+// They are excluded from an operation's clarification identity so a retry
+// with the corrected target answers the original clarification.
+const CLARIFICATION_TARGET_FIELDS = new Set(['customer_id', 'customer_name', 'phone']);
 const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 const AGENT_ESTIMATE_FEATURE_KEY = 'agent_estimate';
 const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
@@ -2307,8 +2311,17 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
     }
     if (req.ibResumedTask && platformEnabled) {
-      const previouslyLoaded = currentMessages.flatMap(m => Array.isArray(m.content) ? m.content : [])
-        .filter(block => block.type === 'tool_use').map(block => ActionRegistry.actions.get(block.name))
+      // Restore every tool the worker had loaded: the ones it invoked and the
+      // ones a completed discovery round loaded but never reached (the
+      // continuation prompt forbids repeating that discovery). Availability is
+      // re-checked against the current scope, never trusted from the checkpoint.
+      const blocks = currentMessages.flatMap(m => Array.isArray(m.content) ? m.content : []);
+      const discoveryIds = new Set(blocks.filter(block => block.type === 'tool_use' && block.name === ActionRegistry.DISCOVERY_TOOL.name).map(block => block.id));
+      const discoveredNames = blocks.filter(block => block.type === 'tool_result' && discoveryIds.has(block.tool_use_id))
+        .flatMap(block => { try { return JSON.parse(block.content)?.capabilities || []; } catch { return []; } })
+        .filter(capability => capability?.availability === 'loaded').map(capability => capability.id);
+      const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
+      const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
         .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
     }
@@ -2316,7 +2329,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const toolCalls = [];
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
-    const unresolvedClarifications = new Set(); // tools whose latest result still needs a target choice
+    // Operations whose latest result still needs a target choice. An operation
+    // is the tool plus its own arguments minus the target selectors, so two
+    // same-tool calls in one round (two call ids) never share a marker, while
+    // a corrected retry of the same record does answer it.
+    const unresolvedClarifications = new Set();
+    const clarificationKey = toolUse => `${toolUse.name}:${JSON.stringify(Object.entries(toolUse.input || {})
+      .filter(([key]) => !CLARIFICATION_TARGET_FIELDS.has(key)).sort(([a], [b]) => a.localeCompare(b)))}`;
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
@@ -2507,8 +2526,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         toolResults.push({ name: toolUse.name, result });
         // A clarification stays open until the same operation later succeeds;
         // an unrelated call succeeding in the same round does not answer it.
-        if (result?.code === 'target_clarification_required') unresolvedClarifications.add(toolUse.name);
-        else if (!isToolFailure(result)) unresolvedClarifications.delete(toolUse.name);
+        if (result?.code === 'target_clarification_required') unresolvedClarifications.add(clarificationKey(toolUse));
+        else if (!isToolFailure(result)) unresolvedClarifications.delete(clarificationKey(toolUse));
         if (toolActivityOn) {
           toolActivity.push({
             tool: toolUse.name,

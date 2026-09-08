@@ -184,6 +184,51 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     await api('/cancel-action', { pending_action_id: corrected.body.pendingActions[0].id });
   }, 30000);
 
+  test('two same-tool calls in one round keep their own clarification markers', async () => {
+    const unlinkedCall = crypto.randomUUID(), ownCall = crypto.randomUUID();
+    await db('call_log').insert([
+      { id: unlinkedCall, customer_id: null, transcription: 'Foreign private same-tool evidence', status: 'completed' },
+      { id: ownCall, customer_id: customerA, transcription: 'Synthetic own call evidence', status: 'completed' },
+    ]);
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'call log' }, 'discover'))
+      .mockResolvedValueOnce({ content: [
+        { type: 'tool_use', name: 'get_call_log', input: { call_id: unlinkedCall }, id: 'unlinked-call' },
+        { type: 'tool_use', name: 'get_call_log', input: { call_id: ownCall }, id: 'own-call' },
+      ], usage: {} }).mockResolvedValueOnce(answer('One call is loaded.'));
+    const response = await api('/query', request(`Read both calls for ${nameA}`));
+    expect(response.status).toBe(200);
+    const round = mockModel.mock.calls.at(-1)[0].messages.at(-1).content;
+    expect(round.find(block => block.tool_use_id === 'own-call').content).toContain('Synthetic own call evidence');
+    expect(JSON.parse(round.find(block => block.tool_use_id === 'unlinked-call').content)).toMatchObject({ code: 'target_clarification_required' });
+    expect(JSON.stringify(mockModel.mock.calls)).not.toContain('Foreign private same-tool evidence');
+    // The other call succeeding never answers the unlinked call's clarification.
+    expect(response.body.taskState).toBe('needs_information');
+  }, 30000);
+
+  test('resume restores tools a completed discovery loaded but the worker never invoked', async () => {
+    mockModel.mockResolvedValueOnce({ content: [
+      { type: 'tool_use', name: 'discover_capabilities', input: { query: 'update customer fields' }, id: 'discover-write' },
+      { type: 'tool_use', name: 'discover_capabilities', input: { query: 'send sms' }, id: 'discover-sms' },
+    ], usage: {} })
+      .mockResolvedValueOnce(tools('update_customer', { customer_id: customerA, updates: { notes: 'Discovered-then-resumed note' } }, 'note'))
+      .mockResolvedValueOnce(answer('The note is awaiting confirmation.'));
+    const proposed = await api('/query', request(`Update the note for ${nameA}, then text that the note was updated`));
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const card = proposed.body.pendingActions[0];
+    expect((await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash })).body.success).toBe(true);
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(tools('send_sms', { customer_id: customerA, message: 'Your note was updated.' }, 'sms'))
+      .mockResolvedValueOnce(answer('The text is awaiting confirmation.'));
+    const resumed = await api(`/tasks/${proposed.body.taskId}/resume`, { session_id: sessionId });
+    expect(resumed.status).toBe(200);
+    // send_sms was loaded by the checkpointed discovery, never invoked, and must not need a repeated discovery.
+    expect(mockModel.mock.calls[0][0].tools.map(tool => tool.name)).toContain('send_sms');
+    expect(JSON.stringify(mockModel.mock.calls)).not.toContain('capability_not_loaded');
+    expect(resumed.body.pendingActions).toHaveLength(1);
+    expect(resumed.body.pendingActions[0].tool).toBe('send_sms');
+    await api('/cancel-action', { pending_action_id: resumed.body.pendingActions[0].id });
+  }, 30000);
+
   test('customer matching cannot describe another account inside a customer-scoped task', async () => {
     const other = await db('customers').where('id', customerB).first('phone');
     mockModel.mockResolvedValueOnce(tools('match_existing_customer', { phone: other.phone }, 'match'))
