@@ -15,7 +15,7 @@ const { randomUUID } = require('node:crypto');
 const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment } = require('../services/sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY } = require('../services/sms-commitment-fulfillment');
 const NotificationService = require('../services/notification-service');
 const { etDateString } = require('../utils/datetime-et');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
@@ -555,6 +555,34 @@ postgres('SMS commitments on PostgreSQL', () => {
     await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 600000) });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(2);
     expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+  });
+
+  test('a verdict cached under an earlier fulfillment policy is rechecked', async () => {
+    result.obligations[0] = { ...result.obligations[0], kind: 'other',
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const now = new Date(message.created_at.getTime() + 2000);
+    const commitment = await mockPg('call_commitments').first();
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const current = fulfillmentFingerprint(commitment, evidence).evidenceHash;
+    const stale = { verdict: 'uncertain', reason: 'incomplete_sources', evidence_hash: current, retry_after: null };
+    // Same evidence, same hash: the cache holds. A policy bump changes the
+    // hash for identical evidence, so the stale verdict is not reused.
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const cached = { ...commitment, sms_context: { ...commitment.sms_context, fulfillment_check: stale } };
+    expect(await verifySmsFulfillment(cached, evidence, { now })).toMatchObject({ reason: 'incomplete_sources' });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(typeof FULFILLMENT_POLICY).toBe('number');
+    const previousPolicyHash = require('../services/data-hygiene/source-extraction-store').hashExtractionSource(
+      JSON.stringify({ version: require('../services/sms-operational-extractor').VERSION,
+        fulfillmentPolicy: FULFILLMENT_POLICY - 1, policy: require('../config/models').TEXT_POLICIES.highStakes,
+        obligation: fulfillmentFingerprint(commitment, evidence).obligation,
+        records: [...evidence.records].sort((a, b) => a.ref.localeCompare(b.ref)), failures: [] }));
+    expect(previousPolicyHash).not.toBe(current);
+    const older = { ...commitment, sms_context: { ...commitment.sms_context, fulfillment_check: { ...stale, evidence_hash: previousPolicyHash } } };
+    const rechecked = await verifySmsFulfillment(older, evidence, { now });
+    expect(rechecked).toMatchObject({ verdict: 'open', evidence_hash: current });
+    expect(rechecked.reason).toBeUndefined();
   });
 
   test('archived owners stop processing until restoration without losing the obligation', async () => {

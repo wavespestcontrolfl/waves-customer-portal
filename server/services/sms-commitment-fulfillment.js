@@ -10,6 +10,9 @@ const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKe
 const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt, whereEstimateCustomerOwnership } = require('./call-commitments');
 
 const LIMIT = 50;
+// Bump when admissibility or completeness rules change: cached verdicts
+// keyed on unchanged evidence would otherwise never be rechecked.
+const FULFILLMENT_POLICY = 2;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -239,7 +242,7 @@ function fulfillmentFingerprint(commitment, evidence) {
   const { fulfillment_check: _previous, ...sms_context } = commitment.sms_context || {};
   const obligation = { party: commitment.party, kind: commitment.kind, description: commitment.description,
     evidence: commitment.evidence, due_at: commitment.due_at, sms_context };
-  return { obligation, evidenceHash: hashExtractionSource(JSON.stringify({ version: VERSION, policy: MODELS.TEXT_POLICIES.highStakes,
+  return { obligation, evidenceHash: hashExtractionSource(JSON.stringify({ version: VERSION, fulfillmentPolicy: FULFILLMENT_POLICY, policy: MODELS.TEXT_POLICIES.highStakes,
     obligation, records: [...evidence.records].sort((a, b) => a.ref.localeCompare(b.ref)),
     failures: [...evidence.failures].sort() })) };
 }
@@ -306,4 +309,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, truncated_channels: ev
   return groundFulfillment(result.json, evidence, commitment);
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY };
