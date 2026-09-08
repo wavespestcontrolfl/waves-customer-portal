@@ -337,12 +337,16 @@ function uniqueInts(values, max) {
   return out.sort((a, b) => a - b);
 }
 
+// A signal the model reports at unknown confidence is an unknown signal: its
+// level never becomes a score (a "severe" at unknown confidence would map to
+// a customer-facing 20 the model itself did not stand behind).
 function normalizeSignal(raw, levels) {
   const source = raw && typeof raw === 'object' ? raw : {};
+  const confidence = CONFIDENCE.includes(source.confidence) ? source.confidence : 'unknown';
   return {
-    level: levels.includes(source.level) ? source.level : 'unknown',
+    level: confidence !== 'unknown' && levels.includes(source.level) ? source.level : 'unknown',
     evidence: clip(source.evidence, 300),
-    confidence: CONFIDENCE.includes(source.confidence) ? source.confidence : 'unknown',
+    confidence,
   };
 }
 
@@ -407,11 +411,15 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
   const rawFindings = Array.isArray(json.findings) ? json.findings : [];
   const findings = normalizeFindings(rawFindings).map((finding, index) => {
     const raw = rawFindings[index] || {};
-    const canDetermine = raw.can_determine !== false;
-    // A finding the model itself says the photos cannot settle carries no
-    // confidence claim: unknown, so the naming gate publishes no cause.
-    const confidence = canDetermine ? finding.confidence : 'unknown';
     const photoRefs = uniqueInts(raw.photo_refs, photoCount);
+    // A finding the model itself says the photos cannot settle carries no
+    // confidence claim: unknown, so the naming gate publishes no cause. The
+    // same for a condition that cites no photo of this visit (none, or only
+    // out-of-range numbers): evidence nobody can trace is not evidence. The
+    // clean-lawn finding is exempt — it has nothing to point at.
+    const untraceable = !photoRefs.length && safeConditionLabel(finding.name, finding.confidence) !== NO_STRESS_LABEL;
+    const canDetermine = raw.can_determine !== false && !untraceable;
+    const confidence = canDetermine ? finding.confidence : 'unknown';
     return {
       ...finding,
       // Server-authored ids: the review keys on them, so a duplicate or a
@@ -422,7 +430,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
       photo_refs: photoRefs,
       zone: zoneFromRefs(photoRefs, photoZones),
       can_determine: canDetermine,
-      cannot_determine_reason: canDetermine ? '' : clip(raw.cannot_determine_reason, 300),
+      cannot_determine_reason: canDetermine ? '' : (clip(raw.cannot_determine_reason, 300) || (untraceable ? 'no photo of this visit cited' : '')),
       // The allowlisted customer label — the naming gate applied here, once,
       // so no consumer ever maps the raw name itself.
       label: safeConditionLabel(finding.name, confidence),
@@ -648,8 +656,20 @@ function photoRowInputs(analysis) {
 }
 
 // ── Run row ───────────────────────────────────────────────────────────
+// Tokens across every leg the providers billed — a primary answer the
+// validator rejected before the fallback answered carries its usage on the
+// failure entry (llm/call.js) — so the run row reports what the visit spent.
+function billedUsage(analysis) {
+  const legs = [...(analysis.failures || []).map((leg) => leg?.usage), analysis.usage].filter(Boolean);
+  if (!legs.length) return { input_tokens: null, output_tokens: null, reasoning_tokens: null };
+  const sum = (key) => legs.reduce((total, usage) => total + (Number(usage[key]) || 0), 0);
+  return { input_tokens: sum('input_tokens'), output_tokens: sum('output_tokens'), reasoning_tokens: sum('reasoning_tokens') };
+}
+
 function runRowFor({ assessment, analysis, photoRecords = [] }) {
-  const usage = analysis.usage || {};
+  const usage = billedUsage(analysis);
+  const complete = analysis.status === 'complete';
+  const whenComplete = (value) => (complete && value ? JSON.stringify(value) : null);
   return {
     assessment_id: assessment.id,
     customer_id: assessment.customer_id,
@@ -659,19 +679,19 @@ function runRowFor({ assessment, analysis, photoRecords = [] }) {
     requested_model: analysis.model || null,
     fallback_used: !!analysis.fallbackUsed,
     failures: JSON.stringify(analysis.failures || []),
-    unavailable_reason: analysis.status === 'unavailable' ? clip(analysis.reason || 'error', 80) : null,
+    unavailable_reason: complete ? null : clip(analysis.reason || 'error', 80),
     prompt_version: analysis.promptVersion,
     context_hash: analysis.contextHash,
     photo_ids: JSON.stringify(photoRecords.map((row) => row.id)),
     photo_quality: JSON.stringify(analysis.photoQuality || []),
     findings: JSON.stringify(analysis.findings || []),
-    severities: analysis.status === 'complete' && analysis.severities ? JSON.stringify(analysis.severities) : null,
-    scores_raw: analysis.status === 'complete' && analysis.scores ? JSON.stringify(analysis.scores) : null,
+    severities: whenComplete(analysis.severities),
+    scores_raw: whenComplete(analysis.scores),
     observations: analysis.observations || null,
     raw_response: analysis.raw == null ? null : JSON.stringify(analysis.raw),
-    tokens_in: usage.input_tokens ?? null,
-    tokens_out: usage.output_tokens ?? null,
-    tokens_reasoning: usage.reasoning_tokens ?? null,
+    tokens_in: usage.input_tokens,
+    tokens_out: usage.output_tokens,
+    tokens_reasoning: usage.reasoning_tokens,
     latency_ms: analysis.latencyMs ?? null,
   };
 }
@@ -828,7 +848,11 @@ function buildReview(run, review = {}) {
     return {
       ...finding,
       name,
-      label: entry?.name ? entry.name : safeConditionLabel(finding.name, finding.confidence),
+      // An unrenamed finding keeps the label the run stored at assessment
+      // time (provenance) — never re-mapped by whatever the pattern list says
+      // at confirmation; a stored run without one (never the case for a run
+      // this module wrote) is mapped once here.
+      label: entry?.name ? entry.name : (finding.label || safeConditionLabel(finding.name, finding.confidence)),
       keep: entry ? entry.keep !== false : true,
       tech_note: entry?.tech_note || null,
       source: finding.source || 'model',
@@ -842,7 +866,7 @@ function buildReview(run, review = {}) {
   // a product treats — it stays in the review, out of the reconciliation.
   const reconcilable = [...reviewed.filter((finding) => finding.keep), ...added]
     .filter((finding) => finding.label !== NO_STRESS_LABEL)
-    .map((finding) => ({ ...finding, name: finding.label }));
+    .map((finding) => ({ ...finding, name: finding.label, confirmation_step: safeConfirmationStep(finding.confirmation_step) }));
   const products = normalizeProducts(review.appliedProducts || []);
   const treatmentRationale = buildTreatmentRationale({ products, findings: reconcilable });
   const flags = buildReconciliationFlags({ findings: reconcilable, products, treatmentRationale });
@@ -857,6 +881,15 @@ function buildReview(run, review = {}) {
       computed_at: new Date().toISOString(),
     },
   };
+}
+
+// The model's confirmation_step is concatenated into the customer-facing
+// watch items, so it is egress-scrubbed like the observations column; one
+// that carries an access code is dropped (the builder's "monitor response"
+// fallback takes its place).
+function safeConfirmationStep(text) {
+  const scrubbed = scrubCustomerText(text || '').slice(0, 200).trim();
+  return !scrubbed || containsReportAccessCode(scrubbed) ? '' : scrubbed;
 }
 
 async function reviewRun({ run, review, technicianId }, knex) {
@@ -973,8 +1006,8 @@ function runAiScores(run) {
   const scores = parseJsonObject(run?.scores_raw);
   const severities = parseJsonObject(run?.severities);
   if (run?.status !== 'complete' || !scores) return {};
-  const { observations, overwatering_signal, drought_stress, ...legacy } = deriveLegacyScores({ status: 'complete', scores, severities: severities || {}, observations: '' });
-  return legacy;
+  const legacy = deriveLegacyScores({ status: 'complete', scores, severities: severities || {}, observations: '' });
+  return Object.fromEntries(SCORE_KEYS.map((key) => [key, legacy[key]]));
 }
 
 // ── Response shapes ───────────────────────────────────────────────────
@@ -1025,6 +1058,8 @@ module.exports = {
   NO_OBSERVATIONS,
   customerObservations,
   runAiScores,
+  billedUsage,
+  safeConfirmationStep,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
   SYSTEM_PROMPT,

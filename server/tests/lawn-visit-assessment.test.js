@@ -258,6 +258,34 @@ describe('legacy column derivation — missing is not healthy', () => {
     expect(visit.NO_OBSERVATIONS).not.toBe(visit.UNAVAILABLE_OBSERVATIONS);
   });
 
+  test('a determinable finding that cites no photo of this visit is undeterminable; the clean-lawn finding is exempt', () => {
+    const json = answer({ findings: [
+      finding({ name: 'Chinch bug damage', confidence: 'high', photo_refs: [] }),
+      finding({ finding_id: 'F2', name: 'Gray leaf spot', confidence: 'high', photo_refs: [7, 0, -1] }),
+      finding({ finding_id: 'F3', name: 'No major visible stress', confidence: 'moderate', photo_refs: [] }),
+      finding({ finding_id: 'F4', name: 'Dollar spot', confidence: 'high', photo_refs: [2] }),
+    ] });
+    const [none, outOfRange, clean, cited] = visit.normalizeAssessment(json, 2, [null, null]).findings;
+    expect(none).toMatchObject({ can_determine: false, confidence: 'unknown', label: 'general lawn stress', cannot_determine_reason: 'no photo of this visit cited', photo_refs: [] });
+    expect(outOfRange).toMatchObject({ can_determine: false, confidence: 'unknown', photo_refs: [] });
+    expect(clean).toMatchObject({ can_determine: true, confidence: 'moderate', label: 'no major visible stress' });
+    expect(cited).toMatchObject({ can_determine: true, confidence: 'high', label: 'dollar spot', photo_refs: [2] });
+    // The model's own reason wins when it gave one.
+    const own = visit.normalizeAssessment(answer({ findings: [finding({ photo_refs: [], can_determine: false, cannot_determine_reason: 'too far' })] }), 2).findings[0];
+    expect(own.cannot_determine_reason).toBe('too far');
+  });
+
+  test('a signal at unknown confidence is an unknown signal — its level never becomes a score', () => {
+    const json = answer({ severities: { ...answer().severities, fungal_activity: { level: 'severe', evidence: 'maybe', confidence: 'unknown' }, thatch_visibility: { level: 'high', evidence: '', confidence: 'bogus' } } });
+    const normalized = visit.normalizeAssessment(json, 2, [null, null]);
+    expect(normalized.severities.fungal_activity).toEqual({ level: 'unknown', evidence: 'maybe', confidence: 'unknown' });
+    expect(normalized.severities.thatch_visibility.level).toBe('unknown');
+    expect(normalized.severities.drought_stress).toMatchObject({ level: 'moderate', confidence: 'moderate' });
+    const scores = visit.deriveLegacyScores({ status: 'complete', severities: normalized.severities, scores: {}, observations: '' });
+    expect(scores.fungus_control).toBeNull();
+    expect(scores.thatch_level).toBeNull();
+  });
+
   test('stress is the worst KNOWN stressor; an unknown signal is left out, never 95', () => {
     const scores = visit.deriveLegacyScores(complete(
       sev({ fungal_activity: 'minor', insect_damage: 'unknown', drought_stress: 'moderate', mechanical_damage: 'none', thatch_visibility: 'moderate', overwatering_signal: 'yes' }),
@@ -363,6 +391,11 @@ describe('run row', () => {
     expect(JSON.parse(row.photo_ids)).toEqual(['p1', 'p2']);
     expect(JSON.parse(row.findings)).toEqual([{ finding_id: 'F1' }]);
     expect(JSON.parse(row.raw_response)).toEqual({ x: 1 });
+    // A billed leg that failed before the fallback answered adds its tokens; a failure without usage adds nothing.
+    const chained = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, failures: [{ provider: 'gemini', reason: 'empty_findings', validator: true, usage: { input_tokens: 10, output_tokens: 20, reasoning_tokens: 30 } }, { provider: 'x', reason: 'x_503' }] } });
+    expect(chained).toMatchObject({ tokens_in: 11, tokens_out: 22, tokens_reasoning: 33 });
+    expect(visit.billedUsage({ failures: [{ usage: { input_tokens: 5, output_tokens: 1 } }], usage: null })).toEqual({ input_tokens: 5, output_tokens: 1, reasoning_tokens: 0 });
+    expect(visit.billedUsage({ failures: [], usage: null })).toEqual({ input_tokens: null, output_tokens: null, reasoning_tokens: null });
     // An unavailable run stores SQL NULL for scores and severities even though the analysis object carries null-valued placeholders.
     const unavailable = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, status: 'unavailable', reason: 'all_providers_failed', provider: null, model: null, raw: null, severities: null, scores: { turf_density: null, weed_coverage: null, color_health: null }, usage: null } });
     expect(unavailable).toMatchObject({ status: 'unavailable', unavailable_reason: 'all_providers_failed', service_id: null, provider: null, raw_response: null, severities: null, scores_raw: null, tokens_in: null });
@@ -428,6 +461,29 @@ describe('technician review on confirm', () => {
     expect(rec).not.toMatch(/4471|Smith|dog/);
     expect(built.reconciliation.treatment_rationale[0].customer_explanation).toContain('chinch bug activity');
     expect(built.reviewed_findings[0].name).toContain('Mrs. Smith'); // the review keeps the raw internal text
+  });
+
+  test('the confirmation step reaches the watch items egress-scrubbed; one carrying an access code is dropped', () => {
+    const step = (text) => ({ ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch bug damage', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: text, customer_wording: null, photo_refs: [1], zone: 'front', label: 'chinch bug activity', source: 'model' }]) });
+    const watch = (text) => visit.buildReview(step(text), { reviewedFindings: [] }).reconciliation.watch_items[0];
+    expect(watch('Float test near the driveway; call 941-555-0100 if it fails')).toMatch(/^chinch bug activity: Float test near the driveway/);
+    expect(watch('Float test near the driveway; call 941-555-0100 if it fails')).not.toMatch(/941/);
+    expect(watch('Float test by the side gate, code 4471')).toBe('chinch bug activity: monitor response');
+    expect(watch('')).toBe('chinch bug activity: monitor response');
+    expect(visit.safeConfirmationStep('The lockbox is 2288')).toBe('');
+    // The review keeps the raw step; only the reconciliation copy is scrubbed.
+    expect(visit.buildReview(step('Float test by the side gate, code 4471'), {}).reviewed_findings[0].confirmation_step).toBe('Float test by the side gate, code 4471');
+  });
+
+  test('an unrenamed finding keeps the label the run stored — never re-mapped at confirmation', () => {
+    const stored = { ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch bug damage', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: '', customer_wording: null, photo_refs: [1], zone: 'front', label: 'a label the mapper no longer produces', source: 'model' }]) };
+    const built = visit.buildReview(stored, { reviewedFindings: [{ finding_id: 'F1', keep: true }] });
+    expect(built.reviewed_findings[0].label).toBe('a label the mapper no longer produces');
+    expect(built.reconciliation.watch_items[0]).toMatch(/^a label the mapper no longer produces:/);
+    // A rename still wins; a stored finding without a label is mapped once.
+    expect(visit.buildReview(stored, { reviewedFindings: [{ finding_id: 'F1', name: 'general lawn stress' }] }).reviewed_findings[0].label).toBe('general lawn stress');
+    const unlabeled = { ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch bug damage', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', photo_refs: [1], source: 'model' }]) };
+    expect(visit.buildReview(unlabeled, {}).reviewed_findings[0].label).toBe('chinch bug activity');
   });
 
   test('a dropped finding leaves the reconciliation; a technician detail joins it at moderate; products reconcile deterministically', () => {
