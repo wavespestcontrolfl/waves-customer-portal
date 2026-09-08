@@ -120,12 +120,34 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const result = await api('/query', request(`Get customer details for ${nameA}`));
     expect(result.status).toBe(200);
     expect(result.body.taskTarget.customer_id).toBe(customerA);
+    // The corrected read answered the request: an earlier wrong read is not an open clarification.
+    expect(result.body.taskState).toBe('responded');
     const round = mockModel.mock.calls[1][0].messages.at(-1).content;
     expect(round.find(block => block.tool_use_id === 'wrong-read').content).toContain('target_clarification_required');
     expect(round.find(block => block.tool_use_id === 'correct-read').content).toContain('Synthetic A read fact');
     expect(round.find(block => block.tool_use_id === 'lookup').content).toContain(customerA);
     expect(JSON.stringify(round)).not.toContain('Synthetic wrong-record private fact');
     await db('customers').whereIn('id', [customerA, customerB]).update({ crm_notes: null });
+  }, 30000);
+
+  test('lead searches inside a customer-scoped task never return another customer or an unlinked lead', async () => {
+    const own = crypto.randomUUID(), foreign = crypto.randomUUID(), unlinked = crypto.randomUUID();
+    await db('leads').insert([
+      { id: own, customer_id: customerA, first_name: 'Synthetic', last_name: 'Ownlead', status: 'new', first_contact_at: new Date() },
+      { id: foreign, customer_id: customerB, first_name: 'Synthetic', last_name: 'Foreignlead', status: 'new', first_contact_at: new Date() },
+      { id: unlinked, customer_id: null, first_name: 'Synthetic', last_name: 'Unlinkedlead', status: 'new', first_contact_at: new Date() },
+    ]);
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'query leads' }, 'discover'))
+      .mockResolvedValueOnce(tools('query_leads', { search: 'Synthetic' }, 'leads'))
+      .mockResolvedValueOnce(answer('The customer leads are loaded.'));
+    const result = await api('/query', request(`Show ${nameA}'s leads`));
+    expect(result.status).toBe(200);
+    expect(result.body.taskTarget.customer_id).toBe(customerA);
+    const round = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+      .find(block => block.type === 'tool_result' && block.tool_use_id === 'leads').content;
+    expect(round).toContain('Ownlead');
+    expect(round).not.toContain('Foreignlead');
+    expect(round).not.toContain('Unlinkedlead');
   }, 30000);
 
   test('customer matching cannot describe another account inside a customer-scoped task', async () => {

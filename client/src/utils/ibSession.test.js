@@ -30,10 +30,12 @@ it('keeps one request key for the same request until the server answers', async 
   expect(identity.begin('{"prompt":"text alice"}').request_key).not.toBe(first.request_key);
 });
 
-it('returns a valid in-memory identity when session storage is unavailable', async () => {
+it('reuses one in-memory identity for the page while session storage is unavailable', async () => {
   vi.stubGlobal('sessionStorage', { getItem() { throw new Error('Storage unavailable'); } });
   const { ibSessionId } = await import('./ibSession');
-  expect(ibSessionId()).toMatch(/^[0-9a-f-]{36}$/);
+  const session = ibSessionId();
+  expect(session).toMatch(/^[0-9a-f-]{36}$/);
+  expect(ibSessionId()).toBe(session);
 });
 
 it('formats cryptographic fallback bytes with UUID v4 version and variant bits', async () => {

@@ -11,6 +11,10 @@ function uuid() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+// Without session storage every surface on the page still shares one
+// session for the lifetime of the page, so saved tasks stay reachable.
+let fallbackSession = null;
+
 export function ibSessionId() {
   let actor = 'session';
   try { actor = JSON.parse(localStorage.getItem('waves_admin_user') || '{}').id || actor; } catch { /* unavailable */ }
@@ -21,7 +25,10 @@ export function ibSessionId() {
     const id = uuid();
     sessionStorage.setItem(key, id);
     return id;
-  } catch { return uuid(); }
+  } catch {
+    fallbackSession ||= uuid();
+    return fallbackSession;
+  }
 }
 
 // begin(request) hands out the identity for that serialized request body. The

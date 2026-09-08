@@ -1973,7 +1973,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeTaxTool(toolName, input);
   }
   if (LEADS_TOOL_NAMES.has(toolName)) {
-    return executeLeadsTool(toolName, input);
+    return executeLeadsTool(toolName, input, actionContext);
   }
   if (EMAIL_TOOL_NAMES.has(toolName)) {
     return executeEmailTool(toolName, input);
@@ -2316,6 +2316,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const toolCalls = [];
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
+    let clarificationPending = false; // the latest tool round still needs a target choice
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
@@ -2361,6 +2362,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
       // Execute all tool calls using context-aware router
       const results = [];
+      const roundStart = toolResults.length;
       for (const toolUse of toolUses) {
         // PII-bearing tool inputs (name/phone/email/address/SMS search terms) — log keys only
         const loggableInput = platformEnabled || PII_TOOL_NAMES.has(toolUse.name)
@@ -2513,6 +2515,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
       }
 
+      // Clarification stays open only while the latest round could not
+      // proceed at all; a corrected read after a wrong one answers it.
+      const roundResults = toolResults.slice(roundStart);
+      clarificationPending = roundResults.some(r => r.result?.code === 'target_clarification_required') && roundResults.every(r => isToolFailure(r.result));
       currentMessages = [
         ...currentMessages,
         { role: 'assistant', content: response.content },
@@ -2663,7 +2669,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // failed best-effort.
       threadsEnabled: threadPersistenceActive,
       ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length ? 'awaiting_approval'
-        : toolResults.some(r => r.result?.code === 'target_clarification_required') ? 'needs_information' : 'responded',
+        : clarificationPending ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
     if (activeTask) {
