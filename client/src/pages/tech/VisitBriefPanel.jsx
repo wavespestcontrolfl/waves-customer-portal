@@ -26,7 +26,7 @@
 // Tech portal style rule (CLAUDE.md): inline styles + dark palette,
 // Montserrat headings per-element. No Tailwind, no components/ui.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { stopPropertyAlerts } from './routeStops';
+import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import {
   fmtMoney,
   lawnGateLabels,
@@ -467,10 +467,10 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
   );
 }
 
-// The pre-existing per-service action buttons, moved verbatim from the
-// old ServiceRow (labels + terminal logic + trace-eligibility guard
-// unchanged) — one row per member service on a grouped stop.
+// Per-service actions keep terminal reports read-only and preserve the
+// trace-eligibility guard — one row per member service on a grouped stop.
 function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead }) {
+  const reportDisabled = TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status);
   const btn = {
     padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
     border: `1px solid ${DARK.border}`, background: 'transparent',
@@ -490,7 +490,7 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
         </p>
       )}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button onClick={() => onProject(service)} style={btn}>
+        <button disabled={reportDisabled} onClick={() => onProject(service)} style={{ ...btn, ...(reportDisabled ? { color: DARK.muted, cursor: 'default' } : {}) }}>
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}

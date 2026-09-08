@@ -449,8 +449,8 @@ export default function TechHomePage({ section = 'today' }) {
   // fetch per MEMBER service of the stop (grouped siblings keep their own
   // line-scoped history and possibly separate estimate provenance),
   // cached for the session under the stop's primary id. Partial success
-  // is fine (each section fails soft); only everything failing renders
-  // the Retry row. A 404 (ownership filter / older stop) reads as
+  // preserves each previously loaded section and exposes Retry. A 404
+  // (ownership filter / older stop) reads as
   // "nothing linked", not an error.
   const loadStopDetail = useCallback(async (stop) => {
     const key = stop.primary.id;
@@ -478,7 +478,12 @@ export default function TechHomePage({ section = 'today' }) {
     }
     setStopDetail((d) => ({
       ...d,
-      [key]: { status: fulfilled === 0 ? 'error' : 'ready', byService },
+      [key]: {
+        status: fulfilled === results.length ? 'ready' : 'error',
+        byService: Object.fromEntries(stop.services.map(({ id }) => [id, {
+          ...d[key]?.byService?.[id], ...byService[id],
+        }])),
+      },
     }));
   }, []);
   // Which stop's brief has an own-line text or bridge in flight. Tracked

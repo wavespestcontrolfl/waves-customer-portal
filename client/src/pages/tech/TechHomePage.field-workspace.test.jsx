@@ -16,8 +16,10 @@ vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: ({ ser
 vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: () => <div>Existing recap form</div> }));
-vi.mock('./VisitBriefPanel', () => ({ default: ({ stop, onPhotos, onBusyChange }) => <div>
+vi.mock('./VisitBriefPanel', () => ({ default: ({ stop, detail, onRetry, onPhotos, onBusyChange }) => <div>
   <p>Property brief for {stop.primary.id}</p>
+  <p>{detail?.byService?.[stop.primary.id]?.brief?.facts?.access?.accessNotes}</p>
+  {detail?.status === 'error' && <button onClick={onRetry}>Retry details</button>}
   <button onClick={() => onPhotos(stop.primary)}>Service photos</button>
   <button onClick={() => onBusyChange(true)}>Start contact action</button>
 </div> }));
@@ -26,6 +28,7 @@ import TechHomePage from './TechHomePage';
 const row = (id, overrides = {}) => ({ id, technicianId: 'tech-fixture', customerName: `Fixture ${id}`, address: '100 Example Lane', serviceType: 'Lawn care', scheduledDate: '2099-01-01', status: 'confirmed', windowStart: '09:00:00', windowEnd: '10:00:00', ...overrides });
 let rows;
 let scheduleFails;
+let briefStatus;
 let fetchMock;
 
 function mount(path = '/tech', { enabled = true, role = 'technician' } = {}) {
@@ -43,6 +46,7 @@ function mount(path = '/tech', { enabled = true, role = 'technician' } = {}) {
 beforeEach(() => {
   rows = [row('one'), row('two', { status: 'en_route' }), row('other', { technicianId: 'other-tech' })];
   scheduleFails = false;
+  briefStatus = 200;
   mocks.navigationBusy.mockClear();
   fetchMock = vi.fn(async (path, options = {}) => {
     let data = {};
@@ -54,6 +58,10 @@ beforeEach(() => {
     if (path.endsWith('/on-site')) {
       const id = path.split('/').at(-2);
       rows = rows.map((service) => service.id === id ? { ...service, status: 'on_site' } : service);
+    }
+    if (path.endsWith('/visit-brief')) {
+      status = briefStatus;
+      data = status === 200 ? { facts: { access: { accessNotes: 'Use the side gate' } } } : { error: status === 404 ? 'Not found' : 'Brief unavailable' };
     }
     if (path.includes('/tech/line')) data = { line: null };
     return { ok: status === 200, status, json: async () => data };
@@ -110,6 +118,20 @@ describe('Tech field workspace uses the existing route workflow', () => {
     await act(async () => { mocks.socketEvent(); });
     expect(await screen.findByRole('heading', { name: 'Visit unavailable' })).toBeInTheDocument();
     expect(screen.queryByText('Property brief for two')).not.toBeInTheDocument();
+  });
+
+  it('retains prior access details after a partial background failure and clears a confirmed removal on retry', async () => {
+    mount('/tech?visit=row%3Atwo');
+    await screen.findByText('Use the side gate');
+    briefStatus = 503;
+    rows = rows.map(service => ({ ...service }));
+    await act(async () => { mocks.socketEvent(); });
+    await screen.findByRole('button', { name: 'Retry details' });
+    expect(screen.getByText('Use the side gate')).toBeInTheDocument();
+    briefStatus = 404;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry details' }));
+    await waitFor(() => expect(screen.queryByText('Use the side gate')).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Retry details' })).not.toBeInTheDocument();
   });
 
   it('keeps the group URL selected when its first member becomes terminal', async () => {

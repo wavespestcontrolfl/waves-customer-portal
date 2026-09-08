@@ -481,7 +481,18 @@ describe('VisitBriefPanel', () => {
     expect(screen.getByText(pWithText(/Lawn Care Service · pending/))).toBeInTheDocument();
   });
 
-  it('renders the per-service action buttons with the old ServiceRow logic preserved', () => {
+  it.each(['completed', 'cancelled', 'skipped', 'no_show'])('disables report controls for a %s visit while retaining photos', (status) => {
+    const onProject = vi.fn();
+    render(<VisitBriefPanel stop={stopOf({ ...BASE_SERVICE, status })} detail={detailFor({})}
+      onRetry={vi.fn()} onPhotos={vi.fn()} onProject={onProject} onZone={vi.fn()} onLead={vi.fn()} />);
+    const report = screen.getByRole('button', { name: /🗂️/ });
+    expect(report).toBeDisabled();
+    fireEvent.click(report);
+    expect(onProject).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Photos/ })).toBeEnabled();
+  });
+
+  it('keeps terminal linked reports disabled and live member reports actionable', () => {
     const onProject = vi.fn();
     const onZone = vi.fn();
     const sent = { ...BASE_SERVICE, id: 'svc-1', linkedProject: { id: 'p1', status: 'sent' } };
@@ -497,6 +508,9 @@ describe('VisitBriefPanel', () => {
     expect(screen.getAllByText('Rodent Station Check').length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText('Trace treatment zone')).toHaveLength(1);
     fireEvent.click(screen.getByText('🗂️ Sent'));
-    expect(onProject).toHaveBeenCalledWith(sent);
+    expect(screen.getByText('🗂️ Sent')).toBeDisabled();
+    expect(onProject).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('🗂️ Report'));
+    expect(onProject).toHaveBeenCalledWith(traceless);
   });
 });

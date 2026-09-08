@@ -1,4 +1,4 @@
-import { Link, Outlet, useLocation } from 'react-router-dom';
+import { Link, matchPath, Outlet, useLocation } from 'react-router-dom';
 import { CalendarDays, MoreHorizontal, Waves, Wrench } from 'lucide-react';
 import { useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './AddToHomeScreenHint';
@@ -11,12 +11,13 @@ export default function TechFieldShell({ children, techName, techRole, documents
   const { enabled, ready } = useFeatureFlagReady('tech-field-workspace', false);
   const { pathname, search } = useLocation();
   const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
+  const documentsRoute = Boolean(matchPath('/tech/documents', pathname));
   const visit = new URLSearchParams(search).get('visit');
   const visitSearch = visit ? `?visit=${encodeURIComponent(visit)}` : '';
   const legacyTool = ['/tech/protocols', '/tech/lawn-diagnostic', '/tech/social-post'].includes(pathname);
   if (!ready) return <div className="tech-field" role="status">Loading field workspace…</div>;
   if (!enabled) return children;
-  const section = pathname === '/tech/more' || pathname === '/tech/documents' ? 'more'
+  const section = pathname === '/tech/more' || documentsRoute ? 'more'
     : pathname === '/tech' ? 'today' : 'tools';
   return (
     <div className="tech-field">
@@ -28,7 +29,7 @@ export default function TechFieldShell({ children, techName, techRole, documents
         <AddToHomeScreenHint />
         {visit && pathname !== '/tech' && <Link className="tf-button" to={`/tech${visitSearch}`} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>Return to visit</Link>}
         <div className={legacyTool ? 'tf-existing' : undefined}>
-          {pathname === '/tech/documents' && !documentsAvailable
+          {documentsRoute && !documentsAvailable
             ? <p>Staff documents are unavailable.</p>
             : <Outlet context={{ fieldWorkspace: true, techRole, documentsAvailable, setNavigationBusy }} />}
         </div>

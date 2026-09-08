@@ -82,11 +82,11 @@ describe('TechLayout staff-session verification', () => {
     expect(screen.getByText('Staff login /admin/login?next=%2Ftech%3Fvisit%3Drow%253Atwo')).toBeInTheDocument();
   });
 
-  it('keeps controlled documents unavailable inside the enabled field shell', async () => {
+  it.each(['/tech/documents', '/tech/documents/', '/TECH/DOCUMENTS/'])('keeps controlled documents unavailable at %s inside the enabled field shell', async (path) => {
     localStorage.setItem('waves_admin_token', 'fixture-only');
     vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: true, ready: true });
     vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', role: 'technician' })));
-    renderTech('/tech/documents');
+    renderTech(path);
     expect(await screen.findByText('Staff documents are unavailable.')).toBeInTheDocument();
     expect(screen.queryByText('Protected staff documents')).not.toBeInTheDocument();
   });
