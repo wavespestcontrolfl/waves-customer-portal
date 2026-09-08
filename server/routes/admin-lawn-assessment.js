@@ -694,8 +694,10 @@ router.post('/assess', async (req, res, next) => {
       const rows = await history.propertyHistory({ customerId, scope, throughVisitDate: visitServiceDateStr, reset }, db);
       isBaseline = !!scope.propertyId && rows.length === 0;
     } else {
-      const existingCount = await db('lawn_assessments')
-        .where({ customer_id: customerId })
+      // A pending run-backed row (the gate was on, the technician has not
+      // completed it) is not a prior assessment: a legacy row that replaces
+      // it after the kill switch still becomes the customer's baseline.
+      const existingCount = await visitAssessment.withoutPendingRuns(db('lawn_assessments').where({ customer_id: customerId }))
         .count('id as cnt')
         .first();
       isBaseline = parseInt(existingCount.cnt) === 0;
