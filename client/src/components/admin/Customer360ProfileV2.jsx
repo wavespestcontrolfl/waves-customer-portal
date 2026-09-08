@@ -83,11 +83,16 @@ import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
 import { formatAddress } from "../../utils/format-address";
-import {
+import { Textarea,
   Card,
   CardBody,
   Badge,
   Button,
+  buttonStyles,
+  UiSurface,
+  useUiDensity,
+  inputStyles,
+  ActionFeedback,
   Input,
   Select,
   Switch,
@@ -596,7 +601,7 @@ function StageBadgeV2({ stage }) {
 // ─── Section title ───────────────────────────────────────────────
 function SectionTitle({ children, className }) {
   return (
-    <div className={cn("u-label text-ink-secondary mb-2", className)}>
+    <div className={cn("c360-section-heading ui-label text-ink-secondary mb-2", className)}>
       {children}
     </div>
   );
@@ -607,7 +612,7 @@ function StatCardV2({ label, value, alert }) {
   return (
     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-center">
       {" "}
-      <div className="u-label text-ink-secondary mb-1">{label}</div>{" "}
+      <div className="ui-label text-ink-secondary mb-1">{label}</div>{" "}
       <div
         className={cn(
           "u-nums text-16 font-medium tracking-tight",
@@ -674,8 +679,8 @@ function ContractMeta({ label, value }) {
   return (
     <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
       {" "}
-      <div className="u-label text-ink-tertiary mb-1">{label}</div>{" "}
-      <div className="text-13 text-zinc-900 break-words">
+      <div className="ui-label text-ink-tertiary mb-1">{label}</div>{" "}
+      <div className="text-ui-body text-zinc-900 break-words">
         {value || "—"}
       </div>{" "}
     </div>
@@ -1169,7 +1174,7 @@ function ElectronicAuthorizationContractV2({
                           <span
                             key={step.key}
                             className={cn(
-                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-ui-caption ui-label",
                               step.done
                                 ? "bg-zinc-50 border-zinc-200 text-zinc-900"
                                 : "bg-zinc-50 border-zinc-200 text-ink-secondary",
@@ -1274,7 +1279,7 @@ function ElectronicAuthorizationContractV2({
             </div>{" "}
           </div>
         ) : (
-          <div className="mb-5 text-13 text-ink-secondary">
+          <div className="mb-5 text-ui-body text-ink-secondary">
             No contract records created yet.
           </div>
         )}
@@ -1285,7 +1290,7 @@ function ElectronicAuthorizationContractV2({
                 <SectionTitle>
                   Delivery Audit
                 </SectionTitle>
-                <div className="text-12 text-ink-secondary">
+                <div className="text-ui-label text-ink-secondary">
                   {auditContract?.title || "Contract"} · {auditLoading ? "Loading events" : `${auditEvents.length} event${auditEvents.length === 1 ? "" : "s"}`}
                 </div>
               </div>
@@ -1303,7 +1308,7 @@ function ElectronicAuthorizationContractV2({
               </Button>
             </div>
             {auditErr && (
-              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
+              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-ui-label text-red-900">
                 {auditErr}
               </div>
             )}
@@ -1312,7 +1317,7 @@ function ElectronicAuthorizationContractV2({
                 <span
                   key={step.key}
                   className={cn(
-                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-ui-caption ui-label",
                     step.done
                       ? "bg-zinc-900 border-zinc-900 text-white"
                       : "bg-zinc-50 border-zinc-200 text-ink-secondary",
@@ -1325,28 +1330,28 @@ function ElectronicAuthorizationContractV2({
             </div>
             <div className="divide-y divide-zinc-100 rounded-sm border-hairline border-zinc-200">
               {auditEvents.map((event) => (
-                <div key={event.id} className="grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
-                  <div className="text-12 font-medium text-zinc-900">
+                <div key={event.id} className="c360-contract-grid grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
+                  <div className="text-ui-label font-medium text-zinc-900">
                     {contractEventLabel(event.eventType)}
                   </div>
-                  <div className="min-w-0 text-12 text-ink-secondary">
+                  <div className="min-w-0 text-ui-label text-ink-secondary">
                     {event.actorType || "system"}
                     {event.ip ? ` · ${event.ip}` : ""}
                     {event.metadata?.templateKey ? ` · ${event.metadata.templateKey}` : ""}
                     {event.metadata?.reason ? ` · ${event.metadata.reason}` : ""}
                   </div>
-                  <div className="u-nums text-11 text-ink-secondary md:text-right">
+                  <div className="u-nums text-ui-caption text-ink-secondary md:text-right">
                     {fmtDate(event.createdAt)}
                   </div>
                 </div>
               ))}
               {!auditLoading && auditEvents.length === 0 && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
+                <div className="px-3 py-4 text-ui-label text-ink-secondary">
                   No audit events recorded for this contract.
                 </div>
               )}
               {auditLoading && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
+                <div className="px-3 py-4 text-ui-label text-ink-secondary">
                   Loading audit events...
                 </div>
               )}
@@ -1356,21 +1361,21 @@ function ElectronicAuthorizationContractV2({
       </div>
       </ContractSection>
       <ContractSection title={"Auto Pay authorization"} description="Payment authorization and signing links.">
-      <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
+      <div className="c360-contract-form mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
         {" "}
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+        <div className="c360-contract-form-header flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
           {" "}
-          <div>
+          <div className="c360-contract-form-duplicate-title">
             {" "}
             <div className="text-16 font-medium text-zinc-900">
               AutoPay Authorization
             </div>{" "}
-            <div className="text-12 text-ink-secondary mt-1">
+            <div className="text-ui-label text-ink-secondary mt-1">
               Create, share, sign, and audit saved-payment authorization
               contracts.
             </div>{" "}
           </div>{" "}
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="c360-contract-form-actions flex flex-wrap items-center justify-end gap-2">
             {" "}
             <Button
               size="sm"
@@ -1418,7 +1423,7 @@ function ElectronicAuthorizationContractV2({
         {setupLinkResult ? (
           <div
             className={cn(
-              "px-4 py-2 text-12 border-b border-hairline border-zinc-200",
+              "px-4 py-2 text-ui-label border-b border-hairline border-zinc-200",
               describeAutopaySetupLinkResult(setupLinkResult).tone === "bad"
                 ? "text-alert-fg"
                 : "text-ink-secondary",
@@ -1430,7 +1435,7 @@ function ElectronicAuthorizationContractV2({
             ) : null}
           </div>
         ) : null}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
+        <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
           {" "}
           <ContractMeta label="Recipient" value={signerName} />{" "}
           <ContractMeta label="Contract name" value="AutoPay Authorization" />{" "}
@@ -1447,13 +1452,13 @@ function ElectronicAuthorizationContractV2({
             value={paymentMethodLabel(selectedPaymentMethod)}
           />{" "}
         </div>{" "}
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_0.8fr] gap-3 px-4 pb-4">
+        <div className="c360-contract-grid grid grid-cols-1 md:grid-cols-[1fr_0.8fr] gap-3 px-4 pb-4">
           {" "}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
             {" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Payment method
               </div>{" "}
               <Select
@@ -1461,7 +1466,7 @@ function ElectronicAuthorizationContractV2({
                 onChange={(e) =>
                   updateContractForm("paymentMethodId", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               >
                 {cards.length === 0 && (
                   <option value="">No saved payment method</option>
@@ -1475,53 +1480,53 @@ function ElectronicAuthorizationContractV2({
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service name
               </div>{" "}
-              <input
+              <Input
                 value={contractForm.serviceName}
                 onChange={(e) =>
                   updateContractForm("serviceName", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Renewal date
               </div>{" "}
-              <input
+              <Input
                 type="date"
                 value={contractForm.renewalDate}
                 onChange={(e) =>
                   updateContractForm("renewalDate", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Cancellation deadline
               </div>{" "}
-              <input
+              <Input
                 type="date"
                 value={contractForm.cancellationDeadline}
                 onChange={(e) =>
                   updateContractForm("cancellationDeadline", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
           </div>{" "}
           <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
             {" "}
-            <div className="u-label text-ink-secondary mb-2">Signing Link</div>
+            <div className="ui-label text-ink-secondary mb-2">Signing Link</div>
             {signingUrl ? (
               <div className="space-y-2">
                 {" "}
-                <div className="break-all text-12 text-zinc-900 leading-5">
+                <div className="break-all text-ui-label text-zinc-900 leading-5">
                   {signingUrl}
                 </div>{" "}
                 <Button size="sm" variant="secondary" onClick={copySigningUrl}>
@@ -1531,39 +1536,39 @@ function ElectronicAuthorizationContractV2({
                 </Button>{" "}
               </div>
             ) : (
-              <div className="text-12 text-ink-secondary leading-5">
+              <div className="text-ui-label text-ink-secondary leading-5">
                 Create a link to send manually. SMS templates are seeded but
                 inactive, so this will not send automatically.
               </div>
             )}
             {!canCreateContract && (
-              <div className="mt-2 text-11 text-alert-fg">
+              <div className="mt-2 text-ui-caption text-alert-fg">
                 Add a saved payment method before creating an authorization
                 contract.
               </div>
             )}
             {contractAction && (
-              <div className="mt-2 text-11 text-zinc-900">{contractAction}</div>
+              <div className="mt-2 text-ui-caption text-zinc-900">{contractAction}</div>
             )}
             {contractErr && (
-              <div className="mt-2 text-11 text-alert-fg">{contractErr}</div>
+              <div className="mt-2 text-ui-caption text-alert-fg">{contractErr}</div>
             )}
           </div>{" "}
         </div>{" "}
       </div>{" "}
       </ContractSection>
       <ContractSection title={"Create a document"} description="Service agreements, notices, and reusable templates.">
-      <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
-          <div>
+      <div className="c360-contract-form mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
+        <div className="c360-contract-form-header flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+          <div className="c360-contract-form-duplicate-title">
             <div className="text-16 font-medium text-zinc-900">
               Reusable documents
             </div>
-            <div className="text-12 text-ink-secondary mt-1">
+            <div className="text-ui-label text-ink-secondary mt-1">
               Send service agreements, notices, prep forms, and WDO acknowledgements through the e-sign workflow.
             </div>
           </div>
-          <Button
+          <Button className="c360-contract-form-actions"
             size="sm"
             onClick={createDocumentLink}
             disabled={!canCreateDocument || documentTemplatesLoading}
@@ -1572,16 +1577,16 @@ function ElectronicAuthorizationContractV2({
             {creatingDocument ? "Creating..." : "Create Link"}
           </Button>
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-3 p-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="c360-contract-grid grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-3 p-4">
+          <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Template
               </div>
               <Select
                 value={selectedDocumentTemplateKey}
                 onChange={(e) => setSelectedDocumentTemplateKey(e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
                 disabled={documentTemplatesLoading}
               >
                 {documentTemplates.length === 0 && (
@@ -1595,52 +1600,52 @@ function ElectronicAuthorizationContractV2({
               </Select>
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service name
               </div>
-              <input
+              <Input
                 value={documentValues.serviceName}
                 onChange={(e) => updateDocumentValue("serviceName", e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Agreement start
               </div>
-              <input
+              <Input
                 type="date"
                 value={documentValues.agreementStartDate}
                 onChange={(e) => updateDocumentValue("agreementStartDate", e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service / inspection date
               </div>
-              <input
+              <Input
                 type="date"
                 value={documentValues.serviceDate || documentValues.inspectionDate}
                 onChange={(e) => {
                   updateDocumentValue("serviceDate", e.target.value);
                   updateDocumentValue("inspectionDate", e.target.value);
                 }}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block sm:col-span-2">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Property address (optional)
               </div>
-              <input
+              <Input
                 value={documentPropertyAddress}
                 onChange={(e) => setDocumentPropertyAddress(e.target.value)}
                 placeholder="Overrides the customer's primary address on the document"
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
-            <label className="sm:col-span-2 inline-flex min-h-8 items-center gap-2 text-12 font-medium text-zinc-900">
+            <label className="sm:col-span-2 inline-flex min-h-8 items-center gap-2 text-ui-label font-medium text-zinc-900">
               <input
                 type="checkbox"
                 checked={documentAllowUnresolved}
@@ -1651,15 +1656,15 @@ function ElectronicAuthorizationContractV2({
             </label>
           </div>
           <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
-            <div className="u-label text-ink-secondary mb-2">Document link</div>
-            <div className="text-12 text-ink-secondary leading-5">
+            <div className="ui-label text-ink-secondary mb-2">Document link</div>
+            <div className="text-ui-label text-ink-secondary leading-5">
               {selectedDocumentTemplate
                 ? `${selectedDocumentTemplate.name} will be rendered with this customer's name, address, and the values entered here.`
                 : "Select an active template to create a document link."}
             </div>
             {documentSigningUrl && (
               <div className="mt-3 space-y-2">
-                <div className="break-all text-12 text-zinc-900 leading-5">
+                <div className="break-all text-ui-label text-zinc-900 leading-5">
                   {documentSigningUrl}
                 </div>
                 <Button size="sm" variant="secondary" onClick={copyDocumentSigningUrl}>
@@ -1669,17 +1674,17 @@ function ElectronicAuthorizationContractV2({
               </div>
             )}
             {documentAction && (
-              <div className="mt-2 text-11 text-zinc-900">{documentAction}</div>
+              <div className="mt-2 text-ui-caption text-zinc-900">{documentAction}</div>
             )}
             {documentErr && (
-              <div className="mt-2 text-11 text-alert-fg">{documentErr}</div>
+              <div className="mt-2 text-ui-caption text-alert-fg">{documentErr}</div>
             )}
           </div>
         </div>
       </div>
       </ContractSection>
       <ContractSection title={"Authorization preview & signature"} description="Full terms, selected clauses, and signing evidence.">
-      <div className="grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
+      <div className="c360-contract-grid grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
         {" "}
         <Card>
           {" "}
@@ -1698,7 +1703,7 @@ function ElectronicAuthorizationContractV2({
                   <div className="text-18 font-medium tracking-tight text-zinc-900">
                     Electronic Payment Authorization
                   </div>{" "}
-                  <div className="text-12 text-ink-secondary mt-1">
+                  <div className="text-ui-label text-ink-secondary mt-1">
                     Waves Pest Control, LLC
                   </div>{" "}
                 </div>{" "}
@@ -1728,17 +1733,17 @@ function ElectronicAuthorizationContractV2({
                   {" "}
                   <div>
                     {" "}
-                    <div className="text-13 font-medium text-zinc-900">
+                    <div className="text-ui-body font-medium text-zinc-900">
                       AutoPay Authorization - Initials required
                     </div>{" "}
-                    <div className="text-12 leading-5 text-ink-secondary mt-2">
+                    <div className="text-ui-label leading-5 text-ink-secondary mt-2">
                       {displayedText}
                     </div>{" "}
                   </div>{" "}
                   <Badge tone="neutral">Clause</Badge>{" "}
                 </div>{" "}
               </div>{" "}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+              <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
                 {" "}
                 <ContractMeta label="Customer" value={signerName} />{" "}
                 <ContractMeta
@@ -1761,7 +1766,7 @@ function ElectronicAuthorizationContractV2({
                     <div className="text-15 font-medium text-zinc-900">
                       Waves Pest Control
                     </div>{" "}
-                    <div className="text-12 text-ink-secondary mt-1">
+                    <div className="text-ui-label text-ink-secondary mt-1">
                       Signature requested on {requestedLabel}
                     </div>{" "}
                   </div>{" "}
@@ -1786,11 +1791,11 @@ function ElectronicAuthorizationContractV2({
                   <div className="text-18 font-medium text-zinc-900 mb-3">
                     AutoPay Authorization
                   </div>{" "}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-12">
+                  <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3 text-ui-label">
                     {" "}
                     <div>
                       {" "}
-                      <div className="u-label text-ink-secondary mb-1">
+                      <div className="ui-label text-ink-secondary mb-1">
                         Business
                       </div>{" "}
                       <div className="text-zinc-900">Waves Pest Control</div>{" "}
@@ -1803,7 +1808,7 @@ function ElectronicAuthorizationContractV2({
                     </div>{" "}
                     <div>
                       {" "}
-                      <div className="u-label text-ink-secondary mb-1">
+                      <div className="ui-label text-ink-secondary mb-1">
                         Recipient
                       </div>{" "}
                       <div className="text-zinc-900">{signerName}</div>{" "}
@@ -1815,25 +1820,25 @@ function ElectronicAuthorizationContractV2({
                       </div>{" "}
                     </div>{" "}
                   </div>{" "}
-                  <div className="mt-4 text-12 leading-5 text-zinc-900">
+                  <div className="mt-4 text-ui-label leading-5 text-zinc-900">
                     This contract is between Waves Pest Control (the Business)
                     and {signerName} (the Client) dated {contractDate}.
                   </div>{" "}
                 </div>{" "}
                 <div className="py-4 border-b border-hairline border-zinc-200">
                   {" "}
-                  <div className="u-label text-ink-secondary mb-2">
+                  <div className="ui-label text-ink-secondary mb-2">
                     Terms
                   </div>{" "}
-                  <div className="text-13 font-medium text-zinc-900 mb-2">
+                  <div className="text-ui-body font-medium text-zinc-900 mb-2">
                     AutoPay Authorization
                   </div>{" "}
-                  <p className="text-13 leading-6 text-zinc-900 m-0 whitespace-pre-line">
+                  <p className="text-ui-body leading-6 text-zinc-900 m-0 whitespace-pre-line">
                     {displayedContractText}
                   </p>{" "}
                   <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
                     {" "}
-                    <div className="u-label text-ink-secondary mb-1">
+                    <div className="ui-label text-ink-secondary mb-1">
                       Recipient Initial
                     </div>{" "}
                     <div className="h-7 rounded-sm border-hairline border-zinc-300 bg-white" />{" "}
@@ -1841,15 +1846,15 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
                 <div className="pt-4">
                   {" "}
-                  <div className="u-label text-ink-secondary mb-2">
+                  <div className="ui-label text-ink-secondary mb-2">
                     Signatures
                   </div>{" "}
-                  <div className="text-12 text-ink-secondary leading-5 mb-4">
+                  <div className="text-ui-label text-ink-secondary leading-5 mb-4">
                     Electronic signatures count as original for all purposes. By
                     typing their names as signatures below, both parties agree
                     to the terms and provisions of this agreement.
                   </div>{" "}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     <ContractMeta
                       label="Business signature"
@@ -1873,7 +1878,7 @@ function ElectronicAuthorizationContractV2({
                   </div>{" "}
                 </div>{" "}
               </div>{" "}
-              <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-ink-secondary leading-5">
+              <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-label text-ink-secondary leading-5">
                 This authorization covers saved-payment use only. Service scope,
                 visit frequency, renewal terms, and cancellation policy remain
                 controlled by the customer&apos;s service agreement and account
@@ -1882,31 +1887,31 @@ function ElectronicAuthorizationContractV2({
               <div className="mt-5">
                 {" "}
                 <SectionTitle>Florida Compliance Reference</SectionTitle>{" "}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {FLORIDA_COMPLIANCE_ITEMS.map((item) => (
                     <div
                       key={item.title}
                       className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3"
                     >
                       {" "}
-                      <div className="text-12 font-medium text-zinc-900">
+                      <div className="text-ui-label font-medium text-zinc-900">
                         {item.title}
                       </div>{" "}
-                      <div className="text-12 text-ink-secondary leading-5 mt-1">
+                      <div className="text-ui-label text-ink-secondary leading-5 mt-1">
                         {item.body}
                       </div>{" "}
                       <a
                         href={item.href}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex mt-2 text-11 u-label text-zinc-900 hover:underline"
+                        className="inline-flex mt-2 text-ui-caption ui-label text-zinc-900 hover:underline"
                       >
                         {item.citation}
                       </a>{" "}
                     </div>
                   ))}
                 </div>{" "}
-                <div className="mt-2 text-11 text-ink-tertiary leading-5">
+                <div className="mt-2 text-ui-caption text-ink-tertiary leading-5">
                   Internal compliance reference only. Final customer-facing
                   contract language should be reviewed by counsel before use.
                 </div>{" "}
@@ -1926,7 +1931,7 @@ function ElectronicAuthorizationContractV2({
               </div>{" "}
             </div>
             {latestContract?.signedAt ? (
-              <div className="space-y-2 text-12">
+              <div className="space-y-2 text-ui-label">
                 {" "}
                 <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
                   {" "}
@@ -1972,7 +1977,7 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
               </div>
             ) : latest ? (
-              <div className="space-y-2 text-12">
+              <div className="space-y-2 text-ui-label">
                 {" "}
                 <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
                   {" "}
@@ -2011,7 +2016,7 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
               </div>
             ) : (
-              <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-ink-secondary leading-5">
+              <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-label text-ink-secondary leading-5">
                 No signed saved-payment authorization is recorded for this
                 customer yet.
               </div>
@@ -2025,10 +2030,10 @@ function ElectronicAuthorizationContractV2({
               />{" "}
               <div>
                 {" "}
-                <div className="text-12 font-medium text-zinc-900">
+                <div className="text-ui-label font-medium text-zinc-900">
                   {paymentMethodLabel(methodForSummary)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary mt-0.5">
+                <div className="text-ui-caption text-ink-secondary mt-0.5">
                   {latest?.isDefault || defaultCard?.is_default
                     ? "Default payment method"
                     : "Saved payment method"}
@@ -2049,36 +2054,36 @@ function ElectronicAuthorizationContractV2({
           <div className="overflow-x-auto">
             {" "}
             <Table>
-              {" "}
+
               <THead>
-                {" "}
+
                 <TR>
-                  {" "}
+
                   <TH>Accepted</TH>
                   <TH>Source</TH>
                   <TH>Method</TH>
-                  <TH>Version</TH>{" "}
-                </TR>{" "}
-              </THead>{" "}
+                  <TH>Version</TH>
+                </TR>
+              </THead>
               <TBody>
                 {consents.map((consent) => (
                   <TR key={consent.id}>
-                    {" "}
+
                     <TD className="u-nums">
                       {fmtDate(consent.createdAt)}
-                    </TD>{" "}
-                    <TD>{sourceLabel(consent.source)}</TD>{" "}
-                    <TD>{paymentMethodLabel(consent)}</TD>{" "}
+                    </TD>
+                    <TD>{sourceLabel(consent.source)}</TD>
+                    <TD>{paymentMethodLabel(consent)}</TD>
                     <TD className="u-nums">
                       {consent.consentTextVersion || "—"}
-                    </TD>{" "}
+                    </TD>
                   </TR>
                 ))}
-              </TBody>{" "}
+              </TBody>
             </Table>{" "}
           </div>
         ) : (
-          <div className="text-13 text-ink-secondary">
+          <div className="text-ui-body text-ink-secondary">
             No saved-payment authorizations recorded.
           </div>
         )}
@@ -2112,10 +2117,10 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
   return (
     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm overflow-hidden mb-1.5">
       {" "}
-      <button
+      <button data-ui-text-action
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex justify-between items-center px-3.5 py-2.5 text-13 u-focus-ring hover:bg-zinc-100 transition-colors"
+        className="w-full flex justify-between items-center px-3.5 py-2.5 text-ui-body u-focus-ring hover:bg-zinc-100 transition-colors"
       >
         {" "}
         <span className="font-medium text-zinc-900 text-left">
@@ -2130,7 +2135,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
           )}
           <span className="text-ink-secondary">{fmtDateOnly(s.service_date)}</span>{" "}
           <span
-            className="text-ink-secondary text-12 transition-transform"
+            className="text-ink-secondary text-ui-label transition-transform"
             style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
           >
             ▾
@@ -2138,7 +2143,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
         </span>{" "}
       </button>
       {expanded && (
-        <div className="px-3.5 py-2.5 border-t border-hairline border-zinc-200 text-12 space-y-1">
+        <div className="px-3.5 py-2.5 border-t border-hairline border-zinc-200 text-ui-label space-y-1">
           {isProjectCompletion && (
             <div className="mb-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5">
               {" "}
@@ -2712,11 +2717,11 @@ function PropertyZonesPanel({ customerId }) {
       {open && (
         <div className="mt-3">
           {loading && (
-            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+            <div className="text-ui-body text-ink-secondary">Loading the satellite view…</div>
           )}
           {!loading && map && !map.available && (
             <div className="flex items-center gap-3">
-              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+              <span className={cn("text-ui-body", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
                 {map.reason === "load_failed"
                   ? err || "Failed to load the property map"
                   : `Satellite view unavailable (${map.reason || "unknown"}).`}
@@ -2737,7 +2742,7 @@ function PropertyZonesPanel({ customerId }) {
             </div>
           )}
           {!loading && map?.available && !zones.length && (
-            <div className="text-13 text-ink-secondary">
+            <div className="text-ui-body text-ink-secondary">
               No zones yet — zones are created when a visit is completed with
               treated areas.
             </div>
@@ -2746,14 +2751,14 @@ function PropertyZonesPanel({ customerId }) {
             <div>
               {lineOptions.length > 1 && (
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-12 text-ink-secondary">Service line</span>
+                  <span className="text-ui-label text-ink-secondary">Service line</span>
                   {lineOptions.map((opt) => (
-                    <button
+                    <button data-ui-text-action
                       key={opt}
                       type="button"
                       onClick={() => setLine(opt)}
                       className={cn(
-                        "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                        "text-ui-label px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
                         opt === line
                           ? "border-zinc-900 bg-zinc-900 text-white"
                           : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
@@ -2765,7 +2770,7 @@ function PropertyZonesPanel({ customerId }) {
                 </div>
               )}
               {areas.some((label) => staleKeys.has(normalizeZoneKey(label))) && (
-                <div className="text-12 text-zinc-700 mb-2">
+                <div className="text-ui-label text-zinc-700 mb-2">
                   Some zones have marks that no longer match the current
                   satellite image (the property was re-geocoded) — they show
                   as unmarked below. Redraw them, or clear everything to
@@ -2793,13 +2798,13 @@ function PropertyZonesPanel({ customerId }) {
                       : "Save zone marks"}
                 </Button>
                 {!saveable && dirtyCount > 0 && (
-                  <span className="text-12 text-ink-secondary">
+                  <span className="text-ui-label text-ink-secondary">
                     Mark every zone on this line (or clear them all) to save.
                   </span>
                 )}
-                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {msg && <span className="text-ui-label text-zinc-700">{msg}</span>}
                 {err && map && (
-                  <span className="text-12 text-alert-fg">{err}</span>
+                  <span className="text-ui-label text-alert-fg">{err}</span>
                 )}
               </div>
             </div>
@@ -3041,11 +3046,11 @@ function TermiteStationsPanel({ customerId }) {
       {open && (
         <div className="mt-3">
           {loading && (
-            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+            <div className="text-ui-body text-ink-secondary">Loading the satellite view…</div>
           )}
           {!loading && map && !map.available && (
             <div className="flex items-center gap-3">
-              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+              <span className={cn("text-ui-body", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
                 {map.reason === "load_failed"
                   ? err || "Failed to load the property map"
                   : `Satellite view unavailable (${map.reason || "unknown"}).`}
@@ -3068,16 +3073,16 @@ function TermiteStationsPanel({ customerId }) {
           {!loading && map?.available && (
             <div>
               <div className="flex items-center gap-2 mb-2">
-                <span className="text-12 text-ink-secondary">Program</span>
+                <span className="text-ui-label text-ink-secondary">Program</span>
                 {["termite", "rodent", "trapping"].map((opt) => (
-                  <button
+                  <button data-ui-text-action
                     key={opt}
                     type="button"
                     disabled={saving || (dirtyCount > 0 && opt !== program)}
                     title={dirtyCount > 0 && opt !== program ? "Save or discard this program's edits first" : undefined}
                     onClick={() => switchProgram(opt)}
                     className={cn(
-                      "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                      "text-ui-label px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
                       opt === program
                         ? "border-zinc-900 bg-zinc-900 text-white"
                         : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
@@ -3105,9 +3110,9 @@ function TermiteStationsPanel({ customerId }) {
                 <Button size="sm" onClick={save} disabled={!dirtyCount || saving}>
                   {saving ? "Saving…" : "Save stations"}
                 </Button>
-                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {msg && <span className="text-ui-label text-zinc-700">{msg}</span>}
                 {err && map && (
-                  <span className="text-12 text-alert-fg">{err}</span>
+                  <span className="text-ui-label text-alert-fg">{err}</span>
                 )}
               </div>
             </div>
@@ -3172,12 +3177,12 @@ export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate,
       {" "}
       <CardBody className="p-4">
         {" "}
-        <div className="u-label text-ink-secondary mb-1">
+        <div className="ui-label text-ink-secondary mb-1">
           How this customer pays
         </div>{" "}
         <div className="flex items-center gap-2 flex-wrap">
           {" "}
-          <select
+          <Select
             value={mode}
             disabled={!canEdit || saving}
             onChange={(e) => save(e.target.value)}
@@ -3188,29 +3193,29 @@ export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate,
                 {o.label}
               </option>
             ))}
-          </select>{" "}
-          {saving && <span className="text-12 text-ink-secondary">Saving…</span>}{" "}
+          </Select>{" "}
+          {saving && <span className="text-ui-label text-ink-secondary">Saving…</span>}{" "}
         </div>
         {!mode && (
-          <div className="text-12 text-ink-secondary mt-1.5">
+          <div className="text-ui-label text-ink-secondary mt-1.5">
             Unset — currently behaves as{" "}
             <span className="text-zinc-900">{inferred}</span> (inferred from
             tier + monthly rate).
           </div>
         )}
         {mode === "monthly_membership" && (
-          <div className="text-12 text-ink-secondary mt-1.5">
+          <div className="text-ui-label text-ink-secondary mt-1.5">
             Dues on the 1st cover recurring plan visits — completions never
             invoice them.
           </div>
         )}
         {msg && (
-          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">
+          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-ui-label">
             {msg}
           </div>
         )}
         {err && (
-          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {err}
           </div>
         )}
@@ -3294,7 +3299,7 @@ function AdminAutopayPanelV2({
           {" "}
           <div>
             {" "}
-            <div className="u-label text-ink-secondary mb-1">Auto-pay</div>{" "}
+            <div className="ui-label text-ink-secondary mb-1">Auto-pay</div>{" "}
             <div className="flex items-center gap-2">
               {" "}
               <span
@@ -3312,7 +3317,7 @@ function AdminAutopayPanelV2({
               </span>{" "}
             </div>
             {state && (
-              <div className="text-12 text-ink-secondary mt-1.5 leading-relaxed">
+              <div className="text-ui-label text-ink-secondary mt-1.5 leading-relaxed">
                 Next charge:{" "}
                 <span className="u-nums text-zinc-900">
                   {state.next_charge_date || "—"}
@@ -3350,13 +3355,13 @@ function AdminAutopayPanelV2({
         {state?.recent_events?.length > 0 && (
           <div className="mt-3 border-t border-hairline border-zinc-200 pt-2.5">
             {" "}
-            <div className="u-label text-ink-secondary mb-1.5">
+            <div className="ui-label text-ink-secondary mb-1.5">
               Recent events
             </div>
             {state.recent_events.slice(0, 5).map((ev) => (
               <div
                 key={ev.id}
-                className="text-11 text-ink-secondary py-0.5 flex justify-between gap-2"
+                className="text-ui-caption text-ink-secondary py-0.5 flex justify-between gap-2"
               >
                 {" "}
                 <span className="u-nums text-zinc-900">
@@ -3479,18 +3484,18 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   };
 
   const inputClass =
-    "block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900";
+    "block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900";
 
   return (
     <Card className="mb-5">
       <CardBody className="p-4">
         <div className="flex justify-between items-start gap-3 flex-wrap mb-3">
           <div>
-            <div className="u-label text-ink-secondary mb-1">Account credit</div>
+            <div className="ui-label text-ink-secondary mb-1">Account credit</div>
             <div className="text-22 text-zinc-900 u-nums leading-none">
               {loaded ? fmtCurrency(balance) : loadError ? "—" : "…"}
             </div>
-            <div className="text-12 text-ink-tertiary mt-1">
+            <div className="text-ui-label text-ink-tertiary mt-1">
               {loadError && !loaded
                 ? "Balance unavailable"
                 : "Available to apply to invoices"}
@@ -3509,9 +3514,9 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
         </div>
 
         {loadError && !loaded && (
-          <div className="text-12 text-alert-fg mb-3 flex items-center gap-2">
+          <div className="text-ui-label text-alert-fg mb-3 flex items-center gap-2">
             <span>Couldn't load the credit balance.</span>
-            <button
+            <button data-ui-text-action
               type="button"
               className="underline"
               onClick={load}
@@ -3525,19 +3530,19 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
           <div className="border-hairline border-zinc-200 rounded-sm p-3 mb-3 bg-zinc-50">
             <div className="grid grid-cols-2 gap-2 mb-2">
               <label className="block">
-                <span className="u-label text-ink-tertiary block mb-1">Direction</span>
-                <select
+                <span className="ui-label text-ink-tertiary block mb-1">Direction</span>
+                <Select
                   value={direction}
                   onChange={(e) => setDirection(e.target.value)}
                   className={inputClass}
                 >
                   <option value="add">Add credit</option>
                   <option value="deduct">Deduct credit</option>
-                </select>
+                </Select>
               </label>
               <label className="block">
-                <span className="u-label text-ink-tertiary block mb-1">Amount</span>
-                <input
+                <span className="ui-label text-ink-tertiary block mb-1">Amount</span>
+                <Input
                   type="number"
                   min="0"
                   step="0.01"
@@ -3551,20 +3556,20 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
             {direction === "add" ? (
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <label className="block">
-                  <span className="u-label text-ink-tertiary block mb-1">Funding</span>
-                  <select
+                  <span className="ui-label text-ink-tertiary block mb-1">Funding</span>
+                  <Select
                     value={fundKind}
                     onChange={(e) => setFundKind(e.target.value)}
                     className={inputClass}
                   >
                     <option value="prepayment">Prepayment (money received)</option>
                     <option value="goodwill">Goodwill / courtesy (no money)</option>
-                  </select>
+                  </Select>
                 </label>
                 {fundKind === "prepayment" && (
                   <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">Method</span>
-                    <select
+                    <span className="ui-label text-ink-tertiary block mb-1">Method</span>
+                    <Select
                       value={method}
                       onChange={(e) => setMethod(e.target.value)}
                       className={inputClass}
@@ -3575,30 +3580,30 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
                       <option value="venmo">Venmo</option>
                       <option value="paypal">PayPal</option>
                       <option value="other">Other</option>
-                    </select>
+                    </Select>
                   </label>
                 )}
               </div>
             ) : (
-              <div className="text-12 text-ink-tertiary mb-2">
+              <div className="text-ui-label text-ink-tertiary mb-2">
                 Recorded as an adjustment / correction (no payment booked).
               </div>
             )}
-            <div className="text-11 text-ink-tertiary mb-2 leading-snug">
+            <div className="text-ui-caption text-ink-tertiary mb-2 leading-snug">
               {direction === "add" && fundKind === "prepayment"
                 ? "Books a payment now (counts as collected revenue at receipt)."
                 : "No payment booked — does not count as revenue."}
             </div>
             <label className="block mb-2">
-              <span className="u-label text-ink-tertiary block mb-1">Note (optional)</span>
-              <input
+              <span className="ui-label text-ink-tertiary block mb-1">Note (optional)</span>
+              <Input
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 placeholder="e.g. Q3 quarterly prepay collected by check"
                 className={inputClass}
               />
             </label>
-            {err && <div className="text-12 text-alert-fg mb-2">{err}</div>}
+            {err && <div className="text-ui-label text-alert-fg mb-2">{err}</div>}
             <Button size="sm" variant="primary" disabled={saving || !loaded} onClick={submit}>
               {saving
                 ? "Saving…"
@@ -3616,7 +3621,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
               return (
                 <div
                   key={row.id}
-                  className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
+                  className="py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
                 >
                   <span className={cn("u-nums", delta < 0 ? "text-ink-secondary" : "text-zinc-900")}>
                     {delta >= 0 ? "+" : "−"}
@@ -3635,7 +3640,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
             })}
           </div>
         ) : loaded ? (
-          <div className="text-12 text-ink-tertiary">No credit history yet</div>
+          <div className="text-ui-label text-ink-tertiary">No credit history yet</div>
         ) : null}
       </CardBody>
     </Card>
@@ -3648,23 +3653,23 @@ function AnnualPrepayPanelV2({ activeTerm, onOpen, onSendInvoice }) {
       <CardBody className="p-4">
         <div className="flex justify-between items-start gap-3 flex-wrap">
           <div>
-            <div className="u-label text-ink-secondary mb-1">Annual prepay</div>
+            <div className="ui-label text-ink-secondary mb-1">Annual prepay</div>
             {activeTerm ? (
               <>
                 <div className="text-14 font-medium text-zinc-900">
                   {activeTerm.planLabel || "Annual Prepay"}
                 </div>
-                <div className="text-12 text-ink-secondary mt-1">
+                <div className="text-ui-label text-ink-secondary mt-1">
                   {fmtDate(activeTerm.termStart)} to {fmtDate(activeTerm.termEnd)} · {String(activeTerm.status || "").replace(/_/g, " ")}
                 </div>
                 {activeTerm.coverageServiceType && (
-                  <div className="text-11 text-ink-secondary mt-1">
+                  <div className="text-ui-caption text-ink-secondary mt-1">
                     Covers {activeTerm.coverageVisitCount || 4} {activeTerm.coverageServiceType} visit{Number(activeTerm.coverageVisitCount || 4) === 1 ? "" : "s"}
                   </div>
                 )}
               </>
             ) : (
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 No annual prepay term on this account.
               </div>
             )}
@@ -3678,7 +3683,7 @@ function AnnualPrepayPanelV2({ activeTerm, onOpen, onSendInvoice }) {
             </Button>
           </div>
         </div>
-        <div className="text-11 text-ink-secondary mt-2">
+        <div className="text-ui-caption text-ink-secondary mt-2">
           Send an invoice to request payment, or record a payment already collected.
         </div>
       </CardBody>
@@ -3741,19 +3746,19 @@ function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
 
   return <>
     <label className="block sm:col-span-2">
-      <div className="u-label text-ink-secondary mb-1">Service plan</div>
-      <select
+      <div className="ui-label text-ink-secondary mb-1">Service plan</div>
+      <Select
         value={selected?.value || "__custom__"}
         onChange={(e) => onChange(e.target.value === "__custom__" ? "" : e.target.value)}
         className="w-full h-9 px-2.5 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
       >
         {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         <option value="__custom__">Custom label</option>
-      </select>
+      </Select>
     </label>
     <label className="block sm:col-span-2">
-      <div className="u-label text-ink-secondary mb-1">Service covered</div>
-      <input
+      <div className="ui-label text-ink-secondary mb-1">Service covered</div>
+      <Input
         value={serviceType}
         onChange={(e) => onChange(e.target.value)}
         list={listId}
@@ -3772,6 +3777,7 @@ function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
 }
 
 export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], estimateSuggestion = null, onClose, onSaved }) {
+  const density = useUiDensity();
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   // For a brand-new customer (no options, no term, no prepaid plans) the
@@ -4029,7 +4035,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4047,9 +4053,9 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-15 font-medium text-zinc-900">Record collected annual prepay</div>
-            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+            <div className="text-ui-caption text-ink-secondary mt-0.5">{customerName}</div>
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !saving && onClose?.()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4059,7 +4065,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
         </div>
         <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           {activeTermEnd && (
-            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
@@ -4069,50 +4075,50 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
             onChange={handleServiceTypeChange}
           />
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Cadence</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Cadence</div>
+            <Select
               value={coverageCadence}
               onChange={(e) => handleCadenceChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Applications covered</div>
+            <Input
               type="number"
               min="1"
               max="24"
               step="1"
               value={visitCount}
               onChange={(e) => handleVisitCountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">
+            <div className="ui-label text-ink-secondary mb-1">
               {isCommercialCustomer ? "Pre-tax service amount collected" : "Amount collected"}
             </div>
-            <input
+            <Input
               type="number"
               min="0"
               step="0.01"
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
             {perVisit > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
               </div>
             )}
             {estimateSuggestionMatchesService(estimateSuggestion, serviceType, coverageCadence, visitCount) && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 From estimate #{estimateSuggestion.shortRef} — quoted prepay
                 year {fmtCurrency(Number(estimateSuggestion.amount))}
                 {Number(estimateSuggestion.discount) > 0
@@ -4121,69 +4127,69 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
               </div>
             )}
             {estimateSuggestion?.blocked && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Estimate #{estimateSuggestion.shortRef}: {estimateSuggestion.blockReason} —
                 enter the amount collected.
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Commercial: ~7% county sales tax is added at invoicing — total
                 recorded as paid ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Payment already collected by</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Payment already collected by</div>
+            <Select
               value={method}
               onChange={(e) => setMethod(e.target.value)}
-              className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {methodOptions.map(([value, label]) => (
                 <option key={value} value={value}>{label}</option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term starts</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term starts</div>
+            <Input
               type="date"
               value={termStart}
               onChange={(e) => handleStartChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term ends</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term ends</div>
+            <Input
               type="date"
               value={termEnd}
               onChange={(e) => setTermEnd(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Reference</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Reference</div>
+            <Input
               value={reference}
               onChange={(e) => setReference(e.target.value)}
               placeholder="Receipt, check, Zelle, or Stripe reference"
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Note</div>
-            <textarea
+            <div className="ui-label text-ink-secondary mb-1">Note</div>
+            <Textarea
               rows={3}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
         </div>
         {error && (
-          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {error}
           </div>
         )}
@@ -4206,6 +4212,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
 // amount inference) instead of maintaining a parallel modal. See
 // schedule/AnnualPrepayLauncher.
 export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved, allowChargeInPerson = false, onChargeInPerson }) {
+  const density = useUiDensity();
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
@@ -8310,7 +8317,7 @@ function CustomerWorkspacePresentation({
     customerId,
   } = headerProps;
   return (
-    <div className="c360-embedded">
+    <UiSurface density="comfortable" className="c360-embedded">
       <div
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
@@ -8400,7 +8407,7 @@ function CustomerWorkspacePresentation({
         </div>
       </div>
       {dialogs}
-    </div>
+    </UiSurface>
   );
 }
 
@@ -8416,9 +8423,10 @@ function CustomerOverlayPresentation({
   actions,
   dialogs,
 }) {
+  const density = useUiDensity();
   const { onClose, setActiveTab } = headerProps;
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
     >
