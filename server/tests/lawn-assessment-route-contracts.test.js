@@ -126,6 +126,10 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/const track = visitAssessmentEnabled \? null : grassCtx\.trackKey;/);
       // The provider-miss early return is legacy-only: an unavailable run still stores the row.
       expect(assess).toMatch(/if \(!visitAssessmentEnabled && !validResults\.length\)/);
+      // An answer that rates every photo poor takes the same retake hold as the legacy quality gate — before any row is written.
+      expect(assess).toMatch(/\(\{ qualityResults, resultByPhotoIndex, allPoor \} = visitAssessment\.photoRowInputs\(visitAnalysis\)\);\s*(?:\/\/[^\n]*\n\s*)*if \(allPoor\) return allPhotosFailed\(qualityResults\);/);
+      expect(assess.indexOf('if (allPoor) return allPhotosFailed(')).toBeLessThan(assess.indexOf('visitAssessment.recordRun('));
+      expect(assess.match(/All photos failed quality check/g)).toHaveLength(1);
     });
 
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
