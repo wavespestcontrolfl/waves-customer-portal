@@ -129,7 +129,7 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db, { throwOnE
 // the transaction's resolution order (see resolveGroupedEstimateOwnerId).
 // `lookupFailed` lets fail-closed callers refuse rather than assume "new
 // customer" when the match itself errored.
-async function resolveProspectiveAcceptCustomer(estimate) {
+async function resolveProspectiveAcceptCustomer(estimate, database = db) {
   let customerId = estimate?.customer_id || null;
   let lookupFailed = false;
   if (!customerId) {
@@ -137,7 +137,7 @@ async function resolveProspectiveAcceptCustomer(estimate) {
     // the phone match still runs (unchanged policy posture), but the
     // fail-closed tender gate sees the signal and offers card only.
     try {
-      customerId = await resolveGroupedEstimateOwnerId(estimate, db, { throwOnError: true });
+      customerId = await resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true });
     } catch (err) {
       lookupFailed = true;
       logger.warn('[recurring-cof] grouped-sibling owner lookup failed — falling through to the phone match', { error: err.message });
@@ -327,13 +327,18 @@ const MAX_SETUP_INTENT_GENERATIONS = 5;
 // Codex P1: judging only estimate.customer_id let an existing customer with
 // a suspended bank slip through as "new"). Genuinely new customer →
 // card_or_bank.
-async function resolveRecurringCaptureTender(estimate) {
+// `database` lets a caller holding a transaction keep these reads on its
+// pinned connection (GitHub Codex #4144 r2 P2: a replacement waiting on the
+// estimate row lock must not also wait on the pool for a second
+// connection). The phone-match fallback inside estimate-public still reads
+// through the module db — it is outside this module's signature.
+async function resolveRecurringCaptureTender(estimate, database = db) {
   if (require('../config/feature-gates').gates.acceptAchCapture !== true) return 'card';
-  const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate);
+  const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate, database);
   if (lookupFailed) return 'card';
   if (!customerId) return 'card_or_bank';
   try {
-    const row = await db('customers').where({ id: customerId }).first('ach_status');
+    const row = await database('customers').where({ id: customerId }).first('ach_status');
     if (row?.ach_status && row.ach_status !== 'active') return 'card';
     return 'card_or_bank';
   } catch (err) {
@@ -539,14 +544,24 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
   // fresh capture — or record a checkout step — for an estimate another
   // tab has accepted in the meantime.
   return db.transaction(async (trx) => {
-    const row = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'status', 'accepted_at');
+    // The locked read carries every column the route's accept-active gate
+    // judges (GitHub Codex #4144 r2 P0): a decline, expiry, archive or
+    // linkage invalidation that landed after the route's pre-read is a
+    // terminal state under which nothing may be minted or retired.
+    const row = await trx('estimates').where({ id: estimate.id }).forUpdate()
+      .first('id', 'status', 'accepted_at', 'archived_at', 'expires_at', 'estimate_data');
     if (!row) return { ok: false, reason: 'intent_mismatch' };
     if (row.status === 'accepted' || row.accepted_at) return { ok: false, reason: 'estimate_accepted' };
+    const gates = require('../routes/estimate-public');
+    // Fail closed if the predicate is ever unavailable — a money path.
+    if (typeof gates.isEstimateAcceptActive !== 'function' || !gates.isEstimateAcceptActive(row)) {
+      return { ok: false, reason: 'estimate_inactive' };
+    }
     if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
       const intent = await createRecurringCardSetupIntentForEstimate(estimate);
       return intent ? { ok: true, intent, retired: false } : { ok: false, reason: 'mint_failed' };
     }
-    const paymentMethodType = await resolveRecurringCaptureTender(estimate);
+    const paymentMethodType = await resolveRecurringCaptureTender(estimate, trx);
     let replacement = null;
     try {
       const created = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, paymentMethodType, replacing: current.id });

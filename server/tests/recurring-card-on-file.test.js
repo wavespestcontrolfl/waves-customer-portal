@@ -24,7 +24,12 @@ jest.mock('../models/db', () => {
   mock.fn = { now: jest.fn(() => 'NOW') };
   // Replacement runs under the estimate row lock: the trx handle reads the
   // same per-table fixtures (mockDbFixtures.estimates = the locked row).
-  mock.transaction = jest.fn(async (fn) => fn(Object.assign((table) => chain(table), { fn: mock.fn })));
+  mock.transaction = jest.fn(async (fn) => {
+    const trx = jest.fn((table) => chain(table));
+    trx.fn = mock.fn;
+    mock.__lastTrx = trx;
+    return fn(trx);
+  });
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -92,6 +97,11 @@ const mockMatchAcceptCustomerByPhone = jest.fn(async () => ({ match: null }));
 jest.mock('../routes/estimate-public', () => ({
   findLinkedUpcomingAppointment: jest.fn(async () => null),
   matchAcceptCustomerByPhone: (...a) => mockMatchAcceptCustomerByPhone(...a),
+  // Status/expiry slice of the real accept-active gate (the replacement
+  // re-judges it under the row lock).
+  isEstimateAcceptActive: (e = {}) => !e.archived_at
+    && !['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'].includes(e.status)
+    && !(e.expires_at && new Date(e.expires_at) < new Date()),
 }));
 
 const {
@@ -665,6 +675,47 @@ describe('replaceRecurringCardIntent ("use a different payment method")', () => 
     expect(mockCreateRecurringCardSetupIntent).not.toHaveBeenCalled();
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
     expect(db.transaction).toHaveBeenCalledTimes(2);
+  });
+
+  // GitHub Codex #4144 r2 P2: the tender lookups inside the locked
+  // transaction ride its pinned connection — a replacement waiting on the
+  // estimate row must not also wait on the pool for a second connection.
+  it('reads the customer ACH state through the transaction handle, not the module db', async () => {
+    const gates = require('../config/feature-gates').gates;
+    gates.acceptAchCapture = true;
+    try {
+      mockDbFixtures.customers = { ach_status: 'active' };
+      liveById({ seti_1: LIVE_GOOD, seti_after: { ...FRESH, payment_method_types: ['card', 'us_bank_account'] } });
+      mockCreateRecurringCardSetupIntent.mockResolvedValue(FRESH);
+      mockRetireSetupIntent.mockResolvedValue({ ...LIVE_GOOD, metadata: { ...LIVE_GOOD.metadata, retired: 'true', replaced_by: 'seti_after' } });
+      const r = await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' });
+      expect(r.ok).toBe(true);
+      expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1', paymentMethodType: 'card_or_bank', replacing: 'seti_1' });
+      expect(db.__lastTrx).toHaveBeenCalledWith('customers');
+      expect(db.mock.calls.filter(([table]) => table === 'customers')).toHaveLength(0);
+    } finally {
+      gates.acceptAchCapture = false;
+    }
+  });
+
+  // GitHub Codex #4144 r2 P0: accepted is not the only terminal state — a
+  // decline, expiry or archive that landed after the route's pre-read must
+  // also refuse under the lock, before anything is minted or retired.
+  it.each([
+    ['declined', { id: 'est-1', status: 'declined', accepted_at: null }],
+    ['expired by status', { id: 'est-1', status: 'expired', accepted_at: null }],
+    ['expired by date', { id: 'est-1', status: 'viewed', accepted_at: null, expires_at: '2020-01-01T00:00:00Z' }],
+    ['archived', { id: 'est-1', status: 'viewed', accepted_at: null, archived_at: '2026-09-08T15:00:00Z' }],
+  ])('refuses under the lock once the estimate is %s, minting and retiring nothing', async (_label, row) => {
+    liveById({ seti_1: LIVE_GOOD, seti_after: FRESH });
+    mockCreateRecurringCardSetupIntent.mockResolvedValue(FRESH);
+    mockDbFixtures.estimates = row;
+    expect(await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'estimate_inactive' });
+    const retired = { ...LIVE_GOOD, metadata: { ...LIVE_GOOD.metadata, retired: 'true', replaced_by: 'seti_after' } };
+    liveById({ seti_1: retired, seti_after: FRESH });
+    expect(await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'estimate_inactive' });
+    expect(mockCreateRecurringCardSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
   });
 
   it('leaves the saved method untouched when the replacement cannot be minted (mint-first ordering)', async () => {

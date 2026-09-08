@@ -20,6 +20,18 @@ import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CA
  * canonical v9 text — the summary never replaces the authorization of
  * record, it makes it readable at the moment of decision.
  */
+// Failure copy per tender (bank vs card) for the confirm flow.
+const CARD_FAIL_COPY = {
+  saveFailed: 'We could not save that card. Try another card.',
+  notSaved: 'That card could not be saved. Try again in a moment.',
+  threw: 'We could not save that card. Try again.',
+};
+const BANK_FAIL_COPY = {
+  saveFailed: 'We could not save that bank account. Try a card instead.',
+  notSaved: 'That bank account could not be verified instantly. Use a card to finish booking.',
+  threw: 'We could not save that bank account. Try again or use a card.',
+};
+
 const NAVY = '#04395E';
 
 const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
@@ -170,6 +182,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
     }
   };
 
+  // Tender-specific failure copy picked once per render, so confirmSetup
+  // decides only the flow (GitHub Codex #4144 r2 P2: complexity).
+  const failCopy = bank ? BANK_FAIL_COPY : CARD_FAIL_COPY;
+
   useImperativeHandle(ref, () => ({
     // Not ready while a replacement is in flight: the intent this capture
     // holds is being retired.
@@ -224,7 +240,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           redirect: 'if_required',
         });
         if (result.error) {
-          return fail(result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.'));
+          return fail(result.error.message || failCopy.saveFailed);
         }
         const si = result.setupIntent;
         if (si && si.status === 'succeeded') {
@@ -233,11 +249,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         // Instant-verified banks land 'succeeded' like cards; a bank that
         // could not instant-verify never gets here (Stripe surfaces the
         // error above) — no micro-deposit pending state exists at accept.
-        return fail(bank
-          ? 'That bank account could not be verified instantly. Use a card to finish booking.'
-          : 'That card could not be saved. Try again in a moment.');
+        return fail(failCopy.notSaved);
       } catch {
-        return fail(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
+        return fail(failCopy.threw);
       }
     },
   }), [ready, agreed, intent, bank, replay, replacing]);

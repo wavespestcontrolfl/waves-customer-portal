@@ -794,6 +794,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       const replaced = await replaceRecurringCardIntent({ estimate, setupIntentId: replaceSetupIntentId });
       if (!replaced.ok) {
         if (replaced.reason === 'estimate_accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+        if (replaced.reason === 'estimate_inactive') return res.status(409).json({ error: 'Estimate is no longer active' });
         return res.status(replaced.reason === 'intent_mismatch' ? 400 : 503).json({
           error: 'We could not switch your payment method. Please refresh this page and try again.',
         });

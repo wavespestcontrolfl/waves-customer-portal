@@ -298,10 +298,12 @@ accept's freshness CAS is untouched) and the accept re-reads its verified
 intent live under the same lock before committing, so a retirement that
 landed after the pre-transaction verify aborts the accept (402 → re-mint)
 and a replacement that finds the estimate already accepted retires
-nothing (409) — every replacement outcome takes that lock, including a
-stale retry with an already-retired or unfinished intent, so no fresh
-capture is minted (and no checkout step recorded) for an accepted
-estimate. A chain head is judged by what it captured, like the accept
+nothing (409 "Estimate already accepted") — every replacement outcome
+takes that lock, including a stale retry with an already-retired or
+unfinished intent, and the locked read re-judges the full accept-active
+gate (declined / expired / archived / off-surface → 409 "Estimate is no
+longer active"), so no fresh capture is minted (and no checkout step
+recorded) for an estimate that turned terminal after the route's read. A chain head is judged by what it captured, like the accept
 gate: a saved card stays valid after GATE_ACCEPT_ACH_CAPTURE closes, a
 captured bank under a card-only policy is skipped like a dead replay
 (unfinished heads must match the tender family exactly) so the
