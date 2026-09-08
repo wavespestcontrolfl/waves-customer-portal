@@ -15,13 +15,19 @@ describe('recurring schedule anomaly audit', () => {
     expect(normalizedSql).toContain('?::text, ?::integer');
     expect(normalizedSql).toContain('s.status not in (?, ?, ?)');
     expect(bindings).toContain('monthly_nth_weekday');
-    // Seasonal mosquito series must be in the pattern map — the active_series
-    // CTE inner-joins it, so an absent pattern silently exempts every seasonal
-    // parent/child from the duplicate and too-close checks (codex r5 P2). The
-    // 1-month interval applies the 21-day in-season minimum; the winter gap is
-    // longer than any threshold and can't false-positive.
+    // Seasonal mosquito series must be in the pattern map — an absent pattern
+    // silently exempts every seasonal parent/child from the duplicate and
+    // too-close checks (codex r5 P2). The in-season minimum is the 21-day
+    // month; the winter gap is longer than any threshold and can't
+    // false-positive.
     expect(bindings).toContain('seasonal_feb_oct');
-    expect(bindings[bindings.indexOf('seasonal_feb_oct') + 1]).toBe(1);
+    expect(bindings[bindings.indexOf('seasonal_feb_oct') + 1]).toBe(21);
+    // Day-gap cadences the month-only map silently dropped (ops-inbox
+    // triage 2026-09-05 lane 4): every_6_weeks is in the map; custom takes
+    // its minimum from the row's own recurring_interval_days.
+    expect(bindings[bindings.indexOf('every_6_weeks') + 1]).toBe(29);
+    expect(normalizedSql).toContain("= 'custom' then case when coalesce(p.recurring_interval_days, s.recurring_interval_days) > 0");
+    expect(normalizedSql).toContain('where min_gap_days is not null');
     expect(bindings).toEqual(expect.arrayContaining(['cancelled', 'rescheduled', 'completed']));
     expect(normalizedSql).not.toMatch(/\b(update|insert|delete|truncate|alter|drop)\b/);
   });

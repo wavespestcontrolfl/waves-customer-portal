@@ -139,15 +139,20 @@ const LawnIntelligence = {
       (a.turf_density + a.weed_suppression + a.fungus_control +
         (a.color_health || 0) + (a.thatch_level || 0)) / 5
     );
-    const overall = scoreOf(assessment);
-
     // Get previous assessment for delta
-    const previous = await db('lawn_assessments')
+    const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+    const scopedHistory = propertyHistoryEnabled ? await require('./lawn-assessment-history').historyForAssessment(assessment, { knex: db }) : null;
+    if (propertyHistoryEnabled) {
+      if (!scopedHistory.current) return null;
+      assessment = scopedHistory.current;
+    }
+    const overall = propertyHistoryEnabled ? scopedHistory.progress.score : scoreOf(assessment);
+    const previous = propertyHistoryEnabled ? scopedHistory.previous : await db('lawn_assessments')
       .where({ customer_id: assessment.customer_id, confirmed_by_tech: true })
       .where('service_date', '<', assessment.service_date)
       .orderBy('service_date', 'desc')
       .first();
-    const delta = previous ? overall - scoreOf(previous) : null;
+    const delta = propertyHistoryEnabled ? scopedHistory.progress.previousDelta : previous ? overall - scoreOf(previous) : null;
 
     // Parse recommendations for customer tip
     let tip = '';
@@ -233,7 +238,10 @@ const LawnIntelligence = {
   // ── 10. Lawn health → customer health bridge ────────────────
   async emitHealthSignal(customerId) {
     try {
-      const assessments = await db('lawn_assessments')
+      const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+      const assessments = propertyHistoryEnabled
+        ? (await require('./lawn-assessment-history').latestForCustomer(customerId, { limit: 4 }, db)).reverse()
+        : await db('lawn_assessments')
         .where({ customer_id: customerId, confirmed_by_tech: true })
         .orderBy('service_date', 'desc')
         .limit(4);

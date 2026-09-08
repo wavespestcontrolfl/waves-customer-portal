@@ -57,7 +57,7 @@ export default function TechRecapCapture({ service, request }) {
 
   const refresh = () => request(`/tech/services/${serviceId}/recap-media`)
     .then((d) => setItems(d?.items || [])).catch(() => {});
-  useEffect(() => { if (serviceId) refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [serviceId]);
+  useEffect(() => { if (serviceId) refresh(); }, [serviceId]) // eslint: react-hooks plugin is not configured in this repo;
 
   const onPick = (e) => {
     const file = e.target.files && e.target.files[0];
@@ -136,9 +136,10 @@ export default function TechRecapCapture({ service, request }) {
         {uploading ? `Uploading… (${uploading})` : '+ Capture recap clip'}
       </button>
 
+      {/* zIndex 1000 like the other tech sheets: the bottom nav is fixed at 50 and later in the DOM, so at 50 it painted over the sheet's last rows. */}
       {pendingFile && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(5,8,13,.7)', zIndex: 50, display: 'flex', alignItems: 'flex-end' }} onClick={() => setPendingFile(null)}>
-          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', background: C.card, borderRadius: '18px 18px 0 0', border: `1px solid ${C.border}`, padding: '16px 14px 22px', maxHeight: '82%', overflowY: 'auto' }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(5,8,13,.7)', zIndex: 1000, display: 'flex', alignItems: 'flex-end' }} onClick={() => setPendingFile(null)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', background: C.card, borderRadius: '18px 18px 0 0', border: `1px solid ${C.border}`, boxSizing: 'border-box', padding: '16px 14px calc(22px + env(safe-area-inset-bottom, 0px))', maxHeight: '82%', overflowY: 'auto' }}>
             <div style={{ width: 40, height: 4, background: C.border, borderRadius: 3, margin: '0 auto 12px' }} />
             <div style={{ fontWeight: 800, fontSize: 16, color: C.text, textAlign: 'center' }}>What were you doing?</div>
             <div style={{ fontSize: 12, color: C.muted, textAlign: 'center', margin: '4px 0 12px' }}>One tap. We caption it for the customer.</div>

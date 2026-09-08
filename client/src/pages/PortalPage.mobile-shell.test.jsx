@@ -71,7 +71,7 @@ describe('reminder settings rows', () => {
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
     const switchNames = [
-      'New Appointment Confirmation',
+      'Appointment Confirmations',
       '72-Hour Appointment Reminder',
       '24-Hour Service Reminder',
       'Tech En Route Alert',
@@ -89,10 +89,10 @@ describe('reminder settings rows', () => {
 
   it('keeps labelled channel selects on the alerts that offer delivery choice', async () => {
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
-    await screen.findByRole('switch', { name: 'New Appointment Confirmation' });
+    await screen.findByRole('switch', { name: 'Appointment Confirmations' });
 
     const channelNames = [
-      'New Appointment Confirmation',
+      'Appointment Confirmations',
       '72-Hour Appointment Reminder',
       '24-Hour Service Reminder',
       'Tech En Route Alert',
@@ -109,7 +109,7 @@ describe('reminder settings rows', () => {
     window.innerWidth = 360;
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
-    await screen.findByRole('switch', { name: 'New Appointment Confirmation' });
+    await screen.findByRole('switch', { name: 'Appointment Confirmations' });
     const row = document.querySelector('[data-reminder-row]');
     expect(row.lastElementChild.style.flex).toContain('1 0 100%');
     expect(row.firstElementChild.style.flex).toContain('1 1 160px');

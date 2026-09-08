@@ -97,7 +97,7 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     expect(cards).toHaveLength(2);
     expect(cards[0]).toHaveTextContent('Customer 5');
     expect(cards[1]).toHaveTextContent('Customer 4');
-    expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('3 more schedule changes');
+    expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('3 more notices');
     // Anything on an auto-dismiss timer (arrival prompt, storm warning)
     // renders ABOVE the persistent visit cards so it cannot expire unseen.
     const promptCard = screen.getByText('Okafor');
@@ -109,7 +109,7 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Got it' })[0]);
     await act(async () => { await Promise.resolve(); });
     expect(screen.getAllByTestId('visit-notice')[1]).toHaveTextContent('Customer 3');
-    expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('2 more schedule changes');
+    expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('2 more notices');
   });
 
   it('a visit card the feed no longer lists (dismissed on the tech\'s other device) leaves this screen without a dismiss call, and comes back if the feed lists it again; a failed poll changes nothing', async () => {
