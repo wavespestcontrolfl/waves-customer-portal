@@ -514,6 +514,15 @@ describe('dispatchWithFallback', () => {
       fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
     }, { text: 'write', jsonMode: true }, { validate: (r) => (r.json.text === 'bad' ? 'too_bad' : null) });
     expect(rejected.failures[0]).toMatchObject({ reason: 'too_bad', validator: true, usage: { input_tokens: 5, output_tokens: 2 } });
+
+    // An Anthropic-first chain: the adapter's successful result carries usage too, so a validator rejection keeps it.
+    mockAnthropicCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: '{"text":"bad"}' }], usage: { input_tokens: 7, output_tokens: 3 } });
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ output_text: '{"text":"ok"}' }) });
+    const anthropicFirst = await dispatchWithFallback({
+      primary: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+      fallback: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+    }, { text: 'write', jsonMode: true }, { validate: (r) => (r.json.text === 'bad' ? 'too_bad' : null) });
+    expect(anthropicFirst.failures[0]).toMatchObject({ provider: PROVIDER.ANTHROPIC, reason: 'too_bad', validator: true, usage: { input_tokens: 7, output_tokens: 3 } });
   });
 
   test('uses the other provider when primary is unavailable', async () => {

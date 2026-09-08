@@ -542,7 +542,7 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
     const served = { servedModel: resp.model, providerRef: resp.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
     const code = anthropicVerdict(resp, maxTokens);
     if (code) return failedLeg(base, served, code);
-    return settleLeg(base, served, out, jsonMode, { model, response: resp });
+    return settleLeg(base, served, out, jsonMode, { model, usage: served.usage, response: resp });
   } catch (err) {
     const reason = providerErrorReason('anthropic', err);
     const log = reason === 'anthropic_429' || reason === 'anthropic_529'

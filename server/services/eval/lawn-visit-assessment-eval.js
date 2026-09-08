@@ -27,6 +27,7 @@
 
 const { applySeasonalAdjustment } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores, contextHash } = require('../lawn-visit-assessment');
+const { scrubCustomerText } = require('../lawn-diagnostic-report');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 
 // USD per 1M tokens, standard tier, checked 2026-09-08. Thinking is billed at
@@ -92,9 +93,26 @@ function fixtureCase(row, photos = [], context = {}) {
     context: {
       grassType: context.grassType || null,
       irrigation: context.irrigation || null,
-      priorSummary: context.priorSummary ? String(context.priorSummary).slice(0, 400) : null,
+      priorSummary: scrubPriorSummary(context.priorSummary, context.customerNames),
     },
   };
+}
+
+// The previous visit's ai_summary was written by a model that was given the
+// customer's full name (knowledge-bridge), so the fixture copy goes through
+// the customer egress scrubber (phones, emails, URLs, street addresses,
+// brands) and then loses every customer-name token the exporter knows —
+// first, last, and the household's other names — before it is clipped.
+// Null when nothing is left.
+function scrubPriorSummary(text, customerNames = []) {
+  if (!text) return null;
+  let out = scrubCustomerText(String(text));
+  const names = (customerNames || []).map((value) => String(value || '').trim()).filter((value) => value.length >= 2).sort((a, b) => b.length - a.length);
+  for (const name of names) {
+    out = out.replace(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), 'the customer');
+  }
+  out = out.replace(/\b(?:Mr|Mrs|Ms|Miss|Dr)\.?\s+the customer\b/g, 'the customer').replace(/\bthe customer(?:\s+the customer)+\b/g, 'the customer').trim();
+  return out ? out.slice(0, 400) : null;
 }
 
 // Deterministic selection: explicit ids first (in the order given), else a
@@ -371,6 +389,7 @@ module.exports = {
   selectCases,
   contextFor,
   costUsd,
+  scrubPriorSummary,
   billedLegs,
   sumUsage,
   legsCostUsd,

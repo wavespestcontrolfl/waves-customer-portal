@@ -42,6 +42,14 @@ describe('fixture export shape', () => {
     // No names, phones, addresses — and no legacy observation text (it can echo technician context).
     expect(JSON.stringify(c)).not.toMatch(/MUST NOT LEAK|\+1555|Private Way|LOCKBOX|Smith|legacy obs/);
     expect(c.legacyObservations).toBeUndefined();
+    // The prior summary was written with the customer's name in the prompt: names, phones and addresses are scrubbed before export.
+    const named = evalLib.fixtureCase(row(), [], { priorSummary: "Mrs. Smith's lawn at 12 Private Way improved; Jane Smith asked us to call 941-555-0100.", customerNames: ['Jane', 'Smith'] });
+    expect(named.context.priorSummary).not.toMatch(/Smith|Jane|Private Way|941/);
+    expect(named.context.priorSummary).toMatch(/^the customer's lawn at the property improved; the customer asked us to call/);
+    expect(named.context.priorSummary).not.toMatch(/the customer the customer/);
+    expect(evalLib.scrubPriorSummary('  ', ['x'])).toBeNull();
+    expect(evalLib.scrubPriorSummary(null)).toBeNull();
+    expect(evalLib.scrubPriorSummary('Fine lawn.', [null, 'A'])).toBe('Fine lawn.');
     expect(evalLib.fixtureCase(row({ scheduled_date: null, composite_scores: null }), []).visitDate).toBe('2026-09-01');
   });
 

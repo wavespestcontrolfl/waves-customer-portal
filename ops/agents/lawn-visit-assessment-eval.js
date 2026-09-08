@@ -116,14 +116,17 @@ async function exportFixture(args) {
       const visitDate = evalLib.dateString(row.scheduled_date) || evalLib.dateString(row.service_date);
       const scheduledService = row.service_id ? await knex('scheduled_services').where({ id: row.service_id }).first() : null;
       const grassCtx = await loadCustomerGrassContext(row.customer_id, knex);
-      const [irrigation, prior] = await Promise.all([
+      const [irrigation, customer, prior] = await Promise.all([
         loadIrrigationContext(row.customer_id, grassCtx, knex),
+        knex('customers').where({ id: row.customer_id }).first('first_name', 'last_name'),
         history.historyBeforeVisit({ customerId: row.customer_id, scheduledService, throughVisitDate: visitDate }, knex).catch((err) => { console.error(`warning: prior-visit history failed for ${row.id}: ${err.message}`); return { previous: null }; }),
       ]);
       cases.push(evalLib.fixtureCase(row, byAssessment.get(row.id) || [], {
         grassType: grassCtx.grassTypeLabel || null,
         irrigation,
+        // Scrubbed in fixtureCase: the summary was written with the customer's name in the prompt.
         priorSummary: prior?.previous?.ai_summary || null,
+        customerNames: [customer?.first_name, customer?.last_name],
       }));
     }
     const fixture = { generatedAt: new Date().toISOString(), population: all.length, cases };
