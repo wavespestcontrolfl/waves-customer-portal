@@ -140,7 +140,8 @@ async function saveVisitCompletionPacket(input, database = db) {
           || frozenMemberIds.join() !== members.map((member) => member.id).join()) {
         return failure(409, 'visit_members_changed', 'The visit service list changed. Refresh all service forms.');
       }
-      if (members.some((member) => member.customer_id !== visit.customer_id
+      // Retained history keeps the visit's identity but not its assignment.
+      if (members.filter((member) => !retainedIds.has(member.id)).some((member) => member.customer_id !== visit.customer_id
           || (member.property_id || null) !== (visit.property_id || null)
           || dateOnly(member.scheduled_date) !== dateOnly(visit.scheduled_date)
           || member.technician_id !== visit.technician_id

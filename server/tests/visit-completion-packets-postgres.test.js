@@ -673,6 +673,15 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
   });
 
+  test('a retained cancelled child with a cleared assignment does not block the live member', async () => {
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ status: 'cancelled', technician_id: null });
+    const input = submission({ items: submission().items.filter((item) => item.serviceId === fixture.serviceIds[0]) });
+    expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    const packet = await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId }).first();
+    expect(packet.payload.retainedMembers).toEqual([{ serviceId: fixture.serviceIds[1], status: 'cancelled' }]);
+  });
+
   test('a member another runner finished first is accepted instead of failing the packet', async () => {
     const saved = await saveVisitCompletionPacket(submission());
     const completion = require('../services/complete-scheduled-service');
