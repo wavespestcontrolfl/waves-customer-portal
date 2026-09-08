@@ -24,6 +24,7 @@ const {
 } = require('../services/waveguard-plan-engine');
 const {
   calculateAppliedNutrients,
+  nutrientTreatedSqft,
   toDateOnly,
 } = require('../services/nutrient-ledger');
 
@@ -854,6 +855,24 @@ describe('waveguard-plan-engine helpers', () => {
 
     expect(nutrients.nPer1000).toBe(0.24);
     expect(nutrients.kPer1000).toBe(0.11);
+  });
+
+  test.each([
+    [1000, 'sqft', 1000], ['1000', 'sqft', 1000],
+    [1000, 'linear_ft', 2500], [null, 'sqft', 2500],
+    ['', 'sqft', 2500], [0, 'sqft', 2500], [-1, 'sqft', 2500],
+    [false, 'sqft', 2500], [true, 'sqft', 2500], [Infinity, 'sqft', 2500],
+  ])('nutrient actuals use measured product square footage, then visit area: %p %s', (areaValue, areaUnit, expected) => {
+    const lawnSqft = nutrientTreatedSqft(areaValue, areaUnit, 2500);
+    expect(lawnSqft).toBe(expected);
+    const nutrients = calculateAppliedNutrients({ product: { analysis_n: 20 }, amount: 5, amountUnit: 'lb', lawnSqft });
+    expect(nutrients.nAppliedPer1000).toBe(expected === 1000 ? 1 : 0.4);
+    expect(summarizeAnnualN({ currentN: 3.5, projectedVisitN: nutrients.nAppliedPer1000, annualNLimit: 4 }).status)
+      .toBe(expected === 1000 ? 'exceeded' : 'near_limit');
+  });
+
+  test.each([[1000.4, 1000], ['1000.5', 1001], [0.2, 1]])('fractional product area uses ledger-compatible square footage: %p', (area, expected) => {
+    expect(nutrientTreatedSqft(area, 'sqft', 2500)).toBe(expected);
   });
 
   test('calculateNutrients converts ounces to pounds and refuses fluid ounces without density', () => {
