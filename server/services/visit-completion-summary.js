@@ -48,6 +48,22 @@ async function ensureVisitSummaryToken(packetId, database = db) {
   }
 }
 
+/** Members a customer may see: never a backfill, only an auto_send report posture. */
+function publishableSummaryItems(items) {
+  return items.filter((item) => {
+    const notes = typeof item.structured_notes === 'string' ? JSON.parse(item.structured_notes) : item.structured_notes;
+    return !notes?.backfill && (!notes?.typedReportDelivery || notes.typedReportDelivery === 'auto_send');
+  });
+}
+
+/** An internal-only packet has no customer summary: no link is minted for it. */
+async function packetHasPublishableSummary(packetId, database = db) {
+  const items = await database('visit_completion_packet_items as i')
+    .join('service_records as r', 'r.id', 'i.service_record_id')
+    .where('i.packet_id', packetId).select('r.structured_notes');
+  return publishableSummaryItems(items).length > 0;
+}
+
 /** Explicit customer projection. Notes, addresses and billing tokens stay out. */
 async function getVisitCompletionSummary(token, database = db) {
   if (!VISIT_SUMMARY_TOKEN_RE.test(String(token || ''))) return null;
@@ -68,10 +84,7 @@ async function getVisitCompletionSummary(token, database = db) {
   if (items.length < 2 || items.some((item) => item.status !== 'done'
       || item.customer_id !== visit.customer_id || item.visit_id !== visit.id
       || item.scheduled_service_id !== item.member_id)) return null;
-  const visible = items.filter((item) => {
-    const notes = typeof item.structured_notes === 'string' ? JSON.parse(item.structured_notes) : item.structured_notes;
-    return !notes?.backfill && (!notes?.typedReportDelivery || notes.typedReportDelivery === 'auto_send');
-  });
+  const visible = publishableSummaryItems(items);
   if (!visible.length) return null;
   return {
     serviceDate: VisitGroups.dateOnly(visit.scheduled_date),
@@ -106,32 +119,39 @@ async function deferSummarySms({ visit, customer, recipient, body, claim, nextAl
 }
 
 // A frozen bearer-link recipient must still be authorized when the queue runs.
-async function recheckDeferredSummarySms(meta) {
-  const visit = await db('service_visits').where({ id: meta.visit_id, customer_id: meta.customer_id,
+async function recheckDeferredSummarySms(meta, database = db) {
+  const visit = await database('service_visits').where({ id: meta.visit_id, customer_id: meta.customer_id,
     summary_token_hash: meta.summary_token_hash }).whereNull('summary_token_revoked_at')
     .whereIn('status', ['closing', 'closed']).first('id');
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
-  const customer = await withAccountPrimaryContact(await db('customers').where({ id: meta.customer_id }).first());
+  const customer = await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
+    { db: database });
   const recipient = getServiceContactSmsRecipient(customer);
   if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
-  const effect = await db('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
+  const effect = await database('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
     claim_token: meta.visit_summary_claim_token }).first();
   // A late provider-boundary quiet-hours block proves no send occurred.
   // Its durable scheduler stamp allows exactly that handoff to be retried.
   if (effect?.status === 'unknown_delivery' && meta.quiet_hours_hold_at
     && new Date(meta.quiet_hours_hold_at) >= new Date(effect.claimed_at)) {
-    await db('visit_effects').where({ id: effect.id, status: 'unknown_delivery', claimed_at: effect.claimed_at,
-      claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', updated_at: db.fn.now() });
+    await database('visit_effects').where({ id: effect.id, status: 'unknown_delivery', claimed_at: effect.claimed_at,
+      claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', updated_at: database.fn.now() });
     effect.status = 'pending';
   }
   return { eligible: effect?.status === 'pending', reason: 'visit_summary_claim_unavailable' };
 }
 
+// The recipient check and the dispatch claim commit together while the
+// customer row is held, so a contact edit that lands between the queue's
+// recheck and the provider handoff cannot leave the former number eligible.
 async function beginDeferredSummarySms(meta) {
-  if (!(await recheckDeferredSummarySms(meta)).eligible) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
-  const owned = await VisitGroups.beginVisitNotificationDispatch(meta.visit_id, 'completion_sms',
-    meta.visit_summary_claim_token, { scheduled: true });
-  return { ok: owned, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+  return db.transaction(async (trx) => {
+    await trx('customers').where({ id: meta.customer_id }).forShare().first('id');
+    if (!(await recheckDeferredSummarySms(meta, trx)).eligible) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+    const owned = await VisitGroups.beginVisitNotificationDispatch(meta.visit_id, 'completion_sms',
+      meta.visit_summary_claim_token, { scheduled: true, database: trx });
+    return { ok: owned, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+  });
 }
 
 async function finalizeDeferredSummarySms(meta) {
@@ -163,6 +183,11 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
       to: recipient.phone, customerId: customer.id, appointmentId: member.id,
       body,
       identityTrustLevel: 'service_contact_authorized', entryPoint: 'visit_closeout_summary',
+      // The bearer link is the message. Both push-routing layers key on the
+      // message type, and the generic service_complete push lands on the
+      // Visits tab without it — so the summary stays an SMS (its deferred
+      // row already carries this type).
+      metadata: { original_message_type: 'visit_summary' },
       preDispatchCheck: async () => {
         dispatched = await VisitGroups.beginVisitNotificationDispatch(visit.id, 'completion_sms', claim.token);
         return { ok: dispatched, code: 'VISIT_SUMMARY_CLAIM_LOST' };
@@ -252,6 +277,31 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
   }
 }
 
+// A provider bounce arrives after the aggregate closed as sent. When the
+// recipient ledger no longer proves any accepted send, the effect returns to
+// the uncertain bucket the office already reviews, once per closed packet.
+async function reconcileSummaryEmailBounce(message, database = db) {
+  const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
+  if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
+  const visitId = match[1];
+  const messages = await database('email_messages').where({ trigger_event_id: message.trigger_event_id,
+    template_key: 'service.visit_summary', recipient_id: message.recipient_id })
+    .select('status', 'sent_at', 'provider_message_id', 'error_message');
+  if (messages.map(summaryEmailState).includes('sent')) return { reconciled: false };
+  const flipped = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'sent' })
+    .update({ status: 'unknown_delivery', last_error: 'provider_bounce', updated_at: database.fn.now() }).returning('id');
+  if (!flipped.length) return { reconciled: false };
+  const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');
+  const member = await database('scheduled_services').where({ visit_id: visitId }).orderBy('id').first('id', 'technician_id');
+  if (packet && member) {
+    await require('./dispatch-alerts').createAlert({
+      type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id,
+      payload: { visitId, packetId: packet.id, delivery: 'delivery_review', reason: 'summary_email_bounced' },
+    });
+  }
+  return { reconciled: true };
+}
+
 async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
@@ -261,10 +311,11 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
   const member = await database('scheduled_services').where({ visit_id: visit.id }).orderBy('id').first();
   const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
-  const summary = await getVisitCompletionSummary(token, database);
+  const summary = token ? await getVisitCompletionSummary(token, database) : null;
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');
-  const context = { visit, member, customer, prefs, database, visible: Boolean(summary), summaryUrl: portalUrl(`/visit/${token}`),
+  const context = { visit, member, customer, prefs, database, visible: Boolean(summary),
+    summaryUrl: token ? portalUrl(`/visit/${token}`) : null,
     requested: payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms === true) };
   await sendSummarySms(context);
   await sendSummaryEmail(context);
@@ -281,5 +332,6 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   return { state: pending ? 'delivery_pending' : unknown ? 'delivery_review' : 'delivered' };
 }
 
-module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, getVisitCompletionSummary, deliverVisitCompletionSummary,
+module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
+  deliverVisitCompletionSummary, reconcileSummaryEmailBounce,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms };

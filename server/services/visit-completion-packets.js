@@ -282,7 +282,11 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   const items = await database('visit_completion_packet_items').where({ packet_id: packet.id }).orderBy('scheduled_service_id');
   const Summary = require('./visit-completion-summary');
-  const token = await Summary.ensureVisitSummaryToken(packet.id, database);
+  // An internal-only packet (every member a backfill or a non-auto_send
+  // posture) has nothing a customer may open: no link is minted, so the
+  // encryption key is not a prerequisite for closing it.
+  const token = await Summary.packetHasPublishableSummary(packet.id, database)
+    ? await Summary.ensureVisitSummaryToken(packet.id, database) : null;
   const payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
   // Unpaid invoices use the existing scheduled invoice sender and its
   // durable send claim. Billing contacts receive their financial document;
@@ -343,7 +347,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     }
   });
   return { status: pending ? 202 : 200, body: {
-    visitId: packet.visit_id, packetId: packet.id, state, payment, delivery, summaryUrl: `/visit/${token}`,
+    visitId: packet.visit_id, packetId: packet.id, state, payment, delivery, summaryUrl: token ? `/visit/${token}` : null,
   } };
 }
 
