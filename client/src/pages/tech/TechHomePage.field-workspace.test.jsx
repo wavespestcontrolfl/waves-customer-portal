@@ -134,6 +134,31 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(screen.queryByRole('button', { name: 'Retry details' })).not.toBeInTheDocument();
   });
 
+  it('ignores an older detail response after a newer refresh confirms removal', async () => {
+    mount('/tech?visit=row%3Atwo');
+    await screen.findByText('Use the side gate');
+    const respond = fetchMock.getMockImplementation();
+    let release;
+    let delayNext = true;
+    fetchMock.mockImplementation(async (path, options) => {
+      if (delayNext && path.endsWith('/visit-brief')) {
+        delayNext = false;
+        return new Promise(resolve => { release = () => resolve({ ok: true, status: 200, json: async () => ({ facts: { access: { accessNotes: 'Stale gate code' } } }) }); });
+      }
+      return respond(path, options);
+    });
+    rows = rows.map(service => ({ ...service }));
+    await act(async () => { mocks.socketEvent(); });
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    briefStatus = 404;
+    rows = rows.map(service => ({ ...service }));
+    await act(async () => { mocks.socketEvent(); });
+    await waitFor(() => expect(screen.queryByText('Use the side gate')).not.toBeInTheDocument());
+    await act(async () => { release(); });
+    expect(screen.queryByText('Stale gate code')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry details' })).not.toBeInTheDocument();
+  });
+
   it('keeps the group URL selected when its first member becomes terminal', async () => {
     rows = [row('one', { visit: { id: 'group' } }), row('two', { visit: { id: 'group' } })];
     mount('/tech?visit=visit%3Agroup');
@@ -180,6 +205,14 @@ describe('Tech field workspace uses the existing route workflow', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /Project Report/ })).toBeDisabled();
     expect(screen.queryByText('Existing recap form')).not.toBeInTheDocument();
+  });
+
+  it.each(['sent', 'closed', 'draft'])('Tools only offers editable linked reports (%s)', async status => {
+    rows = [row('one', { linkedProject: { id: 'existing-report', status } })];
+    await act(async () => { mount('/tech/tools'); });
+    const report = await screen.findByRole('button', { name: /Project Report/ });
+    if (status === 'draft') expect(report).toBeEnabled();
+    else expect(report).toBeDisabled();
   });
 
   it('preserves owner-only estimating and the social feature gate in Tools', async () => {

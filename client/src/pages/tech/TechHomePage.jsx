@@ -452,8 +452,11 @@ export default function TechHomePage({ section = 'today' }) {
   // preserves each previously loaded section and exposes Retry. A 404
   // (ownership filter / older stop) reads as
   // "nothing linked", not an error.
+  const stopDetailSeq = useRef(new Map());
   const loadStopDetail = useCallback(async (stop) => {
     const key = stop.primary.id;
+    const seq = (stopDetailSeq.current.get(key) || 0) + 1;
+    stopDetailSeq.current.set(key, seq);
     // A refresh keeps the previous data visible while it fetches — codes
     // and money must not flicker away on reopen.
     setStopDetail((d) => ({
@@ -476,15 +479,18 @@ export default function TechHomePage({ section = 'today' }) {
       const [kind, id, value] = r.value;
       byService[id] = { ...byService[id], [kind]: value };
     }
-    setStopDetail((d) => ({
-      ...d,
-      [key]: {
-        status: fulfilled === results.length ? 'ready' : 'error',
-        byService: Object.fromEntries(stop.services.map(({ id }) => [id, {
-          ...d[key]?.byService?.[id], ...byService[id],
-        }])),
-      },
-    }));
+    setStopDetail((d) => {
+      if (stopDetailSeq.current.get(key) !== seq) return d;
+      return {
+        ...d,
+        [key]: {
+          status: fulfilled === results.length ? 'ready' : 'error',
+          byService: Object.fromEntries(stop.services.map(({ id }) => [id, {
+            ...d[key]?.byService?.[id], ...byService[id],
+          }])),
+        },
+      };
+    });
   }, []);
   // Which stop's brief has an own-line text or bridge in flight. Tracked
   // at the list level, not per row: the accordion shows ONE stop, so a
@@ -567,7 +573,7 @@ export default function TechHomePage({ section = 'today' }) {
     openProjectForService(service);
   }, [openProjectForService]);
   const projectServices = fieldWorkspace
-    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => !TERMINAL_STATUSES_VISIT.has(service.status))
+    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => !TERMINAL_STATUSES_VISIT.has(service.status) && !['sent', 'closed'].includes(service.linkedProject?.status))
     : myServices;
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {

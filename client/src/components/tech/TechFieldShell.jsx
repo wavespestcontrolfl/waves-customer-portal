@@ -12,13 +12,15 @@ export default function TechFieldShell({ children, techName, techRole, documents
   const { pathname, search } = useLocation();
   const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
   const documentsRoute = Boolean(matchPath('/tech/documents', pathname));
+  const todayRoute = Boolean(matchPath('/tech', pathname));
+  const moreRoute = Boolean(matchPath('/tech/more', pathname));
   const visit = new URLSearchParams(search).get('visit');
   const visitSearch = visit ? `?visit=${encodeURIComponent(visit)}` : '';
-  const legacyTool = ['/tech/protocols', '/tech/lawn-diagnostic', '/tech/social-post'].includes(pathname);
+  const legacyTool = ['/tech/protocols', '/tech/lawn-diagnostic', '/tech/social-post'].some(path => matchPath(path, pathname));
   if (!ready) return <div className="tech-field" role="status">Loading field workspace…</div>;
   if (!enabled) return children;
-  const section = pathname === '/tech/more' || documentsRoute ? 'more'
-    : pathname === '/tech' ? 'today' : 'tools';
+  const section = moreRoute || documentsRoute ? 'more'
+    : todayRoute ? 'today' : 'tools';
   return (
     <div className="tech-field">
       <header className="tf-header">
@@ -27,7 +29,7 @@ export default function TechFieldShell({ children, techName, techRole, documents
       </header>
       <main className="tf-main">
         <AddToHomeScreenHint />
-        {visit && pathname !== '/tech' && <Link className="tf-button" to={`/tech${visitSearch}`} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>Return to visit</Link>}
+        {visit && !todayRoute && <Link className="tf-button" to={`/tech${visitSearch}`} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>Return to visit</Link>}
         <div className={legacyTool ? 'tf-existing' : undefined}>
           {documentsRoute && !documentsAvailable
             ? <p>Staff documents are unavailable.</p>

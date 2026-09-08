@@ -32,6 +32,7 @@ function renderTech(initialPath = '/tech/protocols?day=monday') {
         <Route path="/tech" element={<TechLayout />}>
           <Route index element={<div>Protected field route</div>} />
           <Route path="protocols" element={<div>Protected field protocols</div>} />
+          <Route path="more" element={<div>Protected field more</div>} />
           <Route path="documents" element={<div>Protected staff documents</div>} />
         </Route>
         <Route path="/admin/login" element={<LocationResult label="Staff login" />} />
@@ -89,6 +90,19 @@ describe('TechLayout staff-session verification', () => {
     renderTech(path);
     expect(await screen.findByText('Staff documents are unavailable.')).toBeInTheDocument();
     expect(screen.queryByText('Protected staff documents')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['/tech/', 'Today', false], ['/TECH/', 'Today', false],
+    ['/tech/more/', 'More', true], ['/TECH/MORE/', 'More', true],
+    ['/TECH/PROTOCOLS/', 'Tools', true],
+  ])('matches shell navigation and visit return state at %s', async (path, section, returnVisible) => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: true, ready: true });
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', role: 'technician' })));
+    renderTech(`${path}?visit=row%3Atwo`);
+    expect(await screen.findByRole('link', { name: section, exact: true })).toHaveAttribute('aria-current', 'page');
+    expect(Boolean(screen.queryByRole('link', { name: 'Return to visit' }))).toBe(returnVisible);
   });
 
   it('holds the outlet until the workspace flag resolves', async () => {
