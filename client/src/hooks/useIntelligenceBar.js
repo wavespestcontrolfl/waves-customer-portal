@@ -251,6 +251,11 @@ export function useIntelligenceBar({
 
       if (onAfterSubmitRef.current) onAfterSubmitRef.current(data);
     } catch (err) {
+      // A definitive HTTP failure was answered; only a dropped response keeps the key.
+      if (err?.status) {
+        identityRef.current.settle();
+        answered = true;
+      }
       if (isStale()) {
         if (epoch === epochRef.current) { submittingRef.current = false; setLoading(false); }
         return;

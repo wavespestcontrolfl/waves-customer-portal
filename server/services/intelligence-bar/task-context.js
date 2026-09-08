@@ -28,7 +28,7 @@ const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|conta
 const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named|both|these customers|all of these`;
 // Direct read verbs resolve an exact full name ("Show John Smith details")
 // without becoming refusal hints: a read that names nobody stays a read.
-const READ_SELECTOR_SOURCE = 'show|find|look\\s+up|pull\\s+up|open|view|display';
+const READ_SELECTOR_SOURCE = 'show|find|get|look\\s+up|pull\\s+up|open|view|display';
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',

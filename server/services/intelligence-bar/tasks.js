@@ -10,6 +10,8 @@ const { UUID_RE } = require('./task-context');
 const REQUEST_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 const STATES = new Set(['running', 'responded', 'awaiting_approval', 'needs_information', 'failed', 'outcome_unknown', 'canceled']);
 const leaseExpiry = () => new Date(Date.now() + 120000);
+// Open for the operator: the receipt-derived states that still need attention.
+const OPEN_STATES = new Set(['running', 'awaiting_approval', 'needs_information', 'outcome_unknown', 'partially_completed', 'ready_to_continue']);
 
 function requestHash(request) {
   return crypto.createHash('sha256').update(stableStringify(request)).digest('hex');
@@ -129,15 +131,18 @@ async function get(id, actorId, sessionId) {
 async function list(actorId, sessionId) {
   if (!UUID_RE.test(sessionId || '')) return [];
   const scoped = () => db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId }).where('expires_at', '>', db.fn.now());
-  // The latest twenty plus every task still open for the operator, so an
-  // older approval, interruption or unknown outcome stays reachable.
-  const latest = scoped().orderBy('created_at', 'desc').limit(20).select('id');
-  const tasks = await scoped().where(query => query.whereIn('id', latest).orWhereNotIn('state', ['responded', 'canceled']))
+  const latest = (await scoped().orderBy('created_at', 'desc').limit(20).select('id')).map(task => task.id);
+  // The latest twenty plus every task still open for the operator, judged by
+  // the same receipt-derived state the client shows: a settled approval
+  // beyond the cap drops out while an older interruption stays reachable.
+  const tasks = await scoped().where(query => query.whereIn('id', latest).orWhereNotIn('state', ['responded', 'canceled', 'failed']))
     .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at');
   if (!tasks.length) return tasks;
   const actions = await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id));
+  const recent = new Set(latest);
   return tasks.map(task => ({ ...task, state: exposedTaskState(task,
-    actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt)) }));
+    actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt)) }))
+    .filter(task => recent.has(task.id) || OPEN_STATES.has(task.state));
 }
 
 // Run from the existing IB retention sweep even while the platform gate is off.

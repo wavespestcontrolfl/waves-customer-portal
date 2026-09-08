@@ -145,18 +145,26 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const IbTasks = require('../services/intelligence-bar/tasks');
     const session = crypto.randomUUID();
     const ids = [];
-    for (let index = 0; index < 22; index += 1) {
+    for (let index = 0; index < 24; index += 1) {
       const { task } = await IbTasks.begin({ actorId: actor, sessionId: session, requestKey: crypto.randomUUID(),
         request: { prompt: `Synthetic saved request ${index}` }, pageContext: {} });
       ids.push(task.id);
     }
-    await db('ib_tasks').where('id', ids[0]).update({ state: 'needs_information', created_at: new Date(Date.now() - 120000) });
-    await db('ib_tasks').where('id', ids[1]).update({ state: 'responded', created_at: new Date(Date.now() - 110000) });
+    // Four older tasks beyond the latest twenty: still awaiting a choice, answered,
+    // approval settled by cancellation, and awaiting an approval that was never proposed.
+    await db('ib_tasks').where('id', ids[0]).update({ state: 'needs_information', created_at: new Date(Date.now() - 140000) });
+    await db('ib_tasks').where('id', ids[1]).update({ state: 'responded', created_at: new Date(Date.now() - 130000) });
+    await db('ib_tasks').where('id', ids[2]).update({ state: 'awaiting_approval', created_at: new Date(Date.now() - 120000) });
+    await db('ib_pending_actions').insert({ tool_name: 'update_customer', params: '{}', params_hash: 'synthetic', requested_by: actor,
+      status: 'cancelled', expires_at: new Date(Date.now() + 3600000), task_id: ids[2], step_key: 'synthetic-cancelled' });
+    await db('ib_tasks').where('id', ids[3]).update({ state: 'awaiting_approval', created_at: new Date(Date.now() - 110000) });
     const listed = await api(`/tasks?session_id=${session}`);
     const listedIds = listed.body.tasks.map(task => task.id);
     expect(listedIds).toContain(ids[0]);
+    expect(listedIds).toContain(ids[3]);
     expect(listedIds).not.toContain(ids[1]);
-    expect(listed.body.tasks).toHaveLength(21);
+    expect(listedIds).not.toContain(ids[2]);
+    expect(listed.body.tasks).toHaveLength(22);
     expect(listed.body.tasks.find(task => task.id === ids[0]).state).toBe('needs_information');
   }, 30000);
 

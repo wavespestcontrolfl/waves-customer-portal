@@ -94,6 +94,7 @@ Use for: "reply to Henderson via text instead", "SMS them about their appointmen
       properties: {
         email_id: { type: 'string', description: 'Email this is in response to' },
         customer_name: { type: 'string' },
+        customer_id: { type: 'string', format: 'uuid', description: 'Canonical customer id. The proposal pins the resolved recipient here; a name never substitutes for it.' },
         message: { type: 'string', description: 'SMS body (keep under 160 chars)' },
       },
       required: ['message'],

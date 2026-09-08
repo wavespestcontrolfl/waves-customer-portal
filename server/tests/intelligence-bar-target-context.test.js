@@ -42,7 +42,7 @@ test.each(selectors)(
 
 test('direct read verbs resolve an exact full name without becoming refusal hints', async () => {
   lookupRows = [rows.customers[0]];
-  for (const prompt of ['Show Synthetic Person details', 'Find Synthetic Person', 'Look up Synthetic Person', 'Show me Synthetic Person']) {
+  for (const prompt of ['Show Synthetic Person details', 'Find Synthetic Person', 'Get Synthetic Person details', 'Look up Synthetic Person', 'Show me Synthetic Person']) {
     const task = await Context.resolve({ prompt, pageData: {} });
     expect(task.target).toMatchObject({ customer_id: A, provenance: 'current_request_lookup' });
   }

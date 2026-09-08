@@ -613,6 +613,11 @@ function GlobalCommandPalette({ user }, ref) {
           }
         }
       } catch (err) {
+        // A definitive HTTP failure was answered; only a dropped response keeps the key.
+        if (err?.status) {
+          identityRef.current.settle();
+          answered = true;
+        }
         if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
       }
       if (threadEpochRef.current === epoch) {
@@ -667,7 +672,7 @@ function GlobalCommandPalette({ user }, ref) {
   };
   const taskCard = <IntelligenceTaskCard task={activeTask}
     onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}
-    onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved} />;
+    onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved}  variant="dark" />;
   const taskHistory = savedTasks.length > 0 && <div style={{ marginBottom: 12 }}>
     <div style={{ fontSize: 14, marginBottom: 8 }}>Saved requests — clearing a chat does not cancel actions</div>
     {savedTasks.map(task => <button key={task.id} type="button" onClick={() => refreshTask(task.id)}
