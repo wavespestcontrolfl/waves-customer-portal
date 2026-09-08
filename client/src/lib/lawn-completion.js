@@ -56,6 +56,23 @@ export function lawnPlanSelections(items, buildProduct, catalog, { areas = LAWN_
   });
 }
 
+// The plan request failed: every still-derived suggestion is withdrawn (an
+// entered value keeps its number and unit) and the row asks for the actual.
+// Applied by the failed request itself and again by a draft restored while
+// that failure stands — the reconcile effect is off during a plan error, so a
+// restored row would otherwise keep the suggestions saved under an earlier
+// plan and pass the actuals gate with them.
+export const LAWN_PLAN_UNAVAILABLE_REASON = 'Plan unavailable. Confirm the treated area and actual amount or retry.';
+export function withdrawLawnPlanSuggestions(rows) {
+  return rows.map((row) => row.lawnPlanDefaults ? {
+    ...row,
+    totalAmount: row.totalAmountManual ? row.totalAmount : '',
+    rate: row.lawnPlanManualFields?.includes('rate') ? row.rate : '',
+    areaValue: row.lawnPlanManualFields?.includes('areaValue') ? row.areaValue : '',
+    lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON,
+  } : row);
+}
+
 // Reconcile each row, not the whole list: an edited total or a removed default
 // must not freeze every other product when the plan or visit area changes.
 // A legacy/manual row has no provenance and stays entirely technician-owned.

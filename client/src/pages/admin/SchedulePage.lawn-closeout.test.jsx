@@ -329,8 +329,11 @@ it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measure
   }
   fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
   await waitFor(() => expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe(mode === 'partial-zones' ? '' : mode === 'measured-zones' ? '1000' : '4000'));
-  const expectedAmount = { calculated: '4', 'manual-amount': '7', 'manual-unit': '5', 'partial-zones': '', 'measured-zones': '1' }[mode];
+  // manual-unit: the derived 5 was fl oz; under the tech's gallons it is
+  // withdrawn rather than kept or re-derived (Codex r8 P1).
+  const expectedAmount = { calculated: '4', 'manual-amount': '7', 'manual-unit': '', 'partial-zones': '', 'measured-zones': '1' }[mode];
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12', '8', expectedAmount]));
+  if (mode === 'manual-unit') expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('gal');
 });
 
 it('a withdrawn suggestion requires actual units and method instead of displaying hidden fallbacks', async () => {
@@ -445,4 +448,63 @@ it.each([
   // work. Without a mode on the option the catalog default still applies.
   expect(selects[2].value).toBe(expected);
   expect(totals()[2].value).toBe('');
+});
+
+it('changing only the amount unit withdraws a plan-suggested total: blank through a refresh and a rate edit, and a typed total keeps its number under the chosen unit', async () => {
+  enableDefaults();
+  mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  const unitOf = (index) => within(totals()[index].parentElement).getAllByRole('combobox')[1];
+  fireEvent.change(unitOf(0), { target: { value: 'gal' } });
+  // The suggestion was 15 fl oz; 15 gal must never stand (Codex r8 P1).
+  expect(totals()[0].value).toBe('');
+  expect(unitOf(0).value).toBe('gal');
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[1].value).toBe('8'));
+  expect(totals()[0].value).toBe('');
+  expect(unitOf(0).value).toBe('gal');
+  // A rate edit derives the total in the RATE's unit — not under the tech's gallons.
+  fireEvent.change(screen.getAllByPlaceholderText('Rate')[0], { target: { value: '4' } });
+  expect(totals()[0].value).toBe('');
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  fireEvent.change(totals()[0], { target: { value: '2' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products[0]).toMatchObject({ productId: 'test-k', totalAmount: '2', amountUnit: 'gal', rate: '4' });
+});
+
+it('a draft restored during a plan outage withdraws the suggestions saved under the earlier plan', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[0], { target: { value: '9' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts[0].totalAmount).toBe('9'));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  // The entered 9 survives; the saved 10 was a suggestion the failed plan can
+  // no longer stand behind (Codex r8 P1).
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  failPlan = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry plan' }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '10']));
+});
+
+it('a tierless visit with governed defaults still requires every product\'s actual amount', async () => {
+  enableDefaults();
+  render(<CompletionPanel service={{ ...service, waveguardTier: null }} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[1], { target: { value: '' } });
+  // No WaveGuard tier, but the server enabled completion defaults for the
+  // explicit assignment: a governed row without an amount cannot close out
+  // (Codex r8 P1).
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: /complete & send recap/i })).toBeNull();
+  fireEvent.change(totals()[1], { target: { value: '6' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products.map(product => product.totalAmount)).toEqual([15, '6']);
 });

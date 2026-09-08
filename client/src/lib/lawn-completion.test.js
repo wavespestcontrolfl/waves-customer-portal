@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lawnPlanActionOptions, lawnPlanSelections, previousLawnAssessment, reconcileLawnPlanSelections, LAWN_FIELD_ACTIONS } from './lawn-completion';
+import { lawnPlanActionOptions, lawnPlanSelections, previousLawnAssessment, reconcileLawnPlanSelections, withdrawLawnPlanSuggestions, LAWN_FIELD_ACTIONS, LAWN_PLAN_UNAVAILABLE_REASON } from './lawn-completion';
 
 it('uses the engine mix instead of catalog defaults and skips unselected optional rows', () => {
   const build = (product) => ({ productId: product.id, rate: 99, areaValue: 5000, totalAmount: 999 });
@@ -114,4 +114,15 @@ it('an "Additional work" option keeps the protocol row\'s application mode on it
     { id: 'legacy', name: 'No mode' },
   ]);
   expect(options[0]).toMatchObject({ id: 'lawn-plan-speedzone', label: 'SpeedZone', scope: 'exterior', treatmentApplied: true });
+});
+
+it('a plan outage withdraws every still-derived suggestion and keeps entered values with their units', () => {
+  const governed = { productId: 'k', lawnPlanDefaults: { rate: 3 }, rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft', lawnPlanManualFields: [] };
+  const entered = { ...governed, productId: 'micro', totalAmount: '9', amountUnit: 'gal', totalAmountManual: true, rate: '2', areaValue: '1000', lawnPlanManualFields: ['rate', 'areaValue', 'amountUnit'] };
+  const manual = { productId: 'legacy', totalAmount: 4, amountUnit: 'oz' };
+  expect(withdrawLawnPlanSuggestions([governed, entered, manual])).toEqual([
+    { ...governed, totalAmount: '', rate: '', areaValue: '', lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON },
+    { ...entered, lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON },
+    manual,
+  ]);
 });

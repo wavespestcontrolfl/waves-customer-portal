@@ -59,7 +59,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -624,6 +624,17 @@ export function derivedTotalAmount(rate, areaSqft) {
   const a = Number(areaSqft);
   if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(a) || a <= 0) return "";
   return Math.round(r * (a / 1000) * 100) / 100;
+}
+// The derived total is the rate's quantity in the rate's unit. A per-basis
+// rate never derives one, and under lawn defaults neither does a row whose
+// amount unit the tech chose away from the rate's unit (`lawnPlanManualFields`
+// only exists there): 15 fl oz must never stand as 15 gal — the total waits
+// for the actual (Codex r8 P1 on #4086).
+function lawnDerivedTotal(product, areaSqft) {
+  if (isPerBasisUnit(product.rateUnit)) return "";
+  if ((product.lawnPlanManualFields || []).includes("amountUnit")
+    && baseUnitOf(product.amountUnit) !== baseUnitOf(product.rateUnit)) return "";
+  return derivedTotalAmount(product.rate, areaSqft);
 }
 
 function createCompletionIdempotencyKey(serviceId) {
@@ -11790,8 +11801,7 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts(current => current.map(product => follows(product)
       ? { ...product, areaValue: lawnVisitArea,
-        totalAmount: product.totalAmountManual ? product.totalAmount
-          : isPerBasisUnit(product.rateUnit) ? "" : derivedTotalAmount(product.rate, lawnVisitArea) } : product));
+        totalAmount: product.totalAmountManual ? product.totalAmount : lawnDerivedTotal(product, lawnVisitArea) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
@@ -12029,12 +12039,19 @@ export function CompletionPanel({
         (block) => block?.code === "inventory_product_inactive",
       )
     : treatmentPlanInventoryBlocks;
+  // Every applied product needs its actual amount, unit and method on a
+  // WaveGuard closeout AND on any governed-defaults closeout: the server
+  // enables completion defaults for a tierless visit with an explicit
+  // assignment too, and a governed row left without an amount would persist
+  // with no actual and no inventory deduction (Codex r8 P1). The empty-list
+  // and inventory gates stay tier-scoped.
+  const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
-    calibrationRequired &&
-    !isIncompleteVisit &&
-    (selectedProducts.length === 0 ||
-      selectedProductsMissingActualAmount.length > 0 ||
-      treatmentPlanGatingInventoryBlocks.length > 0);
+    (calibrationRequired &&
+      !isIncompleteVisit &&
+      (selectedProducts.length === 0 ||
+        treatmentPlanGatingInventoryBlocks.length > 0)) ||
+    (productActualsRequired && selectedProductsMissingActualAmount.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -12494,11 +12511,7 @@ export function CompletionPanel({
       .catch((err) => {
         if (!cancelled) {
           setTreatmentPlanError(err.message || "Could not load WaveGuard plan");
-          setSelectedProducts(current => current.map(product => product.lawnPlanDefaults
-            ? { ...product, totalAmount: product.totalAmountManual ? product.totalAmount : "",
-              rate: product.lawnPlanManualFields?.includes("rate") ? product.rate : "",
-              areaValue: product.lawnPlanManualFields?.includes("areaValue") ? product.areaValue : "",
-              lawnAmountReason: "Plan unavailable. Confirm the treated area and actual amount or retry." } : product));
+          setSelectedProducts(withdrawLawnPlanSuggestions);
         }
       })
       .finally(() => {
@@ -12814,7 +12827,12 @@ export function CompletionPanel({
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? savedDraft.lawnRemovedDefaultIds : []);
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
     setNotes(savedDraft.notes || "");
-    setSelectedProducts(
+    // A draft restored while the plan request has already failed carries the
+    // suggestions saved under an earlier plan, and the reconcile effect stays
+    // off during a plan error — withdraw them exactly as the failed request
+    // does for rows it can see (Codex r8 P1).
+    const restoreProducts = (rows) => (treatmentPlanError ? withdrawLawnPlanSuggestions(rows) : rows);
+    setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
             const normalized = normalizeProductArea(product, serviceTypeForArea);
@@ -12832,7 +12850,7 @@ export function CompletionPanel({
             return normalized;
           })
         : [],
-    );
+    ));
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
@@ -14088,17 +14106,22 @@ export function CompletionPanel({
         // when the rate/area is cleared or the method stops being area-based,
         // so a stale full-lawn total can't be submitted. The derived total is
         // in the rate's unit, so a rate-unit change moves the total unit too.
-        if (field === "totalAmount" || (lawnDefaultsEnabled && field === "amountUnit")) {
+        if (field === "totalAmount") {
           next.totalAmountManual = true;
+        } else if (lawnDefaultsEnabled && field === "amountUnit") {
+          // A still-derived total is the plan's quantity in the plan's unit:
+          // a unit change alone withdraws it (never keeps the number under
+          // the new unit, never converts) until the tech enters the actual.
+          // An entered total keeps its number under the chosen unit as
+          // before (Codex r8 P1).
+          if (!p.totalAmountManual) next.totalAmount = "";
         } else if (!next.totalAmountManual) {
           if (next.areaUnit !== "sqft") {
             if (field === "applicationMethod" && p.areaUnit === "sqft") {
               next.totalAmount = "";
             }
           } else if (field === "rate" || field === "areaValue") {
-            next.totalAmount = isPerBasisUnit(next.rateUnit)
-              ? ""
-              : derivedTotalAmount(next.rate, next.areaValue);
+            next.totalAmount = lawnDerivedTotal(next, next.areaValue);
           } else if (field === "rateUnit") {
             // Per-basis rate units (mix concentrations, spot placements,
             // per-acre…) keep Total in the base quantity unit, and can't
@@ -14728,8 +14751,7 @@ export function CompletionPanel({
       return;
     }
     if (
-      calibrationRequired &&
-      !isIncompleteVisit &&
+      productActualsRequired &&
       selectedProductsMissingActualAmount.length
     ) {
       alert(
