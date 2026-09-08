@@ -279,12 +279,19 @@ const OBJECT_INTRO_RE = /\b(?:with|by|to|from|of|than|against|as|under|not|nor|o
 // the relation's object because the copula precedes the participle.
 const PASSIVE_AGENT_HEAD_RE = /(?:^|[.;!?\n]|\b(?:but|however)\b)\s*(?:(?:the|these|those|all|its|their|any)\s+)?(?:(?!\b(?:is|are|was|were|be|been|being)\b)[\w'-]+\s+){0,4}(?:offered|provided|performed|delivered|run|operated|sold|handled|listed|advertised|marketed)\s+by\s+(?:the\s+)?$/i;
 
+// A name after a comma-coordinated "and" / "or" that starts its own
+// predicate ("Orkin offers termite treatment, and Waves offers fumigation")
+// is the new clause's subject, not an object of the conjunction.
+const COORDINATED_INTRO_RE = /,\s*(?:and|or|nor)\s+(?:the\s+|a\s+|an\s+)?$/i;
+const COORDINATED_PREDICATE_RE = new RegExp(`^[\\w'&-]*(?:\\s+[A-Z][\\w'&-]*){0,2}\\s+(?:also\\s+|still\\s+|now\\s+|only\\s+)?${PREDICATE_VERB}\\b`, 'i');
+
 function lastSubjectIndex(re, text) {
   let last = -1;
   re.lastIndex = 0;
   for (const m of text.matchAll(re)) {
     const prefix = text.slice(0, m.index);
-    if (!OBJECT_INTRO_RE.test(prefix) || PASSIVE_AGENT_HEAD_RE.test(prefix)) last = m.index;
+    const coordinated = COORDINATED_INTRO_RE.test(prefix) && COORDINATED_PREDICATE_RE.test(text.slice(m.index));
+    if (!OBJECT_INTRO_RE.test(prefix) || PASSIVE_AGENT_HEAD_RE.test(prefix) || coordinated) last = m.index;
   }
   return last;
 }

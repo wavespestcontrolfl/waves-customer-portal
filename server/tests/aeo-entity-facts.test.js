@@ -533,6 +533,10 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E1', 'The owners of Waves are Adam Benetti and Jane Smith.').forbidden.wrong_founder).toBe(true);
   expect(score('E1', 'Adam Benetti and Jane Smith own Waves.').forbidden.wrong_founder).toBe(true);
   expect(score('E1', 'Waves is owned by Adam Benetti and his family.').forbidden.wrong_founder).toBe(false);
+  // Pre-push hook r38: a comma-coordinated clause has its own subject; a compound subject keeps the object filter.
+  expect(score('E6', 'Orkin offers termite treatment, and Waves offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Orkin offers fumigation, and Waves offers pest control.')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: false } });
+  expect(score('E6', 'Waves offers pest control, and Orkin offers fumigation.')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: false } });
   // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
   expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });
