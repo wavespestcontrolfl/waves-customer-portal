@@ -28,12 +28,16 @@ function isStripeResourceMissing(err) {
 // replacement can itself be replaced). `readLive(id)` performs the Stripe
 // read the caller wants (payment_method expanded or not). Returns null on a
 // broken chain, a canceled head, a head that is itself retired at the hop
-// cap, or when the chain leaves the caller's own capture family (the
-// `belongs(head)` predicate — never hand back another purpose's intent).
+// cap, or when the chain leaves the caller's own capture family — the
+// `belongs(intent)` predicate is applied to EVERY intent traversed, not
+// only the head (GH Codex #4163 r1): a hop through another purpose's or
+// request's intent is a malformed chain, even if a later link points back
+// into this family. Never hand back an intent reached through one.
 const MAX_REPLACEMENT_HOPS = 10;
 async function followReplacementChain(setupIntent, readLive, belongs = () => true) {
   let current = setupIntent;
   for (let hop = 0; hop < MAX_REPLACEMENT_HOPS && current && isRetiredSetupIntent(current); hop += 1) {
+    if (!belongs(current)) return null;
     const nextId = current.metadata?.replaced_by;
     if (!nextId) return null;
     current = await readLive(nextId);
