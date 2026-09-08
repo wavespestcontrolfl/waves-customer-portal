@@ -205,6 +205,30 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     await db('scheduled_services').whereIn('id', [visitA, visitB]).del();
   }, 30000);
 
+  test('broad customer-row readers are refused inside a customer-scoped task and stay open outside one', async () => {
+    const foreignPhone = (await db('customers').where('id', customerB).first('phone')).phone;
+    await db('sms_log').insert({ id: crypto.randomUUID(), direction: 'inbound', from_phone: foreignPhone, to_phone: '+15550000000',
+      message_body: 'Foreign private unanswered message', customer_id: customerB, created_at: new Date() });
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'unanswered messages threads' }, 'discover'))
+      .mockResolvedValueOnce(tools('get_unanswered_threads', { hours_back: 24 }, 'threads'))
+      .mockResolvedValueOnce(answer('Only the task customer may be read.'));
+    const scoped = await api('/query', request(`Show unanswered messages for ${nameA}`, { context: 'communications', pageData: { route: '/admin/communications' } }));
+    expect(scoped.status).toBe(200);
+    expect(scoped.body.taskTarget.customer_id).toBe(customerA);
+    const refused = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'threads').content;
+    expect(JSON.parse(refused)).toMatchObject({ code: 'customer_scope_required' });
+    expect(JSON.stringify(mockModel.mock.calls)).not.toContain('Foreign private unanswered message');
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'unanswered messages threads' }, 'discover'))
+      .mockResolvedValueOnce(tools('get_unanswered_threads', { hours_back: 24 }, 'threads'))
+      .mockResolvedValueOnce(answer('The unanswered threads are loaded.'));
+    const broad = await api('/query', request('Show all unanswered messages', { context: 'communications', pageData: { route: '/admin/communications' } }));
+    expect(broad.status).toBe(200);
+    expect(broad.body.taskTarget).toBeFalsy();
+    const listed = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'threads').content;
+    expect(JSON.parse(listed).code).toBeUndefined();
+  }, 30000);
+
   test('two same-tool calls in one round keep their own clarification markers', async () => {
     const unlinkedCall = crypto.randomUUID(), ownCall = crypto.randomUUID();
     await db('call_log').insert([

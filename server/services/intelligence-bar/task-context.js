@@ -410,8 +410,25 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
 // Resolve name/phone selectors to one of the task's known customers, then pass
 // the immutable ID to existing readers. Broad searches without a selector stay
 // broad. No fuzzy result or model-selected alternate contact becomes authority.
+// Readers that list customer rows (names, phones, addresses, balances,
+// message bodies) without a customer selector and without consuming the
+// task's read scope. Inside a customer-scoped task they would hand every
+// matching customer to the model, so they are refused there; the scoped
+// readers (query_customers, query_leads, get_schedule_view, search_emails …)
+// remain available for the task customer.
+const BROAD_CUSTOMER_ROW_READERS = new Set([
+  'get_csr_overview', 'get_unanswered_threads', 'list_call_partners',
+  'find_duplicates', 'find_overdue_customers', 'get_recent_completions',
+  'get_day_summary', 'get_zone_density', 'cancel_and_reschedule_far_out',
+  'get_outreach_candidates', 'get_unresponded_reviews', 'search_reviews',
+  'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
+]);
+
 async function prepareReadInput(params, context, { toolName, schema }) {
   const input = { ...params };
+  if (context.targets?.length && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
+    return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
+  }
   let readContext = context;
   if (schema.properties?.customer_id && (params.customer_name || params.phone)) {
     const permitted = new Set(context.targets.map(target => target.customer_id));
@@ -446,4 +463,4 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   return invalid || { input };
 }
 
-module.exports = { UUID_RE, pageIds, resolve, validateRecordTarget, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { UUID_RE, BROAD_CUSTOMER_ROW_READERS, pageIds, resolve, validateRecordTarget, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

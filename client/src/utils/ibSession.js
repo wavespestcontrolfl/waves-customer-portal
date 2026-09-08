@@ -34,7 +34,10 @@ export function ibSessionId() {
 // begin(request) hands out the identity for that serialized request body. The
 // key survives a transport or server error, so resubmitting the same request
 // replays the server's saved task; it changes only when the request changes
-// or settle() records a definitive answer.
+// or settle(identity) records a definitive answer for THAT identity. A stale
+// request answered after a newer one began (navigation or Clear released the
+// submit guard mid-flight) leaves the newer key in place, so a dropped
+// response to the newer request still replays its saved task on retry.
 export function createRequestIdentity(sessionId = ibSessionId()) {
   let pending = null;
   return {
@@ -42,6 +45,6 @@ export function createRequestIdentity(sessionId = ibSessionId()) {
       if (!pending || pending.request !== request) pending = { request, request_key: uuid() };
       return { session_id: sessionId, request_key: pending.request_key };
     },
-    settle() { pending = null; },
+    settle(identity) { if (pending && identity?.request_key === pending.request_key) pending = null; },
   };
 }

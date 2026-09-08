@@ -26,8 +26,25 @@ it('keeps one request key for the same request until the server answers', async 
   expect(identity.begin('{"prompt":"text alice"}')).toEqual(first);
   // A different request is a new logical request even before the first settles.
   expect(identity.begin('{"prompt":"text bob"}').request_key).not.toBe(first.request_key);
-  identity.settle();
+  identity.settle(first);
   expect(identity.begin('{"prompt":"text alice"}').request_key).not.toBe(first.request_key);
+});
+
+it('a stale request settling cannot clear a newer pending identity', async () => {
+  const { createRequestIdentity } = await import('./ibSession');
+  const identity = createRequestIdentity('existing-session');
+  const first = identity.begin('{"prompt":"text alice"}');
+  // Navigation released the submit guard: a second request began while the first was in flight.
+  const second = identity.begin('{"prompt":"text bob"}');
+  identity.settle(first);
+  // The second response was dropped; its retry must replay the same saved task, never a new key.
+  expect(identity.begin('{"prompt":"text bob"}')).toEqual(second);
+  identity.settle(second);
+  expect(identity.begin('{"prompt":"text bob"}').request_key).not.toBe(second.request_key);
+  // An argument-less settle is a no-op rather than a wildcard.
+  const third = identity.begin('{"prompt":"text carol"}');
+  identity.settle();
+  expect(identity.begin('{"prompt":"text carol"}')).toEqual(third);
 });
 
 it('reuses one in-memory identity for the page while session storage is unavailable', async () => {

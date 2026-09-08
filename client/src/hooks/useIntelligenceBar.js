@@ -232,14 +232,15 @@ export function useIntelligenceBar({
 
     // The request key outlives a dropped response: the same request
     // resubmitted replays the saved task instead of running it again.
-    Object.assign(body, identityRef.current.begin(JSON.stringify(body)));
+    const identity = identityRef.current.begin(JSON.stringify(body));
+    Object.assign(body, identity);
     let answered = false;
     try {
       const data = await adminFetch('/admin/intelligence-bar/query', {
         method: 'POST',
         body: JSON.stringify(body),
       });
-      identityRef.current.settle();
+      identityRef.current.settle(identity);
       answered = true;
 
       if (isStale()) {
@@ -253,7 +254,7 @@ export function useIntelligenceBar({
     } catch (err) {
       // A definitive HTTP failure was answered; only a dropped response keeps the key.
       if (err?.status) {
-        identityRef.current.settle();
+        identityRef.current.settle(identity);
         answered = true;
       }
       if (isStale()) {

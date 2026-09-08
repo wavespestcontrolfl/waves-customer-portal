@@ -573,12 +573,13 @@ function GlobalCommandPalette({ user }, ref) {
       // The request key outlives a dropped response: the same request
       // resubmitted replays the saved task instead of running it again.
       let answered = false;
+      const identity = identityRef.current.begin(JSON.stringify(request));
       try {
         const data = await adminFetch("/admin/intelligence-bar/query", {
           method: "POST",
-          body: JSON.stringify({ ...request, ...identityRef.current.begin(JSON.stringify(request)) }),
+          body: JSON.stringify({ ...request, ...identity }),
         });
-        identityRef.current.settle();
+        identityRef.current.settle(identity);
         answered = true;
         // "New chat" (or a context reset) while the query was inflight —
         // drop the stale response instead of restoring the cleared thread.
@@ -615,7 +616,7 @@ function GlobalCommandPalette({ user }, ref) {
       } catch (err) {
         // A definitive HTTP failure was answered; only a dropped response keeps the key.
         if (err?.status) {
-          identityRef.current.settle();
+          identityRef.current.settle(identity);
           answered = true;
         }
         if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
