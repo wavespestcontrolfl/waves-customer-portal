@@ -14937,8 +14937,13 @@ export function CompletionPanel({
         })),
         // The existing completion field carries the visit area into the server
         // planner, protocol record and nutrient ledger. Product-specific actuals
-        // remain on each product row; no saved turf profile is changed.
-        lawnProtocolCompletion: lawnDefaultsEnabled
+        // remain on each product row; no saved turf profile is changed. A
+        // governed draft restored while the initial plan request failed still
+        // carries its visit area (`lawnAreaOverride`), and it is serialized
+        // regardless of whether defaults loaded — otherwise the server planner
+        // records the full saved lawn for an entered partial area (pre-push
+        // audit P1).
+        lawnProtocolCompletion: lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined)
           ? { treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea) } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {

@@ -552,3 +552,28 @@ it('edits and removals on a governed draft restored under an initial plan outage
   expect(totals()).toHaveLength(1);
   expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('1000');
 });
+
+it('a governed draft restored under an initial plan outage still submits its saved visit area', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '1000' } });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['3', '2']));
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).lawnAreaOverride).toBe('1000'));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  // The withdrawn rows ask for the actual area and amount; the visit area
+  // itself was restored from the draft.
+  screen.getAllByPlaceholderText('Sq ft').forEach((input) => fireEvent.change(input, { target: { value: '1000' } }));
+  fireEvent.change(totals()[0], { target: { value: '3' } });
+  fireEvent.change(totals()[1], { target: { value: '2' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  // Defaults never loaded, but the entered 1,000 sq ft is the visit area the
+  // server must plan and record against — not the full saved lawn.
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion).toEqual({ treatedSqft: 1000 });
+});
