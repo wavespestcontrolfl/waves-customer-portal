@@ -539,8 +539,15 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('email_messages').where({ id: messages[0].id }).update({ provider_retry_next_at: new Date(Date.now() - 1000) });
     await mockPg('email_messages').where({ id: messages[1].id }).update({ provider_retry_next_at: null });
     sendOne.mockClear();
+    // The inline reconciliation after the resend fails transiently: the
+    // message is sent and off the rail, so the delivery webhook must settle it.
+    jest.spyOn(Summary, 'reconcileSummaryEmailRecovery').mockRejectedValueOnce(new Error('Synthetic reconcile outage'));
     expect(await require('../services/transactional-email-provider-retry').runDueRetries()).toMatchObject({ claimed: 1, sent: 1 });
-    expect(require('../services/logger').warn.mock.calls.filter(([m]) => /summary recovery/.test(m))).toEqual([]);
+    expect(require('../services/logger').warn.mock.calls.filter(([m]) => /summary recovery/.test(m))).toHaveLength(1);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery' });
+    const resent = await mockPg('email_messages').where({ id: messages[0].id }).first();
+    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, resent);
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
       .toMatchObject({ status: 'sent', last_error: null });
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
@@ -618,6 +625,19 @@ postgres('visit summary recipient recovery', () => {
     expect(edited).toBe(true);
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: `completion_${channel}` }).first())
       .toMatchObject({ status: 'sent' });
+  });
+
+  test('a bounce that lands before the library returns keeps the aggregate out of delivered', async () => {
+    sendOne.mockImplementationOnce(async ({ customArgs }) => {
+      // The fast webhook: the row is terminal before sendTemplate returns sent.
+      await mockPg('email_messages').where({ id: customArgs.email_message_id })
+        .update({ status: 'bounced', bounced_at: new Date(), error_message: 'mailbox unavailable' });
+      return { messageId: randomUUID() };
+    });
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(sendOne).toHaveBeenCalledTimes(2);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery' });
   });
 
   test('the full coordinator closes the visit and replay preserves one email per recipient', async () => {
