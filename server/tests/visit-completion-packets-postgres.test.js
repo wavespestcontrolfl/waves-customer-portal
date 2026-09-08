@@ -452,7 +452,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     // The catalog key now resolves to no specialty lane: the same observation
     // would be refused at intake, but these records are committed.
     await mockPg('services').where({ id: fixture.catalogId }).update({ service_key: `fixture_${fixture.catalogId}` });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
     expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
     expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
