@@ -336,7 +336,17 @@ function normalizeReviewTiming(value) {
 }
 // What the chosen timing means, from the server preview (never a client
 // approximation of the smart window).
-function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
+function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
+  // An unpaid completion invoice holds the ask until payment lands (the
+  // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
+  // relative timing is re-derived from the payment time; an absolute one is
+  // kept if it is still ahead (codex #4140 r10 P2).
+  if (awaitsPayment && reviewTiming === "auto") return "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment.";
+  if (awaitsPayment && reviewTiming === "customer_requested") return "Review text waits for the invoice to be paid, then goes out at the next cadence tick the send window allows. The request is recorded.";
+  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
+  return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
+}
+function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
   if (reviewTiming === "auto") {
     return preview?.at ? `Review text goes out separately, about ${fmtReviewTime(preview.at)}.` : "Review text goes out separately at the smart send window.";
   }
@@ -359,6 +369,8 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
   return "";
 }
 const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
+// The server's MAX_REVIEW_DELAY_MINUTES (complete-scheduled-service.js).
+const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60000;
 // The first cadence tick after the 8 AM send window opens on `day` (an ET
 // date); null with cadences off or when the server did not name the ticks.
 function windowOpenTickISO(day, preview, opts) {
@@ -373,6 +385,10 @@ function customReviewTimingHint(reviewCustomAt, preview) {
   // browser's zone (codex #4140 r1).
   const iso = etDatetimeLocalToISO(reviewCustomAt);
   if (!iso) return "Choose a time for the review text.";
+  // The server clamps every review delay to 30 days after completion
+  // (MAX_REVIEW_DELAY_MINUTES): a later date would send ~30 days out, not
+  // on the chosen day. Say so instead of promising the date (codex #4140 r10 P2).
+  if (new Date(iso).getTime() > Date.now() + MAX_REVIEW_DELAY_MS) return `Review times can be at most 30 days after completion (by ${fmtReviewTime(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}) — choose an earlier time.`;
   // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
   // outside it is held to the next window (codex #4140 r3) — but only
   // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
@@ -11974,7 +11990,7 @@ export function CompletionPanel({
     (oneTimeRecapOnly ||
       (reviewTiming === "customer_requested" && reviewSendPreview?.bundlesImmediateAsk === true));
   const reviewTimingHintText = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms, awaitsPayment: willInvoice })
     : "";
   const smsPreview = [
     smsRecapPreview(customerRecap),
@@ -14795,6 +14811,11 @@ export function CompletionPanel({
         target.getTime() <= Date.now()
       ) {
         alert("Choose a future review request time.");
+        return;
+      }
+      // The server clamps to 30 days; a later time would silently move (codex #4140 r10 P2).
+      if (target.getTime() > Date.now() + MAX_REVIEW_DELAY_MS) {
+        alert("The review request time can be at most 30 days after completion.");
         return;
       }
     }
@@ -18108,6 +18129,7 @@ export function CompletionPanel({
                     <input
                       type="datetime-local"
                       value={reviewCustomAt}
+                      max={`${etDateString(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}T23:59`}
                       onChange={(e) => setReviewCustomAt(e.target.value)}
                       style={mInput}
                     />
