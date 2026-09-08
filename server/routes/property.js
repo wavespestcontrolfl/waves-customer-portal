@@ -7,11 +7,21 @@ const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const TermiteStations = require('../services/termite-stations');
 const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
+const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
 
 // Cap the JSON body for this route family. The global limit is generous;
 // property preferences never need more than a few KB.
 router.use(express.json({ limit: '64kb' }));
 router.use(authenticate);
+
+router.get('/watering-plan', async (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    if (!appPlanEnabled()) return res.json({ available: false });
+    const plan = await loadCustomerWateringPlan(req.customerId);
+    return res.json({ available: true, plan });
+  } catch (err) { next(err); }
+});
 
 const shortText = Joi.string().trim().allow('', null).max(200);
 const longText = Joi.string().trim().allow('', null).max(2000);

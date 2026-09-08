@@ -1,4 +1,4 @@
-import React, { Component, useEffect } from 'react';
+import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -183,6 +183,12 @@ function ReviewLinkRedirect() {
   return <Navigate to={`/rate/${token}${location.search}`} replace />;
 }
 
+function EstimateRoute() {
+  const { search } = useLocation();
+  const page = <EstimateViewPage />;
+  return new URLSearchParams(search).get('website') === '1' ? page : <WavesShell>{page}</WavesShell>;
+}
+
 // Legacy linked-estimate booking page: its estimate fetch expected JSON from
 // an endpoint that serves the estimate HTML page, so it never loaded (and
 // every hit inflated view_count). Nothing mints these links anymore — send
@@ -349,6 +355,7 @@ function lazyWithRetry(factory) {
 // admin platform plus the 500KB+ PortalPage before first paint. Same
 // lazyWithRetry + per-route Suspense treatment as the rest of the pages;
 // no rendered-output change.
+const StaffDocumentLibrary = lazyWithRetry(() => import('./components/staffDocuments/Library'));
 const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
 const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
 const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));
@@ -428,13 +435,34 @@ function RoutesErrorBoundary({ children }) {
 }
 
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading, error } = useAuth();
+  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty } = useAuth();
   const location = useLocation();
+  const targetProperty = new URLSearchParams(location.search).get('notificationProperty');
+  const targetPending = !!targetProperty && isAuthenticated && String(customer?.id) !== targetProperty;
+  const switchingTarget = useRef(null);
+  const [targetError, setTargetError] = useState(null);
+  useEffect(() => {
+    if (!targetPending || loading || switchingTarget.current === targetProperty) return;
+    if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
+    if (!properties.some((property) => String(property.id) === targetProperty)) {
+      setTargetError('This notification belongs to a property that is no longer available on your account.');
+      return;
+    }
+    switchingTarget.current = targetProperty;
+    // select-property verifies ownership again on the server. The portal
+    // stays unmounted until the authenticated customer matches the target.
+    void switchProperty(targetProperty).then((switched) => {
+      if (!switched) setTargetError('This property could not be opened. Try again.');
+    }).catch(() => setTargetError('This property could not be opened. Try again.'));
+  }, [targetPending, targetProperty, loading, properties, propertiesError, switchProperty]);
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
-  useGlassSurface(loading);
+  useGlassSurface(loading || targetPending);
 
-  if (loading) {
+  if (targetPending && targetError) {
+    return <CustomerFailureScreen title="Property unavailable" message={targetError} onRetry={() => window.location.assign('/')} />;
+  }
+  if (loading || targetPending) {
     return (
       <div style={{
         minHeight: '100vh',
@@ -523,7 +551,7 @@ export default function App() {
           {Object.entries(ESTIMATE_MARKETING_REDIRECTS).map(([slug, destination]) => (
             <Route key={slug} path={`/estimate/${slug}`} element={<ExternalRedirect to={destination} />} />
           ))}
-          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><EstimateViewPage /></WavesShell></Suspense>} />
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><EstimateRoute /></Suspense>} />
           {/* #EDF4FA fallbacks = glass-adjacent wash, not the warm legacy
               #FAF8F3 — these pages all mount the glass scene, so a warm
               fallback reads as the old theme flashing before glass. The
@@ -550,6 +578,7 @@ export default function App() {
                 posted the wrong request shape, so it could show “sent” after a 400. */}
             <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
+            <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
           </Route>

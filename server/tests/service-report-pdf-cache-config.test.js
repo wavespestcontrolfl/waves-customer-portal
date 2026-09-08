@@ -23,7 +23,7 @@ jest.mock('../services/service-report/report-data', () => ({
   // expected key.
   lawnAssessmentPdfSignature: async () => '',
   // Non-lawn fixture: nothing to pin, empty key component (#3172).
-  resolveCanonicalLawnRender: async () => ({ pin: null, signature: '' }),
+  resolveCanonicalLawnRender: jest.fn(async () => ({ pin: null, signature: '' })),
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: mockBuildServiceReportDynamicContext,
@@ -106,6 +106,17 @@ describe('service report PDF Pest Pressure cache config', () => {
     mockActivePestPressureConfig = { key: 'current', showOnCustomerReport: true };
   });
 
+  test.each(['fixture-assessment', 'none'])('the delivery PDF wrapper returns the browser history identity (pin=%s)', async (pin) => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    resolveCanonicalLawnRender.mockResolvedValueOnce({ pin, signature: '-la-fixture', lawnHistory: { identity: 'fixture-history', eligibleVisitIds: [] } });
+    const result = await getOrRenderServiceReportPdf('service-1', {
+      token: 'token-1', knex: makeKnex(makeService()), pinnedLawnAssessmentId: pin, propertyHistoryEnabled: true,
+    });
+    expect(result.pinnedLawnHistoryIdentity).toBe('fixture-history');
+    expect(mockRenderServiceReportV1Pdf.mock.calls[0][1].pinnedLawnHistoryIdentity).toBe(result.pinnedLawnHistoryIdentity);
+    expect(mockBuildReportV1Data.mock.calls[0][3].pinnedLawnHistoryIdentity).toBe(result.pinnedLawnHistoryIdentity);
+  });
+
   test('renderAndStoreServiceReportPdf keys storage with the same config used to build report data', async () => {
     const knex = makeKnex(makeService());
 
@@ -119,7 +130,7 @@ describe('service report PDF Pest Pressure cache config', () => {
       expect.objectContaining({ id: 'service-1' }),
       'token-1',
       knex,
-      { pestPressureConfig: mockActivePestPressureConfig, pinnedLawnAssessmentId: null },
+      { pestPressureConfig: mockActivePestPressureConfig, pinnedLawnAssessmentId: null, propertyHistoryEnabled: false },
     );
     expect(mockBuildServiceReportDynamicContext).toHaveBeenCalledWith(expect.objectContaining({
       recordId: 'service-1',
@@ -183,7 +194,7 @@ describe('service report PDF Pest Pressure cache config', () => {
       expect.objectContaining({ id: 'service-1' }),
       'token-1',
       knex,
-      { pestPressureConfig: mockActivePestPressureConfig, pinnedLawnAssessmentId: null },
+      { pestPressureConfig: mockActivePestPressureConfig, pinnedLawnAssessmentId: null, propertyHistoryEnabled: false },
     );
     expect(mockGetHealthyStoredReportPdf).not.toHaveBeenCalled();
     expect(result.rendered).toBe(true);
@@ -203,8 +214,8 @@ describe('service report PDF Pest Pressure cache config', () => {
     });
 
     expect(mockRenderServiceReportV1Pdf).toHaveBeenCalledTimes(2);
-    expect(mockBuildReportV1Data.mock.calls[0][3]).toEqual({ pestPressureConfig: firstConfig, pinnedLawnAssessmentId: null });
-    expect(mockBuildReportV1Data.mock.calls[1][3]).toEqual({ pestPressureConfig: secondConfig, pinnedLawnAssessmentId: null });
+    expect(mockBuildReportV1Data.mock.calls[0][3]).toEqual({ pestPressureConfig: firstConfig, pinnedLawnAssessmentId: null, propertyHistoryEnabled: false });
+    expect(mockBuildReportV1Data.mock.calls[1][3]).toEqual({ pestPressureConfig: secondConfig, pinnedLawnAssessmentId: null, propertyHistoryEnabled: false });
     expect(mockPutReportPdf).toHaveBeenCalledWith(
       'service-1',
       Buffer.from('%PDF-1.4'),

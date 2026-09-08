@@ -20,13 +20,13 @@ function serviceReportPublicBase(req) {
 // the attachment's content deterministic is to tell the page which assessment
 // to show. The data route validates the pin against what this token already
 // exposes and refuses anything else.
-function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null, pinnedWeekPlanSentAt } = {}) {
+function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity } = {}) {
   const base = serviceReportPublicBase(req).replace(/\/+$/, '');
   const params = [];
   if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
   // Week-plan identity rides inside the assessment pin's signature (an
   // unpinned plan = '' — the page then reads the live snapshot).
-  const planPin = pinnedWeekPlanSentAt === undefined ? '' : (pinnedWeekPlanSentAt === null ? 'none' : String(pinnedWeekPlanSentAt));
+  const planPin = pinnedWeekPlanAvailableAt === undefined ? '' : (pinnedWeekPlanAvailableAt === null ? 'none' : String(pinnedWeekPlanAvailableAt));
   if (pinnedLawnAssessmentId) {
     // The signature is what makes the pin trustworthy: the route refuses an
     // unsigned pin, because only this server may ask a report to render a
@@ -39,7 +39,7 @@ function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessment
     // render loses the pin's guarantee but keeps the post-render selection
     // re-check that shipped in #3146, and keeps mail flowing.
     const { signAssessmentPin } = require('./assessment-pin');
-    const signed = signAssessmentPin(token, pinnedLawnAssessmentId, { plan: planPin });
+    const signed = signAssessmentPin(token, pinnedLawnAssessmentId, { plan: planPin, history: pinnedLawnHistoryIdentity || '' });
     if (!signed) {
       // FAIL CLOSED. I previously degraded to an unpinned render here so a
       // missing secret could not stop mail — wrong trade. The post-render

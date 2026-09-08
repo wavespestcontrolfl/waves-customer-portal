@@ -125,8 +125,6 @@ export default function TreatmentPlanPanel({ service, onClose }) {
   const [plan, setPlan] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [equipmentSystemId, setEquipmentSystemId] = useState('');
-  const [equipmentOptions, setEquipmentOptions] = useState([]);
   const [selectedConditionalIds, setSelectedConditionalIds] = useState([]);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -135,11 +133,10 @@ export default function TreatmentPlanPanel({ service, onClose }) {
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
-    if (equipmentSystemId) params.set('equipmentSystemId', equipmentSystemId);
     if (selectedConditionalIds.length) params.set('selectedConditionalProductIds', selectedConditionalIds.join(','));
     const qs = params.toString();
     return qs ? `?${qs}` : '';
-  }, [equipmentSystemId, selectedConditionalIds]);
+  }, [selectedConditionalIds]);
 
   useEffect(() => {
     if (!canLoad) return;
@@ -149,13 +146,7 @@ export default function TreatmentPlanPanel({ service, onClose }) {
     adminFetch(`/admin/treatment-plans/${serviceId}${query}`)
       .then((data) => {
         if (cancelled) return;
-        const nextPlan = data.plan || null;
-        setPlan(nextPlan);
-        const options = nextPlan?.equipmentCalibration?.options || [];
-        if (options.length) setEquipmentOptions(options);
-        if (!equipmentSystemId && options.length === 1 && options[0].equipmentSystemId) {
-          setEquipmentSystemId(options[0].equipmentSystemId);
-        }
+        setPlan(data.plan || null);
       })
       .catch((err) => {
         if (!cancelled) setError(err.message || 'Failed to load treatment plan');
@@ -164,9 +155,8 @@ export default function TreatmentPlanPanel({ service, onClose }) {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [canLoad, serviceId, query, equipmentSystemId, refreshKey]);
+  }, [canLoad, serviceId, query, refreshKey]);
 
-  const options = equipmentOptions.length ? equipmentOptions : (plan?.equipmentCalibration?.options || []);
   const blocks = plan?.propertyGate?.blocks || [];
   const warnings = plan?.propertyGate?.warnings || [];
   const base = plan?.protocol?.base || [];
@@ -262,25 +252,8 @@ export default function TreatmentPlanPanel({ service, onClose }) {
             </PlanCard>
 
             <PlanCard icon={Wrench} title="Equipment Calibration">
-              {options.length > 0 && (
-                <div className="mb-4">
-                  <label className="u-label text-ink-secondary block mb-1">Equipment</label>
-                  <select
-                    value={equipmentSystemId}
-                    onChange={(e) => setEquipmentSystemId(e.target.value)}
-                    className="h-11 md:h-9 w-full rounded-sm bg-white border-hairline border-zinc-300 px-3 text-14 md:text-13 u-focus-ring"
-                  >
-                    <option value="">Select equipment system</option>
-                    {options.map((opt) => (
-                      <option key={opt.equipmentSystemId} value={opt.equipmentSystemId}>
-                        {opt.systemName} · {fmtNumber(opt.carrierGalPer1000, ' gal/1K')}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <Field label="Selected" value={plan.equipmentCalibration?.selected?.system_name} />
+                <Field label="Rig" value={plan.equipmentCalibration?.selected?.system_name || (plan.mixCalculator?.carrierSource === 'protocol_default' ? 'Protocol default carrier' : null)} />
                 <Field label="Carrier" value={fmtNumber(plan.mixCalculator?.carrierGalPer1000, ' gal/1K')} />
                 <Field label="Tank" value={fmtNumber(plan.mixCalculator?.tankCapacityGal, ' gal')} />
                 <Field label="Lawn Area" value={fmtNumber(plan.mixCalculator?.lawnSqft, ' sq ft')} />

@@ -34,6 +34,7 @@
  * PII: never log message bodies or full phone numbers from this module.
  */
 const db = require('../models/db');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 
@@ -143,7 +144,9 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     const threadLast10 = String(inbound.from_phone || '').replace(/\D/g, '').slice(-10) || null;
     const toPhone = inbound.from_phone || null; // the customer
     if (!toPhone) return null;
-    const fromNumber = inbound.to_phone || null; // the Waves line they texted
+    // The Waves line they texted — unless it is a per-tech line: automated
+    // texts never originate from one (#4053); null → the location default.
+    const fromNumber = inbound.to_phone && !TWILIO_NUMBERS.isTechLine(inbound.to_phone) ? inbound.to_phone : null;
 
     await suggest.lockSuggestThread(trx, threadLast10 || customerId);
 

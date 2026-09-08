@@ -52,11 +52,20 @@ jest.mock('../models/db', () => {
       orWhere() { return b; },
       whereIn() { return b; },
       whereNotIn(col, vals) { if (col === 'status') b._statusNotIn = vals; return b; },
+      // The series lock read groups whereNull('status').orWhereNotIn(...) (live = NULL or non-terminal).
+      orWhereNotIn(col, vals) { if (col === 'status') b._statusNotIn = vals; return b; },
       whereNot() { return b; },
-      whereNull() { return b; },
+      whereNull(col) { (b._nullCols ||= []).push(String(col).replace(/^scheduled_services\./, '')); return b; },
       whereNotNull() { return b; },
       leftJoin() { return b; },
-      whereRaw() { return b; },
+      whereRaw(sql, bindings) {
+        // The manual prepaid writers' null-safe annual-method predicate
+        // (prepaid-series.js withoutAnnualCoverage); other raw SQL is opaque.
+        const distinct = /^(\w+) IS DISTINCT FROM \?$/.exec(String(sql));
+        if (distinct) (b._distinctFrom ||= []).push([distinct[1], bindings?.[0]]);
+        return b;
+      },
+      whereNotExists() { return b; },
       orderBy() { return b; },
       forUpdate() { b._locked = true; return b; },
       modify(cb) { cb(b); return b; },
@@ -69,9 +78,12 @@ jest.mock('../models/db', () => {
       async columnInfo() { return { recurring_ongoing: {} }; },
       update(u) {
         // Honour the id + status predicates so a terminal row matches 0 rows
-        // (the single-visit prepaid guard) — other updates match everything.
+        // (the single-visit prepaid guard) and the annual-coverage predicates
+        // (whereNull + IS DISTINCT FROM) — other updates match everything.
         const match = (r) => Object.entries(b._where).every(([k, v]) => r[k] === v)
-          && !(b._statusNotIn && b._statusNotIn.includes(r.status));
+          && !(b._statusNotIn && b._statusNotIn.includes(r.status))
+          && (b._nullCols || []).every((col) => r[col] == null)
+          && (b._distinctFrom || []).every(([col, val]) => r[col] !== val);
         const rows = table === 'scheduled_services' && b._where.id
           ? state.rows.filter(match) : [{ id: null }];
         if (rows.length) state.writes.push({ table, op: 'update', u });
@@ -80,7 +92,11 @@ jest.mock('../models/db', () => {
           then: (res, rej) => Promise.resolve(rows.length).then(res, rej),
         };
       },
-      async insert(r) { state.writes.push({ table, op: 'insert', r }); return [1]; },
+      insert(r) {
+        state.writes.push({ table, op: 'insert', r });
+        return { returning: async () => [{ id: 'allocation-audit' }],
+          then: (resolve, reject) => Promise.resolve([1]).then(resolve, reject) };
+      },
       // Awaiting the builder (the target select) resolves every scheduled
       // service — the harness owns the scope filtering by what it seeds.
       then(resolve, reject) {
@@ -253,6 +269,56 @@ test('POST /admin/schedule/:id/prepaid still stamps a live visit', async () => {
   });
   expect(res.status).toBe(200);
   expect(db.__state.writes.some((w) => w.op === 'update' && Number(w.u.prepaid_amount) === 95)).toBe(true);
+});
+
+test('POST /admin/schedule/:id/prepaid refuses an annual-covered visit with 409 annual_prepay_coverage (Codex #4030 r7 P1)', async () => {
+  seed({ prepaidChild: { annual_prepay_term_id: null, prepaid_method: 'annual_prepay_invoice', prepaid_amount: '100.00' } });
+  const res = await fetch(`${baseUrl}/api/admin/schedule/child-2/prepaid`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: 95, method: 'cash' }),
+  });
+  const body = await res.json();
+  expect(res.status).toBe(409);
+  expect(body.code).toBe('annual_prepay_coverage');
+  expect(db.__state.writes.filter((w) => w.op === 'update')).toHaveLength(0);
+});
+
+test('POST /admin/schedule/bulk-action mark_prepaid refuses an annual-linked visit inside the UPDATE and stamps the rest', async () => {
+  seed({ prepaidChild: { annual_prepay_term_id: 'term-1', prepaid_amount: null } });
+  const res = await fetch(`${baseUrl}/api/admin/schedule/bulk-action`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'mark_prepaid', serviceIds: ['child-1', 'child-2'], payload: { totalAmount: 95, method: 'check' } }),
+  });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.updated).toEqual(['child-1']);
+  expect(body.failed).toEqual([{ id: 'child-2', reason: expect.stringMatching(/annual prepay coverage/) }]);
+  const stamps = db.__state.writes.filter((w) => w.op === 'update' && w.u.prepaid_amount != null);
+  expect(stamps).toHaveLength(1);
+  expect(stamps[0].u).toMatchObject({ prepaid_amount: 95, prepaid_method: 'check' });
+});
+
+test.each([true, [100]])('series prepayment rejects malformed input %p before coercion', async (amount) => {
+  seed();
+  const res = await fetch(`${baseUrl}/api/admin/schedule/parent/prepaid`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount, method: 'cash', applyToSeries: true }),
+  });
+  expect(res.status).toBe(400);
+  expect(db.__state.writes).toEqual([]);
+});
+
+test('series prepayment preserves numeric-string inputs and exact-cent allocations', async () => {
+  seed();
+  const res = await fetch(`${baseUrl}/api/admin/schedule/parent/prepaid`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: '100.00', method: 'cash', applyToSeries: true }),
+  });
+  expect(res.status).toBe(200);
+  const result = await res.json();
+  expect(result.updatedRows.map((row) => row.prepaid_amount)).toEqual([33.33, 33.33, 33.34]);
+  const audits = db.__state.writes.filter((write) => write.table === 'audit_log');
+  expect(audits.map((write) => write.r.metadata.prepaid_amount)).toEqual([33.33, 33.33, 33.34]);
 });
 
 describe('term coverage is decided by the canonical reader, not a status list (pre-push P0 on #3878)', () => {

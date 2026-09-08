@@ -770,6 +770,7 @@ function GlobalCommandPalette({ user }, ref) {
             {" "}
             <input
               ref={inputRef}
+              aria-label="Ask Waves AI"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -964,7 +965,7 @@ function GlobalCommandPalette({ user }, ref) {
           </div>
         )}
         {loading && (
-          <div style={{ padding: "14px 18px" }}>
+          <div style={{ padding: "14px 18px" }} role="status" aria-live="polite" aria-label="Thinking">
             {[90, 70, 85, 55].map((w, i) => (
               <div
                 key={i}
@@ -982,7 +983,7 @@ function GlobalCommandPalette({ user }, ref) {
           </div>
         )}
         {response && !loading && !showThreads && (
-          <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }}>
+          <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }} aria-live="polite">
             {" "}
             <ToolActivityList items={toolActivity} variant="dark" />
             <div
@@ -1263,6 +1264,7 @@ function MobileSheet({
             {" "}
             <input
               ref={inputRef}
+              aria-label="Ask Waves AI"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}

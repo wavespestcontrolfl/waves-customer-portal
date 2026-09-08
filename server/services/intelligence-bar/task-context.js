@@ -24,13 +24,32 @@ const normalizeName = value => String(value || '').toLowerCase().replace(/[’']
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
 // Overlapping selectors matter: "update customer Jhon" must still inspect
 // "customer Jhon" after seeing "update customer".
-const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update';
-const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named|both|these customers|all of these`;
+const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update|set|edit|mark|make|rename|relabel|forward|resend';
+// "send the response to Jhon" / "forward the estimate to Jhon": the thing being
+// sent introduces its recipient just as the verb does.
+const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|(?:reply|response|message|text|email|reminder|invoice|estimate|quote|note|details|receipt|link)\\s+(?:to|for)|for|customer|named`;
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
-const NON_PERSON_NAMES = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
+const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'status', 'billing', 'type', 'plan', 'frequency', 'autopay', 'balance', 'schedule', 'tags', 'tag', 'preferences', 'details',
+  // every update_customer field (tools.js) and the contractions a request may open with
+  'first', 'last', 'city', 'state', 'zip', 'waveguard', 'tier', 'pipeline', 'stage', 'source', 'monthly', 'rate', 'mode', 'membership',
+  'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using',
+  'account', 'accounts', 'profile', 'record', 'records',
+  // record nouns that follow an action verb name a thing, never a person
+  'appointment', 'appointments', 'property', 'properties', 'estimate', 'estimates', 'invoice', 'invoices', 'product', 'products',
+  'call', 'calls', 'visit', 'visits', 'service', 'services', 'reservation', 'treatment', 'quote', 'reminder']);
+// A set quantifier ("both A and B", "these customers …", "all of these …") is
+// never a target: one target per request, so the request asks to clarify.
+// Owner decision 2026-09-08: fail closed rather than parse cohorts.
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those) customers|all(?: of)?(?: the| these| those)? customers|all of (?:these|those)|(?:each|every)(?: one)?(?: of)?(?: the| these| those)? customers?)\b/;
+// An independently requested operation starts at "and/then <action>".
+const ACTION_CLAUSE_SPLIT = new RegExp(`\\b(?:and|then)\\s+(?=(?:${PERSON_ACTIONS}|revise|add|save|assign|draft|write|post|submit)\\b)`, 'i');
+const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
+// An explicit email or phone recipient is a contact, never a name or a quantifier.
+const withoutContacts = clause => clause.replace(CONTACT_LITERAL_RE, ' ');
+const setQuantified = prompt => SET_QUANTIFIER_RE.test(normalizeName(withoutContacts(targetClause(prompt))));
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
 const CUSTOMER_LOOKUP_LIMIT = 10;
 
@@ -54,7 +73,7 @@ function targetClause(prompt, retainRecordConstraints = false) {
 }
 
 function explicitSingleNames(prompt) {
-  const clause = targetClause(prompt);
+  const clause = withoutContacts(targetClause(prompt));
   const normalized = normalizeName(clause);
   return [...new Set([
     ...[...normalized.matchAll(PERSON_REFERENCE)]
@@ -105,13 +124,11 @@ function namesTargetCustomer(clause, customer) {
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
-  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE})(?:\\s+both)?$`).test(before)
-    || /\b(?:both|these customers|all of these)$/.test(before)
-    || (/\b(?:both|these customers|all of these)\b/.test(clause) && /\band$/.test(before));
+  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE})$`).test(before);
 }
 
 async function namedCustomers(prompt) {
-  const normalized = normalizeName(targetClause(prompt));
+  const normalized = normalizeName(withoutContacts(targetClause(prompt)));
   const words = normalized.split(' ').slice(0, 300);
   const phrases = [];
   for (let length = 2; length <= 5; length++) {
@@ -126,13 +143,23 @@ async function namedCustomers(prompt) {
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
     .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));
-  if (fullNames.length || !singleNames.length || matches.length === CUSTOMER_LOOKUP_LIMIT) {
-    return { matches: fullNames, complete: matches.length < CUSTOMER_LOOKUP_LIMIT };
-  }
-  const singles = await db('customers').whereNull('deleted_at').where(function () {
+  const capped = matches.length === CUSTOMER_LOOKUP_LIMIT;
+  const singleLookup = !fullNames.length && singleNames.length && !capped;
+  const singles = singleLookup ? await db('customers').whereNull('deleted_at').where(function () {
     this.whereIn(normalizedStoredName('first_name'), singleNames).orWhereIn(normalizedStoredName('last_name'), singleNames);
-  }).limit(CUSTOMER_LOOKUP_LIMIT).select(columns);
-  return { matches: singles, complete: singles.length < CUSTOMER_LOOKUP_LIMIT };
+  }).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
+  const accepted = singleLookup ? singles : fullNames;
+  // Name evidence that only partly resolved — a customer accepted from one
+  // action clause while another clause's person reference matches nobody, as
+  // in "update Jhon Smith and text Alice Owner" — is never a target and no
+  // selection survives it. A resolved clause may still carry other nouns, and
+  // a request that resolved nobody keeps the plain unresolved-name handling.
+  const acceptedTokens = new Set(accepted.flatMap(customer => normalizeName(`${customer.first_name || ''} ${customer.last_name || ''}`).split(' ')));
+  const partial = accepted.length > 0 && normalized.split(ACTION_CLAUSE_SPLIT).some(clause => {
+    const references = explicitSingleNames(clause);
+    return references.length > 0 && !references.some(token => acceptedTokens.has(token));
+  });
+  return { matches: accepted, complete: !capped && singles.length < CUSTOMER_LOOKUP_LIMIT, partial };
 }
 
 // Callers supply only the fixed customer/lead/estimate column expressions below.
@@ -195,9 +222,10 @@ function customerIds(records) {
   return [...new Set(records.map(r => r.kind === 'customer_id' ? r.id : r.customer_id).filter(Boolean))];
 }
 
+// Errors keep the page shape so the resolver never branches on them twice.
 async function loadPage(pageData, prompt) {
   let ids = pageIds(pageData);
-  if (ids.error) return ids;
+  if (ids.error) return { ids: {}, records: {}, ...ids };
   const referencedKinds = new Set([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => `${match[1].toLowerCase() === 'account' ? 'customer' : match[1].toLowerCase()}_id`));
   // A directly referenced available hint takes precedence over unrelated page
@@ -206,37 +234,19 @@ async function loadPage(pageData, prompt) {
     ids = Object.fromEntries(Object.entries(ids).filter(([kind]) => referencedKinds.has(kind)));
   }
   const resolved = await readReferences(ids);
-  if (resolved.error) return resolved;
+  if (resolved.error) return { ids: {}, records: {}, ...resolved };
   const customers = customerIds(resolved.records);
-  if (customers.length > 1) return { error: 'The viewed records belong to different customers', code: 'context_mismatch' };
+  if (customers.length > 1) return { ids: {}, records: {}, error: 'The viewed records belong to different customers', code: 'context_mismatch' };
   const page = { ids, records: Object.fromEntries(resolved.records.map(r => [r.kind, r])) };
   if (!customers.length) return page;
   const customer = resolved.parents.find(parent => parent.id === customers[0]);
-  if (!customer) return { error: 'The viewed customer is unavailable', code: 'record_unavailable' };
+  if (!customer) return { ids: {}, records: {}, error: 'The viewed customer is unavailable', code: 'record_unavailable' };
   page.customer = customerTarget(customer, 'viewed_record');
   return page;
 }
 
-function candidateSelection(candidates, prompt, viewedCustomer, complete) {
-  if (!complete) return { target: null, targets: [], ambiguous: true };
-  const labels = candidates.map(c => normalizeName(c.label));
-  const requestedSet = targetClause(prompt).split(/\b(?:both|these customers|all of these)\s+/i)[1];
-  if (requestedSet) {
-    const members = requestedSet.split(/\s+and\s+|\s*,\s*/i).filter(Boolean)
-      .map(member => normalizeName(member).replace(/^(?:(?:(?:the\s+)?customer|named)\s+)+/, ''));
-    const namesMembers = members.some(member => labels.some(label => member === label || member.startsWith(`${label} `)));
-    // A valid subset cannot stand in for the complete requested cohort.
-    const resolved = members.map((member, index) => labels.filter(label => member === label
-      || (index === members.length - 1 && member.startsWith(`${label} `)
-        && AFTER_SINGLE_NAME.has(member.slice(label.length + 1).split(' ')[0]))));
-    if (namesMembers && (members.length < 2 || resolved.some(matches => matches.length !== 1))) {
-      return { target: null, targets: [], ambiguous: true };
-    }
-  }
-  const namedSet = candidates.length > 1 && new Set(labels).size === candidates.length
-    && /\b(?:both|these customers|all of these)\b/i.test(prompt)
-    && labels.every(label => normalizeName(prompt).includes(label));
-  if (namedSet) return { target: null, targets: candidates, ambiguous: false };
+function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort) {
+  if (!complete || cohort) return { target: null, targets: [], ambiguous: true };
   if (candidates.length === 1) return { target: candidates[0], targets: candidates, ambiguous: false };
   if (candidates.length > 1) return { target: null, targets: [], ambiguous: true };
   const pageReference = PAGE_REFERENCE_RE.test(targetClause(prompt));
@@ -245,28 +255,34 @@ function candidateSelection(candidates, prompt, viewedCustomer, complete) {
 }
 
 async function resolve({ prompt, pageData, selectedTarget }) {
-  const [viewed, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
+  // Object(null) is {} — an absent or null selection reads as no customer id.
+  const selectedId = Object(selectedTarget).customer_id;
+  const [page, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
   const named = namedResult.matches;
   // A stale page hint cannot block an unrelated task or an explicitly named
   // customer. A request relying on the unavailable viewed record still stops.
-  if (viewed.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length && !selectedTarget?.customer_id) return viewed;
-  const page = viewed.error ? { ids: {}, records: {} } : viewed;
+  if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete);
-  if (selectedTarget?.customer_id) {
-    const selected = await customerById(selectedTarget.customer_id);
-    if (!selected || ((namesRequested(prompt) || named.length || !namedResult.complete) && !named.some(c => c.id === selected.id))
-      || (selection.ambiguous && /\b(?:both|these customers|all of these)\b/i.test(targetClause(prompt)))) {
+  // A set quantifier or partly resolved name evidence never yields a target.
+  const cohort = setQuantified(prompt) || namedResult.partial;
+  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort);
+  if (selectedId) {
+    const selected = await customerById(selectedId);
+    // A selection never overrides current-request evidence: an explicit name
+    // that matched nothing, a capped lookup, or a set quantifier all refuse
+    // it. Duplicate-name ambiguity is the one case a selection resolves.
+    if (!selected || !namedResult.complete || cohort
+      || ((namesRequested(prompt) || named.length) && !named.some(c => c.id === selected.id))) {
       return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch' };
     }
     const target = customerTarget(selected, 'operator_selection');
-    if (selection.targets.length < 2) selection = { target, targets: [target], ambiguous: false };
+    selection = { target, targets: [target], ambiguous: false };
   }
   // Only the leading recipient expression establishes a raw contact. A later
   // "text <number>" inside a note or an unresolved person's message is data.
-  const recipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/i)?.[1] || '';
+  const recipient = [...targetClause(prompt).matchAll(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/gi)].map(match => match[1]).join('');
   const reviewClause = targetClause(prompt);
-  const explicitReview = reviewClause.match(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i)?.[1];
+  const [explicitReview] = [...reviewClause.matchAll(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)].map(match => match[1].toLowerCase());
   const reviewReference = explicitReview || (!namesRequested(prompt)
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
   const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
@@ -277,17 +293,16 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   const explicitRecords = {};
   // A content noun ends its own action clause. An independently requested
   // operation after "and/then <action>" retains its explicit target IDs.
-  const explicitRecordClause = targetClause(prompt, true)
-    .split(new RegExp(`\\b(?:and|then)\\s+(?=(?:${PERSON_ACTIONS}|revise|change|set|rename|relabel|add|save|assign|draft|write|post|submit)\\b)`, 'i'))
+  const explicitRecordClause = targetClause(prompt, true).split(ACTION_CLAUSE_SPLIT)
     .map(clause => clause.split(/\b(?:notes?|messages?|instructions|comments)\b/i)[0]).join(' and ');
   for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
     (explicitRecords[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());
   }
   for (const [kind, ids] of Object.entries(explicitRecords)) {
-    requestedRecords[kind] = Object.hasOwn(requestedRecords, kind) ? ids.filter(id => id === requestedRecords[kind]) : ids;
+    requestedRecords[kind] = ids.filter(id => !Object.hasOwn(requestedRecords, kind) || id === requestedRecords[kind]);
   }
-  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
-    reviewReference: reviewReference?.toLowerCase() || null,
+  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)), namesRequested: namesRequested(prompt),
+    reviewReference: reviewReference || null,
     bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
       .map(match => normalizeEmail(match[1])),
@@ -344,6 +359,9 @@ function bulkLeadSelection(toolName, records, params) {
 }
 
 async function validateRecordTarget(params, context = {}, { toolName } = {}) {
+  // A refused cohort or unresolved name stops here too; explicit record IDs
+  // inside "both appointment A and appointment B" do not reopen it.
+  if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
   const policy = require('./action-policy.json')[toolName];
   if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
     return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };
@@ -386,6 +404,10 @@ async function validateRecordTarget(params, context = {}, { toolName } = {}) {
 // the immutable ID to existing readers. Broad searches without a selector stay
 // broad. No fuzzy result or model-selected alternate contact becomes authority.
 async function prepareReadInput(params, context, { toolName, schema }) {
+  // A refused cohort or an unresolved name never widens into an unscoped read.
+  if (context.ambiguous || (schema.properties?.customer_id && !context.targets?.length && context.namesRequested)) {
+    return { error: 'Name one customer for this record lookup', code: 'target_clarification_required' };
+  }
   const input = { ...params };
   if (schema.properties?.customer_id && (params.customer_name || params.phone)) {
     const permitted = new Set(context.targets.map(target => target.customer_id));

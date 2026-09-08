@@ -524,6 +524,7 @@ function RowActionsMenu({ items, label = "More actions" }) {
             <div
               onClick={(e) => e.stopPropagation()}
               className="relative bg-white border-hairline border-zinc-200 rounded-t-md sm:rounded-md w-full sm:w-72 max-w-md shadow-lg overflow-hidden"
+              style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
             >
               {" "}
               <div className="px-4 py-3 border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary font-medium flex items-center justify-between">

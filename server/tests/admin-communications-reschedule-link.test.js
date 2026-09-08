@@ -400,8 +400,8 @@ describe('POST /admin/communications/reschedule-link', () => {
       const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
-        url: GOOD_LINK.url,
-        line: GOOD_LINK.line,
+        url: 'wvs.example/r/abc123',
+        line: 'Need a different time? Reschedule online: wvs.example/r/abc123\n\n',
         firstName: null,
         appointment: {
           id: 'svc-1',
@@ -415,10 +415,7 @@ describe('POST /admin/communications/reschedule-link', () => {
     });
   });
 
-  // Owner directive 2026-08-01 (sms-link-policy.js): owned portal hosts go
-  // bare in SMS. Composer inserts never pass through getTemplate's strip, so
-  // the endpoint strips before responding. The 200 test above pins the other
-  // side of the rule — a third-party host (wvs.example) keeps its scheme.
+  // Composer inserts use the same scheme-free display for every SMS host.
   test('portal-host links come back scheme-less for the SMS composer', async () => {
     const customers = soloCustomer();
     const services = makeServicesBuilder([[{

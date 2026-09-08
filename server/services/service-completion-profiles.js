@@ -1,5 +1,6 @@
 const { counterpartServiceName } = require('../config/service-name-aliases');
 const db = require('../models/db');
+const { savepointRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
 const { isTypedFindingsType } = require('./service-report/activity-indicators');
 
@@ -201,7 +202,7 @@ async function tableAvailable(knex, { strict = false } = {}) {
   // companion list) must SEE a transient failure — swallowed-to-false it
   // reads as "no companions" and overwrites cached guidance.
   try {
-    return await knex.schema.hasTable('service_completion_profiles');
+    return await savepointRead(knex, (k) => k.schema.hasTable('service_completion_profiles'));
   } catch (err) {
     if (strict) throw err;
     return false;
@@ -376,9 +377,9 @@ async function reloadIdentityEvidence(scheduledService, knex, { strict = false }
   const needsRecurring = scheduledService.is_recurring === undefined;
   if (!scheduledService.id || (!needsSnapshot && !needsRecurring)) return scheduledService;
   try {
-    const reloaded = await knex('scheduled_services')
+    const reloaded = await savepointRead(knex, (k) => k('scheduled_services')
       .where({ id: scheduledService.id })
-      .first('service_key_snapshot', 'is_recurring');
+      .first('service_key_snapshot', 'is_recurring'));
     return reloaded ? { ...scheduledService, ...reloaded } : scheduledService;
   } catch (err) {
     // strict callers (pre-visit brief) hash the resolved companions —
@@ -469,9 +470,9 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
     // resolving an identity that was never actually unique. The predicate is an
     // equality match on one column of a ~100-row catalog, so the full set is
     // both cheap and the only correct basis for a uniqueness decision.
-    shortNameMatches = await knex('services')
+    shortNameMatches = await savepointRead(knex, (k) => k('services')
       .whereRaw('lower(short_name) = lower(?)', [serviceType])
-      .select('service_key', 'name', 'category', 'billing_type');
+      .select('service_key', 'name', 'category', 'billing_type'));
   } catch (err) {
     // strict callers must see the outage (see reloadIdentityEvidence) —
     // an empty collision set here resolves the default profile.

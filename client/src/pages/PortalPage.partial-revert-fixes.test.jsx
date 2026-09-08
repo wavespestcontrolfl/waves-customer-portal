@@ -1,3 +1,4 @@
+import { etDateString, addETDays } from '../lib/timezone';
 // @vitest-environment jsdom
 // Pins the partial-revert interaction fixes (codex r3 on PR #2818):
 // 1. PropertyTab flushes debounced edits when it unmounts (tab navigation),
@@ -7,12 +8,13 @@
 //    server change marks file-less (downloadUrl: null / shareable: false).
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, act } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
   default: {
     getPropertyPreferences: vi.fn(),
+    getWateringPlan: vi.fn(),
     updatePropertyPreferences: vi.fn(),
     getServicePreferences: vi.fn(),
     updateServicePreferences: vi.fn(),
@@ -34,6 +36,7 @@ const customer = {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
+  api.getWateringPlan.mockResolvedValue({ available: false });
   api.getPropertyPreferences.mockResolvedValue({ preferences: {} });
   api.getServicePreferences.mockResolvedValue({ preferences: {} });
   api.updatePropertyPreferences.mockResolvedValue({ preferences: {} });
@@ -136,6 +139,34 @@ describe('PropertyTab pending-edit flush', () => {
     expect(api.updatePropertyPreferences).toHaveBeenCalledWith(
       expect.objectContaining({ sideGateAccess: 'Gate stays open' }),
     );
+  });
+});
+
+describe('watering plan invalidation during irrigation autosave', () => {
+  it('an older save cannot reveal the plan while newer irrigation edits remain unsaved', async () => {
+    api.getPropertyPreferences.mockResolvedValue({ preferences: { irrigationRunMinutes: 20, irrigationSystem: true }, hasLawnCare: true });
+    api.getWateringPlan.mockResolvedValue({ available: true, plan: { validThrough: etDateString(addETDays(new Date(), 6)), title: 'Saved plan', summary: 'Previously sent plan', instruction: 'Run 30 minutes', guides: [] } });
+    let resolveFirst;
+    let resolveSecond;
+    api.updatePropertyPreferences.mockImplementationOnce(() => new Promise((done) => { resolveFirst = done; }))
+      .mockImplementationOnce(() => new Promise((done) => { resolveSecond = done; }));
+    render(<PropertyTab customer={customer} />);
+    expect(await screen.findByText('Run 30 minutes')).toBeInTheDocument();
+    const input = screen.getByRole('spinbutton', { name: /Total minutes each zone runs/ });
+    fireEvent.change(input, { target: { value: '25' } });
+    expect(screen.queryByText('Run 30 minutes')).not.toBeInTheDocument();
+    fireEvent(window, new CustomEvent('waves:property-switching', { detail: { waiters: [] } }));
+    await waitFor(() => expect(resolveFirst).toBeTypeOf('function'));
+    fireEvent.change(input, { target: { value: '40' } });
+    fireEvent(window, new CustomEvent('waves:property-switching', { detail: { waiters: [] } }));
+    await act(async () => { resolveFirst({ preferences: { irrigationRunMinutes: 25 } }); });
+    await waitFor(() => expect(resolveSecond).toBeTypeOf('function'));
+    expect(screen.queryByText('Run 30 minutes')).not.toBeInTheDocument();
+    expect(api.getWateringPlan).toHaveBeenCalledTimes(1);
+    api.getWateringPlan.mockResolvedValue({ available: true, plan: null });
+    await act(async () => { resolveSecond({ preferences: { irrigationRunMinutes: 40 } }); });
+    expect(await screen.findByText(/current plan isn't available/)).toBeInTheDocument();
+    expect(api.getWateringPlan).toHaveBeenCalledTimes(2);
   });
 });
 
