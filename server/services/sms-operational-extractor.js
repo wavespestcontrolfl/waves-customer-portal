@@ -76,7 +76,7 @@ function explicitContactPreference(quote) {
 
 // Questions in SMS frequently omit punctuation. Check every clause, not only
 // the start of the message, and normalize compatibility question marks.
-const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however|please)[, ]+)?(?:(?:are|is|am|was|were|do(?!\s+not\b)|does|did|can|could|would|should|will|won't|have|has|had|may|might|shall|what|where|when|why|who|whose|which|how)\b|ok(?:ay)? (?:to|if)\b|mind if\b)|\b(?:any chance|(?:is|would) it (?:ok|okay|possible|alright)|(?:could|can|would) you)\b/i;
+const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however|please)[, ]+)?(?:(?:are|is|am|was|were|do(?!\s+not\b)|does|did|can|could|would|should|will|won't|have|has|had|may|might|shall|what|where|when|why|who|whose|which|how)\b|ok(?:ay)? (?:to|if)\b|mind if\b|(?:want|need|like) (?:me|us) to\b)|\b(?:any chance|(?:is|would) it (?:ok|okay|possible|alright)|(?:could|can|would) you)\b/i;
 // Indirect questions do not invert the subject and auxiliary. Keep the
 // inquiry verb and its embedded question in the same clause; any such
 // clause makes a whole-message fact unsuitable for automatic persistence.
@@ -172,9 +172,10 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     // a clock stated in the source. Ambiguous association needs review;
     // only a grounded due_text can establish an automatic deadline.
     // A bare hour after a clock preposition ("tomorrow at 9", "September 10
-    // at 3", "before five") is stated timing the parser cannot resolve
-    // without AM/PM, so it must reach review rather than stay undated.
-    const clockStated = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|o['’]?clock|noon|midnight)(?=\s|[,.!?;]|$)/i.test(body)
+    // at 3", "before five") or SMS shorthand ("3p", "9a") is stated timing
+    // the parser cannot resolve, so it must reach review rather than stay
+    // undated.
+    const clockStated = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|\d{1,2}[ap]|o['’]?clock|noon|midnight)(?=\s|[,.!?;]|$)/i.test(body)
       || /\b(?:at|by|around|before|after|until|till)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?=\s|[,.!?;]|$)/i.test(body);
     const resolved = timingGrounded && clockStated ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
     const proposed = item.due_at ? parseDueAt(item.due_at) : resolved;

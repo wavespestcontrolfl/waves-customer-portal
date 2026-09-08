@@ -77,7 +77,8 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts).toEqual([]);
   });
 
-  test.each(['Should I call you tomorrow at 9am?', 'Should I call you tomorrow at 9am'])('an outbound question cannot be recorded as a promise: %s', (body) => {
+  test.each(['Should I call you tomorrow at 9am?', 'Should I call you tomorrow at 9am', 'Want me to call you tomorrow at 9am',
+    'Need us to call you tomorrow at 9am'])('an outbound question cannot be recorded as a promise: %s', (body) => {
     const message = source(body, 'outbound');
     const result = groundExtraction(extracted([obligation('call you tomorrow at 9am', {
       basis: 'promise', kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
@@ -155,7 +156,7 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.dropped).toBe(1);
   });
 
-  test.each(["9 o'clock", '9 o’clock', "nine o'clock", '9', 'nine'])("unsupported clock %s requires review without inventing AM/PM", (clock) => {
+  test.each(["9 o'clock", '9 o’clock', "nine o'clock", '9', 'nine', '3p', '9a', '9A'])("unsupported clock %s requires review without inventing AM/PM", (clock) => {
     const message = source(`Please call tomorrow at ${clock}`);
     for (const due_text of [null, `tomorrow at ${clock}`]) {
       const result = groundExtraction(extracted([obligation(message.message_body, {
@@ -348,7 +349,7 @@ describe('SMS operational evidence and ownership', () => {
       expect(result.dropped).toBe(1);
     });
 
-  test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate']])(
+  test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate'], ['Please send 2 a month of the estimates', 'send_estimate']])(
     'a number that is not a clock hour stays undated without review: %s', (body, kind) => {
       const message = source(body);
       const result = groundExtraction(extracted([obligation(message.message_body, { kind })]), { message, properties });
