@@ -22,8 +22,11 @@ vi.mock('../utils/api', () => {
   return { default: proxy };
 });
 
+const authSession = vi.hoisted(() => ({ epoch: 0 }));
+
 vi.mock('../hooks/useAuth', () => ({
   useAuth: () => ({
+    sessionEpoch: authSession.epoch,
     customer: {
       id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
       phone: '9415551234', email: 'pat@example.com', tier: 'Gold',
@@ -42,6 +45,7 @@ import api from '../utils/api';
 import PortalPage from './PortalPage';
 
 beforeEach(() => {
+  authSession.epoch = 0;
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   window.history.replaceState({}, '', '/');
@@ -67,6 +71,19 @@ afterEach(() => {
 });
 
 describe('portal tab history sync', () => {
+  it('drops old visit reads when a new session for the same customer is adopted', async () => {
+    window.history.replaceState({}, '', '/?appRefresh=1');
+    api.getNextService.mockResolvedValueOnce({ next: { id: 'old-visit', date: '2027-01-01', serviceType: 'Previous session visit' } });
+    const { rerender } = render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    await screen.findByText('Previous session visit');
+    api.getNextService.mockImplementationOnce(() => new Promise(() => {}));
+    authSession.epoch += 1;
+    rerender(<BrowserRouter><PortalPage /></BrowserRouter>);
+    expect(screen.queryByText('Previous session visit')).not.toBeInTheDocument();
+    await waitFor(() => expect(api.getNextService).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('heading', { name: 'Saved next visit' })).not.toBeInTheDocument();
+  });
+
   it('writes the URL on tab clicks and walks back through tab history', async () => {
     render(<BrowserRouter><PortalPage /></BrowserRouter>);
 

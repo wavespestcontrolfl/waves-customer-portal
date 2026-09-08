@@ -83,6 +83,28 @@ afterEach(() => {
 });
 
 describe('session epoch guards', () => {
+  it('publishes a new epoch immediately for a same-customer family adoption but not token rotation', async () => {
+    const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const tokenFor = (sessionId, suffix) => `${b64u({ alg: 'none' })}.${b64u({ customerId: 'cust-a', sessionId })}.${suffix}`;
+    const original = tokenFor('session-a', 'original');
+    stubLocalStorage({ waves_token: original });
+    api.getMe.mockResolvedValueOnce({ id: 'cust-a' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    const epoch = authApi.sessionEpoch;
+    api.getMe.mockImplementation(() => new Promise(() => {}));
+    await act(async () => {
+      localStorage.setItem('waves_token', tokenFor('session-a', 'rotated'));
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token' }));
+    });
+    expect(authApi.sessionEpoch).toBe(epoch);
+    await act(async () => {
+      localStorage.setItem('waves_token', tokenFor('session-b', 'new-login'));
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token' }));
+    });
+    expect(authApi.sessionEpoch).toBe(epoch + 1);
+    expect(authApi.customer.id).toBe('cust-a');
+  });
+
   it('discards a property-switch response that lands after Sign out', async () => {
     stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
     api.getMe.mockResolvedValueOnce({ id: 'cust-a' });
