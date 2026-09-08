@@ -12,6 +12,7 @@ const { executeBITool } = require('./bi-agent-tools');
 const { BI_AGENT_CONFIG } = require('./bi-agent-config');
 const { recordSessionUsage } = require('./llm-dispatch-metrics');
 const { isSessionTerminal, isSessionError } = require('./agent-control/session-events');
+const { readSessionFrames } = require('./agent-control/session-stream');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BI_AGENT_ID = process.env.BI_AGENT_ID;
@@ -39,23 +40,10 @@ async function* streamSessionEvents(sessionId) {
     },
   });
   if (!res.ok) throw Object.assign(new Error(`Stream ${res.status}: ${await res.text()}`), { status: res.status, code: `anthropic_${res.status}` });
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-    let ev = null;
-    for (const line of lines) {
-      if (line.startsWith('event: ')) ev = line.slice(7).trim();
-      else if (line.startsWith('data: ') && ev) {
-        try { yield { event: ev, data: JSON.parse(line.slice(6)) }; } catch {}
-        ev = null;
-      }
-    }
+  for await (const { event, data } of readSessionFrames(res.body)) {
+    let parsed;
+    try { parsed = JSON.parse(data); } catch { continue; }
+    yield { event, data: parsed };
   }
 }
 
