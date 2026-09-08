@@ -62,6 +62,11 @@ function chain(overrides = {}) {
   };
 }
 
+// A query awaited directly (no .first/.limit) — resolves to `list`.
+function rows(list) {
+  return chain({ then(res, rej) { return Promise.resolve(list).then(res, rej); } });
+}
+
 function collection(rows) {
   return chain({
     limit: jest.fn().mockResolvedValue(rows),
@@ -111,7 +116,7 @@ describe('review request follow-up flow', () => {
         },
       ]),
       chain({ first: jest.fn().mockResolvedValue(null) }),
-      chain({ first: jest.fn().mockResolvedValue(null) }), // 3-day rule: no newer ask to this customer
+      rows([]), // 3-day rule: no delivered ask to this customer besides this row
       updateQuery,
     ];
     const customerQuery = chain({
@@ -128,6 +133,7 @@ describe('review request follow-up flow', () => {
     db.mockImplementation((table) => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'customers') return customerQuery;
+      if (table === 'sms_log') return rows([]); // no staff-sent ask
       throw new Error(`Unexpected table query: ${table}`);
     });
     // Service contact stored as a full name — the {first_name} slot must be the
@@ -170,7 +176,7 @@ describe('review request follow-up flow', () => {
       eligibleQuery,
       chain({ first: jest.fn().mockResolvedValue(null) }),
       // A cadence touch / manual ask went to this customer inside 72h.
-      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-newer', customer_id: 'cust-1' }) }),
+      rows([{ sms_sent_at: new Date(Date.now() - 10 * 3600000), sent_at: null }]),
       updateQuery,
     ];
     db.mockImplementation((table) => {
@@ -191,6 +197,31 @@ describe('review request follow-up flow', () => {
     expect(Math.abs(spacingBound[1][0].getTime() - (Date.now() - 72 * 3600000))).toBeLessThan(5000);
   });
 
+  test('the 3-day rule also holds the legacy follow-up behind a staff-sent review link that has no request row (codex #4141 r2)', async () => {
+    const updateQuery = chain();
+    const reviewRequestQueries = [
+      chain(),
+      collection([]),
+      collection([{ id: 'rr-old2', customer_id: 'cust-1', sms_sent_at: '2026-05-30T15:00:00.000Z', status: 'sent', score: null }]),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      rows([]), // no other request row
+      rows([]), // the detector's pipeline-send correlation read: no pipeline text to excuse the row
+      updateQuery,
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      // Staff texted a g.page review link 5 h ago — detected from sms_log.
+      if (table === 'sms_log') return rows([{ id: 'sms-1', message_body: 'Here is our Google review link g.page/r/abc', created_at: new Date(Date.now() - 5 * 3600000), status: 'delivered' }]);
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await ReviewService.processFollowups();
+
+    expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updateQuery.update).not.toHaveBeenCalled();
+  });
+
   test('marks terminal follow-up policy blocks as handled', async () => {
     const updateQuery = chain();
     const reviewRequestQueries = [
@@ -206,7 +237,7 @@ describe('review request follow-up flow', () => {
         },
       ]),
       chain({ first: jest.fn().mockResolvedValue(null) }),
-      chain({ first: jest.fn().mockResolvedValue(null) }), // 3-day rule: no newer ask to this customer
+      rows([]), // 3-day rule: no delivered ask to this customer besides this row
       updateQuery,
     ];
     const customerQuery = chain({
@@ -223,6 +254,7 @@ describe('review request follow-up flow', () => {
     db.mockImplementation((table) => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'customers') return customerQuery;
+      if (table === 'sms_log') return rows([]); // no staff-sent ask
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
@@ -260,7 +292,7 @@ describe('review request follow-up flow', () => {
         },
       ]),
       chain({ first: jest.fn().mockResolvedValue(null) }),
-      chain({ first: jest.fn().mockResolvedValue(null) }), // 3-day rule: no newer ask to this customer
+      rows([]), // 3-day rule: no delivered ask to this customer besides this row
       updateQuery,
     ];
     const customerQuery = chain({
@@ -277,6 +309,7 @@ describe('review request follow-up flow', () => {
     db.mockImplementation((table) => {
       if (table === 'review_requests') return reviewRequestQueries.shift();
       if (table === 'customers') return customerQuery;
+      if (table === 'sms_log') return rows([]); // no staff-sent ask
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });

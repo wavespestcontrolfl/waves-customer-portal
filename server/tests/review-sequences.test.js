@@ -619,6 +619,14 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(at.getTime()).toBe(new Date('2026-08-06T08:00:00-04:00').getTime());
   });
 
+  test('a private no-link check-in on a later day keeps its day — the 3-day minimum spaces asks only (codex #4141 r2)', () => {
+    const now = new Date(WED.getTime() + 60000);
+    const at = nextTouchRunAt({ startedAt: WED, step: { day: 1, channel: 'sms', templateKey: 'resolution_check' }, now });
+    expect(at.getTime()).toBe(WED.getTime() + 86400000);
+    const ask = nextTouchRunAt({ startedAt: WED, step: { day: 1, channel: 'sms', templateKey: 'soft_reminder' }, now });
+    expect(ask.getTime()).toBe(now.getTime() + 72 * 3600000);
+  });
+
   test('a future step is scheduled exactly at started_at + day offset', () => {
     const at = nextTouchRunAt({ startedAt: WED, step: { day: 3, channel: 'sms' }, now: WED });
     expect(at.getTime()).toBe(WED.getTime() + 3 * 86400000);
@@ -920,6 +928,41 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(seq.status).toBe('active');
       expect(parse(seq.decision)).toMatchObject({ reason: 'spacing_lookup_unavailable', ownerAction: 'none' });
       expect(seq.next_run_at.getTime()).toBeGreaterThan(Date.now() + 25 * 60000);
+    });
+
+    test('the shared sender holds a legacy queued ask inside 72h of another delivered ask, and behind a staff-sent link (codex #4141 r2 P1)', async () => {
+      const mock = makeMock({
+        customers: [
+          { id: 'lq-1', first_name: 'Bo', last_name: 'Q', phone: '+19410000152', nearest_location_id: 'bradenton' },
+          { id: 'lq-2', first_name: 'Cy', last_name: 'Q', phone: '+19410000153', nearest_location_id: 'bradenton' },
+          { id: 'lq-3', first_name: 'Di', last_name: 'Q', phone: '+19410000154', nearest_location_id: 'bradenton' },
+        ],
+        review_requests: [
+          // Two completions for one customer: the first ask went 10 h ago, the second is queued now.
+          { id: 'rr-lq1a', customer_id: 'lq-1', channel: 'sms', status: 'sent', template_key: 'day0_ask', sms_sent_at: new Date(Date.now() - 10 * 3600000), created_at: new Date(Date.now() - 10 * 3600000), token: 't1a' },
+          { id: 'rr-lq1b', customer_id: 'lq-1', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 't1b', location_id: 'bradenton', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() },
+          // Staff texted a review link 3 h ago; the queued ask has no sibling row.
+          { id: 'rr-lq2', customer_id: 'lq-2', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 't2', location_id: 'bradenton', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() },
+          // No prior ask at all: sends.
+          { id: 'rr-lq3', customer_id: 'lq-3', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 't3', location_id: 'bradenton', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() },
+        ],
+        sms_log: [{ id: 'sms-lq2', customer_id: 'lq-2', direction: 'outbound', status: 'delivered', message_body: 'Here is our Google review link https://g.page/r/waves/review', created_at: new Date(Date.now() - 3 * 3600000) }],
+      });
+      db.mockImplementation(mock);
+
+      const held = await ReviewService.sendSMS('rr-lq1b');
+      const heldManual = await ReviewService.sendSMS('rr-lq2');
+      const sent = await ReviewService.sendSMS('rr-lq3');
+
+      expect(held).toMatchObject({ deferred: 'spacing' });
+      expect(Math.abs(new Date(held.nextAllowedAt).getTime() - (Date.now() + 62 * 3600000))).toBeLessThan(5000);
+      const row = mock.__state.rows.review_requests.find((r) => r.id === 'rr-lq1b');
+      expect(row.status).toBe('pending');
+      expect(row.scheduled_for.getTime()).toBe(new Date(held.nextAllowedAt).getTime());
+      expect(heldManual).toMatchObject({ deferred: 'spacing' });
+      expect(sent === undefined || sent.deferred === undefined).toBe(true);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Di!');
     });
 
     test('the first ask has no timing gate: a Day-0 step with no prior ask sends at its scheduled time', async () => {

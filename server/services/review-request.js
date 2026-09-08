@@ -407,7 +407,9 @@ function nextTouchRunAt({ startedAt, step, now = new Date() }) {
   const dayOffset = Number(step?.day) || 0;
   let at = new Date(new Date(startedAt).getTime() + dayOffset * 86400000);
   if (at <= now) at = new Date(now.getTime() + 60000);
-  if (dayOffset > 0) {
+  // The 3-day rule spaces ASKS; a private no-link check-in an admin plan
+  // places on a later day keeps its own day (codex #4141 r2).
+  if (dayOffset > 0 && OUTREACH.isAskTemplate(step?.templateKey)) {
     const minAt = new Date(now.getTime() + ASK_SPACING_MS);
     if (at < minAt) at = minAt;
   }
@@ -422,6 +424,29 @@ function nextTouchRunAt({ startedAt, step, now = new Date() }) {
  * whether the owner has anything to do — a routine deferral is
  * ownerAction 'none', never a send/drop question.
  */
+/**
+ * When the customer last received a review ask that is not `excludeRequestId`
+ * — the 3-day rule's anchor at every dispatch boundary (sequence runner,
+ * legacy queued asks, legacy follow-ups). review_requests only; staff-sent
+ * asks with no request row are detected separately by
+ * manualReviewAskSentRecently. Throws on a lookup failure so callers fail
+ * closed (no evidence is not "no ask").
+ */
+async function lastDeliveredAskAt(customerId, { excludeRequestId = null } = {}) {
+  const q = db("review_requests")
+    .where({ customer_id: customerId })
+    .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+    .whereRaw(ASK_TOUCH_SQL)
+    .where("created_at", ">", new Date(Date.now() - 30 * 86400000))
+    .select("sms_sent_at", "sent_at");
+  if (excludeRequestId) q.where("id", "!=", excludeRequestId);
+  const rows = await q;
+  return rows.reduce((max, r) => {
+    const t = new Date(r.sms_sent_at || r.sent_at).getTime();
+    return Number.isFinite(t) && t > (max ? max.getTime() : 0) ? new Date(t) : max;
+  }, null);
+}
+
 function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null }) {
   return JSON.stringify({
     reason,
@@ -1622,6 +1647,33 @@ const ReviewService = {
       );
       return;
     }
+    // The 3-day rule at the shared sender (codex #4141 r2): a legacy queued
+    // ask (two completions for one customer create separate pending rows)
+    // or a retried row must not land inside 72 h of another delivered ask —
+    // including a staff-sent one with no request row. Held rows stay
+    // pending with scheduled_for pushed out; an unavailable lookup holds
+    // 30 min (fail closed).
+    try {
+      const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: requestId });
+      const recentRowAsk = !!lastAsk && Date.now() - lastAsk.getTime() < ASK_SPACING_MS;
+      const manualRecent = recentRowAsk
+        ? false
+        : await this.manualReviewAskSentRecently(request.customer_id, { since: new Date(Date.now() - ASK_SPACING_MS) });
+      const holdUntil = recentRowAsk
+        ? new Date(lastAsk.getTime() + ASK_SPACING_MS)
+        : manualRecent ? new Date(Date.now() + ASK_SPACING_MS) : null;
+      if (holdUntil) {
+        await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: holdUntil });
+        logger.info(`[review] Held request for the 3-day rule (requestId=${requestId} until=${holdUntil.toISOString()})`);
+        return { deferred: "spacing", nextAllowedAt: holdUntil };
+      }
+    } catch (err) {
+      const retryAt = new Date(Date.now() + 30 * 60 * 1000);
+      await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: retryAt }).catch(() => {});
+      logger.warn(`[review] 3-day rule lookup failed, holding request (requestId=${requestId}): ${err.message}`);
+      return { deferred: "spacing_lookup_unavailable", nextAllowedAt: retryAt };
+    }
+
     // Route to the service beneficiary (see services/customer-contact.js) —
     // falls back to the billing phone when no service contact is configured.
     const { getServiceContactSmsRecipient } = require("./customer-contact");
@@ -2899,20 +2951,18 @@ const ReviewService = {
         continue;
       }
 
-      // The 3-day rule against ANY newer ask to this customer (a manual
-      // one-off, a cadence touch): leave the row for a later run — the
+      // The 3-day rule against ANY newer ask to this customer — a cadence
+      // touch, a manual one-off, or a staff-sent link with no request row
+      // (sms_log, codex #4141 r2): leave the row for a later run — the
       // selector re-picks it once 72 h have passed. A failed lookup holds
       // too (fail closed).
-      let newerAsk = null;
+      let newerAsk = false;
       try {
-        newerAsk = await db("review_requests")
-          .where({ customer_id: request.customer_id })
-          .where("id", "!=", request.id)
-          .whereRaw("GREATEST(COALESCE(sms_sent_at, sent_at), COALESCE(sent_at, sms_sent_at)) > ?", [new Date(Date.now() - ASK_SPACING_MS)])
-          .whereRaw(ASK_TOUCH_SQL)
-          .first();
+        const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: request.id });
+        newerAsk = (!!lastAsk && Date.now() - lastAsk.getTime() < ASK_SPACING_MS)
+          || await this.manualReviewAskSentRecently(request.customer_id, { since: new Date(Date.now() - ASK_SPACING_MS) });
       } catch {
-        newerAsk = { unavailable: true };
+        newerAsk = true;
       }
       if (newerAsk) {
         suppressed++;
