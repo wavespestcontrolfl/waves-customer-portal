@@ -263,7 +263,9 @@ export default function TechHomePage({ section = 'today' }) {
   // enforce owner-only server-side regardless.
   const currentRole = getAdminUser()?.role || null;
 
+  const scheduleSeq = useRef(0);
   const fetchSchedule = useCallback(async () => {
+    const seq = ++scheduleSeq.current;
     // Runs alongside the schedule read but never gates it: the route must
     // render even when the line lookup hangs on a poor connection (codex
     // #4072 r8 P2). The first render cannot show the personal-phone links
@@ -277,15 +279,17 @@ export default function TechHomePage({ section = 'today' }) {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json().catch(() => ({}));
+      if (seq !== scheduleSeq.current) return;
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
       setScheduleError('');
       setSchedule(scheduleRowsFromResponse(data));
       setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
     } catch (err) {
+      if (seq !== scheduleSeq.current) return;
       console.error('Failed to fetch schedule:', err);
       setScheduleError(err.message || 'Your route could not be loaded.');
     } finally {
-      setLoading(false);
+      if (seq === scheduleSeq.current) setLoading(false);
     }
   }, [fetchTechLine]);
 

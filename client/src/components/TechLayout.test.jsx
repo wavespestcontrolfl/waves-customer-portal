@@ -77,10 +77,10 @@ describe('TechLayout staff-session verification', () => {
     expect(screen.queryByText('Messages')).not.toBeInTheDocument();
   });
 
-  it('retains a selected visit in the unauthenticated sign-in destination', () => {
-    renderTech('/tech?visit=row%3Atwo');
+  it.each(['/tech?visit=row%3Atwo', '/TECH/?visit=row%3Atwo', '/TECH/PROTOCOLS/?visit=row%3Atwo'])('retains the unauthenticated sign-in destination %s', (path) => {
+    renderTech(path);
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(screen.getByText('Staff login /admin/login?next=%2Ftech%3Fvisit%3Drow%253Atwo')).toBeInTheDocument();
+    expect(screen.getByText(`Staff login /admin/login?next=${encodeURIComponent(path)}`)).toBeInTheDocument();
   });
 
   it.each(['/tech/documents', '/tech/documents/', '/TECH/DOCUMENTS/'])('keeps controlled documents unavailable at %s inside the enabled field shell', async (path) => {

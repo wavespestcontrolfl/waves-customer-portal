@@ -182,6 +182,38 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(await screen.findByRole('button', { name: 'On site' })).toBeEnabled();
   });
 
+  it.each([true, false])('keeps the latest schedule verdict when the newer request fails: %s', async (newerFails) => {
+    mount('/tech?visit=row%3Atwo');
+    await screen.findByText('Property brief for two');
+    const respond = fetchMock.getMockImplementation();
+    const olderData = newerFails ? { services: rows.map(service => ({ ...service })) } : { error: 'Older route failure' };
+    let release;
+    let delayNext = true;
+    fetchMock.mockImplementation(async (path, options) => {
+      if (delayNext && path.includes('/admin/schedule?')) {
+        delayNext = false;
+        return new Promise(resolve => { release = () => resolve({ ok: newerFails, status: newerFails ? 200 : 503, json: async () => olderData }); });
+      }
+      return respond(path, options);
+    });
+    await act(async () => { mocks.socketEvent(); });
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    scheduleFails = newerFails;
+    await act(async () => { mocks.socketEvent(); });
+    const expectLatest = () => {
+      if (newerFails) {
+        expect(screen.getByText('Route connection unavailable')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'On site' })).not.toBeInTheDocument();
+      } else {
+        expect(screen.getByRole('button', { name: 'On site' })).toBeEnabled();
+        expect(screen.queryByText('Older route failure')).not.toBeInTheDocument();
+      }
+    };
+    await waitFor(expectLatest);
+    await act(async () => { release(); });
+    expectLatest();
+  });
+
   it('does not present an unavailable route as zero assigned stops', async () => {
     scheduleFails = true;
     mount();

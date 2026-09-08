@@ -74,6 +74,9 @@ describe('staff authentication destinations', () => {
   it.each([
     ['/tech?visit=row%3Atwo', '/tech?visit=row%3Atwo'],
     ['/tech/tools?visit=row%3Atwo', '/tech/tools?visit=row%3Atwo'],
+    ['/TECH/?visit=row%3Atwo', '/TECH/?visit=row%3Atwo'],
+    ['/TECH/TOOLS/?visit=row%3Atwo', '/TECH/TOOLS/?visit=row%3Atwo'],
+    ['/TECHNOLOGY?visit=row%3Atwo', '/tech'],
     ['/technology?visit=row%3Atwo', '/tech'],
     ['//example.com/tech?visit=row%3Atwo', '/tech'],
   ])('preserves allowed technician destinations for %s', async (next, expected) => {
