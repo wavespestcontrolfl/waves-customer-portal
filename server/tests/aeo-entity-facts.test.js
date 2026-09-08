@@ -537,6 +537,15 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E6', 'Orkin offers termite treatment, and Waves offers fumigation.').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Orkin offers fumigation, and Waves offers pest control.')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: false } });
   expect(score('E6', 'Waves offers pest control, and Orkin offers fumigation.')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: false } });
+  // Pre-push hook r39: a coordinated clause needs no comma, a compound subject stays compound; a topic about fumigation is not an offer.
+  expect(score('E6', 'Waves offers pest control and Orkin offers fumigation.')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: false } });
+  expect(score('E6', 'Orkin offers pest control and Waves offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves and Orkin offer fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Orkin and Waves offer fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves also publishes articles about fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves provides information about fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves also offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves provides pest control and also fumigation.').forbidden.fumigation_offered).toBe(true);
   // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
   expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });

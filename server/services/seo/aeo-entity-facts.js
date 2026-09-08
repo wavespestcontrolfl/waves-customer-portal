@@ -279,10 +279,13 @@ const OBJECT_INTRO_RE = /\b(?:with|by|to|from|of|than|against|as|under|not|nor|o
 // the relation's object because the copula precedes the participle.
 const PASSIVE_AGENT_HEAD_RE = /(?:^|[.;!?\n]|\b(?:but|however)\b)\s*(?:(?:the|these|those|all|its|their|any)\s+)?(?:(?!\b(?:is|are|was|were|be|been|being)\b)[\w'-]+\s+){0,4}(?:offered|provided|performed|delivered|run|operated|sold|handled|listed|advertised|marketed)\s+by\s+(?:the\s+)?$/i;
 
-// A name after a comma-coordinated "and" / "or" that starts its own
-// predicate ("Orkin offers termite treatment, and Waves offers fumigation")
-// is the new clause's subject, not an object of the conjunction.
-const COORDINATED_INTRO_RE = /,\s*(?:and|or|nor)\s+(?:the\s+|a\s+|an\s+)?$/i;
+// A name after "and" / "or" that starts its own predicate ("Orkin offers
+// termite treatment(,) and Waves offers fumigation") is the new clause's
+// subject, not an object of the conjunction — unless a name sits right
+// before the conjunction ("Waves and Orkin offer"), a compound subject that
+// keeps the object reading.
+const COORDINATED_INTRO_RE = /,?\s*(?:and|or|nor)\s+(?:the\s+|a\s+|an\s+)?$/i;
+const NAME_BEFORE_CONJUNCTION_RE = /(?:\b[Ww]aves|\bAdam|\bBenetti|[A-Z][\w'&-]*)$/;
 const COORDINATED_PREDICATE_RE = new RegExp(`^[\\w'&-]*(?:\\s+[A-Z][\\w'&-]*){0,2}\\s+(?:also\\s+|still\\s+|now\\s+|only\\s+)?${PREDICATE_VERB}\\b`, 'i');
 
 function lastSubjectIndex(re, text) {
@@ -290,15 +293,22 @@ function lastSubjectIndex(re, text) {
   re.lastIndex = 0;
   for (const m of text.matchAll(re)) {
     const prefix = text.slice(0, m.index);
-    const coordinated = COORDINATED_INTRO_RE.test(prefix) && COORDINATED_PREDICATE_RE.test(text.slice(m.index));
+    const coordinated = COORDINATED_INTRO_RE.test(prefix)
+      && !NAME_BEFORE_CONJUNCTION_RE.test(prefix.replace(COORDINATED_INTRO_RE, ''))
+      && COORDINATED_PREDICATE_RE.test(text.slice(m.index));
     if (!OBJECT_INTRO_RE.test(prefix) || PASSIVE_AGENT_HEAD_RE.test(prefix) || coordinated) last = m.index;
   }
   return last;
 }
 
+// A compound subject that includes Waves ("Orkin and Waves offer …",
+// "Waves and Orkin offer …") asserts about Waves: the other name is dropped
+// from the compound before the subject is read.
+const COMPOUND_WITH_WAVES_RE = new RegExp(`\\b(?:${OTHER_ENTITY_ALTERNATION}|[A-Z][\\w'&-]*(?:\\s+[A-Z][\\w'&-]*){0,3})\\s+(?:and|&)\\s+(?=Waves\\b)|(?<=\\bWaves\\s+)(?:and|&)\\s+(?:${OTHER_ENTITY_ALTERNATION}|[A-Z][\\w'&-]*(?:\\s+[A-Z][\\w'&-]*){0,3})(?=\\s+(?:both\\s+|all\\s+|each\\s+)?${PREDICATE_VERB}\\b)`, 'g');
+
 function aboutAnotherEntity(beforeClause, answerPrefix) {
   if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
-  const named = answerPrefix.replace(COMPARISON_PHRASE_RE, ' ');
+  const named = answerPrefix.replace(COMPARISON_PHRASE_RE, ' ').replace(COMPOUND_WITH_WAVES_RE, ' ');
   return Math.max(lastSubjectIndex(OTHER_ENTITY_RE, named), lastSubjectIndex(GOV_SUBJECT_RE, named)) > lastSubjectIndex(WAVES_NAMED_RE, named);
 }
 
