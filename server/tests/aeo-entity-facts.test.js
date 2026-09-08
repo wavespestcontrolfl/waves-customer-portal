@@ -1009,3 +1009,30 @@ test('the pest is the treatment verb\'s own object, and an ended franchise relat
   }
   expect(score('E8', 'Waves has operated as a franchise since 2020.').forbidden.franchise).toBe(true);
 });
+
+test('"going to" is prospective, a guard stops at a subordinate or sequenced predicate, ended ranges and a former franchisee assert nothing, a bare "but" or reversing "from" excludes the pest, and an offering keeps any service noun (#4155 r7)', () => {
+  expect(score('E5', 'Waves is going to serve Manatee County.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves is going to offer fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves is considering growth as it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves is considering growth as it offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E5', 'Waves plans to expand while it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E8', 'Waves was formerly local, then became a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves was formerly local and later became a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves was a franchise from 2020 to 2024.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves operated as a franchise between 2020 and 2024.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves has been a franchise from 2020 to the present.').forbidden.franchise).toBe(true);
+  for (const text of ['Waves was formerly a franchisee of Orkin.', 'Waves used to be a franchisee of Orkin.', 'Waves stopped being a franchisee of Orkin.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(false);
+  }
+  expect(score('E8', 'Waves is a franchisee of Orkin.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves controls everything but termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves removes all pests but rodents.').expected.rodent).toBe(false);
+  expect(score('E6', 'Waves removes termites from its service list.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termites from being eliminated.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termites from entering your home.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves removes rodents from attics.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves offers mice exclusion.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves offers mosquito fogging.').expected.mosquito).toBe(true);
+  expect(score('E6', 'Waves offers termite baiting.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves handles termite-related search terms.').expected.termite).toBe(false);
+});
