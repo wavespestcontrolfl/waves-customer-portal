@@ -14796,6 +14796,17 @@ export function CompletionPanel({
         alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
         return;
       }
+      // The re-check itself failed while a time was on screen (codex #4140
+      // r13 P2): the promise can no longer be vouched for, so drop it — the
+      // hint falls back to "at the smart send window" — and stop once. A
+      // second submit proceeds with no shown time to compare against; the
+      // server computes the window itself. Completion is never blocked by
+      // the preview endpoint for more than one click.
+      if (!fresh && shown) {
+        setReviewSendPreview(null);
+        alert("The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue.");
+        return;
+      }
     }
     // The ONLY time-dependent pre-submit gate — skipped for a committed
     // chain retry: the replayed body is immutable and the server ignores
@@ -14809,7 +14820,11 @@ export function CompletionPanel({
       willReview &&
       reviewTiming === "custom"
     ) {
-      const target = new Date(reviewCustomAt);
+      // The datetime-local value is an ET wall clock, as the server parses
+      // it (parseCompletionReviewDelayMinutes) — never `new Date(value)`,
+      // which reads it in the browser's zone (codex #4140 r13 P1).
+      const targetISO = etDatetimeLocalToISO(reviewCustomAt);
+      const target = new Date(targetISO || NaN);
       if (
         !reviewCustomAt ||
         Number.isNaN(target.getTime()) ||

@@ -325,17 +325,18 @@ function decisionLine(seq, sequencesEnabled) {
   // A stranded claim (null schedule the worker never re-selects) needs a hand
   // whether or not the gate is on — say so first (codex #4140 r6 P2).
   if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
+  // The worker skips every run while GATE_REVIEW_SEQUENCES is off — the
+  // redemption sweep included — so neither an active row's next tick nor a
+  // parked row's re-check is a plan: both are frozen (codex #4140 r5, r13 P2).
+  if (sequencesEnabled === false) return `Paused — cadences are off (GATE_REVIEW_SEQUENCES) · Owner action: turn the gate on, or stop this ${seq.parked ? "parked " : ""}cadence`;
+  if (seq.sending) return "Sending now · Owner action: none";
   // A parked series final (deferred until the opener's send settles) is a
   // durable enrollment the redemption sweep redeems — not "no cadence"
-  // (codex #4140 r12 P2). Its next_run_at is the next redemption check.
-  if (seq.parked) {
-    const at = seq.nextRunAt ? new Date(seq.nextRunAt).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
-    return [at ? `Re-check ${at}` : null, DECISION_LABELS.opener_in_flight, "Owner action: none"].filter(Boolean).join(" · ");
-  }
-  // The worker skips every run while GATE_REVIEW_SEQUENCES is off, so an
-  // active row's next tick is not a plan — it is frozen (codex #4140 r5 P2).
-  if (sequencesEnabled === false) return "Paused — cadences are off (GATE_REVIEW_SEQUENCES) · Owner action: turn the gate on, or stop this cadence";
-  if (seq.sending) return "Sending now · Owner action: none";
+  // (codex #4140 r12 P2). It needs no branch of its own: its stored
+  // decision is opener_in_flight with no plannedAt, so it renders below as
+  // "Re-check <tick> · Series final parked… · Owner action: none" — the
+  // tick because the sweep runs on the cadence ticks (nextSendTickAt),
+  // not at the raw park time (codex #4140 r13 P2).
   const d = seq.decision || {};
   const label = DECISION_LABELS[d.reason] || (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
   // nextRunAt is when the row becomes ELIGIBLE; the worker runs at :14/:44,
