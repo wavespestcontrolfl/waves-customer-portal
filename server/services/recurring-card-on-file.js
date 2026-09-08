@@ -129,7 +129,7 @@ async function resolveGroupedEstimateOwnerId(estimate, database = db, { throwOnE
 // the transaction's resolution order (see resolveGroupedEstimateOwnerId).
 // `lookupFailed` lets fail-closed callers refuse rather than assume "new
 // customer" when the match itself errored.
-async function resolveProspectiveAcceptCustomer(estimate) {
+async function resolveProspectiveAcceptCustomer(estimate, database = db) {
   let customerId = estimate?.customer_id || null;
   let lookupFailed = false;
   if (!customerId) {
@@ -137,7 +137,7 @@ async function resolveProspectiveAcceptCustomer(estimate) {
     // the phone match still runs (unchanged policy posture), but the
     // fail-closed tender gate sees the signal and offers card only.
     try {
-      customerId = await resolveGroupedEstimateOwnerId(estimate, db, { throwOnError: true });
+      customerId = await resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true });
     } catch (err) {
       lookupFailed = true;
       logger.warn('[recurring-cof] grouped-sibling owner lookup failed — falling through to the phone match', { error: err.message });
@@ -147,7 +147,9 @@ async function resolveProspectiveAcceptCustomer(estimate) {
     try {
       const gates = require('../routes/estimate-public');
       if (typeof gates.matchAcceptCustomerByPhone === 'function') {
-        const { match } = await gates.matchAcceptCustomerByPhone(estimate);
+        // Same handle as the caller (GitHub Codex #4144 r4 P2): under the
+        // replacement's row lock this must not wait on the pool.
+        const { match } = await gates.matchAcceptCustomerByPhone(estimate, database);
         customerId = match?.id || null;
       }
     } catch (err) {
@@ -327,13 +329,17 @@ const MAX_SETUP_INTENT_GENERATIONS = 5;
 // Codex P1: judging only estimate.customer_id let an existing customer with
 // a suspended bank slip through as "new"). Genuinely new customer →
 // card_or_bank.
-async function resolveRecurringCaptureTender(estimate) {
+// `database` lets a caller holding a transaction keep these reads on its
+// pinned connection (GitHub Codex #4144 r2 P2: a replacement waiting on the
+// estimate row lock must not also wait on the pool for a second
+// connection), including the phone-match fallback in estimate-public.
+async function resolveRecurringCaptureTender(estimate, database = db) {
   if (require('../config/feature-gates').gates.acceptAchCapture !== true) return 'card';
-  const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate);
+  const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate, database);
   if (lookupFailed) return 'card';
   if (!customerId) return 'card_or_bank';
   try {
-    const row = await db('customers').where({ id: customerId }).first('ach_status');
+    const row = await database('customers').where({ id: customerId }).first('ach_status');
     if (row?.ach_status && row.ach_status !== 'active') return 'card';
     return 'card_or_bank';
   } catch (err) {
@@ -342,53 +348,261 @@ async function resolveRecurringCaptureTender(estimate) {
   }
 }
 
-async function createRecurringCardSetupIntentForEstimate(estimate) {
-  const paymentMethodType = await resolveRecurringCaptureTender(estimate);
+// Live read of a minted/replayed intent (payment_method expanded so a
+// succeeded replay's tender resolves without a second call). An idempotent
+// replay returns the ORIGINAL create response — status and metadata as they
+// were at mint, never what has happened since (pre-push Codex P1 on
+// #4144) — so every judgement runs on this, never on the create body.
+async function readLiveSetupIntent(setupIntentId) {
+  return StripeService.retrieveSetupIntent(setupIntentId, { expand: ['payment_method'] });
+}
+
+// The capture UI's contract for one usable (non-canceled, non-retired)
+// intent. A SUCCEEDED replay already holds a payment method the customer
+// will not re-enter — the UI must render the consent for THAT tender
+// (Codex #3723 r1 P1: a bank captured earlier must not sit under a card
+// authorization), resolved here where the secret key can.
+async function shapeCaptureIntent(setupIntent, paymentMethodType) {
+  let capturedMethodType = null;
+  if (setupIntent.status === 'succeeded' && setupIntent.payment_method) {
+    const pm = setupIntent.payment_method;
+    try {
+      capturedMethodType = typeof pm === 'object' && pm?.type
+        ? pm.type
+        : (await StripeService.retrievePaymentMethod(typeof pm === 'string' ? pm : pm.id))?.type || null;
+    } catch (err) {
+      logger.warn(`[recurring-cof] captured method type lookup failed for replayed intent ${setupIntent.id}: ${err.message}`);
+    }
+  }
+  return {
+    clientSecret: setupIntent.client_secret,
+    setupIntentId: setupIntent.id,
+    // The capture UI keys its heading/consent copy on this — the Payment
+    // Element only shows a bank tab when the intent allows it.
+    paymentMethodTypes: paymentMethodType === 'card_or_bank' ? ['card', 'us_bank_account'] : ['card'],
+    // Non-null only for a succeeded replay: the tender already on the
+    // intent, so the UI initializes its consent to it.
+    capturedMethodType,
+  };
+}
+
+// A RETIRED intent points at its replacement (`metadata.replaced_by`, set by
+// replaceRecurringCardIntent). Follow the chain to the live head so a
+// deterministic replay of the first capture lands on whatever the customer
+// replaced it with — unbounded replacements, no local counter. Returns the
+// first non-retired intent, or null when the chain is broken (a stamp that
+// never landed) or ends canceled — the caller then walks the generation
+// salt as it always did.
+const MAX_REPLACEMENT_HOPS = 10;
+async function followReplacementChain(setupIntent) {
+  let current = setupIntent;
+  for (let hop = 0; hop < MAX_REPLACEMENT_HOPS && current && isRetiredSetupIntent(current); hop += 1) {
+    const nextId = current.metadata?.replaced_by;
+    if (!nextId) return null;
+    current = await readLiveSetupIntent(nextId);
+  }
+  if (!current || isRetiredSetupIntent(current) || current.status === 'canceled') return null;
+  return current;
+}
+
+async function createRecurringCardSetupIntentForEstimate(estimate, database = db) {
+  const paymentMethodType = await resolveRecurringCaptureTender(estimate, database);
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
-    const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
+    const created = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
+    if (!created) return null;
+    let setupIntent;
+    try {
+      setupIntent = await readLiveSetupIntent(created.id);
+    } catch (err) {
+      // Fail closed (no capture offered) rather than judge a stale body.
+      logger.warn(`[recurring-cof] live SetupIntent read failed after mint ${created.id}: ${err.message}`);
+      return null;
+    }
     if (!setupIntent) return null;
     if (setupIntent.status === 'canceled') continue;
-    // A SUCCEEDED replay already holds a payment method the customer will
-    // not re-enter — the capture UI must render the consent for THAT
-    // tender (Codex #3723 r1 P1: a bank captured earlier must not sit under
-    // a card authorization). Resolve its type here, where the secret key
-    // can; the client cannot read a pm's type with a publishable key.
-    let capturedMethodType = null;
-    if (setupIntent.status === 'succeeded' && setupIntent.payment_method) {
-      const pm = setupIntent.payment_method;
+    // A RETIRED replay: the customer replaced that capture — hand back its
+    // live replacement instead. A broken chain falls through to the next
+    // generation (the pre-replacement behavior for a dead replay).
+    if (isRetiredSetupIntent(setupIntent)) {
+      let head = null;
       try {
-        capturedMethodType = typeof pm === 'object' && pm?.type
-          ? pm.type
-          : (await StripeService.retrievePaymentMethod(typeof pm === 'string' ? pm : pm.id))?.type || null;
+        head = await followReplacementChain(setupIntent);
       } catch (err) {
-        logger.warn(`[recurring-cof] captured method type lookup failed for replayed intent ${setupIntent.id}: ${err.message}`);
+        logger.warn(`[recurring-cof] replacement chain read failed from ${setupIntent.id}: ${err.message}`);
+        return null;
       }
+      // A replacement was minted under the tender policy of ITS moment; a
+      // head whose tender family no longer matches (bank-capable after the
+      // ACH gate closed, or card-only after it opened) is treated like a
+      // dead replay — the next generation's key is tender-salted, so it
+      // mints a compatible intent instead of advertising ['card'] over a
+      // bank the accept would refuse (pre-push Codex P1 r3).
+      if (!head || !intentTenderMatches(head, paymentMethodType)) continue;
+      return shapeCaptureIntent(head, paymentMethodType);
     }
-    return {
-      clientSecret: setupIntent.client_secret,
-      setupIntentId: setupIntent.id,
-      // The capture UI keys its heading/consent copy on this — the Payment
-      // Element only shows a bank tab when the intent allows it.
-      paymentMethodTypes: paymentMethodType === 'card_or_bank' ? ['card', 'us_bank_account'] : ['card'],
-      // Non-null only for a succeeded replay: the tender already on the
-      // intent, so the UI initializes its consent to it.
-      capturedMethodType,
-    };
+    return shapeCaptureIntent(setupIntent, paymentMethodType);
   }
   logger.error(`[recurring-cof] exhausted SetupIntent generations for estimate ${estimate.id} — all replays terminal`);
   return null;
 }
 
-// A live-retrieved SetupIntent counts only when Stripe says it succeeded, it
-// carries a saved payment_method, AND its metadata pins it to THIS estimate
-// as a recurring card-on-file capture (a one-time HOLD intent must never
-// satisfy this gate — different consent, different semantics).
-function recurringCardIntentMatchesEstimate(setupIntent, estimateId) {
+// Does a live intent's tender family match what the current policy would
+// mint? (The generation keys are salted by this, so only a replacement
+// chain head can drift.)
+function intentTenderMatches(setupIntent, paymentMethodType) {
+  const bankAllowed = paymentMethodType === 'card_or_bank';
+  // A SUCCEEDED head is judged by what it actually captured, the same way
+  // the accept gate judges it (GitHub Codex #4144 r1 P2): a card saved on a
+  // bank-capable intent is still a valid card after the ACH gate closes —
+  // skipping it would make the customer re-enter a card already on file.
+  // Only a captured bank is refused under a card-only policy.
+  if (setupIntent?.status === 'succeeded' && setupIntent.payment_method) {
+    const pm = setupIntent.payment_method;
+    const capturedType = typeof pm === 'object' ? pm?.type : null;
+    if (capturedType === 'card') return true;
+    if (capturedType === 'us_bank_account') return bankAllowed;
+  }
+  // An unfinished intent (or a capture whose tender could not be read)
+  // must match the family exactly — it still decides what can be saved.
+  const bankCapable = Array.isArray(setupIntent?.payment_method_types)
+    && setupIntent.payment_method_types.includes('us_bank_account');
+  return bankCapable === bankAllowed;
+}
+
+// Stripe's "No such setupintent" (HTTP 404, code resource_missing) — the
+// id was never minted, so there is nothing to retire and nothing to retry.
+function isStripeResourceMissing(err) {
+  return err?.code === 'resource_missing' || err?.statusCode === 404;
+}
+
+// Retirement stamp (replaceRecurringCardIntent): the customer replaced this
+// capture with a different payment method. Read from Stripe's own metadata
+// so the accept gate and the mint agree without a local row.
+function isRetiredSetupIntent(setupIntent) {
+  return setupIntent?.metadata?.retired === 'true';
+}
+
+// The intent's metadata pins it to THIS estimate as a recurring card-on-file
+// capture (a one-time HOLD intent must never satisfy the accept gate —
+// different consent, different semantics).
+function recurringCardIntentBelongsToEstimate(setupIntent, estimateId) {
   return !!setupIntent
-    && setupIntent.status === 'succeeded'
     && setupIntent.metadata?.purpose === 'estimate_recurring_card'
-    && String(setupIntent.metadata?.estimate_id) === String(estimateId)
+    && String(setupIntent.metadata?.estimate_id) === String(estimateId);
+}
+
+// A live-retrieved SetupIntent counts only when Stripe says it succeeded, it
+// carries a saved payment_method, it belongs to this estimate, AND the
+// customer has not retired it in favour of another payment method.
+function recurringCardIntentMatchesEstimate(setupIntent, estimateId) {
+  return recurringCardIntentBelongsToEstimate(setupIntent, estimateId)
+    && setupIntent.status === 'succeeded'
+    && !isRetiredSetupIntent(setupIntent)
     && !!setupIntent.payment_method;
+}
+
+// "Use a different payment method" after a capture already succeeded: the
+// deterministic idempotency key replays the succeeded intent on every reopen
+// and refresh, and Stripe will not cancel a succeeded SetupIntent, so without
+// this the first tender saved is the only one the accept can ever enroll
+// (customer report 2026-09-08: a credit card saved, then no way to switch to
+// a bank account to avoid the surcharge). Order matters: the replacement is
+// MINTED FIRST (keyed on the retired id — unbounded, and re-requesting the
+// same replacement replays the same fresh intent), and only then is the old
+// intent stamped retired + `replaced_by` in Stripe, so a mint failure leaves
+// the customer's saved method untouched and usable. The accept gate refuses
+// the retired id from then on; the deterministic mint follows `replaced_by`
+// to the live capture. Only an intent pinned to THIS estimate can be
+// replaced (an echoed foreign id is a mismatch). An intent that is not a
+// succeeded capture has nothing to retire — the customer can still pick any
+// tender inside it — so the ordinary mint is returned. Returns
+// { ok, intent } or { ok: false, reason }.
+async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
+  if (!setupIntentId) return { ok: false, reason: 'no_setup_intent' };
+  let current = null;
+  try {
+    current = await readLiveSetupIntent(setupIntentId);
+  } catch (err) {
+    // An id Stripe has never heard of is a client error, not an outage
+    // (GitHub Codex #4144 r1): keep the route's documented 400 for a
+    // foreign/unknown id and reserve 503 for a genuine Stripe failure.
+    if (isStripeResourceMissing(err)) return { ok: false, reason: 'intent_mismatch' };
+    logger.warn('[recurring-cof] replace: live SetupIntent lookup failed', { error: err.message });
+    return { ok: false, reason: 'verification_failed' };
+  }
+  if (!recurringCardIntentBelongsToEstimate(current, estimate.id)) {
+    return { ok: false, reason: 'intent_mismatch' };
+  }
+  // Serialized with the accept on the estimate ROW LOCK (pre-push Codex P1
+  // r3): the accept's first write is a guarded UPDATE of this row that
+  // holds the lock to commit, and it re-reads the intent live under that
+  // lock (verifyRecurringCardIntentUnderLock). So either the retirement
+  // commits first and the accept 402s on it, or the accept commits first
+  // and this sees `accepted` and retires nothing. Read-only on the row —
+  // an UPDATE here would move updated_at and 409 the accept's CAS. EVERY
+  // outcome takes the lock (GitHub Codex #4144 r1 P0): a stale tab
+  // retrying with an already-retired or unfinished intent must not mint a
+  // fresh capture — or record a checkout step — for an estimate another
+  // tab has accepted in the meantime.
+  return db.transaction(async (trx) => {
+    // The locked read carries every column the route's accept-active gate
+    // judges (GitHub Codex #4144 r2 P0): a decline, expiry, archive or
+    // linkage invalidation that landed after the route's pre-read is a
+    // terminal state under which nothing may be minted or retired.
+    const row = await trx('estimates').where({ id: estimate.id }).forUpdate()
+      .first('id', 'status', 'accepted_at', 'archived_at', 'expires_at', 'estimate_data');
+    if (!row) return { ok: false, reason: 'intent_mismatch' };
+    if (row.status === 'accepted' || row.accepted_at) return { ok: false, reason: 'estimate_accepted' };
+    const gates = require('../routes/estimate-public');
+    // Fail closed if the predicate is ever unavailable — a money path.
+    if (typeof gates.isEstimateAcceptActive !== 'function' || !gates.isEstimateAcceptActive(row)) {
+      return { ok: false, reason: 'estimate_inactive' };
+    }
+    if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
+      const intent = await createRecurringCardSetupIntentForEstimate(estimate, trx);
+      return intent ? { ok: true, intent, retired: false } : { ok: false, reason: 'mint_failed' };
+    }
+    const paymentMethodType = await resolveRecurringCaptureTender(estimate, trx);
+    let replacement = null;
+    try {
+      const created = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, paymentMethodType, replacing: current.id });
+      replacement = created ? await readLiveSetupIntent(created.id) : null;
+    } catch (err) {
+      logger.warn(`[recurring-cof] replace: replacement mint failed for ${current.id}`, { error: err.message });
+      return { ok: false, reason: 'mint_failed' };
+    }
+    // The replacement key is deterministic per retired id, so a replay that
+    // has itself been retired or canceled cannot be offered — nothing is
+    // retired in that case and the customer keeps the saved method.
+    if (!replacement || replacement.status === 'canceled' || isRetiredSetupIntent(replacement)) {
+      return { ok: false, reason: 'mint_failed' };
+    }
+    try {
+      await StripeService.retireSetupIntent(current.id, { replacedBy: replacement.id });
+    } catch (err) {
+      logger.warn(`[recurring-cof] replace: retire stamp failed for ${current.id}`, { error: err.message });
+      return { ok: false, reason: 'retire_failed' };
+    }
+    logger.info(`[recurring-cof] retired succeeded SetupIntent ${current.id} for estimate ${estimate.id} → replaced by ${replacement.id} (customer chose a different payment method)`);
+    return { ok: true, intent: await shapeCaptureIntent(replacement, paymentMethodType), retired: true };
+  });
+}
+
+// In-transaction re-check of the verified intent under the accept's row lock
+// (pre-push Codex P1 r3): the pre-transaction verify can be a moment stale —
+// a replacement from another tab/request retires the intent between that
+// verify and the commit, and the enrollment would save the retired method.
+// Same lock the replacement takes, so the two are serialized. True when the
+// intent is still a live succeeded capture; a read failure fails closed.
+async function verifyRecurringCardIntentUnderLock({ setupIntentId }) {
+  if (!setupIntentId) return false;
+  try {
+    const setupIntent = await StripeService.retrieveSetupIntent(setupIntentId);
+    return !!setupIntent && setupIntent.status === 'succeeded' && !isRetiredSetupIntent(setupIntent);
+  } catch (err) {
+    logger.warn('[recurring-cof] in-lock SetupIntent re-check failed — refusing', { error: err.message });
+    return false;
+  }
 }
 
 // Accept GATE (pre-commit): live-verify the named SetupIntent WITHOUT writing.
@@ -1365,8 +1579,10 @@ module.exports = {
   prepayChargeMethodKey,
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
+  replaceRecurringCardIntent,
   resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
+  verifyRecurringCardIntentUnderLock,
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
   _private: {

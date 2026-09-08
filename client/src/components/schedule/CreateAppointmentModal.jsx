@@ -34,8 +34,9 @@ import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
-import BestTimeHint from './BestTimeHint';
+import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
+import { etDateString } from '../../lib/timezone';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -135,6 +136,19 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
+
+// Second line of a Find-a-Time result: the drive the van makes INTO the
+// stop from the anchor it leaves (home base for the first stop), then what
+// the insertion adds to the route — same wording as the picker hint, so
+// "+57 min" never reads as a drive time. A result without a single
+// insertion leg (arrival-window mode) keeps the detour-only form.
+export function findTimeSlotDetail(slot) {
+  const added = detourPhrase({ detourMinutes: slot.detour_minutes });
+  const driveIn = Math.round(Number(slot.drive_in_minutes));
+  if (slot.drive_in_minutes == null || !Number.isFinite(driveIn) || !slot.insertion) return added;
+  const from = slot.insertion.after_stop_id ? (slot.insertion.after_name || 'the previous stop') : 'home base';
+  return `${driveIn} min drive from ${from} · ${added} · before ${slot.insertion.before}`;
+}
 
 function normalizeHourTime(value, fallback = '09:00') {
   const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
@@ -1737,7 +1751,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
   const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
-  const { bestTimes } = useBestTimes({
+  const { bestTimes, picked, bestInRange } = useBestTimes({
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
     // Rank at the CHOSEN property, not the customer's primary.
@@ -1747,6 +1761,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     durationMinutes: slotCheckDuration,
     // Same tech scoping as the ranged search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
+    // The picked-hour verdict is priced on ONE technician's route. In Auto
+    // mode the booking's server-side matcher picks its own tech (or leaves
+    // the visit unassigned), and the typed hour has no chip to adopt the
+    // scored one — a cost for a route the booking will not use. Chips stay:
+    // picking one adopts its technician (Codex #4120 r5 P2).
+    pickedStart: techMode === 'choose' && techId ? windowStart : undefined,
+    rangeFrom: etDateString(),
   });
 
   // Submit
@@ -3348,7 +3369,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
                         </div>
                         <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
+                          {findTimeSlotDetail(slot)}
                         </div>
                       </div>
                       <div style={{ fontSize: 11, color: D.teal, fontWeight: 500 }}>Use →</div>
@@ -3377,13 +3398,25 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
           <BestTimeHint
             bestTimes={bestTimes}
+            picked={picked}
+            bestInRange={bestInRange}
             currentStart={windowStart}
+            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentTechnicianId={techMode === 'choose' ? techId : null}
             onPick={(slot) => {
               // Mirror applySlot: the detour was scored for a specific
               // technician, so picking the chip adopts that tech too —
               // leaving auto mode would let assignment land elsewhere and
               // falsify the advertised detour.
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            onPickDate={(slot) => {
+              setApptDate(slot.date);
               setWindowStart(slot.start);
               if (slot.technicianId) {
                 setTechMode('choose');

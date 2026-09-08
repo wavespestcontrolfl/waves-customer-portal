@@ -4756,6 +4756,37 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     // bank policy here, and a refusal bells the office instead of dropping
     // silently. A lookup failure on a bank-capable intent rethrows (retry).
     const boundToAccept = !!acceptedIntentId && acceptedIntentId === setupIntent.id;
+    // An UNSTAMPED accept (legacy, or RECURRING_CARD_ON_FILE off at accept)
+    // is the one path where the event payload is the only evidence — and
+    // that payload is the intent as it succeeded. A "use a different
+    // payment method" replacement since then lives only in Stripe metadata
+    // (`retired` / `replaced_by`), so re-read the intent live before
+    // enrolling (GitHub Codex #4144 r3 P1). A retired capture is a
+    // permanent skip (ack); an unreadable one rethrows for Stripe's retry.
+    // A stamped accept was judged under the row lock, where a retirement
+    // cannot have landed, and no replacement is minted after acceptance.
+    if (!boundToAccept) {
+      const { retrieveSetupIntent } = require('../services/stripe');
+      let live = null;
+      try {
+        live = await retrieveSetupIntent(setupIntent.id);
+      } catch (err) {
+        throw annotateSetupIntentWebhookError(
+          new Error(`recurring card intent ${setupIntent.id} live read failed (${err.message}) — retry`),
+          { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'setup_intent_lookup_failed' },
+        );
+      }
+      if (!live) {
+        throw annotateSetupIntentWebhookError(
+          new Error(`recurring card intent ${setupIntent.id} could not be re-read — retry`),
+          { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'setup_intent_lookup_failed' },
+        );
+      }
+      if (live.metadata?.retired === 'true') {
+        logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} was retired by the customer (replaced by ${live.metadata.replaced_by || 'n/a'}) — not enrolling (estimate ${estimate.id})`);
+        return;
+      }
+    }
     if (!boundToAccept && Array.isArray(setupIntent.payment_method_types) && setupIntent.payment_method_types.includes('us_bank_account')) {
       const pmRef = setupIntent.payment_method;
       let pmType = typeof pmRef === 'object' && pmRef?.type ? pmRef.type : null;

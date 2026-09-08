@@ -1728,9 +1728,9 @@ export default function CustomersPageV2() {
   const [pipelineStageMobile, setPipelineStageMobile] = useState("new_lead");
   const [showFilters, setShowFilters] = useState(false);
   const selected360Id = searchParams.get("customerId") || null;
-  // Query-gated rollout: opt in with ?customer360=workspace. Existing deep
-  // links and profile sheets on other surfaces keep their current presentation.
-  const workspaceMode = searchParams.get("customer360") === "workspace";
+  // Customers defaults to the workspace; ?customer360=overlay is the rollback.
+  // Profile sheets on other surfaces keep their current presentation.
+  const workspaceMode = searchParams.get("customer360") !== "overlay";
   const PagePresentation = workspaceMode
     ? CustomersWorkspacePage
     : CustomersOverlayPage;

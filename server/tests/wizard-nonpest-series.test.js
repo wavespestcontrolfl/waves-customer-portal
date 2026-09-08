@@ -682,7 +682,7 @@ describe('booking route wiring (source contracts)', () => {
     // on the customers row the activation already holds.
     const props = fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-properties.js'), 'utf8');
     expect(props).toMatch(/const \{ claimFence = null, conn = null \} = opts;/);
-    expect(props).toMatch(/return ensurePrimaryCore\(customerOrId, opts, conn && conn\.isTransaction \? conn : db\);/);
+    expect(props).toMatch(/if \(conn && conn\.isTransaction\) return ensurePrimaryCore\(customerOrId, \{ \.\.\.opts, lockWait: false \}, conn\);/);
     expect(props).toMatch(/return conn && conn\.isTransaction \? run\(conn\) : db\.transaction\(run\);/);
     const linkageSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-property-linkage.js'), 'utf8');
     expect(linkageSrc).toMatch(/ensurePrimaryProperty\(customerId, \{ conn: database \}\)/);

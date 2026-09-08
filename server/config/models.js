@@ -76,6 +76,7 @@ const DEFAULTS = Object.freeze({
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
+  OPENAI_FRONTIER: 'gpt-6-astra',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
   GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
@@ -138,6 +139,12 @@ const OPENAI_BEST          = OPENAI_BALANCED;
 // The completed-service report uses this model first, then Claude Opus whenever
 // OpenAI is unavailable, overloaded, empty, or fails the copy-safety gate.
 const OPENAI_REPORT_WRITER = process.env.MODEL_OPENAI_REPORT_WRITER || DEFAULTS.OPENAI_REPORT_WRITER;
+// Frontier OpenAI multimodal model — the backup leg of the lawn visit
+// assessment (owner 2026-09-08: when the Gemini call misses, ChatGPT takes
+// over on the best model). Its own selector, off BALANCED / REPORT_WRITER, so
+// the premium rate is paid only on that lane's fallback leg and a Q&A or
+// report model change never moves it.
+const OPENAI_FRONTIER      = process.env.MODEL_OPENAI_FRONTIER || DEFAULTS.OPENAI_FRONTIER;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
@@ -212,6 +219,7 @@ const MODEL_CATALOG = {
   'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep' },
   'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy', requires: 'deep' },
   'claude-haiku-4-5-20251001': { label: 'Claude Haiku 4.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  'gpt-6-astra': { label: 'GPT-6 Astra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
@@ -294,6 +302,16 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
+  lawnVisitAssessment: Object.freeze({
+    name: 'lawnVisitAssessment',
+    // One multimodal call per lawn visit (services/lawn-visit-assessment.js,
+    // GATE_LAWN_VISIT_ASSESSMENT). Owner ruling 2026-09-08 (DECISIONS.md): the
+    // Gemini vision model reads every visit photo at once; when it misses,
+    // GPT-6 Astra takes over. No Claude leg and no parallel providers — the
+    // one lane that deliberately departs from the Claude-fallback rule.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+  }),
   visitBrief: Object.freeze({
     name: 'visitBrief',
     // Per-visit pocket-reference brief (previsit-brief.js) — summarization
@@ -329,6 +347,7 @@ module.exports = {
   OPENAI_BALANCED,
   OPENAI_FAST,
   OPENAI_REPORT_WRITER,
+  OPENAI_FRONTIER,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,
   EMBEDDING_DIMS,

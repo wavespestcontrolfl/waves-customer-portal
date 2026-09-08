@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const nativeMocks = vi.hoisted(() => {
   const state = { permission: 'prompt', requestResult: 'granted', listeners: {} };
   const PushNotifications = {
+    // Capacitor's proxy exposes a callable `then` for every plugin. Resolving
+    // a promise with the proxy invokes it and never settles that promise.
+    then: vi.fn(),
     addListener: vi.fn(async (name, callback) => {
       state.listeners[name] = callback;
       return { remove: vi.fn() };
@@ -46,6 +49,7 @@ beforeEach(() => {
   nativeMocks.state.requestResult = 'granted';
   navigateToCustomerUrl.mockClear();
   reportError.mockClear();
+  nativeMocks.PushNotifications.then.mockClear();
   nativeMocks.PushNotifications.checkPermissions.mockClear();
   nativeMocks.PushNotifications.requestPermissions.mockClear();
   nativeMocks.PushNotifications.register.mockClear();
@@ -56,6 +60,20 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('nativePush permission and tap handling', () => {
+  it('reaches the permission prompt and registration without awaiting the plugin proxy', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('waves_token', 'test-customer-session');
+    const enrollment = requestNativePushPermission();
+
+    await vi.advanceTimersByTimeAsync(15000);
+
+    await expect(enrollment).resolves.toBe('granted');
+    expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
+    expect(nativeMocks.PushNotifications.register).toHaveBeenCalledTimes(1);
+    expect(nativeMocks.PushNotifications.then).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
   it('does not prompt at startup and routes taps through the customer URL validator', async () => {
     await initNativePush();
 

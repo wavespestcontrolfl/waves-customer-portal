@@ -227,7 +227,12 @@ describe('llm call ledger', () => {
     it('records usageMetadata, modelVersion and empty_json with usage', async () => {
       global.fetch = fetchJson(GEMINI_BODY);
       const { call } = load();
-      expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({ ok: true, text: '{"g":true}', json: { g: true }, model: 'g' });
+      // The Gemini leg returns its usage like the OpenAI leg does (2026-09-08),
+      // so a caller can put token cost on its own provenance row.
+      expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({
+        ok: true, text: '{"g":true}', json: { g: true }, model: 'g',
+        usage: { input_tokens: 50, cached_input_tokens: 10, cache_write_tokens: null, output_tokens: 20, reasoning_tokens: 5 },
+      });
       global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ content: { parts: [{ text: 'not json' }] } }] });
       expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({ ok: false, reason: 'empty_json' });
       await flush();

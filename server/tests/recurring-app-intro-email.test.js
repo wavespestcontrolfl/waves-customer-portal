@@ -5,13 +5,16 @@
 // NOTE: waveguard_tier is read from the customers table (loadService doesn't
 // join customers), so the db mock is table-aware: customers -> tier,
 // service_records -> completed-visit count.
-let mockServiceRecordCount = 0;
+const mockFirstServiceVisit = jest.fn(async () => true);
+jest.mock('../services/customer-visit-history', () => ({
+  isFirstServiceVisit: (...args) => mockFirstServiceVisit(...args),
+}));
 let mockTier = 'Bronze';
 jest.mock('../models/db', () => jest.fn((table) => {
   if (table === 'customers') {
     return { where: () => ({ first: async () => ({ waveguard_tier: mockTier }) }) };
   }
-  return { where: () => ({ count: () => ({ first: async () => ({ count: mockServiceRecordCount }) }) }) };
+  throw new Error('Unexpected table: ' + table);
 }));
 jest.mock('../services/account-membership-email', () => ({
   sendAppIntro: jest.fn(async () => ({ ok: true, messageId: 'm1' })),
@@ -29,12 +32,13 @@ const RecurringAppIntro = require('../services/recurring-app-intro-email');
 
 // svc deliberately omits waveguard_tier — it isn't on scheduled_services, so the
 // module must source the tier from the customers table, not from svc.
-const recurringSvc = { id: 's1', customer_id: 'c1', is_recurring: true };
+const recurringSvc = { id: 's1', customer_id: 'c1', is_recurring: true, scheduled_date: '2030-01-02', track_view_token: 'a'.repeat(64), track_token_expires_at: new Date(Date.now() + 3600000).toISOString() };
 
 describe('recurring-app-intro-email gating', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockServiceRecordCount = 0;
+    mockFirstServiceVisit.mockResolvedValue(true);
+    mockTierLabelStatus.mockResolvedValue('not_label');
     mockTier = 'Bronze';
     process.env.GATE_APP_INTRO_EMAIL = 'true';
   });
@@ -61,7 +65,7 @@ describe('recurring-app-intro-email gating', () => {
   });
 
   test('skips when the customer already has a completed visit (not their first)', async () => {
-    mockServiceRecordCount = 2;
+    mockFirstServiceVisit.mockResolvedValue(false);
     const r = await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
     expect(r).toMatchObject({ sent: false, reason: 'not_first_visit' });
     expect(AccountMembershipEmail.sendAppIntro).not.toHaveBeenCalled();
@@ -70,7 +74,8 @@ describe('recurring-app-intro-email gating', () => {
   test('sends for a recurring member on their first visit', async () => {
     const r = await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
     expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledTimes(1);
-    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledWith({ customerId: 'c1', sourceId: 's1' });
+    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledWith({ customerId: 'c1', sourceId: 's1', trackToken: 'a'.repeat(64), trackTokenExpiresAt: recurringSvc.track_token_expires_at });
+    expect(mockFirstServiceVisit).toHaveBeenCalledWith('c1', recurringSvc.scheduled_date);
     expect(r).toMatchObject({ ok: true });
   });
 
