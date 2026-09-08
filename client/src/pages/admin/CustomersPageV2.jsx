@@ -883,7 +883,7 @@ function SortHeaderV2({
 const VIEWS = [
   { key: "directory", label: "Directory", Icon: Users },
   { key: "map", label: "Map", Icon: MapPinned },
-  { key: "intelligence", label: "Outreach & Upsells", Icon: Sparkles },
+  { key: "intelligence", label: "Opportunities", Icon: Sparkles },
 ];
 
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
