@@ -197,7 +197,7 @@ NEVER: send a generic template, promise pricing, book without availability check
     {
       type: 'custom',
       name: 'update_lead_pipeline',
-      description: `Update the lead's pipeline stage and record an activity. Stages: new_lead → contacted → estimate_sent → estimate_viewed → follow_up → won/lost. Also triggers the PipelineManager which handles automatic stage transitions.`,
+      description: `Update the lead's pipeline stage and record an activity. Stages: contacted → estimate_sent → estimate_viewed → follow_up → won/lost. Also triggers the PipelineManager which handles automatic stage transitions.`,
       input_schema: {
         type: 'object',
         properties: {
