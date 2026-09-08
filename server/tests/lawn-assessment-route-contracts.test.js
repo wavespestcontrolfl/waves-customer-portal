@@ -129,6 +129,10 @@ describe('lawn assessment route contracts', () => {
       // Irrigation context comes from the one loader the eval exporter replays (lawn-grass-context.loadIrrigationContext).
       expect(assess).toMatch(/const irrigation = await loadIrrigationContext\(customerId, grassCtx, db\);/);
       expect(assess).not.toMatch(/first\('irrigation_type', 'irrigation_inches_per_week'\)/);
+      // An answer that rates every photo poor takes the same retake hold as the legacy quality gate — before any row is written.
+      expect(assess).toMatch(/\(\{ qualityResults, resultByPhotoIndex, allPoor \} = visitAssessment\.photoRowInputs\(visitAnalysis\)\);\s*(?:\/\/[^\n]*\n\s*)*if \(allPoor\) return allPhotosFailed\(qualityResults\);/);
+      expect(assess.indexOf('if (allPoor) return allPhotosFailed(')).toBeLessThan(assess.indexOf('visitAssessment.recordRun('));
+      expect(assess.match(/All photos failed quality check/g)).toHaveLength(1);
     });
 
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {

@@ -444,14 +444,15 @@ router.post('/assess', async (req, res, next) => {
     const passedPhotos = passedIndices.map((i) => photos[i]);
     const failedPhotos = photos.filter((_, i) => !qualityResults[i].passed);
 
-    if (passedPhotos.length === 0 && failedPhotos.length > 0) {
-      return res.json({
-        success: false,
-        message: 'All photos failed quality check. Please retake with better lighting, closer to the lawn, avoiding shadows.',
-        qualityResults: qualityResults.map((q, i) => ({ photoIndex: i, ...q })),
-        photoCount: photos.length,
-      });
-    }
+    // Every photo unusable: ask for a retake, store nothing. The gate-on
+    // path reaches the same hold once the visit model has rated the photos.
+    const allPhotosFailed = (results) => res.json({
+      success: false,
+      message: 'All photos failed quality check. Please retake with better lighting, closer to the lawn, avoiding shadows.',
+      qualityResults: results.map((q, i) => ({ photoIndex: i, ...q })),
+      photoCount: photos.length,
+    });
+    if (passedPhotos.length === 0 && failedPhotos.length > 0) return allPhotosFailed(qualityResults);
 
     // Use only photos that passed quality. Fallback path (quality
     // gate unavailable / no passes but no fails either) analyses
@@ -641,7 +642,11 @@ router.post('/assess', async (req, res, next) => {
     let displayScores;
     if (visitAssessmentEnabled) {
       visitAnalysis = await visitAssessment.analyzeVisit({ photos, photoZones: visitPhotos.zones, visionContext });
-      ({ qualityResults, resultByPhotoIndex } = visitAssessment.photoRowInputs(visitAnalysis));
+      let allPoor;
+      ({ qualityResults, resultByPhotoIndex, allPoor } = visitAssessment.photoRowInputs(visitAnalysis));
+      // The model answered but called every photo unusable: the legacy
+      // retake hold, not an assessment scored off images it could not read.
+      if (allPoor) return allPhotosFailed(qualityResults);
     } else {
       mergedComposite = mergePhotoComposites(validResults);
       // Convert to display scores
