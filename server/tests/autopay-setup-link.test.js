@@ -1122,6 +1122,16 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
   });
 
+  it('a replacement replayed after another tab already CONFIRMED it carries its captured tender (GH Codex #4163 r7 P1)', async () => {
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (id === 'seti_old') return { ...SAVED };
+      if (id === 'seti_after') return { ...FRESH, status: 'succeeded', payment_method: { id: 'pm_b', type: 'us_bank_account' } };
+      return null;
+    });
+    const res = await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' });
+    expect(res).toMatchObject({ ok: true, intent: { setupIntentId: 'seti_after', capturedMethodType: 'us_bank_account' } });
+  });
+
   it('a replacement replay that is itself retired or canceled is never offered — nothing retired', async () => {
     mockRetrieveSetupIntent.mockImplementation(async (id) => {
       if (id === 'seti_old') return { ...SAVED };

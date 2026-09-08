@@ -750,7 +750,12 @@ async function replaceAutopaySetupIntent({ request, setupIntentId }) {
         clientSecret: replacement.client_secret,
         setupIntentId: replacement.id,
         paymentMethodTypes: replacement.payment_method_types || ['card'],
-        capturedMethodType: null,
+        // The replacement key is deterministic per retired id: a second
+        // concurrent replacement can replay a replacement another tab has
+        // already CONFIRMED — carry its captured tender so the UI renders
+        // the saved-method panel, not an element on a finished intent
+        // (GH Codex #4163 r7 P1).
+        capturedMethodType: await capturedMethodTypeOf(replacement),
       },
     };
   });
