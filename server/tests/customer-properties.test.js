@@ -139,10 +139,158 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
   test('two or more active properties → null (office places those)', async () => {
     expect(await soleActivePropertyId('c1', connWith([{ id: 'p1' }, { id: 'p2' }]))).toBeNull();
   });
-  test('none, no customer, or a read error → null (best-effort)', async () => {
-    expect(await soleActivePropertyId('c1', connWith([]))).toBeNull();
+  test('no customer, or a read error → null (best-effort)', async () => {
     expect(await soleActivePropertyId(null, connWith([{ id: 'p1' }]))).toBeNull();
     expect(await soleActivePropertyId('c1', () => { throw new Error('down'); })).toBeNull();
+  });
+
+  // No row at all → the anchor backfills the lazily-created primary from the
+  // customers mirror (prod 2026-09-07: 144 addressed customers, every lead /
+  // public booking for them anchored to NULL) and returns it as the sole
+  // property. Fake knex: `customer_properties` reads answer with `rows`
+  // (then, after an insert, the inserted primary); `customers` answers with
+  // the mirror row; `transaction(fn)` hands back the same fake (a savepoint).
+  const fakeConn = ({ rows = [], customer = null, locked, heldElsewhere = false, insertError = null, isTransaction = false } = {}) => {
+    const state = { rows: [...rows], inserted: [], failures: [], locked: 0, skipLocked: 0 };
+    const conn = (table) => {
+      if (table === 'customers') {
+        // A transaction fake answers the locked read with `locked` when
+        // given (the row as it is once the lock is granted), else the
+        // plain row.
+        const first = async () => customer;
+        // `heldElsewhere` models a row another transaction holds: the
+        // waiting lock would block (never happens in these tests), the
+        // SKIP LOCKED read returns nothing.
+        const lockedFirst = async () => (locked === undefined ? customer : locked);
+        const forUpdate = () => {
+          state.locked += 1;
+          return {
+            first: lockedFirst,
+            skipLocked: () => { state.skipLocked += 1; return { first: async () => (heldElsewhere ? null : lockedFirst()) }; },
+          };
+        };
+        return { where: () => ({ first, forUpdate }) };
+      }
+      const q = {
+        where: () => q,
+        limit: () => q,
+        select: async () => state.rows,
+        first: async () => state.rows.find((r) => r.is_primary) || null,
+        insert: (row) => ({
+          returning: async () => {
+            if (insertError) throw insertError;
+            const id = `p-new-${state.inserted.length + 1}`;
+            state.inserted.push({ ...row, id });
+            state.rows.push({ id, is_primary: true, active: true });
+            return [{ id }];
+          },
+        }),
+      };
+      return q;
+    };
+    conn.isTransaction = isTransaction;
+    conn.transaction = async (fn) => fn(conn);
+    conn.state = state;
+    return conn;
+  };
+  const addressed = { id: 'c1', address_line1: '100 Main St', city: 'Sampleville', state: 'FL', zip: '34200', contact_role: null };
+
+  test('no property row + an on-file address → backfills the primary and anchors to it', async () => {
+    const conn = fakeConn({ customer: addressed });
+    expect(await soleActivePropertyId('c1', conn)).toBe('p-new-1');
+    expect(conn.state.inserted).toHaveLength(1);
+    expect(conn.state.inserted[0]).toMatchObject({
+      customer_id: 'c1', is_primary: true, active: true, source: 'backfill',
+      address_line1: '100 Main St', city: 'Sampleville', zip: '34200', occupancy_type: 'owner_occupied',
+    });
+  });
+  test('backfill runs inside the caller transaction as a savepoint', async () => {
+    const conn = fakeConn({ customer: addressed, isTransaction: true });
+    expect(await soleActivePropertyId('c1', conn)).toBe('p-new-1');
+  });
+  test('no property row and no on-file address → nothing to backfill, null', async () => {
+    const conn = fakeConn({ customer: { id: 'c1', address_line1: '' } });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
+    expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('an archived customer (a merge loser keeps its address) never grows a primary → null', async () => {
+    const conn = fakeConn({ customer: { ...addressed, deleted_at: '2026-09-01T00:00:00.000Z' } });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
+    expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('inside a transaction the liveness check reads the LOCKED customers row — a merge that archives the customer while the anchor waits wins (codex #4115 r3 P2)', async () => {
+    // The caller's snapshot is live; the row under FOR UPDATE is archived.
+    const conn = fakeConn({ customer: addressed, locked: { ...addressed, deleted_at: '2026-09-08T00:00:00.000Z' }, isTransaction: true });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
+    expect(conn.state.locked).toBe(1);
+    expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('on a caller-owned transaction the customers lock is SKIP LOCKED — a row a merge holds reads as not live, no wait, no insert (codex #4115 r5 P2)', async () => {
+    const held = fakeConn({ customer: addressed, isTransaction: true, heldElsewhere: true });
+    expect(await soleActivePropertyId('c1', held)).toBeNull();
+    expect(held.state.skipLocked).toBe(1);
+    expect(held.state.inserted).toHaveLength(0);
+    const free = fakeConn({ customer: addressed, isTransaction: true });
+    expect(await soleActivePropertyId('c1', free)).toBe('p-new-1');
+    expect(free.state.skipLocked).toBe(1);
+    // ensurePrimaryProperty with a caller conn takes the same non-waiting lock.
+    const { ensurePrimaryProperty } = require('../services/customer-properties');
+    const viaConn = fakeConn({ customer: addressed, isTransaction: true, heldElsewhere: true });
+    expect(await ensurePrimaryProperty('c1', { conn: viaConn })).toEqual({ created: false, propertyId: null });
+    expect(viaConn.state.skipLocked).toBe(1);
+  });
+  test('a caller-supplied customer object keeps its address overrides but not its stale liveness', async () => {
+    const { ensurePrimaryProperty } = require('../services/customer-properties');
+    const conn = fakeConn({ customer: addressed, locked: addressed, isTransaction: true });
+    const r = await ensurePrimaryProperty({ ...addressed, address_line2: 'Unit 7' }, { conn });
+    expect(r.created).toBe(true);
+    expect(conn.state.inserted[0]).toMatchObject({ address_line2: 'Unit 7', address_line1: '100 Main St' });
+    const archivedUnderLock = fakeConn({ customer: addressed, locked: { ...addressed, deleted_at: '2026-09-08T00:00:00.000Z' }, isTransaction: true });
+    expect(await ensurePrimaryProperty({ ...addressed, address_line2: 'Unit 7' }, { conn: archivedUnderLock })).toEqual({ created: false, propertyId: null });
+    expect(archivedUnderLock.state.inserted).toHaveLength(0);
+  });
+  test('an inactive-only primary is a deliberate deactivation — not recreated, null', async () => {
+    const conn = fakeConn({ customer: addressed });
+    conn.state.rows = []; // active read finds nothing …
+    const inactive = { id: 'p-old', is_primary: true, active: false };
+    const origConn = conn;
+    // … but the primary existence check (no active filter) sees the row.
+    const wrapped = (table) => {
+      const q = origConn(table);
+      if (table === 'customer_properties') q.first = async () => inactive;
+      return q;
+    };
+    wrapped.isTransaction = false;
+    wrapped.transaction = async (fn) => fn(wrapped);
+    expect(await soleActivePropertyId('c1', wrapped)).toBeNull();
+    expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('a backfill failure degrades to null (best-effort, never throws into a booking)', async () => {
+    const conn = fakeConn({ customer: addressed, insertError: Object.assign(new Error('boom'), { code: '42P01' }) });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
+  });
+  test('a lost primary race (23505) re-reads and anchors to the winner\'s committed primary', async () => {
+    const conn = fakeConn({ customer: addressed, insertError: Object.assign(new Error('dup'), { code: '23505' }) });
+    // First active read: nothing; the concurrent anchor commits before the re-read.
+    let reads = 0;
+    const base = conn;
+    const racing = (table) => {
+      const q = base(table);
+      if (table === 'customer_properties') {
+        const select = q.select;
+        q.select = async () => { reads += 1; return reads === 1 ? [] : [{ id: 'p-winner' }]; };
+        void select;
+      }
+      return q;
+    };
+    racing.isTransaction = false;
+    racing.transaction = async (fn) => fn(racing);
+    expect(await soleActivePropertyId('c1', racing)).toBe('p-winner');
+    expect(reads).toBe(2);
+  });
+  test('a lost race with nothing committed after all → null', async () => {
+    const conn = fakeConn({ customer: addressed, insertError: Object.assign(new Error('dup'), { code: '23505' }) });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
   });
 });
 
@@ -170,5 +318,19 @@ describe('property relationships (constants/property-relationships)', () => {
     expect(normalizeRelationship(' Family_Home ')).toEqual({ ok: true, value: 'family_home' });
     expect(normalizeRelationship('family')).toEqual({ ok: false });
     expect(normalizeRelationship(42)).toEqual({ ok: false });
+  });
+});
+
+describe('ops/agents/primary-property-backfill.js rollback guards (codex #4115 r3)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'ops', 'agents', 'primary-property-backfill.js'), 'utf8');
+  test('the rollback fingerprint keeps NULL positions (jsonb array, not concat_ws)', () => {
+    expect(src).toMatch(/md5\(jsonb_build_array\(/);
+    expect(src).not.toMatch(/concat_ws\(/);
+  });
+  test('a --limit cut is deterministic: created_at ties are broken by id', () => {
+    expect(src).toMatch(/\.orderBy\(\[\{ column: 'c\.created_at', order: 'asc' \}, \{ column: 'c\.id', order: 'asc' \}\]\)/);
+  });
+  test('the printed rollback locks the FK-less visual_service_moments table before the row locks', () => {
+    expect(src).toMatch(/BEGIN; LOCK TABLE visual_service_moments IN SHARE ROW EXCLUSIVE MODE; `\s*\n\s*\+ `SELECT 1 FROM customer_properties WHERE id = ANY/);
   });
 });
