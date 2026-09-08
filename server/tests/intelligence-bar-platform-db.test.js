@@ -184,6 +184,27 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     await api('/cancel-action', { pending_action_id: corrected.body.pendingActions[0].id });
   }, 30000);
 
+  test('schedule reads inside a customer-scoped task never list another customer\'s appointment', async () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const visitA = crypto.randomUUID(), visitB = crypto.randomUUID();
+    await db('scheduled_services').insert([
+      { id: visitA, customer_id: customerA, scheduled_date: today, service_type: 'Synthetic own visit', status: 'pending', notes: 'Own schedule note' },
+      { id: visitB, customer_id: customerB, scheduled_date: today, service_type: 'Synthetic foreign visit', status: 'pending', notes: 'Foreign private schedule note' },
+    ]);
+    mockModel.mockResolvedValueOnce(tools('get_schedule_view', {}, 'schedule'))
+      .mockResolvedValueOnce(answer('The schedule is loaded.'));
+    const response = await api('/query', request(`Show ${nameA}'s schedule today`));
+    expect(response.status).toBe(200);
+    expect(response.body.taskTarget.customer_id).toBe(customerA);
+    const result = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'schedule').content;
+    expect(result).toContain(visitA);
+    expect(result).toContain('Own schedule note');
+    expect(result).not.toContain(visitB);
+    expect(result).not.toContain('Foreign private schedule note');
+    expect(result).not.toContain(customerB);
+    await db('scheduled_services').whereIn('id', [visitA, visitB]).del();
+  }, 30000);
+
   test('two same-tool calls in one round keep their own clarification markers', async () => {
     const unlinkedCall = crypto.randomUUID(), ownCall = crypto.randomUUID();
     await db('call_log').insert([

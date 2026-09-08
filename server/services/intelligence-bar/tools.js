@@ -377,7 +377,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'query_customers': return await queryCustomers(input, actionContext.readCustomerIds);
       case 'find_overdue_customers': return await findOverdueCustomers(input);
       case 'get_customer_detail': return await getCustomerDetail(input.customer_id);
-      case 'get_schedule_view': return await getScheduleView(input);
+      case 'get_schedule_view': return await getScheduleView(input, actionContext.readCustomerIds);
       case 'query_revenue': return await queryRevenue(input);
       case 'compare_technicians': return await compareTechnicians(input);
       case 'find_duplicates': return await findDuplicates(input);
@@ -713,7 +713,10 @@ async function getCustomerDetail(customerId) {
 }
 
 
-async function getScheduleView(input) {
+// readCustomerIds: a customer-scoped task confines the schedule to its
+// resolved customers so a date-wide read cannot expose other customers'
+// names, phones, addresses or notes to the model.
+async function getScheduleView(input, readCustomerIds = []) {
   const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city } = input;
   const offset = Math.max(0, Math.trunc(input.offset || 0));
 
@@ -733,6 +736,7 @@ async function getScheduleView(input) {
       'technicians.name as tech_name',
     )
     .whereNotIn('scheduled_services.status', ['cancelled']);
+  if (readCustomerIds.length) query = query.whereIn('scheduled_services.customer_id', readCustomerIds);
 
   if (date) {
     query = query.where('scheduled_services.scheduled_date', date);
@@ -774,7 +778,8 @@ async function getScheduleView(input) {
     has_more: fetched.length > 200,
     next_offset: fetched.length > 200 ? offset + 200 : null,
     date: date || null,
-    coverage: 'Requested date range; cancelled appointments excluded',
+    coverage: readCustomerIds.length ? 'Requested date range for the task customer only; cancelled appointments excluded'
+      : 'Requested date range; cancelled appointments excluded',
   };
 }
 
