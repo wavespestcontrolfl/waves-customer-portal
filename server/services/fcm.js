@@ -96,6 +96,7 @@ function buildFcmMessage(deviceToken, notification = {}) {
     data[k] = typeof v === 'string' ? v : String(v);
   }
   const android = { priority: 'high', notification: { sound: 'default' } };
+  if (notification.ephemeral) android.ttl = '0s';
   // Same-tag redelivery REPLACES the banner on Android (mirrors the web-push
   // `tag` contract and apns-collapse-id): a stale-lease retry after a crash
   // never stacks a second phone notification.

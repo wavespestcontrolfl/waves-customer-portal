@@ -58,7 +58,7 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // Voice-agent bookings share the outbound-review treatment: pending rows stay
 // excluded from the sweep; the office confirmation is the clearance decision.
 const OFFICE_REVIEW_SOURCE_ACTIONS = require('./call-booking-source-actions').OFFICE_REVIEW_PENDING_SOURCE_ACTIONS;
-const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 // Shared active-plan status vocabulary (codex #3426 r1 P1): recurring
 // evidence must count every NON-TERMINAL row — an in-progress (en_route/
 // on_site) recurring visit is still an active plan — not just the sweep's
@@ -145,11 +145,7 @@ async function runSweep(dbh = db) {
     // Estimate/Follow-up/Re-Visit row with a stale positive price would get
     // a card + cancellation-fee ask for work completion never invoices) —
     // the shared no-cost-visit-types patterns, not a parallel list.
-    .where((qb) => {
-      for (const pattern of ALWAYS_FREE_SERVICE_TYPE_PATTERNS) {
-        qb.whereRaw("COALESCE(s.service_type, '') NOT ILIKE ?", [`%${pattern}%`]);
-      }
-    })
+    .whereRaw("COALESCE(s.service_type, '') !~* ?", [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX])
     .whereNotNull('s.customer_id')
     // Funnel positive-price predicate mirrored (codex r3 P1: the funnel
     // skips unpriced/zero-price visits by owner rule 2026-07-30, and

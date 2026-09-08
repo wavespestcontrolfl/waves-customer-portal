@@ -9,6 +9,9 @@ import AdminTabRedirect from "./AdminTabRedirect";
 import { isPathAdminOnly } from "../../config/adminNavigation";
 
 const app = readFileSync("src/App.jsx", "utf8");
+// Child route names may also exist in Tech. Check the admin parent only.
+const adminStart = app.indexOf('<Route path="/admin"');
+const adminRoutes = app.slice(adminStart, app.indexOf('\n          </Route>', adminStart));
 const cases = [
   ["content-engine", "blog", "autopilot"],
   ["content-registry", "blog", "registry"],
@@ -35,7 +38,8 @@ describe("App's existing admin aliases", () => {
   it.each(cases)("preserves context and history for %s", (source, target, leaf, queryKey = "tab") => {
     // Read the real JSX declaration, so a query-dropping Navigate in App fails
     // even if the redirect helper's independent unit tests remain green.
-    const declaration = app.match(new RegExp(`<Route path="${source}" element=\\{([^\\n]+?)\\} />`));
+    expect(adminStart).toBeGreaterThanOrEqual(0);
+    const declaration = adminRoutes.match(new RegExp(`<Route path="${source}" element=\\{([^\\n]+?)\\} />`));
     expect(declaration).not.toBeNull();
     const opening = parseExpression(declaration[1], { plugins: ["jsx"] }).openingElement;
     expect(opening.name.name).toBe("AdminTabRedirect");

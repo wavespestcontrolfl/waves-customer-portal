@@ -75,6 +75,7 @@ export default function PublicFunnelTracking() {
         backdropFilter: 'blur(4px)',
         borderTop: '1px solid rgba(255,255,255,0.12)',
         padding: '12px 18px',
+        paddingBottom: 'calc(12px + env(safe-area-inset-bottom, 0px))',
       }}
     >
       <div
@@ -88,7 +89,7 @@ export default function PublicFunnelTracking() {
           gap: 12,
         }}
       >
-        <p style={{ color: '#fff', fontSize: 13, margin: 0, lineHeight: 1.45, flex: '1 1 280px' }}>
+        <p style={{ color: '#fff', fontSize: 14, margin: 0, lineHeight: 1.45, flex: '1 1 280px' }}>
           We use cookies to understand how this booking flow is used and improve it.{' '}
           <a
             href="https://wavespestcontrol.com/privacy-policy/"
@@ -109,6 +110,7 @@ export default function PublicFunnelTracking() {
             border: '1px solid rgba(255, 238, 180, 0.92)',
             borderRadius: 8,
             padding: '9px 18px',
+            minHeight: 44,
             fontSize: 14,
             fontWeight: 700,
             cursor: 'pointer',

@@ -1,4 +1,5 @@
 const defaultDb = require('../models/db');
+const { savepointRead } = require('../utils/savepoint-read');
 const { etDateString } = require('../utils/datetime-et');
 
 function isPaused(customer, now = new Date()) {
@@ -78,7 +79,7 @@ async function listChargeableAutopayMethods(customer, knex, { rethrow = false, n
     // customer unchargeable while a chargeable card sits beside it — making
     // this predicate disagree with the SQL aggregate and the charge path
     // (codex #3495 r1 P1).
-    const candidates = await knex('payment_methods')
+    const candidates = await savepointRead(knex, (k) => k('payment_methods')
       .where({
         customer_id: customer.id,
         processor: 'stripe',
@@ -89,7 +90,7 @@ async function listChargeableAutopayMethods(customer, knex, { rethrow = false, n
       .select(
         'id', 'processor', 'method_type', 'stripe_payment_method_id',
         'is_default', 'autopay_enabled', 'exp_month', 'exp_year', 'ach_status'
-      );
+      ));
     // The customer-level ACH rule and the ENROLLMENT POINTER both
     // participate, mirroring StripeService.charge() exactly (codex #3495
     // P0): customers.autopay_payment_method_id is "the method actually in
@@ -103,8 +104,8 @@ async function listChargeableAutopayMethods(customer, knex, { rethrow = false, n
     let pointerId = customer.autopay_payment_method_id;
     if (achStatus === undefined || pointerId === undefined) {
       try {
-        const custRow = await knex('customers').where({ id: customer.id })
-          .first('ach_status', 'autopay_payment_method_id');
+        const custRow = await savepointRead(knex, (k) => k('customers').where({ id: customer.id })
+          .first('ach_status', 'autopay_payment_method_id'));
         if (achStatus === undefined) achStatus = custRow?.ach_status ?? null;
         if (pointerId === undefined) pointerId = custRow?.autopay_payment_method_id ?? null;
       } catch (lookupErr) {
@@ -122,12 +123,12 @@ async function listChargeableAutopayMethods(customer, knex, { rethrow = false, n
     // "falling back to default lookup" branch.
     if (pointerId) {
       const pointerRow = (candidates || []).find((m) => String(m.id) === String(pointerId))
-        || await knex('payment_methods')
+        || await savepointRead(knex, (k) => k('payment_methods')
           .where({ id: pointerId, customer_id: customer.id, processor: 'stripe', autopay_enabled: true })
           .first(
             'id', 'processor', 'method_type', 'stripe_payment_method_id',
             'is_default', 'autopay_enabled', 'exp_month', 'exp_year', 'ach_status'
-          );
+          ));
       if (pointerRow && eligible({ ...pointerRow, is_default: true })) {
         // charge() accepts the pointer regardless of is_default (the
         // pointer normally IS the default; enrollment repoints both) —

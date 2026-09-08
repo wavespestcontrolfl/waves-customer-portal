@@ -139,6 +139,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
               )}
             </div>
           )}
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">Close</Button>
         </div>
       </SheetHeader>
       <SheetBody>

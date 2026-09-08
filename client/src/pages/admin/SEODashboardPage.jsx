@@ -579,30 +579,32 @@ export default function WavesSEODashboard() {
     }));
 
     // LLM provider visibility from backlink data
-    const llmMentions = backlinkData?.llmMentions || [];
     const llmStats = backlinkData?.llmStats || {};
-    const mentionRate = total > 0 ? ((wavesCited / total) * 100).toFixed(1) : 0;
+    const sourceCoverage = total > 0 ? ((wavesCited / total) * 100).toFixed(1) : 0;
 
     return {
-      mentionRate,
+      sourceCoverage,
       recommendRate: aiData.geoScore || 0,
-      firstPosition:
+      sourceRate:
         total > 0 ? ((wavesCited / Math.max(withAIO, 1)) * 100).toFixed(1) : 0,
       citations: wavesCited,
       gaps: (aiData.quickWins || []).length,
+      llmSample: `${llmStats.measured || 0} measured of ${llmStats.total || 0} recent LLM observations`,
       providerVisibility: [
         {
-          name: "Google AIO",
+          name: "Google AIO presence",
           pct: total > 0 ? ((withAIO / total) * 100).toFixed(1) : 0,
           color: WAVES_COLORS.green,
         },
         {
-          name: "LLM Mentions",
-          pct:
-            llmStats.total > 0
-              ? ((llmStats.wavesMentioned / llmStats.total) * 100).toFixed(1)
-              : 0,
+          name: "LLM linked citations",
+          pct: llmStats.citationRate ?? null,
           color: WAVES_COLORS.accent,
+        },
+        {
+          name: "LLM brand mentions",
+          pct: llmStats.mentionRate ?? null,
+          color: WAVES_COLORS.green,
         },
       ],
       competitorMentions,
@@ -746,7 +748,7 @@ export default function WavesSEODashboard() {
   );
   const maxProviderPct = Math.max(
     1,
-    ...(aiOverview?.providerVisibility || []).map((p) => parseFloat(p.pct)),
+    ...(aiOverview?.providerVisibility || []).map((p) => Number(p.pct)),
   );
 
   return (
@@ -816,27 +818,27 @@ export default function WavesSEODashboard() {
           >
             {" "}
             <MetricCard
-              value={`${aiOverview.mentionRate}%`}
-              label="Mention Rate"
+              value={`${aiOverview.sourceCoverage}%`}
+              label="Source Coverage"
               sublabel="across tracked keywords"
               color={WAVES_COLORS.accent}
             />{" "}
             <MetricCard
               value={`${aiOverview.recommendRate}%`}
-              label="GEO Score"
-              sublabel="generative engine optimization"
+              label="Legacy GEO Score"
+              sublabel="SERP source signal"
               color={WAVES_COLORS.green}
             />{" "}
             <MetricCard
-              value={`${aiOverview.firstPosition}%`}
-              label="Citation Rate"
+              value={`${aiOverview.sourceRate}%`}
+              label="AIO Source Rate"
               sublabel="of AIO results"
               color={WAVES_COLORS.purple}
             />{" "}
             <MetricCard
               value={aiOverview.citations}
-              label="Citations"
-              sublabel="total AI citations"
+              label="Source Appearances"
+              sublabel="legacy SERP source flags"
               color={WAVES_COLORS.cyan}
             />{" "}
             <MetricCard
@@ -859,7 +861,11 @@ export default function WavesSEODashboard() {
             <Card>
               {" "}
               <SectionTitle>Provider Visibility</SectionTitle>
-              {aiOverview.providerVisibility.map((p) => (
+              {aiOverview.providerVisibility.map((p) => p.pct === null ? (
+                <div key={p.name} style={{ fontSize: 14, color: WAVES_COLORS.textMuted, marginBottom: 12 }}>
+                  {p.name}: not measured
+                </div>
+              ) : (
                 <HBar
                   key={p.name}
                   label={p.name}
@@ -868,6 +874,7 @@ export default function WavesSEODashboard() {
                   color={p.color}
                 />
               ))}
+              <p style={{ fontSize: 14, color: WAVES_COLORS.textMuted }}>{aiOverview.llmSample}. Engine and question breakdowns are in SEO → Authority → LLM Mentions.</p>
               {aiOverview.providerVisibility.length === 0 && (
                 <div
                   style={{

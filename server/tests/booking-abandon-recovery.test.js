@@ -105,6 +105,7 @@ describe('runSmsStage (touch 1)', () => {
       'booking_abandonment_recovery',
       { first_name: 'Dana', service_type: 'Pest Control', booking_url: expect.any(String) },
       expect.any(Object),
+      { noVariants: true }, // one-segment guard pre-renders: same body both times
     );
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415550101',

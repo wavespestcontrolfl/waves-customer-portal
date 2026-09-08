@@ -53,6 +53,7 @@
 //   messages. This is the untrusted-input boundary — flag any
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
+import { isAcceptedSms } from "../../utils/sms-delivery";
 import React, {
   useState,
   useEffect,
@@ -60,9 +61,10 @@ import React, {
   useMemo,
   useRef,
 } from "react";
+import useLinkLibrary from "../../hooks/useLinkLibrary";
+import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause } from "../../lib/composerLinks";
 import {
   Bell,
-  BookOpen,
   Bot,
   FileText,
   Headphones,
@@ -96,17 +98,12 @@ import {
   Badge,
   Button,
   Card,
-  Dialog,
-  Radio,
-  DialogHeader,
-  DialogTitle,
-  DialogBody,
-  DialogFooter,
   Select,
   cn,
 } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
+import { notifyUnreadChanged } from "../../hooks/useUnreadConversations";
 import {
   MMS_TOTAL_BUDGET_BYTES,
   fitImagesToBudget,
@@ -369,7 +366,7 @@ function TypeBadgeV2({ type }) {
   return <Badge tone="neutral">{type.replace(/_/g, " ")}</Badge>;
 }
 
-function MessageMediaV2({ media = [], inverted = false }) {
+export function MessageMediaV2({ media = [], inverted = false }) {
   // A signed media URL that fails to load (expired signature, offline) left a
   // blank image box inside the bubble — on an outbound (dark) bubble that
   // reads as a big empty black rectangle. Swap failed loads for a labeled
@@ -735,30 +732,14 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "autopay_setup", name: "Auto Pay setup link", keywords: "autopay auto pay card on file save payment method bank ach enroll secure", dynamic: true },
   { key: "appointment", name: "Appointment page link", keywords: "appointment visit details confirm calendar upcoming next", dynamic: true },
   { key: "card_request", name: "Card request link", keywords: "card request secure appointment hold card on file first visit", dynamic: true },
-  { key: "prep_guide", name: "Prep guide link", keywords: "prep prepare checklist flea bed bug cockroach roach treatment", dynamic: true },
+  { key: "prep_guide", name: "Upcoming visit prep link", category: "guides", description: "Insert the prep link for this customer's upcoming visit", keywords: "prep prepare checklist flea bed bug cockroach roach treatment", dynamic: true },
   { key: "service_report", name: "Latest service report link", keywords: "report service report visit summary last recap", dynamic: true },
   { key: "contract", name: "Contract signing link", keywords: "contract sign signature agreement document esign", dynamic: true },
   { key: "statement", name: "Statement pay link", keywords: "statement payer bill-to property manager builder net30 pay", dynamic: true },
+  { key: "receipt", name: "Latest receipt link", keywords: "receipt paid payment record proof bookkeeping refund", dynamic: true },
   { key: "project_report", name: "Project report link", keywords: "project report wdo termite inspection specialty findings pdf", dynamic: true },
-  {
-    key: "portal_login",
-    name: "Portal login",
-    url: "portal.wavespestcontrol.com/login",
-    clause: "Manage your account and appointments here",
-    keywords: "portal login account app sign in manage",
-  },
-  // Cancellation lands IN the portal (owner ruling 2026-09-03): the cancel
-  // flow lives on the My Plan tab behind login, so the link is the login
-  // page with the plan tab as its post-login destination (LoginPage's
-  // safeNextPath honors ?next=; same encoded form the project emails use).
-  {
-    key: "cancel_plan",
-    name: "Cancel plan link",
-    url: "portal.wavespestcontrol.com/login?next=%2F%3Ftab%3Dplan",
-    clause: "You can review or cancel your plan from your account here",
-    keywords: "cancel cancellation stop plan end service quit",
-  },
-].map((l) => ({ ...l, category: "customer" }));
+  ...STATIC_COMPOSER_LINKS,
+].map((l) => ({ category: "customer", ...l }));
 
 // Personalized empty-composer prefill for the generic minted links (the
 // reschedule/re-service builders above stay specialized). `clause` is the
@@ -771,26 +752,10 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   return `Hi ${first}, it's Waves Pest Control. ${line}`;
 }
 
-// Append a static link clause to the composer body (empty body gets the
-// clause alone). Returns the body unchanged when the URL is already present
-// — a second click must not stack a duplicate link.
-export function appendStaticLinkClause(body, { url, clause }) {
-  const b = String(body || "");
-  if (b.includes(url)) return b;
-  if (!b.trim()) return clause;
-  return `${b.replace(/\s+$/, "")}\n\n${clause}`;
-}
-
-// The rendered insert text for a library row: "{clause}: {url}" with the
-// row's name standing in when no clause was authored (sitemap rows).
-export function libraryLinkClause(link) {
-  const prefix = String(link.clause || "").trim() || String(link.name || "").trim() || "More info";
-  return `${prefix}: ${link.url}`;
-}
-
-function SmsTab({ active }) {
-  // Prep-guide sender lives with the composer's other outbound actions.
-  const [prepSendOpen, setPrepSendOpen] = useState(false);
+// With a customer, render the same composer used by Messages, locked to that
+// profile. The caller keys it by customer id/phone to discard another person's
+// draft, attachments, and minted links when the selected record changes.
+export function SmsTab({ active, customer = null, customerMessages = [], customerReadScope = null, onSent, linkRequest = 0 }) {
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
   // /revise 403 for technicians). A tech following a draftId deep link
   // still gets the prefilled text/recipient, but sends as a plain manual
@@ -799,17 +764,17 @@ function SmsTab({ active }) {
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!customer);
   const [smsFilter, setSmsFilter] = useState("all");
 
   const [aiAutoReply, setAiAutoReply] = useState(false);
   const [togglingAi, setTogglingAi] = useState(false);
 
   // Compose
-  const [toNumber, setToNumber] = useState("");
+  const [toNumber, setToNumber] = useState(customer?.phone || "");
   const [toSearch, setToSearch] = useState("");
   const [toResults, setToResults] = useState([]);
-  const [selectedCustomerId, setSelectedCustomerId] = useState(null);
+  const [selectedCustomerId, setSelectedCustomerId] = useState(customer?.id || null);
   const [fromNumber, setFromNumber] = useState("+19413187612");
   const [msgBody, setMsgBody] = useState("");
   const [sending, setSending] = useState(false);
@@ -859,11 +824,8 @@ function SmsTab({ active }) {
   // Insert Link sheet — the searchable link library (customer links +
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
-  // Library rows from GET /admin/communications/link-library, fetched once
-  // per page load on first open (search/filtering is client-side).
-  const [libraryLinks, setLibraryLinks] = useState(null);
-  const [libraryLoading, setLibraryLoading] = useState(false);
-  const [libraryError, setLibraryError] = useState(null);
+  useEffect(() => { if (linkRequest > 0) setShowLinkSheet(true); }, [linkRequest]);
+  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
@@ -901,7 +863,17 @@ function SmsTab({ active }) {
     activeThreadKey: activeThread?.contactPhone ? smsThreadKey(activeThread.contactPhone) : "",
   };
 
+  useEffect(() => {
+    if (!customer) return;
+    const latest = customerMessages.find((message) => message.channel === "sms" && phoneKey(message.contactPhone) === phoneKey(customer.phone));
+    if (latest?.ourEndpointId) {
+      setFromNumber(latest.ourEndpointId);
+      setThreadLock({ contactPhone: customer.phone, ourNumber: latest.ourEndpointId, label: latest.ourEndpointLabel || latest.ourEndpointId });
+    }
+  }, [customer?.id, customer?.phone]);
+
   const loadData = useCallback((search = "", options = {}) => {
+    if (customer) return Promise.resolve();
     const normalizedSearch = search.trim();
     const page = options.page || 1;
     const append = !!options.append;
@@ -931,11 +903,11 @@ function SmsTab({ active }) {
       setStats(statsData);
       setLoading(false);
     });
-  }, []);
+  }, [customer?.id]);
 
   useEffect(() => {
     smsSearchRef.current = smsSearch.trim();
-    if (!active) return;
+    if (!active || customer) return;
     const t = setTimeout(() => {
       loadData(smsSearch.trim());
     }, 300);
@@ -954,7 +926,7 @@ function SmsTab({ active }) {
         .map((m) => m.id)
         .filter(Boolean);
       const conversationIds = [
-        ...new Set(threadMessages.map((m) => m.conversationId).filter(Boolean)),
+        ...new Set([...(thread?.conversationIds || []), ...threadMessages.map((m) => m.conversationId)].filter(Boolean)),
       ];
       const readBefore =
         thread?.lastTimestamp ||
@@ -992,6 +964,7 @@ function SmsTab({ active }) {
             readBefore,
           }),
         });
+        notifyUnreadChanged();
       } catch {
         loadData(smsSearch.trim());
       }
@@ -1000,12 +973,22 @@ function SmsTab({ active }) {
   );
 
   useEffect(() => {
+    if (!active || !customer) return;
+    const messages = customerMessages.filter((message) => message.channel === "sms");
+    // The read boundary comes from the loaded customer thread, including its
+    // older conversations; SMS arriving after that snapshot remain unread.
+    if (messages.length || customerReadScope?.conversationIds?.length) void markMessagesRead({ messages, conversationIds: customerReadScope?.conversationIds, lastTimestamp: customerReadScope?.readBefore });
+  }, [active, customer?.id, customerMessages, customerReadScope, markMessagesRead]);
+
+  useEffect(() => {
+    if (customer) return;
     adminFetch("/admin/communications/ai-auto-reply-status")
       .then((d) => setAiAutoReply(d.enabled))
       .catch(() => {});
   }, []);
 
   useEffect(() => {
+    if (!active) return undefined;
     const phone = toNumber.trim();
     if (!phone && !selectedCustomerId) {
       setAgentDraft(null);
@@ -1036,7 +1019,7 @@ function SmsTab({ active }) {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [toNumber, selectedCustomerId]);
+  }, [active, toNumber, selectedCustomerId]);
 
   useEffect(() => {
     setSelectedAgentDraft(null);
@@ -1051,6 +1034,7 @@ function SmsTab({ active }) {
 
   // Prefill compose from deep links (Estimates/Customers SMS button, Agent Ops drafts).
   useEffect(() => {
+    if (customer) return;
     const params = new URLSearchParams(window.location.search);
     const phone = params.get("phone");
     const queryFromNumber = findKnownWavesNumber(params.get("fromNumber"));
@@ -1196,6 +1180,7 @@ function SmsTab({ active }) {
   };
 
   const handleSend = async () => {
+    if (sendInFlightRef.current || uploading || rewritingSms || aiDrafting || listening) return;
     if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
       return;
     const { value: scheduledFor, error: scheduleErr } = resolveScheduledFor();
@@ -1337,11 +1322,14 @@ function SmsTab({ active }) {
             contractId: insertedCustomerLinks.contract?.contractId || undefined,
           }),
         });
-        setSendResult({ ok: true, text: `Message sent.${reviewEmailNote(sent?.reviewEmail)}` });
+        if (!isAcceptedSms(sent)) {
+          throw new Error(sent?.reason || sent?.error || "Text was not handed to the provider. Your draft is retained.");
+        }
+        setSendResult({ ok: true, text: `Provider accepted; delivery is not yet confirmed.${reviewEmailNote(sent?.reviewEmail)}` });
       }
-      setToNumber("");
+      setToNumber(customer?.phone || "");
       setToSearch("");
-      setSelectedCustomerId(null);
+      setSelectedCustomerId(customer?.id || null);
       setMsgBody("");
       // Cleared in the same batch as the body: the strip effect must see the
       // sent links as already forgotten, not as operator-withdrawn (which
@@ -1357,7 +1345,8 @@ function SmsTab({ active }) {
       setAttachments([]);
       setSendTiming("now");
       setSendCustomAt("");
-      loadData(smsSearch.trim());
+      if (customer) await onSent?.();
+      else await loadData(smsSearch.trim());
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
@@ -1447,9 +1436,11 @@ function SmsTab({ active }) {
       alert("Enter a To number first");
       return;
     }
+    const requestBody = msgBody;
+    const requestContext = { ...rewriteContextRef.current };
     setAiDrafting(true);
     try {
-      const lastMsg = messages.find(
+      const lastMsg = customer ? customerMessages.find((message) => message.channel === "sms" && message.direction === "inbound" && phoneKey(message.contactPhone) === phoneKey(customer.phone)) : messages.find(
         (m) =>
           m.direction === "inbound" &&
           (m.from === toNumber.trim() ||
@@ -1462,7 +1453,13 @@ function SmsTab({ active }) {
           lastMessage: lastMsg?.body || "",
         }),
       });
-      if (d.draft) setMsgBody(d.draft.slice(0, 160));
+      if (d.draft) setMsgBody((current) => {
+        const latest = rewriteContextRef.current;
+        const sameRecipient = phoneKey(latest.toNumber) === phoneKey(requestContext.toNumber)
+          && latest.selectedCustomerId === requestContext.selectedCustomerId
+          && latest.fromNumber === requestContext.fromNumber;
+        return sameRecipient && current === requestBody ? d.draft.slice(0, 160) : current;
+      });
     } catch (e) {
       alert("AI draft failed: " + e.message);
     } finally {
@@ -1727,27 +1724,7 @@ function SmsTab({ active }) {
     }
   }, [insertedReservice, msgBody, toNumber, selectedCustomerId]);
 
-  // Load the link library once per page load — the sheet's search runs
-  // client-side over the full list (office review links + sitemap-synced
-  // website pages + hand-managed rows).
-  const loadLinkLibrary = async () => {
-    if (libraryLoading) return;
-    setLibraryLoading(true);
-    setLibraryError(null);
-    try {
-      const d = await adminFetch("/admin/communications/link-library");
-      setLibraryLinks(Array.isArray(d.links) ? d.links : []);
-    } catch (e) {
-      setLibraryError(`Couldn't load the link library: ${e.message}`);
-    } finally {
-      setLibraryLoading(false);
-    }
-  };
-
-  const openLinkSheet = () => {
-    setShowLinkSheet(true);
-    if (!libraryLinks && !libraryLoading) loadLinkLibrary();
-  };
+  const openLinkSheet = () => setShowLinkSheet(true);
 
   // Insert a static library row (or the portal-login customer row). No
   // bearer-link machinery — append once, confirm in the result line, and
@@ -1787,6 +1764,7 @@ function SmsTab({ active }) {
       d.statement
         ? `Statement pay link added — ${d.statement.number}, $${Number(d.statement.total).toFixed(2)} for ${d.statement.payerName}.`
         : "Statement pay link added.",
+    receipt: (d) => `Receipt link added${d.receipt?.invoiceNumber ? ` — invoice ${d.receipt.invoiceNumber}` : ""}${d.receipt?.paidAt ? `, paid ${d.receipt.paidAt}` : ""}.`,
     project_report: (d) => `Project report link added${d.projectReport?.title ? ` — ${d.projectReport.title}` : ""}${d.projectReport?.projectDate ? ` (${d.projectReport.projectDate})` : ""}.`,
   };
 
@@ -1983,10 +1961,10 @@ function SmsTab({ active }) {
   // get a 403, so those rows are admin-only; the static rows stay staff-wide.
   const insertSheetLinks = useMemo(
     () => [
-      ...CUSTOMER_COMPOSER_LINKS.filter((l) => smsIsAdminRole || !l.dynamic),
+      ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim())) && (l.key !== "receipt" || receiptLinksEnabled)),
       ...(libraryLinks || []),
     ],
-    [libraryLinks, smsIsAdminRole],
+    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled],
   );
 
   const handleInsertSheetPick = (link, channel = null) => {
@@ -2012,8 +1990,11 @@ function SmsTab({ active }) {
     const requestActiveThreadKey = activeThreadMatchesRecipient
       ? smsThreadKey(activeThread.contactPhone)
       : "";
-    const recentNewestMessages =
-      activeThreadMatchesRecipient && Array.isArray(activeThread?.messages)
+    const recentNewestMessages = customer
+      ? customerMessages.filter((message) => message.channel === "sms"
+          && phoneKey(message.contactPhone) === requestRecipientKey
+          && phoneKey(message.ourEndpointId) === requestFromNumberKey).slice(0, 8)
+      : activeThreadMatchesRecipient && Array.isArray(activeThread?.messages)
         ? activeThread.messages
             .filter((m) => smsMessageMatchesLine(m, requestFromNumber))
             .slice(0, 8)
@@ -2282,7 +2263,7 @@ function SmsTab({ active }) {
   return (
     <div>
       {/* Stats + auto-reply */}
-      <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
+      {!customer && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
         {" "}
         <StatCardV2
           label="Sent This Month"
@@ -2341,11 +2322,11 @@ function SmsTab({ active }) {
             setSmsFilter((f) => (f === "estimate" ? "all" : "estimate"))
           }
         />{" "}
-      </div>
+      </div>}
       {/* Compose */}
       <Card id="sms-compose-v2" className="p-5 mb-5">
         {" "}
-        <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
+        {!customer && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
           <button
             type="button"
             onClick={toggleAiAutoReply}
@@ -2374,29 +2355,31 @@ function SmsTab({ active }) {
               />{" "}
             </span>{" "}
           </button>{" "}
-        </div>
+        </div>}
+        {customer && <h3 className="mb-4 text-18 font-medium">Text message</h3>}
         {/* PR 4 — thread-reply lock banner */}
         {threadLock && (
           <div className="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-900 rounded-sm mb-3">
             {" "}
             <Badge tone="strong">Locked</Badge>{" "}
             <span className="text-12 text-zinc-900 flex-1">
-              Replying from <strong>{threadLock.label}</strong>to continue
+              Replying from <strong>{threadLock.label}</strong>{" "}to continue
               thread with {threadLock.contactPhone}
             </span>{" "}
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               onClick={() => setThreadLock(null)}
               className="text-13 md:text-11 min-h-[44px] md:min-h-0 inline-flex items-center px-2 text-ink-secondary underline hover:text-zinc-900 u-focus-ring"
             >
               Override
-            </button>{" "}
+            </Button>{" "}
           </div>
         )}
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           From{threadLock && " (locked to thread)"}
         </label>{" "}
-        <select
+        <Select
+          aria-label="Send from"
           value={fromNumber}
           onChange={(e) => setFromNumber(e.target.value)}
           disabled={!!threadLock}
@@ -2424,7 +2407,8 @@ function SmsTab({ active }) {
             && !ALL_NUMBERS.some((g) => g.numbers.some((n) => n.number === fromNumber)) && (
             <option value={fromNumber}>{threadLock.label}</option>
           )}
-        </select>{" "}
+        </Select>{" "}
+        {!customer && <>
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           To
         </label>{" "}
@@ -2517,6 +2501,7 @@ function SmsTab({ active }) {
               </div>
             );
           })()}
+        </>}
         {(agentDraft || agentDraftLoading) && (
           <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm">
             <div className="flex items-center gap-2 mb-2">
@@ -2580,6 +2565,8 @@ function SmsTab({ active }) {
         </label>{" "}
         <div>
           <textarea
+            aria-label="Text message"
+            name="smsMessage"
             placeholder={listening ? "Listening…" : "Type your message…"}
             value={msgBody}
             onChange={(e) => setMsgBody(e.target.value)}
@@ -2601,7 +2588,7 @@ function SmsTab({ active }) {
               aria-label="Rewrite message in Waves tone"
               title="Rewrite in Waves tone"
               className={cn(
-                "inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
+                "sms-writing-tool inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
                 "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
                 "disabled:opacity-50 disabled:cursor-not-allowed",
               )}
@@ -2620,7 +2607,7 @@ function SmsTab({ active }) {
                 aria-label={listening ? "Stop dictation" : "Start voice dictation"}
                 title={listening ? "Stop dictation" : "Start voice dictation"}
                 className={cn(
-                  "inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
+                  "sms-writing-tool inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
                   listening
                     ? "bg-alert-fg text-white animate-pulse"
                     : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
@@ -2702,7 +2689,8 @@ function SmsTab({ active }) {
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           Send
         </label>{" "}
-        <select
+        <Select
+          aria-label="Send timing"
           value={sendTiming}
           onChange={(e) => setSendTiming(e.target.value)}
           className={cn(
@@ -2715,10 +2703,11 @@ function SmsTab({ active }) {
           <option value="now">Immediately</option>{" "}
           <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
           <option value="custom">Custom time…</option>{" "}
-        </select>
+        </Select>
         {sendTiming === "custom" && (
           <input
             type="datetime-local"
+            aria-label="Scheduled send time (Eastern)"
             value={sendCustomAt}
             onChange={(e) => setSendCustomAt(e.target.value)}
             className={cn(
@@ -2737,7 +2726,7 @@ function SmsTab({ active }) {
               disabled={uploading}
               aria-label="Add attachment"
               title="Add image"
-              className="flex items-center justify-center h-11 w-11 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
+              className="sms-writing-tool flex items-center justify-center h-11 w-11 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
             >
               {" "}
               <svg
@@ -2792,6 +2781,8 @@ function SmsTab({ active }) {
               sending ||
               uploading ||
               rewritingSms ||
+              aiDrafting ||
+              listening ||
               // Mid-lookup send would go out WITHOUT the link the operator
               // just asked for (and clearing the recipient on send discards
               // the response) — wait out the link fetches.
@@ -2819,7 +2810,7 @@ function SmsTab({ active }) {
           <Button
             variant="secondary"
             onClick={handleAiDraft}
-            disabled={aiDrafting || !toNumber.trim()}
+            disabled={aiDrafting || sending || uploading || rewritingSms || listening || !toNumber.trim()}
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
           </Button>{" "}
@@ -2832,10 +2823,9 @@ function SmsTab({ active }) {
             disabled={
               insertingResched ||
               insertingReservice ||
-              !!insertingCustomerLink ||
-              !toNumber.trim()
+              !!insertingCustomerLink || sending
             }
-            title="Quick Links — insert a customer, review, website, or app link into the message"
+            title="Quick Links — insert a link or send a prep guide"
             aria-haspopup="dialog"
             aria-expanded={showLinkSheet}
           >
@@ -2843,25 +2833,12 @@ function SmsTab({ active }) {
               ? "Adding…"
               : "Quick Links"}
           </Button>{" "}
-          <Button
-            variant="secondary"
-            className="gap-2"
-            onClick={() => setPrepSendOpen(true)}
-            aria-haspopup="dialog"
-            aria-expanded={prepSendOpen}
-          >
-            <BookOpen size={15} strokeWidth={1.9} aria-hidden />
-            Send prep guide
-          </Button>
         </div>
-        <PrepSendDialog
-          open={active && prepSendOpen}
-          onClose={() => setPrepSendOpen(false)}
-        />
         <InsertLinkSheet
           open={active && showLinkSheet}
           onClose={() => setShowLinkSheet(false)}
           links={insertSheetLinks}
+          recipientSearch={toSearch || toNumber}
           loading={libraryLoading}
           error={libraryError}
           onRetry={loadLinkLibrary}
@@ -2889,6 +2866,7 @@ function SmsTab({ active }) {
           </div>
         )}
       </Card>
+      {!customer && <>
       {/* View toggle — desktop power-user feature; mobile just shows Conversations */}
       <div className="hidden md:flex items-center gap-3 mb-3 flex-wrap">
         {" "}
@@ -3176,248 +3154,12 @@ function SmsTab({ active }) {
           onClose={() => setSelected360Id(null)}
         />
       )}
+      </>}
     </div>
   );
 }
 
 // ── Page ──────────────────────────────────────────────────────
-
-// Search a customer by name and send them a treatment prep guide. Smart
-// channel: the server emails the formatted guide when the customer has an
-// email on file, otherwise it texts the self-contained prep. Mirrors the
-// server's PREP_CONFIG allow-list (prep-guide-sender.js).
-const PREP_TYPES = [
-  { value: "flea", label: "Flea treatment" },
-  { value: "bed_bug", label: "Bed bug treatment" },
-  { value: "cockroach", label: "Cockroach treatment" },
-  { value: "interior_pest", label: "Interior pest treatment" },
-  { value: "rodent", label: "Rodent service" },
-  { value: "termite", label: "Termite service" },
-  { value: "mosquito", label: "Mosquito treatment" },
-  { value: "lawn", label: "Lawn treatment" },
-  // One-time how-to, not visit prep: brand buttons deep-link to the hub
-  // sprinkler-timer guides, and the text carries that hub link (no visit).
-  { value: "sprinkler_timer", label: "Sprinkler timer guide (lawn)" },
-];
-
-// Operator-chosen channel (owner ruling 2026-09-03). Text carries the
-// guide page link, which needs an upcoming visit of that type (the
-// sprinkler timer guide texts its hub link instead).
-const PREP_CHANNELS = [
-  { value: "both", label: "Email and text" },
-  { value: "email", label: "Email only" },
-  { value: "sms", label: "Text only" },
-];
-
-function PrepSendDialog({ open, onClose }) {
-  const [pestType, setPestType] = useState("flea");
-  const [channel, setChannel] = useState("both");
-  const [search, setSearch] = useState("");
-  const [results, setResults] = useState([]);
-  const [searching, setSearching] = useState(false);
-  const [selected, setSelected] = useState(null);
-  const [sending, setSending] = useState(false);
-  const [result, setResult] = useState(null);
-
-  useEffect(() => {
-    if (!open) {
-      setPestType("flea");
-      setChannel("both");
-      setSearch("");
-      setResults([]);
-      setSelected(null);
-      setSending(false);
-      setResult(null);
-    }
-  }, [open]);
-
-  useEffect(() => {
-    if (selected) return undefined;
-    const q = search.trim();
-    if (q.length < 2) {
-      setResults([]);
-      // Clearing back below 2 chars cancels any in-flight debounce; reset the
-      // spinner too, or it stays stuck on "Searching…" with an empty input.
-      setSearching(false);
-      return undefined;
-    }
-    let cancelled = false;
-    // Drop any results from a previous query so a stale row can't be clicked
-    // and sent to the wrong customer during this query's debounce/fetch window.
-    setResults([]);
-    setSearching(true);
-    const t = setTimeout(async () => {
-      try {
-        const data = await adminFetch(
-          `/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
-        );
-        if (!cancelled) setResults(data?.customers || []);
-      } catch {
-        if (!cancelled) setResults([]);
-      } finally {
-        if (!cancelled) setSearching(false);
-      }
-    }, 250);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [search, selected]);
-
-  const handleSend = async () => {
-    if (!selected || sending) return;
-    setSending(true);
-    setResult(null);
-    try {
-      const data = await adminFetch("/admin/communications/send-prep", {
-        method: "POST",
-        body: JSON.stringify({ customerId: selected.id, pestType, channel }),
-      });
-      // A Both send with one leg down is flagged, not celebrated.
-      setResult({ ok: !data?.partial, text: data?.message || "Prep sent." });
-    } catch (e) {
-      setResult({ ok: false, text: e.message || "Couldn't send the prep." });
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onClose={onClose} size="md">
-      <DialogHeader>
-        <DialogTitle>Send prep guide</DialogTitle>
-      </DialogHeader>
-      <DialogBody>
-        <p className="text-13 text-zinc-600 mb-3">
-          Search a customer by name, pick the guide, and choose how it goes
-          out.{" "}
-          {pestType === "sprinkler_timer"
-            ? "The sprinkler timer guide is a one-time seasonal tip: the text carries the website guide link, no visit needed, and it is not sent to a customer who turned off Seasonal Lawn Tips."
-            : "A text carries the guide page link, so it needs an upcoming visit of that type on the calendar."}
-        </p>
-        <label className="block text-11 uppercase tracking-label text-zinc-500 mb-1">
-          Treatment
-        </label>
-        <select
-          value={pestType}
-          onChange={(e) => {
-            setPestType(e.target.value);
-            setResult(null);
-          }}
-          className="w-full h-10 px-3 mb-3 rounded-sm border-hairline border-zinc-200 text-14 text-zinc-900 bg-white u-focus-ring"
-        >
-          {PREP_TYPES.map((p) => (
-            <option key={p.value} value={p.value}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-        <fieldset className="flex flex-col gap-2 border-0 p-0 m-0 mb-3 min-w-0">
-          <legend className="text-11 uppercase tracking-label text-zinc-500 mb-1 p-0">Send by</legend>
-          {PREP_CHANNELS.map((c) => (
-            <Radio
-              key={c.value}
-              id={`prep-channel-${c.value}`}
-              name="prep-channel"
-              label={c.label}
-              checked={channel === c.value}
-              onChange={() => {
-                setChannel(c.value);
-                setResult(null);
-              }}
-              disabled={sending}
-            />
-          ))}
-        </fieldset>
-        {selected ? (
-          <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
-            <div className="min-w-0">
-              <div className="text-14 font-medium text-zinc-900 truncate">
-                {getCustomerOptionName(selected)}
-              </div>
-              <div className="text-12 text-zinc-500 truncate">
-                {selected.email || "No email on file"}
-                {selected.phone ? ` · ${selected.phone}` : ""}
-              </div>
-            </div>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setSelected(null);
-                setResult(null);
-              }}
-            >
-              Change
-            </Button>
-          </div>
-        ) : (
-          <>
-            <input
-              type="text"
-              autoFocus
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search customer by name…"
-              className="w-full h-10 px-3 rounded-sm border-hairline border-zinc-200 text-14 text-zinc-900 u-focus-ring"
-            />
-            {searching && (
-              <div className="text-12 text-zinc-500 mt-2">Searching…</div>
-            )}
-            {!searching &&
-              search.trim().length >= 2 &&
-              results.length === 0 && (
-                <div className="text-12 text-zinc-500 mt-2">
-                  No customers found.
-                </div>
-              )}
-            {results.length > 0 && (
-              <div className="mt-2 border-hairline border-zinc-200 rounded-sm divide-y divide-zinc-100 max-h-60 overflow-y-auto">
-                {results.map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    onClick={() => {
-                      setSelected(c);
-                      setResults([]);
-                    }}
-                    className="w-full text-left px-3 py-2 hover:bg-zinc-50"
-                  >
-                    <div className="text-13 font-medium text-zinc-900">
-                      {getCustomerOptionName(c)}
-                    </div>
-                    <div className="text-12 text-zinc-500">
-                      {c.email || "No email"}
-                      {c.phone ? ` · ${c.phone}` : ""}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-        {result && (
-          <div
-            className={cn(
-              "mt-3 text-12",
-              result.ok ? "text-zinc-900" : "text-alert-fg",
-            )}
-          >
-            {result.text}
-          </div>
-        )}
-      </DialogBody>
-      <DialogFooter>
-        <Button variant="secondary" onClick={onClose}>
-          Close
-        </Button>
-        <Button onClick={handleSend} disabled={!selected || sending}>
-          {sending ? "Sending…" : "Send prep guide"}
-        </Button>
-      </DialogFooter>
-    </Dialog>
-  );
-}
 
 // Usage-beacon leaf for the rendered tab state (exported for tests).
 // Underscore keys (call_routing; the email_templates back-compat hash →

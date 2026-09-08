@@ -1,7 +1,27 @@
+const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const apns = require('./apns');
 const fcm = require('./fcm');
+const { accountPropertyIds, resolvePrimaryProfileId } = require('./account-properties');
+const { gateEnvValue } = require('../config/feature-gates');
+
+const PUSH_HEARTBEAT_HOURS = 72;
+
+async function customerPushContext(customerId) {
+  const customer = await db('customers').where({ id: customerId }).first('id', 'account_id', 'active', 'deleted_at');
+  if (!customer || customer.active !== true || customer.deleted_at) return null;
+  const req = { customerId, accountId: customer.account_id || customerId };
+  const primaryId = await resolvePrimaryProfileId(req, db, { onError: 'throw' });
+  // SELECT * keeps an older, pre-migration database readable. Absence of
+  // push_enabled retains the existing device opt-in; a stored false stays
+  // effective even when the preference UI gate is turned off.
+  const prefs = await db('notification_prefs').where({ customer_id: primaryId }).first();
+  const ids = gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')
+    ? await accountPropertyIds(req)
+    : [customerId];
+  return { enabled: prefs?.push_enabled !== false, ids };
+}
 
 let webpush;
 let vapidConfigured = false;
@@ -77,7 +97,7 @@ async function sendSubscription(sub, notification) {
     await webpush.sendNotification(
       JSON.parse(sub.subscription_data),
       JSON.stringify(notification),
-      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal' },
+      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal', ...(notification.ephemeral ? { TTL: 0 } : {}) },
     );
     return { sent: true };
   } catch (err) {
@@ -91,6 +111,21 @@ async function sendSubscription(sub, notification) {
 }
 
 class PushNotificationService {
+  async customerStatus(customerId) {
+    const context = await customerPushContext(customerId);
+    if (!context) return { enabled: false, registered: false, fresh: false };
+    const rows = await db('push_subscriptions')
+      .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
+      .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at');
+    const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;
+    const providers = { ios: apns.status().configured, android: fcm.status().configured };
+    return {
+      enabled: context.enabled,
+      registered: rows.length > 0,
+      fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
+    };
+  }
+
   status() {
     return {
       available: Boolean(webpush),
@@ -107,14 +142,59 @@ class PushNotificationService {
   // delivering the remaining legs past it. Callers without the option
   // (bell notifications, admin alerts) are unaffected.
   async sendToCustomer(customerId, notification, opts = {}) {
+    if (opts.notificationId) {
+      try {
+        const previous = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata');
+        if (previous?.metadata?.pushState === 'accepted') return { ...summarize([], 0), sent: 1, deduped: true };
+      } catch {
+        return { ...summarize([], 0), reason: 'push_in_flight' };
+      }
+    }
     // opts.minUpdatedAt: only fan out to subscriptions with a heartbeat at or
     // after this instant (push_first freshness) — otherwise a stale
     // accepting-but-silent token could count as the delivery that suppresses
     // the SMS while the fresh device failed.
-    const query = db('push_subscriptions').where({ customer_id: customerId, active: true });
+    let context;
+    try { context = await customerPushContext(customerId); }
+    catch (err) {
+      logger.warn(`[push] Customer preference unavailable for ${customerId}: ${err.code || 'lookup_failed'}`);
+      return { ...summarize([], 0), reason: 'preferences_unavailable' };
+    }
+    if (!context?.enabled) return { ...summarize([], 0), reason: 'push_disabled' };
+    if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
+      const target = new URL(notification.url, 'https://portal.wavespestcontrol.com');
+      target.searchParams.set('notificationProperty', String(customerId));
+      notification = { ...notification, url: `${target.pathname}${target.search}${target.hash}` };
+    }
+    const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
     if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
+    if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
     const subs = await query;
+    const attemptToken = randomUUID();
+    if (opts.notificationId) {
+      // Reuse this bell/event claim with a bounded lease. Its native collapse
+      // tag stays unchanged on crash recovery. The lease covers every bounded
+      // provider stage plus headroom, rather than expiring mid-fan-out.
+      const leaseUntil = new Date(Date.now() + Math.max(120000, subs.length * 20000 + 30000)).toISOString();
+      try {
+        const claimed = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId })
+          .whereRaw(`COALESCE(metadata->>'pushState', '') <> 'accepted' AND (
+            COALESCE(metadata->>'pushState', '') <> 'sending' OR
+            COALESCE(NULLIF(metadata->>'pushLeaseUntil', '')::timestamptz,
+              NULLIF(metadata->>'pushAttemptedAt', '')::timestamptz + interval '10 minutes',
+              '-infinity'::timestamptz) < now())`)
+          .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ pushState: 'sending', pushAttemptToken: attemptToken, pushAttemptedAt: new Date().toISOString(), pushLeaseUntil: leaseUntil })]) });
+        if (!claimed) {
+          const current = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata');
+          const accepted = current?.metadata?.pushState === 'accepted';
+          return { ...summarize([], 0), sent: Number(accepted), deduped: true, reason: accepted ? null : 'push_in_flight' };
+        }
+      } catch {
+        return { ...summarize([], 0), reason: 'push_in_flight' };
+      }
+    }
     const results = [];
+    let claimLost = false;
     for (const sub of subs) {
       if (typeof opts.shouldContinue === 'function') {
         let go = false;
@@ -124,9 +204,36 @@ class PushNotificationService {
           continue;
         }
       }
-      results.push(await sendSubscription(sub, notification));
+      if (opts.notificationId) {
+        // A paused old worker cannot hand off another device after a newer
+        // worker reclaimed its expired lease.
+        const owned = await db('notifications').where({ id: opts.notificationId })
+          .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken]).first('id').catch(() => null);
+        if (!owned) { claimLost = true; break; }
+      }
+      const result = await sendSubscription(sub, notification).catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
+      results.push(result);
+      if (result.sent && opts.notificationId) {
+        // Persist the first acceptance before walking another device, so a
+        // later provider crash does not erase an already accepted event.
+        await db('notifications').where({ id: opts.notificationId })
+          .whereRaw("metadata->>'pushAttemptToken' = ?", [attemptToken])
+          .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ pushState: 'accepted', pushAcceptedAt: new Date().toISOString() })]) })
+          .catch((err) => logger.error(`[push] Acceptance persistence failed: ${err.code || 'db_error'}`));
+      }
     }
-    return summarize(results, subs.length);
+    const stats = summarize(results, subs.length);
+    if (opts.notificationId && !claimLost) {
+      const accepted = stats.sent > 0;
+      // A failed outcome write never discards KNOWN provider acceptance.
+      await db('notifications').where({ id: opts.notificationId }).whereRaw("metadata->>'pushAttemptToken' = ?", [attemptToken]).update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+          pushState: accepted ? 'accepted' : 'failed',
+          pushAcceptedAt: accepted ? new Date().toISOString() : null,
+        })]),
+      }).catch((err) => logger.error(`[push] Outcome persistence failed: ${err.code || 'db_error'}`));
+    }
+    return claimLost && !stats.sent ? { ...stats, reason: 'push_in_flight' } : stats;
   }
 
   async sendToAdmins(notification) {
@@ -187,6 +294,7 @@ function summarize(results, subscriptions) {
 }
 
 const service = new PushNotificationService();
+service.PUSH_HEARTBEAT_HOURS = PUSH_HEARTBEAT_HOURS;
 // Exposed for unit tests (platform routing); not part of the public API.
 service._sendSubscription = sendSubscription;
 module.exports = service;

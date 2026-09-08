@@ -2,23 +2,32 @@ const db = require('../models/db');
 const { createHash } = require('node:crypto');
 const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-et');
 
-const MONTH_RECURRENCE_INTERVALS = {
-  monthly_nth_weekday: 1,
-  monthly: 1,
+// Minimum plausible gap in DAYS between two visits of a series, per
+// recurring_pattern: ~70% of the nominal interval (a month counts 21 days).
+// The too-close checks flag gaps SMALLER than this; a longer gap is never an
+// anomaly here. Patterns absent from this map (and `custom` rows without an
+// interval) are excluded from the audit — the month-only map used to drop
+// `every_6_weeks` (48 future visits) and every `custom` series (94, at 14
+// or 42 days) silently (ops-inbox triage 2026-09-05 lane 4).
+const MIN_GAP_DAYS_BY_PATTERN = {
+  monthly_nth_weekday: 21,
+  monthly: 21,
   // Seasonal mosquito (9x Feb–Oct): monthly spacing IN season, so the 1-month
-  // too-close threshold (21 days) applies; the Oct→Feb winter gap is longer
-  // than any threshold and can never false-positive (the checks only flag
-  // gaps SMALLER than the minimum). Absent from this map the inner join
-  // dropped every seasonal row before the duplicate/too-close checks ran.
-  seasonal_feb_oct: 1,
-  bimonthly: 2,
-  quarterly: 3,
-  triannual: 4,
-  semiannual: 6,
-  biannual: 6,
-  annual: 12,
-  yearly: 12,
+  // threshold applies; the Oct→Feb winter gap is longer than any threshold
+  // and can never false-positive.
+  seasonal_feb_oct: 21,
+  every_6_weeks: 29,
+  bimonthly: 42,
+  quarterly: 63,
+  triannual: 84,
+  semiannual: 126,
+  biannual: 126,
+  annual: 252,
+  yearly: 252,
 };
+// `custom` carries its own recurring_interval_days: same 70% rule.
+const CUSTOM_MIN_GAP_SQL = `CASE WHEN COALESCE(p.recurring_interval_days, s.recurring_interval_days) > 0
+            THEN round(COALESCE(p.recurring_interval_days, s.recurring_interval_days) * 0.7)::integer END`;
 
 function normalizeLimit(value) {
   const parsed = parseInt(value, 10);
@@ -37,18 +46,18 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
     ? ['cancelled', 'rescheduled']
     : ['cancelled', 'rescheduled', 'completed'];
   const statusPlaceholders = terminalStatuses.map(() => '?').join(', ');
-  const intervalsValues = Object.entries(MONTH_RECURRENCE_INTERVALS)
+  const intervalsValues = Object.entries(MIN_GAP_DAYS_BY_PATTERN)
     .map(() => '(?::text, ?::integer)')
     .join(', ');
-  const intervalBindings = Object.entries(MONTH_RECURRENCE_INTERVALS)
-    .flatMap(([pattern, months]) => [pattern, months]);
+  const intervalBindings = Object.entries(MIN_GAP_DAYS_BY_PATTERN)
+    .flatMap(([pattern, minGapDays]) => [pattern, minGapDays]);
 
   return {
     sql: `
-      WITH intervals(pattern, months) AS (
+      WITH intervals(pattern, min_gap_days) AS (
         VALUES ${intervalsValues}
       ),
-      active_series AS (
+      series_rows AS (
         SELECT
           s.id,
           s.customer_id,
@@ -58,15 +67,20 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
           s.status,
           s.recurring_parent_id,
           COALESCE(p.recurring_pattern, s.recurring_pattern) AS pattern,
+          COALESCE(i.min_gap_days, CASE WHEN COALESCE(p.recurring_pattern, s.recurring_pattern) = 'custom'
+            THEN ${CUSTOM_MIN_GAP_SQL} END) AS min_gap_days,
           COALESCE(p.scheduled_date, s.scheduled_date)::date AS parent_date,
           COALESCE(p.skip_weekends, s.skip_weekends) AS skip_weekends,
           COALESCE(p.weekend_shift, s.weekend_shift) AS weekend_shift
         FROM scheduled_services s
         LEFT JOIN scheduled_services p ON p.id = s.recurring_parent_id
         LEFT JOIN customers c ON c.id = s.customer_id
-        JOIN intervals i ON i.pattern = COALESCE(p.recurring_pattern, s.recurring_pattern)
+        LEFT JOIN intervals i ON i.pattern = COALESCE(p.recurring_pattern, s.recurring_pattern)
         WHERE s.is_recurring = true
           AND s.status NOT IN (${statusPlaceholders})
+      ),
+      active_series AS (
+        SELECT * FROM series_rows WHERE min_gap_days IS NOT NULL
       ),
       child_anomalies AS (
         SELECT
@@ -85,14 +99,13 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
           a.weekend_shift,
           CASE
             WHEN a.scheduled_date <= a.parent_date THEN 'child_on_or_before_parent'
-            WHEN (a.scheduled_date - a.parent_date) < (i.months * 21) THEN 'child_too_close_to_parent'
+            WHEN (a.scheduled_date - a.parent_date) < a.min_gap_days THEN 'child_too_close_to_parent'
           END AS issue
         FROM active_series a
-        JOIN intervals i ON i.pattern = a.pattern
         WHERE a.recurring_parent_id IS NOT NULL
           AND (
             a.scheduled_date <= a.parent_date
-            OR ((a.scheduled_date - a.parent_date) > 0 AND (a.scheduled_date - a.parent_date) < (i.months * 21))
+            OR ((a.scheduled_date - a.parent_date) > 0 AND (a.scheduled_date - a.parent_date) < a.min_gap_days)
           )
       ),
       sequenced AS (
@@ -121,10 +134,9 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
           s.weekend_shift,
           'consecutive_too_close' AS issue
         FROM sequenced s
-        JOIN intervals i ON i.pattern = s.pattern
         WHERE s.prev_date IS NOT NULL
           AND (s.scheduled_date - s.prev_date) > 0
-          AND (s.scheduled_date - s.prev_date) < (i.months * 21)
+          AND (s.scheduled_date - s.prev_date) < s.min_gap_days
       )
       SELECT * FROM child_anomalies
       UNION ALL
@@ -402,7 +414,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
 }
 
 module.exports = {
-  MONTH_RECURRENCE_INTERVALS,
+  MIN_GAP_DAYS_BY_PATTERN,
   auditRecurringScheduleAnomalies,
   buildRecurringScheduleAnomalySql,
   formatAnomaly,

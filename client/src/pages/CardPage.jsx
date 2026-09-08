@@ -207,7 +207,7 @@ export default function CardPage() {
   }, [referralUrl, techFirst]);
 
   const scene = {
-    minHeight: '100vh',
+    flex: 1,
     background: 'radial-gradient(130% 150% at 18% -10%, #0A5480 0%, #04395E 48%, #021D33 100%)',
     display: 'flex',
     justifyContent: 'center',

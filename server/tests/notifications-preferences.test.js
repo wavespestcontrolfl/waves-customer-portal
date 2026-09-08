@@ -20,7 +20,8 @@ jest.mock('../services/account-membership-email', () => ({
 const db = require('../models/db');
 const notificationsRoute = require('../routes/notifications');
 
-const { notificationPrefsDbUpdates, preferencePayload, preferenceChangeItems, resolvePrimaryProfileId, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
+const { notificationPrefsDbUpdates, preferencePayload, preferenceChangeItems, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
+const { resolvePrimaryProfileId } = require('../services/account-properties');
 
 describe('notification preference updates', () => {
   test('clears stale billing contact name when billing email changes without a replacement name', () => {
@@ -251,6 +252,8 @@ describe('account-level channel routing', () => {
       'service_reminder_24h_channel',
       'en_route_channel',
       'tech_arrived_channel',
+      'service_complete_channel',
+      'push_enabled',
     ]);
   });
 });
