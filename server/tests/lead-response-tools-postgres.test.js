@@ -2,7 +2,9 @@
 // Provider delivery is a double; lead/customer reads, locks and writes are real.
 const { randomUUID } = require('node:crypto');
 const mockSend = jest.fn();
+const mockMessage = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: mockSend }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: mockMessage }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
 
 const SKIP = !process.env.DATABASE_URL;
@@ -36,11 +38,15 @@ const SKIP = !process.env.DATABASE_URL;
 
   beforeEach(async () => {
     mockSend.mockReset();
+    mockMessage.mockReset().mockResolvedValue({ sent: false, blocked: true, code: 'QA_BLOCKED' });
     mockSend.mockImplementation(async () => {
       // The alert must observe committed data from its separate DB connection.
       expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'draft_queued' }).first()).toBeTruthy();
       return { success: true, sid: 'SM_qa_integrity' };
     });
+    await db('customer_interactions').whereIn('customer_id', [customerId, foreignCustomerId]).del();
+    await db('estimates').where({ customer_id: customerId, source: 'lead_agent' }).del();
+    await db('customers').whereIn('id', [customerId, foreignCustomerId]).update({ pipeline_stage: 'new_lead' });
     await db('lead_activities').where({ lead_id: leadId }).del();
     await db('lead_agent_responses').where({ lead_id: leadId }).del();
     await db('leads').where({ id: leadId }).update({ customer_id: customerId, deleted_at: null });
@@ -52,6 +58,8 @@ const SKIP = !process.env.DATABASE_URL;
     if (!db) return;
     try {
       await db.transaction(async trx => {
+        await trx('customer_interactions').whereIn('customer_id', [customerId, foreignCustomerId]).del();
+        await trx('estimates').where({ customer_id: customerId, source: 'lead_agent' }).del();
         await trx('lead_agent_responses').where({ lead_id: leadId }).del();
         await trx('lead_activities').where({ lead_id: leadId }).del();
         await trx('leads').where({ id: leadId }).del();
@@ -110,7 +118,9 @@ const SKIP = !process.env.DATABASE_URL;
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('reassignment while the queue waits for its row lock rejects the stale subject', async () => {
+  test.each(['queue_for_adam', 'send_lead_response', 'update_lead_pipeline', 'flag_for_estimate', 'save_lead_response_report']
+    .flatMap(tool => ['reassign', 'archive'].map(change => [tool, change])))(
+    '%s refuses %s while waiting for the lead lock', async (tool, change) => {
     const holder = await db.transaction();
     let started;
     let timer;
@@ -118,25 +128,57 @@ const SKIP = !process.env.DATABASE_URL;
     const waiting = new Promise((resolve, reject) => {
       timer = setTimeout(() => reject(new Error('Queue did not attempt its lead row lock')), 10000);
       started = query => {
-        if (query.sql.includes('"leads"') && query.sql.includes('for update')) resolve();
+        if (query.sql.includes('"leads"') && /for (?:no key )?update/.test(query.sql)) resolve();
       };
     });
     try {
       await holder('leads').where({ id: leadId }).forUpdate().first();
       db.on('query', started);
-      pending = executeLeadTool('queue_for_adam', input, context);
+      pending = executeLeadTool(tool, { ...input, stage: 'won', message: 'Synthetic reply' }, context);
       await waiting;
-      await holder('leads').where({ id: leadId }).update({ customer_id: foreignCustomerId });
+      await holder('leads').where({ id: leadId }).update(change === 'reassign' ? { customer_id: foreignCustomerId } : { deleted_at: new Date() });
       await holder.commit();
       expect(await pending).toHaveProperty('error');
       expect(await db('lead_activities').where({ lead_id: leadId })).toHaveLength(0);
       expect(mockSend).not.toHaveBeenCalled();
+      expect(mockMessage).not.toHaveBeenCalled();
+      expect(await db('lead_agent_responses').where({ lead_id: leadId })).toHaveLength(0);
+      expect(await db('estimates').where({ customer_id: customerId, source: 'lead_agent' })).toHaveLength(0);
+      expect((await db('customers').where({ id: customerId }).first()).pipeline_stage).toBe('new_lead');
     } finally {
       clearTimeout(timer);
       db.removeListener('query', started);
       if (!holder.isCompleted()) await holder.rollback();
       if (pending) await pending.catch(() => {});
     }
+  }, 30000);
+
+  test('pipeline and interaction writes roll back with a rejected note, then commit together', async () => {
+    await expect(executeLeadTool('update_lead_pipeline', { stage: 'won', note: 'QA\u0000reject' }, context)).rejects.toThrow();
+    expect((await db('customers').where({ id: customerId }).first()).pipeline_stage).toBe('new_lead');
+    expect(await db('customer_interactions').where({ customer_id: customerId })).toHaveLength(0);
+    expect(await executeLeadTool('update_lead_pipeline', { stage: 'won', note: 'QA transition' }, context)).toMatchObject({ updated: true });
+    expect((await db('customers').where({ id: customerId }).first()).pipeline_stage).toBe('won');
+    expect(await db('customer_interactions').where({ customer_id: customerId })).toHaveLength(1);
+    expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'pipeline_update' })).toHaveLength(1);
+  });
+
+  test('send lock permits audit foreign keys and blocks lead correction through provider handoff', async () => {
+    mockMessage.mockImplementationOnce(async ({ preDispatchCheck }) => {
+      expect(await preDispatchCheck()).toEqual({ ok: true });
+      await db.transaction(async probe => {
+        await probe.raw("SET LOCAL lock_timeout = '250ms'");
+        await probe('lead_activities').insert({ lead_id: leadId, activity_type: 'qa_provider_fk_probe', description: 'Synthetic provider audit probe' });
+      });
+      await expect(db.transaction(async correction => {
+        await correction.raw("SET LOCAL lock_timeout = '250ms'");
+        await correction('leads').where({ id: leadId }).update({ customer_id: foreignCustomerId });
+      })).rejects.toMatchObject({ code: '55P03' });
+      return { sent: true };
+    });
+    expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context)).toMatchObject({ sent: true });
+    expect(mockMessage).toHaveBeenCalledTimes(1);
+    expect((await db('leads').where({ id: leadId }).first()).customer_id).toBe(customerId);
   }, 30000);
 
   test('a failed report insert reports unsaved and a valid retry persists once', async () => {

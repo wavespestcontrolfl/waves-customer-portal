@@ -22,7 +22,8 @@ async function resolveLeadSubject(input, context, conn = db, lock = false) {
     return { error: 'Tool target does not match assigned lead', validationError: true };
   }
   const query = conn('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at');
-  if (lock) query.forUpdate();
+  if (lock === 'send') query.forNoKeyUpdate();
+  else if (lock) query.forUpdate();
   const lead = await query.first();
   if (!lead) return { error: 'Assigned lead is unavailable', validationError: true };
   const customer = await conn('customers').where('id', context.customerId).whereNull('deleted_at').first();
@@ -33,6 +34,13 @@ async function resolveLeadSubject(input, context, conn = db, lock = false) {
     if (!matches) return { error: 'Tool phone does not match assigned lead', validationError: true };
   }
   return { lead, customer };
+}
+
+async function withLockedLeadSubject(input, context, write, lock = true) {
+  return db.transaction(async trx => {
+    const current = await resolveLeadSubject(input, context, trx, lock);
+    return current.error ? current : write(current, trx);
+  });
 }
 
 async function executeLeadTool(toolName, input, context) {
@@ -250,15 +258,7 @@ async function executeLeadTool(toolName, input, context) {
     // ── Response actions ────────────────────────────────────────
 
     case 'send_lead_response': {
-      // A lead an admin removed from the pipeline must never be contacted:
-      // the agent's prompt can carry a lead id captured before the delete,
-      // so re-check liveness at send time — refuse instead of texting.
-      if (input.lead_id) {
-        const liveLead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first('id');
-        if (!liveLead) return { error: 'Lead was removed from the pipeline — do not contact' };
-      }
-      const customer = await db('customers').where('id', input.customer_id).first();
-      if (!customer?.phone) return { error: 'Customer has no phone number' };
+      let customer = subject.customer;
 
       // Routed through the customer-message middleware so consent /
       // suppression / identity / voice / segment checks all apply, and
@@ -270,20 +270,33 @@ async function executeLeadTool(toolName, input, context) {
       // entries still record so the lead doesn't disappear; we just
       // don't auto-text someone who opted out.
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
-      const result = await sendCustomerMessage({
-        to: customer.phone,
-        body: input.message,
-        channel: 'sms',
-        audience: 'lead',
-        purpose: 'conversational',
-        customerId: customer.id,
-        leadId: input.lead_id || null,
-        entryPoint: 'lead_response_auto_reply',
-        // Preserve the legacy messageType so the admin-sms-templates
-        // kill-switch (lead_response → lead_auto_reply_biz toggle) still
-        // applies when ops disables this template during an incident.
-        metadata: { original_message_type: 'lead_response' },
-      });
+      // NO KEY UPDATE holds the binding through provider handoff while
+      // allowing the messaging audit's foreign-key check on another connection.
+      const result = await withLockedLeadSubject(input, context, async (current, trx) => {
+        customer = current.customer;
+        if (!customer.phone) return { error: 'Customer has no phone number', validationError: true };
+        return sendCustomerMessage({
+          to: customer.phone,
+          body: input.message,
+          channel: 'sms',
+          audience: 'lead',
+          purpose: 'conversational',
+          customerId: customer.id,
+          leadId: input.lead_id || null,
+          entryPoint: 'lead_response_auto_reply',
+          // Preserve the legacy messageType so the admin-sms-templates
+          // kill-switch (lead_response → lead_auto_reply_biz toggle) still
+          // applies when ops disables this template during an incident.
+          metadata: { original_message_type: 'lead_response' },
+          preDispatchCheck: async () => {
+            const current = await resolveLeadSubject(input, context, trx);
+            return current.error || current.customer.phone !== customer.phone
+              ? { ok: false, code: 'LEAD_SUBJECT_CHANGED', reason: 'Assigned lead or contact changed before dispatch' }
+              : { ok: true };
+          },
+        });
+      }, 'send');
+      if (result.error) return result;
 
       // No quiet-hours requeue: lead_response_auto_reply is a
       // customer-action entry point (owner ruling 2026-08-29) — the agent
@@ -298,7 +311,7 @@ async function executeLeadTool(toolName, input, context) {
       // or fire the first_contact pipeline event, otherwise the response-
       // time SLA metric and the funnel both record a phantom contact.
       // Codex P1 follow-up to #538.
-      if (input.lead_id) {
+      await withLockedLeadSubject(input, context, async (current, trx) => {
         // Distinguish wrapper-policy blocks from provider failures so
         // incident triage doesn't see "blocked by middleware" when
         // Twilio actually had a network error. activity_type:
@@ -317,21 +330,21 @@ async function executeLeadTool(toolName, input, context) {
           : (result.blocked
               ? `Auto-response blocked by middleware (${result.code || 'unknown'})`
               : `Auto-response provider failure (${result.code || 'unknown'})`);
-        await db('lead_activities').insert({
+        await trx.transaction(sp => sp('lead_activities').insert({
           lead_id: input.lead_id,
           activity_type: activityType,
           description: activityDescription,
           performed_by: 'lead_agent',
           metadata: JSON.stringify({ audit_log_id: result.auditLogId }),
-        }).catch(() => {});
+        })).catch(() => {});
 
         // Pipeline + response-time only advance on real send — and only on
         // a still-live lead (a mid-flight delete must not be overwritten).
         if (result.sent) {
-          const lead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first();
+          const { lead } = current;
           if (lead?.first_contact_at) {
             const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
-            await db('leads').where('id', input.lead_id).whereNull('deleted_at').update({
+            await trx('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at').update({
               response_time_minutes: responseMinutes,
               status: 'contacted',
               updated_at: new Date(),
@@ -339,15 +352,14 @@ async function executeLeadTool(toolName, input, context) {
             // Funnel-row mirror (monotonic in SQL — can never downgrade a row
             // that already advanced past 'contacted'; best-effort inside).
             const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
-            await bridgeLeadFunnelStage(input.lead_id, 'contacted');
+            await bridgeLeadFunnelStage(input.lead_id, 'contacted', trx);
           }
         }
-      }
-
-      if (result.sent) {
-        const PipelineManager = require('./pipeline-manager');
-        await PipelineManager.onEvent(input.customer_id, 'first_contact');
-      }
+        if (result.sent) {
+          const PipelineManager = require('./pipeline-manager');
+          await PipelineManager.onEvent(context.customerId, 'first_contact', {}, { database: trx });
+        }
+      }).catch(() => logger.warn('[lead-agent] Response bookkeeping failed', { leadId: context.leadId }));
 
       if (result.sent) {
         // PII: ID-only logging per AGENTS.md. Customer name + phone live
@@ -472,18 +484,19 @@ async function executeLeadTool(toolName, input, context) {
 
       const event = Object.hasOwn(eventMap, input.stage) ? eventMap[input.stage] : null;
       if (!event) return { error: 'Unsupported lead pipeline stage', validationError: true };
-      await PipelineManager.onEvent(input.customer_id, event);
+      return withLockedLeadSubject(input, context, async (_current, trx) => {
+        await PipelineManager.onEvent(context.customerId, event, {}, { database: trx });
 
-      if (input.lead_id && input.note) {
-        await db('lead_activities').insert({
-          lead_id: input.lead_id,
-          activity_type: 'pipeline_update',
-          description: input.note,
-          performed_by: 'lead_agent',
-        }).catch(() => {});
-      }
-
-      return { updated: true, stage: input.stage };
+        if (input.note) {
+          await trx('lead_activities').insert({
+            lead_id: input.lead_id,
+            activity_type: 'pipeline_update',
+            description: input.note,
+            performed_by: 'lead_agent',
+          });
+        }
+        return { updated: true, stage: input.stage };
+      });
     }
 
     case 'flag_for_estimate': {
@@ -502,7 +515,10 @@ async function executeLeadTool(toolName, input, context) {
       const customer = await db('customers').where('id', input.customer_id).first();
       const crypto = require('crypto');
 
-      const result = await withAutomatedEstimatePhoneLock(customer?.phone, async (trx) => {
+      const result = await db.transaction(database => withAutomatedEstimatePhoneLock(customer?.phone, async (trx) => {
+        const current = await resolveLeadSubject(input, context, trx, true);
+        if (current.error) return current;
+        if (current.customer.phone !== customer?.phone) return { error: 'Assigned contact changed before estimate creation', validationError: true };
         const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customer?.phone, { database: trx });
         if (duplicateBlock) {
           logger.info(`[lead-agent] Estimate flag blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${input.customer_id}`);
@@ -518,10 +534,10 @@ async function executeLeadTool(toolName, input, context) {
 
         const [estimate] = await trx('estimates').insert({
           customer_id: input.customer_id,
-          customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
-          customer_phone: customer?.phone,
-          customer_email: customer?.email,
-          address: input.address || customer?.address_line1 || '',
+          customer_name: `${current.customer.first_name} ${current.customer.last_name}`,
+          customer_phone: current.customer.phone,
+          customer_email: current.customer.email,
+          address: input.address || current.customer.address_line1 || '',
           status: 'draft',
           source: 'lead_agent',
           service_interest: input.service_interest,
@@ -530,8 +546,9 @@ async function executeLeadTool(toolName, input, context) {
         }).returning('*');
 
         return { estimate };
-      });
+      }, { database }));
 
+      if (result.error) return result;
       if (result.blocked) {
         return { flagged: false, ...result };
       }
@@ -542,22 +559,24 @@ async function executeLeadTool(toolName, input, context) {
 
     case 'save_lead_response_report': {
       try {
-        await db('lead_agent_responses').insert({
-          lead_id: input.lead_id,
-          customer_id: input.customer_id,
-          action_taken: input.action_taken,
-          response_message: input.response_message,
-          response_time_seconds: input.response_time_seconds,
-          triage_summary: input.triage_summary,
-          follow_up_scheduled: input.follow_up_scheduled || false,
-          created_at: new Date(),
+        const result = await withLockedLeadSubject(input, context, async (_current, trx) => {
+          await trx('lead_agent_responses').insert({
+            lead_id: input.lead_id,
+            customer_id: input.customer_id,
+            action_taken: input.action_taken,
+            response_message: input.response_message,
+            response_time_seconds: input.response_time_seconds,
+            triage_summary: input.triage_summary,
+            follow_up_scheduled: input.follow_up_scheduled || false,
+            created_at: new Date(),
+          });
+          return { saved: true };
         });
+        return result.error ? { saved: false, ...result } : result;
       } catch {
         logger.warn('[lead-agent] Report save failed', { leadId: context.leadId });
         return { saved: false, error: 'Lead response report could not be saved' };
       }
-
-      return { saved: true };
     }
 
     default:

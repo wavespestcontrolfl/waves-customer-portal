@@ -1,12 +1,18 @@
 const mockSend = jest.fn();
 const mockContext = jest.fn(async customer => ({ customerId: customer.id }));
 const mockPipeline = jest.fn();
+const mockMessage = jest.fn();
+const mockProvider = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: mockSend }));
 jest.mock('../services/context-aggregator', () => ({ getContextForCustomer: mockContext }));
 jest.mock('../services/pipeline-manager', () => ({ onEvent: mockPipeline }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: mockMessage }));
 jest.mock('../services/short-url', () => ({}));
 jest.mock('../services/pricing-authority-gate', () => ({}));
-jest.mock('../services/estimate-automation-duplicates', () => ({}));
+jest.mock('../services/estimate-automation-duplicates', () => ({
+  blockIfAutomatedEstimateDuplicate: async () => null,
+  withAutomatedEstimatePhoneLock: async (_phone, callback, { database }) => callback(database),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
 const mockState = {};
 const mockDb = jest.fn(table => {
@@ -14,9 +20,11 @@ const mockDb = jest.fn(table => {
   let invocation;
   const builder = {
     where: jest.fn((key, value) => { Object.assign(filters, typeof key === 'object' ? key : { [key]: value }); return builder; }),
+    whereIn: jest.fn(() => builder),
     whereNull: jest.fn(key => { filters[key] = null; return builder; }),
     whereRaw: jest.fn((_sql, bindings) => { invocation = bindings; return builder; }),
     forUpdate: jest.fn(() => builder),
+    forNoKeyUpdate: jest.fn(() => builder),
     first: jest.fn(async () => {
       const row = table === 'leads' ? mockState.lead : table === 'customers' ? mockState.customer : mockState.activity;
       if (row && invocation) {
@@ -44,6 +52,14 @@ beforeEach(() => {
   mockState.activity = null;
   mockState.inserts = 0;
   mockState.insertFails = false;
+  mockState.beforeDispatch = null;
+  mockMessage.mockImplementation(async ({ preDispatchCheck }) => {
+    mockState.beforeDispatch?.();
+    const verdict = await preDispatchCheck();
+    if (!verdict.ok) return { sent: false, blocked: true, code: verdict.code };
+    mockProvider();
+    return { sent: true };
+  });
   process.env.ADAM_PHONE = '+19415550101';
   mockSend.mockResolvedValue({ success: true, sid: 'SM_fixture' });
 });
@@ -77,7 +93,7 @@ test.each(['new_lead', 'service_completed', 'subscription_cancelled', '__proto__
 });
 test('maps supported stage to assigned customer', async () => {
   expect(await executeLeadTool('update_lead_pipeline', { stage: 'contacted' }, context)).toEqual({ updated: true, stage: 'contacted' });
-  expect(mockPipeline).toHaveBeenCalledWith(context.customerId, 'first_contact');
+  expect(mockPipeline).toHaveBeenCalledWith(context.customerId, 'first_contact', {}, { database: mockDb });
 });
 test('failed insert cannot report queued or alert', async () => {
   mockState.insertFails = true;
@@ -126,4 +142,33 @@ test.each([{ sessionId: 'session-2' }, { toolUseId: 'tool-2' }])('keeps independ
   expect(first.activityId).not.toBe(second.activityId);
   expect(mockState.inserts).toBe(2);
   expect(mockSend).toHaveBeenCalledTimes(2);
+});
+
+
+test.each(['send_lead_response', 'update_lead_pipeline', 'flag_for_estimate', 'save_lead_response_report'])('revalidates the lead under the write lock for %s', async tool => {
+  mockDb.transaction.mockImplementationOnce(async callback => {
+    mockState.lead.customer_id = 'other';
+    return callback(mockDb);
+  });
+  expect(await executeLeadTool(tool, { stage: 'won' }, context)).toMatchObject({ error: expect.any(String), validationError: true });
+  expect(mockMessage).not.toHaveBeenCalled();
+  expect(mockPipeline).not.toHaveBeenCalled();
+  expect(mockState.inserts).toBe(0);
+});
+test.each(['reassigned', 'archived', 'customer_deleted', 'phone_changed'])('blocks %s subject at the final messaging check', async change => {
+  mockState.beforeDispatch = () => {
+    if (change === 'reassigned') mockState.lead.customer_id = 'other';
+    if (change === 'archived') mockState.lead.deleted_at = new Date();
+    if (change === 'customer_deleted') mockState.customer.deleted_at = new Date();
+    if (change === 'phone_changed') mockState.customer = { ...mockState.customer, phone: '+19415550199' };
+  };
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context)).toMatchObject({ sent: false, blocked: true, code: 'LEAD_SUBJECT_CHANGED' });
+  expect(mockProvider).not.toHaveBeenCalled();
+  expect(mockPipeline).not.toHaveBeenCalled();
+});
+test('a binding changed after provider acceptance cannot write stale pipeline data or hide the accepted send', async () => {
+  mockMessage.mockImplementationOnce(async () => { mockState.lead.customer_id = 'other'; return { sent: true }; });
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context)).toMatchObject({ sent: true });
+  expect(mockPipeline).not.toHaveBeenCalled();
+  expect(mockState.inserts).toBe(0);
 });
