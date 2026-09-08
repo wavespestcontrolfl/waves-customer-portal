@@ -630,6 +630,11 @@ function assessmentScoreFields({ displayScores, adjustedScores, overallScore }) 
 // best-photo election. Only a photo the model rated adequate or limited
 // passes; 'poor' and unrated (missing entry, unavailable run) photos stay
 // auditable but never customer-visible and never the best photo.
+// `allPoor`: the model answered and rated EVERY photo poor — the legacy
+// all-failed hold applies (the technician is asked to retake; nothing is
+// stored), because scores read off images the model itself called unusable
+// must not become an assessment. An unavailable run is not all-poor: its
+// photos are unrated, not judged, and the visit still closes.
 function photoRowInputs(analysis) {
   const qualityResults = [];
   const resultByPhotoIndex = {};
@@ -638,7 +643,8 @@ function photoRowInputs(analysis) {
     qualityResults[index] = { passed: CUSTOMER_VISIBLE_QUALITY.has(row.quality), issues: row.issue ? [row.issue] : [] };
     resultByPhotoIndex[index] = { qualityScore: QUALITY_SCORE[row.quality] ?? 0 };
   }
-  return { qualityResults, resultByPhotoIndex };
+  const allPoor = analysis?.status === 'complete' && qualityResults.length > 0 && qualityResults.every((row) => row && !row.passed);
+  return { qualityResults, resultByPhotoIndex, allPoor };
 }
 
 // ── Run row ───────────────────────────────────────────────────────────
