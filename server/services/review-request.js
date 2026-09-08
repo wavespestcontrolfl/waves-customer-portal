@@ -654,6 +654,15 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
   return retryAt;
 }
 
+// The caller-facing shape of a sendSMS outcome that did NOT deliver: held
+// (deferred, with the time the retry owner looks again) or failed without a
+// queued retry (failed, no time — nothing will send it).
+function unsentOutcome(outcome) {
+  return outcome.failed
+    ? { sent: false, failed: outcome.failed, nextAllowedAt: null }
+    : { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
+}
+
 function retryAtForDeferredSend(result) {
   if (!result || !(result.retryable || result.deferred)) {
     return null;
@@ -797,8 +806,8 @@ const ReviewService = {
       const fresh = (await db("review_requests").where({ id: existing.id }).first()) || existing;
       // Same truth as the fresh-row path (codex #4141 r4 P2): a resend held
       // by the 3-day rule / send window / provider retry is queued, not sent.
-      if (resendOutcome && resendOutcome.deferred) {
-        fresh.sendOutcome = { sent: false, deferred: resendOutcome.deferred, nextAllowedAt: resendOutcome.nextAllowedAt || null };
+      if (resendOutcome && (resendOutcome.deferred || resendOutcome.failed)) {
+        fresh.sendOutcome = unsentOutcome(resendOutcome);
       }
       return fresh;
     }
@@ -899,8 +908,10 @@ const ReviewService = {
       // or a provider retry. The row stays queued for the retry owner, and
       // the caller learns that it was NOT sent (codex #4141 r3 P2: the tech
       // app was told sent:true for a text that could be 72 h out).
-      if (outcome && outcome.deferred) {
-        request.sendOutcome = { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
+      // A failure that could not even be queued (codex #4156 r1 P2) is
+      // reported as such — never as a held send some job will pick up.
+      if (outcome && (outcome.deferred || outcome.failed)) {
+        request.sendOutcome = unsentOutcome(outcome);
       }
       if (outcome && outcome.refused === "approved_phone_drift") {
         // Remove the row this very call created (pre-push r15 P1): left in
@@ -997,20 +1008,31 @@ const ReviewService = {
         .filter((t) => Number.isFinite(t));
       const unused = sentTimes.filter((sT) =>
         candidateTimes.some((cT) => Math.abs(cT - sT) <= CORRESPONDENCE_MS));
-      // Newest manual ask's send time (candidates are created_at DESC).
-      let manualAt = null;
-      candidates.some((c) => {
-        const t = new Date(c.created_at).getTime();
-        let best = -1;
-        let bestGap = Infinity;
-        unused.forEach((sT, i) => {
-          const gap = Math.abs(sT - t);
-          if (gap <= TEN_MIN && gap < bestGap) { best = i; bestGap = gap; }
+      // Pair each pipeline send with its CLOSEST review-looking row, closest
+      // pairs first, regardless of row order (codex #4156 r1 P2): walking the
+      // rows newest-first let a hand-sent ask 5 min after an automated one
+      // consume the automated send's timestamp, which left the automated row
+      // looking manual and anchored the 3-day rule 5 min early. Whatever row
+      // is left unpaired is a manual ask; the newest of them is the anchor.
+      const pairs = [];
+      candidateTimes.forEach((cT, ci) => {
+        unused.forEach((sT, si) => {
+          const gap = Math.abs(cT - sT);
+          if (gap <= TEN_MIN) pairs.push({ ci, si, gap });
         });
-        if (best === -1) { manualAt = new Date(t); return true; } // no unconsumed pipeline send → manual ask
-        unused.splice(best, 1);
-        return false;
       });
+      pairs.sort((a, b) => a.gap - b.gap);
+      const pairedCandidates = new Set();
+      const pairedSends = new Set();
+      pairs.forEach(({ ci, si }) => {
+        if (pairedCandidates.has(ci) || pairedSends.has(si)) return;
+        pairedCandidates.add(ci);
+        pairedSends.add(si);
+      });
+      // candidateTimes keeps candidates' created_at DESC order: the first
+      // unpaired one is the newest manual ask.
+      const manualIndex = candidateTimes.findIndex((_, ci) => !pairedCandidates.has(ci));
+      const manualAt = manualIndex === -1 ? null : new Date(candidateTimes[manualIndex]);
       // returnAt: the 3-day rule anchors to the ask's actual send, so the
       // dispatch guards get the Date (null = no manual ask), not a boolean.
       return returnAt ? manualAt : manualAt != null;
@@ -1750,7 +1772,12 @@ const ReviewService = {
     // preflight and here must suppress, never send the irreversible SMS to
     // a number the operator did not approve. Only in-process confirmed
     // sends pass expectedPhone; the scheduler's deferred batch does not.
-    if (expectedPhone && contact.phone && String(contact.phone) !== String(expectedPhone)) {
+    // A customer with NO recipient any more is drift too (codex #4156 r1 P1):
+    // the operator approved a number; there is none now. Refusing here
+    // (instead of falling to the suppression below) keeps the fresh-create
+    // path deleting its row and the resend path parking its row, so the
+    // scheduler cannot later text a number added meanwhile without the pin.
+    if (expectedPhone && String(contact.phone || "") !== String(expectedPhone)) {
       // No row mutation here (pre-push r15 P1): the caller decides — the
       // fresh-create path DELETES its just-created row (so the scheduler
       // can never later send it to the unapproved number and the 30-day
@@ -2017,7 +2044,7 @@ const ReviewService = {
         logger.error(
           `[review] SMS failed AND retry-queue update failed (requestId=${requestId} sendErrType=${err?.name || "Error"} dbErrType=${dbErr?.name || "Error"})`,
         );
-        return { deferred: "send_failed_unqueued", nextAllowedAt: null };
+        return { sent: false, failed: "send_failed_unqueued" };
       }
     }
     return { sent: true };
@@ -2876,6 +2903,7 @@ const ReviewService = {
       .limit(20);
 
     let sent = 0;
+    let held = 0;
     for (const request of pending) {
       // Serialize each send under the SAME per-customer lock the manual send and
       // cadence-start paths take. Without this, a cadence start can suppress this
@@ -2885,12 +2913,16 @@ const ReviewService = {
       // skip the row this tick (it's picked up next tick, or was superseded).
       // recordHealth: false — per-customer mutual-exclusion lock, not a
       // scheduled job; recording it would grow job_health per customer.
-      await runExclusive(`review-send:${request.customer_id}`, () => this.sendSMS(request.id), { recordHealth: false });
-      sent++;
+      const out = await runExclusive(`review-send:${request.customer_id}`, () => this.sendSMS(request.id), { recordHealth: false });
+      // Only a delivered send counts (codex #4156 r1 P2): a 3-day-rule or
+      // send-window hold, a lookup deferral, a suppression or a skipped
+      // lock left the customer without a message.
+      if (out && out.sent === true) sent++;
+      else held++;
     }
-    if (sent > 0)
-      logger.info(`[review] Processed ${sent} scheduled review requests`);
-    return { sent };
+    if (sent > 0 || held > 0)
+      logger.info(`[review] Processed scheduled review requests (sent=${sent} held=${held})`);
+    return { sent, held };
   },
 
   /**
