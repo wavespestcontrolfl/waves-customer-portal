@@ -1065,6 +1065,7 @@ export default function CustomersPageV2() {
     setSelected360Id(nextId);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
+      next.delete("tab");
       if (nextId) next.set("customerId", nextId);
       else next.delete("customerId");
       return next;
@@ -2054,6 +2055,8 @@ export default function CustomersPageV2() {
 
       </>}
       {workspaceOpen && <Customer360Workspace
+        key={`${selected360Id}:${searchParams.get("tab") === "comms" ? location.key : "overview"}`}
+        initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
         selectedId={selected360Id}
         onSelect={openCustomerProfile}
         onClose={closeCustomerProfile}
@@ -2226,8 +2229,9 @@ export default function CustomersPageV2() {
       {/* ======================= CUSTOMER 360 (V1) ======================= */}
       {selected360Id && !workspaceOpen && (
         <Customer360Profile
-          key={selected360Id}
+          key={`${selected360Id}:${searchParams.get("tab") === "comms" ? location.key : "overview"}`}
           customerId={selected360Id}
+          initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
           onSelectCustomer={openCustomerProfile}
           onClose={closeCustomerProfile}
         />

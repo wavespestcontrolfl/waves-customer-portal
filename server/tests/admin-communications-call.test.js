@@ -64,6 +64,7 @@ function query({ result = [], returning } = {}) {
     'orderBy',
     'limit',
     'insert',
+    'update',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });

@@ -12,7 +12,9 @@
  *   sprayCheck per-product verdict against NWS hourly at the property
  *   products   the visit's protocol products as cards (verdict, short,
  *              planned amount, precautions, label/SDS, rotation, order)
- *   tank       the active rig calibration the 110 / 1 gal mix helper uses
+ *   tank       the visit's carrier for the 110 / 1 gal mix helper, plus every
+ *              active rig (equipment_systems) with its tank volume for a
+ *              full-tank dose on that rig
  *
  * Read-only apart from the paragraph cache. No comms of any kind.
  */
@@ -49,7 +51,6 @@ const PROMPT_VERSION = 'job_card_paragraph_v1';
 // day feed's current-conditions call uses (routes/admin-schedule.js).
 const SPRAY_WINDOW_HOURS = 4;
 const RAIN_HOLD_PCT = 50;
-const TANK_GALLONS = [110, 1];
 const MAX_PARAGRAPH_WORDS = 60;
 
 function jobCardEnabled() {
@@ -888,16 +889,62 @@ function rigAssignment(svc) {
   return { equipmentSystemId: svc?.assigned_equipment_system_id || null, calibrationId: svc?.assigned_calibration_id || null };
 }
 
-// The assigned rig's calibrations (or every active one when none is
-// assigned). A failed read is an empty list: the carrier then falls back
-// to the protocol default exactly as "no rig on file" does.
-async function loadRigCalibrations(dbh, rig) {
+// Every active rig calibration, once: `rigRows` narrows the set the
+// carrier resolves from. A failed read is an empty list: the carrier then
+// falls back to the protocol default exactly as "no rig on file" does.
+async function loadRigCalibrations(dbh) {
   try {
-    return await getActiveCalibrations(dbh, { equipmentSystemId: rig?.equipmentSystemId || null, calibrationId: rig?.calibrationId || null }, { strict: true });
+    const rows = await getActiveCalibrations(dbh, {}, { strict: true });
+    return Array.isArray(rows) ? rows : [];
   } catch (err) {
     logger.warn(`[job-card] calibration read failed: ${err.message}`);
     return [];
   }
+}
+
+// Every active rig (equipment_systems) — the Tank section's list source.
+// A rig's identity and tank volume live here, independent of whether a
+// calibration is on file (Codex #4134 r1 P2): a rig whose calibration is
+// deactivated still fills, on the protocol carrier. A failed read is an
+// empty list unless `strict`.
+async function loadRigSystems(dbh, { strict = false } = {}) {
+  try {
+    const rows = await dbh('equipment_systems').where({ active: true }).select('id', 'name', 'system_type', 'tank_capacity_gal');
+    return Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    if (strict) throw unavailable('Rig list unavailable', err);
+    logger.warn(`[job-card] rig read failed: ${err.message}`);
+    return [];
+  }
+}
+
+// The calibration rows a rig reference names — the visit's assignment or
+// the Tank section's pick — or every active one when it names none.
+function rigRows(rows, rig) {
+  const systemId = rig?.equipmentSystemId || null;
+  const calibrationId = rig?.calibrationId || null;
+  if (!systemId && !calibrationId) return rows;
+  return rows.filter((row) => (!systemId || row.equipment_system_id === systemId) && (!calibrationId || row.id === calibrationId));
+}
+
+// The calibration rows a viewer may dose on. A calibration is technician-
+// specific (walking pace and arm motion set the carrier rate), so a
+// technician's pick rides only a shared calibration or their own — never
+// another technician's backpack (Codex #4134 r1 P1). An admin (no
+// technicianId) sees every row.
+function viewerRows(rows, technicianId) {
+  if (!technicianId) return rows;
+  return rows.filter((row) => !row.technician_id || row.technician_id === technicianId);
+}
+
+// The Tank section's rig list — every active rig with a tank capacity on
+// file, tanks before backpacks — so a fill can be dosed for that rig's own
+// volume and carrier (110, 110 and 4 gal on the owner's fleet).
+function rigOptions(systems) {
+  return systems
+    .filter((row) => Number(row.tank_capacity_gal) > 0)
+    .sort((a, b) => (a.system_type === 'tank' ? 0 : 1) - (b.system_type === 'tank' ? 0 : 1))
+    .map((row) => ({ equipmentSystemId: row.id, name: row.name || null, tankCapacityGal: Number(row.tank_capacity_gal) }));
 }
 
 // The instant a calibration must still be valid at: the later of now and
@@ -941,7 +988,7 @@ function tankFromCalibrations(rows, fallbackCarrierGalPer1000 = null) {
  */
 function buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000, gallons }) {
   const gal = Number(gallons);
-  if (!TANK_GALLONS.includes(gal)) return { amount: null, unit: rateUnit || null, reason: 'Pick 110 or 1 gallons' };
+  if (!Number.isFinite(gal) || gal <= 0) return { amount: null, unit: rateUnit || null, reason: 'Pick a tank volume' };
   const rate = Number(ratePer1000);
   const carrier = Number(carrierGalPer1000);
   if (!Number.isFinite(rate) || rate <= 0) return { amount: null, unit: rateUnit || null, reason: 'No verified rate on file' };
@@ -1491,14 +1538,15 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
 
   // The spray-check limits are judged from the appointment start.
   const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);
-  const [paragraph, catalog, calibrations, { isToday, hourly }] = await Promise.all([
+  const [paragraph, catalog, calibrations, systems, { isToday, hourly }] = await Promise.all([
     readinessOnly ? null : paragraphForVisit(facts, { dbh, deps }),
     loadCatalog(dbh),
-    loadRigCalibrations(dbh, facts.rig),
+    loadRigCalibrations(dbh),
+    loadRigSystems(dbh),
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
   const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000 } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
-  const tank = tankFromCalibrations(calibrations, carrierGalPer1000);
+  const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
   const products = lines.map((l) => l.product);
   // Limits are judged from the appointment start (now once the window has
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
@@ -1520,7 +1568,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     // copies are bounded.
     notes: facts.notes,
     sprayCheck: { ...sprayCheck, coordsSource: facts.coords.source, window: isToday ? 'today' : 'not_today' },
-    tank,
+    tank: { ...tank, rigs: rigOptions(systems) },
     products: cards,
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
@@ -1537,7 +1585,10 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
 /**
  * Mix helper for the Tank section's product search: amount of one catalog
  * product for 110 or 1 gallons of water on the visit's rig (the
- * appointment's assigned equipment, else the one active rig).
+ * appointment's assigned equipment, else the one active rig), or for a
+ * full tank of the rig the section picked (`equipmentSystemId`), on that
+ * rig's own volume and — when a calibration the viewer may use is on file
+ * (`technicianId` scopes it) — its own carrier.
  */
 // A base line the lawn resolver left unselected — the losing BRANCH_ONE_OF
 // fertilizer for the property's soil-P result, PREMIUM_ONLY on an ineligible
@@ -1552,7 +1603,7 @@ function unselectedBaseBlock(plan, product) {
   return item ? { code: 'base_not_selected', message: UNSELECTED_BASE_REASONS[item.selectionReason] || 'Not selected by this visit\'s plan — amount withheld' } : null;
 }
 
-async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
+async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId = null, technicianId = null, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'epa_reg_number', 'formulation', 'label_weather_review', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'rainfast_minutes').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
     serviceId
@@ -1590,7 +1641,17 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // Same rule as the card: no plan at a non-primary address.
   const lawnPlan = primaryIsLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
   const planned = lawnPlan?.plan ? [...(lawnPlan.plan.mixCalculator?.items || []), ...(lawnPlan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
-  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), lawnPlan?.plan?.mixCalculator?.carrierGalPer1000);
+  // The Tank section's rig pick doses a full tank of THAT rig on its own
+  // volume and carrier — the backpack's 1.33 gal/1,000 over 4 gal, not the
+  // truck's — where the visit's rig otherwise resolves as the card does.
+  // The rig's carrier is a calibration the viewer may dose on; with none
+  // on file the protocol carrier applies, as for "no rig on file". A pick
+  // that is no longer an active rig is not found.
+  const [rigs, systems] = await Promise.all([loadRigCalibrations(dbh), equipmentSystemId ? loadRigSystems(dbh, { strict: true }) : []]);
+  const pickedRig = equipmentSystemId ? rigOptions(systems).find((r) => r.equipmentSystemId === equipmentSystemId) || null : null;
+  if (equipmentSystemId && !pickedRig) return null;
+  const tank = tankFromCalibrations(pickedRig ? viewerRows(rigRows(rigs, { equipmentSystemId }), technicianId) : rigRows(rigs, rigAssignment(svc)), lawnPlan?.plan?.mixCalculator?.carrierGalPer1000);
+  const volume = pickedRig ? pickedRig.tankCapacityGal : gallons;
   // The lawn plan governs every product it names (rate, blocks, approvals)
   // even when a non-lawn add-on's line names it too — Iron Plus on a lawn
   // plan with a Tree & Shrub add-on doses at the plan's rate, as the card
@@ -1676,7 +1737,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   ].find(([applies]) => applies);
   const mix = withheld
     ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
-    : (perGallon ? buildPerGallonAmount(perGallon, gallons) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons }));
+    : (perGallon ? buildPerGallonAmount(perGallon, volume) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons: volume }));
   const packSizes = await loadPackSizes(dbh, [product.id]);
   // The label rate is itself a dosing instruction: it rides only with a
   // permitted amount, never alongside a withheld one.
@@ -1694,6 +1755,9 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     ...mix,
     planBlocks,
     tank,
+    // The rig the amount was computed for, so the section labels the dose
+    // from the answer, not its own list snapshot (Codex #4134 r1 P2).
+    rig: pickedRig,
     order: packSizes ? orderFor(product, packSizes[product.id], null, { includePricing }) : null,
   };
 }
@@ -1764,7 +1828,7 @@ function perGallonRate(product) {
 
 function buildPerGallonAmount(rate, gallons) {
   const gal = Number(gallons);
-  if (!TANK_GALLONS.includes(gal)) return { amount: null, unit: rate.unit, reason: 'Pick 110 or 1 gallons' };
+  if (!Number.isFinite(gal) || gal <= 0) return { amount: null, unit: rate.unit, reason: 'Pick a tank volume' };
   const round = (v) => Math.round(v * 10000) / 10000;
   return { amount: round(rate.lo * gal), amountMax: rate.hi > rate.lo ? round(rate.hi * gal) : null, unit: rate.unit, gallons: gal, basis: 'per_gallon', reason: null };
 }
@@ -1785,5 +1849,5 @@ module.exports = {
   resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, tankFromCalibrations },
+  _test: { dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations },
 };

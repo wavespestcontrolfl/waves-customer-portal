@@ -7,6 +7,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn(), quarantineCardRecording: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(() => Promise.resolve(true)) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/sms-operational-actions', () => ({
+  smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
+}));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
 jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
@@ -84,6 +87,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockRole = 'admin';
   isEnabled.mockReturnValue(true);
+  require('../services/sms-operational-actions').smsCommitmentsEnabled.mockReturnValue(false);
 });
 
 describe('GET /calls/:id/intelligence', () => {
@@ -257,6 +261,7 @@ describe('commitment writes are staff-wide but fail closed when the gate is off'
 
   test('a technician can settle a promise (staff-wide, like tagging a disposition)', async () => {
     mockRole = 'tech';
+    mockDb([{ call_log_id: CALL_ID }]);
     commitments.applyHumanUpdate.mockResolvedValue({ id: COMMIT_ID, human_state: 'confirmed' });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
@@ -309,6 +314,7 @@ describe('customer relink and recording adoption stay admin-only', () => {
 
 describe('PATCH /commitments/:id', () => {
   test('passes the verdict and the reviewer through; service 4xx errors keep their status', async () => {
+    mockDb([{ call_log_id: CALL_ID }, { call_log_id: CALL_ID }]);
     commitments.applyHumanUpdate.mockResolvedValue({ id: COMMIT_ID, human_state: 'confirmed' });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm', note: 'checked' }) });
@@ -319,6 +325,52 @@ describe('PATCH /commitments/:id', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'explode' }) });
       expect(res.status).toBe(400);
+    });
+  });
+});
+
+describe('customer-profile SMS commitments', () => {
+  const sms = require('../services/sms-operational-actions');
+  test('the SMS read requires one customer and preserves pagination', async () => {
+    sms.smsCommitmentsEnabled.mockReturnValue(true);
+    sms.listSmsCommitments.mockResolvedValue([{ id: 'one' }, { id: 'two' }, { id: 'next' }]);
+    await withServer(async (base) => {
+      expect((await fetch(`${base}/admin/call-recordings/commitments/sms`)).status).toBe(400);
+      expect((await fetch(`${base}/admin/call-recordings/commitments/sms?customer_id=${CUSTOMER_ID}&offset=-1`)).status).toBe(400);
+      const body = await (await fetch(`${base}/admin/call-recordings/commitments/sms?customer_id=${CUSTOMER_ID}&limit=2&offset=4`)).json();
+      expect(body).toEqual({ commitments: [{ id: 'one' }, { id: 'two' }], enabled: true, has_more: true, next_offset: 6 });
+      expect(sms.listSmsCommitments).toHaveBeenCalledWith(db, { customerId: CUSTOMER_ID, limit: 3, offset: 4 });
+      expect(commitments.listOpenCommitments).not.toHaveBeenCalled();
+    });
+  });
+
+  test('SMS closure uses its own gate and writer even when the call lane is disabled', async () => {
+    isEnabled.mockReturnValue(false);
+    sms.smsCommitmentsEnabled.mockReturnValue(true);
+    mockDb([{ sms_log_id: CALL_ID }]);
+    sms.applySmsCommitmentUpdate.mockResolvedValue({ id: COMMIT_ID, status: 'fulfilled' });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'fulfill', customer_id: CUSTOMER_ID }),
+      });
+      expect(res.status).toBe(200);
+      expect(sms.applySmsCommitmentUpdate).toHaveBeenCalledWith(db, COMMIT_ID,
+        expect.objectContaining({ customerId: CUSTOMER_ID, action: 'fulfill', reviewedBy: 'tech-1' }));
+      expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
+    });
+  });
+
+  test('call controls cannot bypass a disabled SMS lane or omit its profile scope', async () => {
+    mockDb([{ sms_log_id: CALL_ID }, { sms_log_id: CALL_ID }]);
+    sms.applySmsCommitmentUpdate.mockRejectedValue(Object.assign(new Error('SMS follow-up is disabled'), { status: 409 }));
+    await withServer(async (base) => {
+      const patch = (body) => fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect((await patch({ action: 'fulfill' })).status).toBe(400);
+      expect((await patch({ action: 'fulfill', customer_id: CUSTOMER_ID })).status).toBe(409);
+      expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
     });
   });
 });
