@@ -885,4 +885,14 @@ test('prospective coverage and a former franchise assert nothing; treatment and 
   expect(score('E6', 'Waves does not treat termites.').expected.termite).toBe(false);
   expect(score('E6', 'Waves controls ants but not rodents.').expected.rodent).toBe(false);
   expect(score('E6', 'Orkin controls termites.').expected.termite).toBe(false);
+  // A past or prospective guard binds to its own predicate (#4155 r1).
+  expect(score('E5', 'Waves service plans cover Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves plans to serve Hillsborough, but currently serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves formerly served Tampa but now serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves service plans include fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves formerly offered insulation but now offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E8', 'Waves was formerly independently owned but is now a franchise.').forbidden.franchise).toBe(true);
+  // Explanatory prose is not service evidence; a technician subject in its own clause is.
+  expect(score('E6', 'Waves has a guide explaining how technicians eliminate termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Our technicians eliminate termites.').expected.termite).toBe(true);
 });
