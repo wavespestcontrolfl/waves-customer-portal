@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const lawnHealthRouter = require('../routes/lawn-health');
 const adminLawnAssessmentRouter = require('../routes/admin-lawn-assessment');
 
@@ -90,5 +92,70 @@ describe('lawn assessment route contracts', () => {
       ['created_at', 'desc'],
       ['updated_at', 'desc'],
     ]);
+  });
+
+  // GATE_LAWN_VISIT_ASSESSMENT (services/lawn-visit-assessment.js): the gate is
+  // read once per handler and every legacy statement it bypasses is still in
+  // place — gate off is the byte-identical per-photo quality gate + parallel
+  // scorer, gate on is the one call, NULL-preserving scores and the run row.
+  describe('visit assessment gate wiring', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-lawn-assessment.js'), 'utf8');
+    const assess = source.slice(source.indexOf("router.post('/assess'"), source.indexOf("router.post('/confirm'"));
+    const confirm = source.slice(source.indexOf("router.post('/confirm'"), source.indexOf("router.get('/service/:serviceId'"));
+
+    test('/assess reads the gate once; /confirm never reads it — the run row decides', () => {
+      expect(assess.match(/gateEnvValue\('GATE_LAWN_VISIT_ASSESSMENT'\)/g)).toHaveLength(1);
+      expect(confirm).not.toMatch(/GATE_LAWN_VISIT_ASSESSMENT/);
+      expect(confirm).toMatch(/const visitRun = await visitAssessment\.loadRun\(assessmentId, db\);/);
+    });
+
+    test('/assess keeps the legacy scorer and adds the one call behind the gate', () => {
+      expect(assess).toMatch(/visitAssessmentEnabled\s*\?\s*visitAssessment\.validateVisitPhotos\(photos\)/);
+      expect(assess).toMatch(/LawnIntel\.assessPhotoQuality\(/);
+      expect(assess).toMatch(/lawnAssessment\.analyzePhoto\(/);
+      expect(assess).toMatch(/mergePhotoComposites\(validResults\)/);
+      expect(assess).toMatch(/lawnAssessment\.mapToDisplayScores\(mergedComposite\)/);
+      expect(assess).toMatch(/visitAssessment\.analyzeVisit\(\{ photos, photoZones: visitPhotos\.zones, visionContext \}\)/);
+      // One gate branch derives composite, display, adjusted and overall scores together.
+      expect(assess).toMatch(/visitAssessment\.scoreVisit\(visitAnalysis, \{ seasonAdjust, calculateOverallScore \}\)/);
+      expect(assess).toMatch(/\? \(i\) => visitAssessment\.photoFieldsFor\(visitPhotos\.zones\[i\]\)/);
+      // The run is written in the assessment's transaction — both or neither.
+      expect(assess).toMatch(/db\.transaction\(async \(trx\) => \{[\s\S]{0,400}visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis \}, trx\)/);
+      expect(assess).toMatch(/visitAssessment\.attachRunPhotos\(/);
+      // Perception never sees the planned products under the gate.
+      expect(assess).toMatch(/const track = visitAssessmentEnabled \? null : grassCtx\.trackKey;/);
+      // The provider-miss early return is legacy-only: an unavailable run still stores the row.
+      expect(assess).toMatch(/if \(!visitAssessmentEnabled && !validResults\.length\)/);
+    });
+
+    test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
+      expect(confirm.indexOf('visitAssessment.validateReview(')).toBeLessThan(confirm.indexOf('installConfirmedBaseline('));
+      // One branch: the run-backed row's scores, overall and confirmed verdict come from the module; the legacy block is untouched.
+      expect(confirm).toMatch(/if \(reviewedRun\) \{\s*\(\{ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible \} = visitAssessment\.confirmScores\(assessment, visitRun, adjustedScores, \{ scoreValue, calculateOverallScore \}\)\);/);
+      expect(confirm).toMatch(/overall_score: overallScore,/);
+      // confirmed_by_tech / confirmed_at are stamped only on a confirmed row; a pending row never becomes the property baseline.
+      expect(confirm).toMatch(/\.\.\.\(confirmed \? \{ confirmed_by_tech: true, confirmed_at: new Date\(\) \} : \{\}\),/);
+      expect(confirm.match(/confirmed_by_tech: true/g)).toHaveLength(1);
+      expect(confirm.match(/installConfirmedBaseline\(/g)).toHaveLength(2);
+      expect(confirm).toMatch(/const installBaseline = propertyHistoryEnabled && confirmed;/);
+      expect(confirm).toMatch(/installBaseline\s*\? await lawnAssessment\.installConfirmedBaseline\(/);
+      expect(confirm).toMatch(/else if \(installBaseline\) \{/);
+      // Confirm + review commit together when a review was sent; a score-only confirm stamps nothing.
+      expect(confirm).toMatch(/if \(reviewedRun && visitReview\.provided\) \{\s*\(\{ updated, reviewedVisitRun \} = await db\.transaction\(async \(trx\) => \{[\s\S]{0,700}visitAssessment\.reviewRun\(\{ run: visitRun, review: visitReview, technicianId: req\.technicianId \}, trx\)/);
+      expect(confirm).not.toMatch(/reviewRun\([\s\S]{0,120}, db\)/);
+      // A pending row returns right after the write with the missing scores — before the wiki link and the intelligence pipeline.
+      const pending = confirm.indexOf('if (!confirmed) {');
+      expect(pending).toBeGreaterThan(confirm.indexOf('persistProtocolFieldChecks('));
+      expect(pending).toBeLessThan(confirm.indexOf('wiki.linkTreatmentOutcome('));
+      expect(pending).toBeLessThan(confirm.indexOf('setImmediate('));
+      expect(confirm.slice(pending, pending + 200)).toMatch(/success: true, confirmed: false, missingScores, assessment: updated, \.\.\.runPayload/);
+      expect(confirm).toMatch(/if \(adjustedScores && calibrationEligible\)/);
+      // Every customer-facing step runs once, inside the pipeline only a confirmed row reaches.
+      const pipeline = confirm.slice(confirm.indexOf('setImmediate('), confirm.indexOf('// 7. Track assessment completion'));
+      for (const call of ['KnowledgeBridge.generateAssessmentRecommendations(assessmentId)', 'LawnIntel.emitHealthSignal(updated.customer_id)', 'LawnIntel.sendAssessmentNotification(assessmentId)', 'LawnIntel.generateServiceReport(assessmentId)']) {
+        expect(pipeline).toContain(call);
+        expect(confirm.split(call)).toHaveLength(2);
+      }
+    });
   });
 });

@@ -11,6 +11,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
+const visitAssessment = require('../services/lawn-visit-assessment');
 const KnowledgeBridge = require('../services/knowledge-bridge');
 const LawnIntel = require('../services/lawn-intelligence');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
@@ -353,9 +354,17 @@ router.post('/assess', async (req, res, next) => {
   try {
     const { customerId, serviceId, photos } = req.body;
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+    // GATE_LAWN_VISIT_ASSESSMENT (services/lawn-visit-assessment.js): one
+    // multimodal call over every photo of the visit in place of the per-photo
+    // quality gate + parallel scorer below. Decided once per request.
+    const visitAssessmentEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT');
 
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
+    // Gate on: up to six photos, each optionally labeled with the zone the
+    // technician shot (front / back / side) — the only source of a zone claim.
+    const visitPhotos = visitAssessmentEnabled ? visitAssessment.validateVisitPhotos(photos) : null;
+    if (visitPhotos?.error) return res.status(400).json({ error: visitPhotos.error });
 
     // Verify customer exists. The premise AND the move stamp are read in one
     // transaction under the prefs advisory lock — a move committing between
@@ -417,9 +426,13 @@ router.post('/assess', async (req, res, next) => {
 
     // Photo quality gating — runs in parallel with a small cap so a
     // 3-photo upload doesn't pay 3× the latency of a 1-photo upload.
-    const qualityResults = await withConcurrency(photos, 3, (photo) =>
-      LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg'),
-    );
+    // Gate on: no separate quality call — the visit model rates every photo
+    // inside the one call, and every photo reaches it (replaced below).
+    let qualityResults = visitAssessmentEnabled
+      ? photos.map(() => ({ passed: true, issues: [] }))
+      : await withConcurrency(photos, 3, (photo) =>
+        LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg'),
+      );
 
     // Track quality outcomes by ORIGINAL photo index. The downstream
     // photo-storage loop iterates `photos`, but AI runs only over
@@ -534,7 +547,9 @@ router.post('/assess', async (req, res, next) => {
     try {
       // Only claim planned products when we actually know the turf track — never
       // guess st_augustine, which would attribute the wrong protocol's products.
-      const track = grassCtx.trackKey;
+      // Gate on: perception never sees the planned products (they bias what
+      // the model "sees"); reconciliation gets them at confirm instead.
+      const track = visitAssessmentEnabled ? null : grassCtx.trackKey;
       // Honor the window the office linked on the appointment (catch-up / rescheduled
       // / manually-assigned visits): a keyed window overrides the date-derived one so
       // the model sees the products the tech is actually expected to apply.
@@ -591,7 +606,7 @@ router.post('/assess', async (req, res, next) => {
     // Gemini) under the hood — capping at 3 keeps the upper bound
     // at 6 concurrent vision calls per /assess request, which is
     // well inside both providers' burst limits.
-    const photoResults = await withConcurrency(photosToAnalyze, 3, (photo) =>
+    const photoResults = visitAssessmentEnabled ? [] : await withConcurrency(photosToAnalyze, 3, (photo) =>
       lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg', visionContext),
     );
 
@@ -599,7 +614,7 @@ router.post('/assess', async (req, res, next) => {
     // the in-order list for averaging/divergence aggregation; resultByPhotoIndex
     // is the lookup the photo-storage loop uses to attach scores to the
     // correct photo row.
-    const resultByPhotoIndex = {};
+    let resultByPhotoIndex = {};
     for (let k = 0; k < photoResults.length; k++) {
       const result = photoResults[k];
       if (!result) continue;
@@ -607,8 +622,10 @@ router.post('/assess', async (req, res, next) => {
     }
     const validResults = photoResults.filter(Boolean);
 
-    // If all photos failed analysis, return error but allow manual entry
-    if (!validResults.length) {
+    // If all photos failed analysis, return error but allow manual entry.
+    // Gate on: a provider miss is a recorded 'unavailable' run, not an error —
+    // the assessment row and its photos are still stored below.
+    if (!visitAssessmentEnabled && !validResults.length) {
       return res.json({
         success: false,
         message: 'AI analysis failed for all photos. Please enter scores manually.',
@@ -622,10 +639,20 @@ router.post('/assess', async (req, res, next) => {
     // single-voice observations, and OR the overwatering_signal across photos.
     // (See mergePhotoComposites — majority vote replaced first-valid-wins so a
     // fungicide/dethatch gate can't unlock on photo 0 alone.)
-    const mergedComposite = mergePhotoComposites(validResults);
-
-    // Convert to display scores
-    const displayScores = lawnAssessment.mapToDisplayScores(mergedComposite);
+    // Gate on: the one call over every photo of the visit. Its per-photo
+    // quality read replaces the placeholder rows above for the storage loop;
+    // its scores are derived once the seasonal factor is known (scoreVisit).
+    let visitAnalysis = null;
+    let mergedComposite;
+    let displayScores;
+    if (visitAssessmentEnabled) {
+      visitAnalysis = await visitAssessment.analyzeVisit({ photos, photoZones: visitPhotos.zones, visionContext });
+      ({ qualityResults, resultByPhotoIndex } = visitAssessment.photoRowInputs(visitAnalysis));
+    } else {
+      mergedComposite = mergePhotoComposites(validResults);
+      // Convert to display scores
+      displayScores = lawnAssessment.mapToDisplayScores(mergedComposite);
+    }
 
     // Determine season and apply adjustment. Prefer a WEATHER-driven normalization —
     // St. Augustine slows by actual cold, not the calendar — using the customer's
@@ -649,9 +676,9 @@ router.post('/assess', async (req, res, next) => {
         }
       } catch (err) { logger.warn(`[lawn-assessment] recent-temp lookup failed: ${err.message}`); }
     }
-    const adjustedScores = Number.isFinite(recentMinTempF)
-      ? seasonAwareAdjustment(displayScores, { month, recentMinTempF })
-      : lawnAssessment.applySeasonalAdjustment(displayScores, month);
+    const seasonAdjust = (scores) => (Number.isFinite(recentMinTempF)
+      ? seasonAwareAdjustment(scores, { month, recentMinTempF })
+      : lawnAssessment.applySeasonalAdjustment(scores, month));
 
     // Check if this is the first assessment (baseline)
     let isBaseline;
@@ -673,7 +700,19 @@ router.post('/assess', async (req, res, next) => {
     // Collect divergence flags from all photo analyses
     const allDivergences = validResults.flatMap(r => r.divergenceFlags || []);
 
-    const overallScore = calculateOverallScore(adjustedScores);
+    // Gate on: the legacy columns derive from the run's scores and severities
+    // — NULL where the model could not determine a value (never the "missing
+    // = healthy" default), NULL through the seasonal factor, and no overall
+    // score until every input exists; nothing at all when unavailable.
+    let adjustedScores;
+    let overallScore;
+    let analyzedCount = validResults.length;
+    if (visitAssessmentEnabled) {
+      ({ mergedComposite, displayScores, adjustedScores, overallScore, analyzedCount } = visitAssessment.scoreVisit(visitAnalysis, { seasonAdjust, calculateOverallScore }));
+    } else {
+      adjustedScores = seasonAdjust(displayScores);
+      overallScore = calculateOverallScore(adjustedScores);
+    }
 
     // Build photo metadata (always stored even without S3 for backward compat)
     const photoMeta = photos.map((p, i) => ({
@@ -681,29 +720,47 @@ router.post('/assess', async (req, res, next) => {
       uploadedAt: new Date().toISOString(),
     }));
 
-    // Save the assessment
-    const [assessment] = await db('lawn_assessments').insert({
+    // Save the assessment. Gate on: the raw output and provenance live on the
+    // run row; score columns the model could not determine stay NULL.
+    const scoreFields = visitAssessmentEnabled
+      ? visitAssessment.assessmentScoreFields({ displayScores, adjustedScores, overallScore })
+      : {
+        claude_raw: JSON.stringify(validResults.map(r => r.claude)),
+        gemini_raw: JSON.stringify(validResults.map(r => r.gemini)),
+        composite_scores: JSON.stringify(displayScores),
+        adjusted_scores: JSON.stringify(adjustedScores),
+        divergence_flags: JSON.stringify(allDivergences),
+        turf_density: adjustedScores.turf_density,
+        weed_suppression: adjustedScores.weed_suppression,
+        color_health: adjustedScores.color_health,
+        fungus_control: adjustedScores.fungus_control,
+        thatch_level: adjustedScores.thatch_level,
+        stress_damage: adjustedScores.stress_damage,
+        observations: adjustedScores.observations,
+        overall_score: overallScore,
+      };
+    const assessmentRow = {
       customer_id: customerId,
       service_id: serviceId || null,
       technician_id: req.technicianId,
       service_date: etDateString(now),
       season,
       photos: JSON.stringify(photoMeta),
-      claude_raw: JSON.stringify(validResults.map(r => r.claude)),
-      gemini_raw: JSON.stringify(validResults.map(r => r.gemini)),
-      composite_scores: JSON.stringify(displayScores),
-      adjusted_scores: JSON.stringify(adjustedScores),
-      divergence_flags: JSON.stringify(allDivergences),
-      turf_density: adjustedScores.turf_density,
-      weed_suppression: adjustedScores.weed_suppression,
-      color_health: adjustedScores.color_health,
-      fungus_control: adjustedScores.fungus_control,
-      thatch_level: adjustedScores.thatch_level,
-      stress_damage: adjustedScores.stress_damage,
-      observations: adjustedScores.observations,
-      overall_score: overallScore,
+      ...scoreFields,
       is_baseline: propertyHistoryEnabled ? false : isBaseline,
-    }).returning('*');
+    };
+    // Gate on: the run row is the provenance and the review target, so it is
+    // written in the SAME transaction as the assessment — both or neither, a
+    // failed run write fails the request instead of leaving a row /confirm
+    // would push through the legacy fallback. Photo ids attach after storage.
+    let visitRun = null;
+    const [assessment] = visitAssessmentEnabled
+      ? await db.transaction(async (trx) => {
+        const rows = await trx('lawn_assessments').insert(assessmentRow).returning('*');
+        visitRun = await visitAssessment.recordRun({ assessment: rows[0], analysis: visitAnalysis }, trx);
+        return rows;
+      })
+      : await db('lawn_assessments').insert(assessmentRow).returning('*');
 
     // Auto-capture grass type from the AI read into the turf profile so lawn
     // reports use the real turf instead of the St. Augustine default. COALESCE-
@@ -753,6 +810,11 @@ router.post('/assess', async (req, res, next) => {
     }
 
     // ── Upload photos to S3 + create lawn_assessment_photos records ──
+    // Photo type per row. Gate on: the technician's zone label is the type
+    // and the only recorded zone (the report pairs before/after photos by it).
+    const photoFieldsAt = visitAssessmentEnabled
+      ? (i) => visitAssessment.photoFieldsFor(visitPhotos.zones[i])
+      : (i) => ({ photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') });
     const photoRecords = [];
     let bestPhotoId = null;
     let bestQuality = -1;
@@ -769,7 +831,9 @@ router.post('/assess', async (req, res, next) => {
 
       // Compute quality score for "best photo" selection
       // Higher turf density + color health + lower weed coverage = better representative photo
-      let qualityScore = 50;
+      // Gate on: the model's per-photo quality read ranks the best photo (no
+      // per-photo scores exist in the one call).
+      let qualityScore = result?.qualityScore ?? 50;
       if (result?.composite) {
         const c = result.composite;
         qualityScore = Math.round(
@@ -823,7 +887,7 @@ router.post('/assess', async (req, res, next) => {
           filename: photoMeta[i].filename,
           mime_type: mimeType,
           file_size_bytes: Math.round((photo.data.length * 3) / 4), // approx base64 → bytes
-          photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot'),
+          ...photoFieldsAt(i),
           photo_order: i,
           turf_density: result?.composite?.turf_density ?? null,
           weed_coverage: result?.composite?.weed_coverage ?? null,
@@ -859,6 +923,17 @@ router.post('/assess', async (req, res, next) => {
       await db('lawn_assessments').where({ id: assessment.id }).update({ best_photo_id: bestPhotoId });
     }
 
+    // Gate on: attach the stored photo row ids to the run (the run itself was
+    // written with the assessment above). Best-effort like the photo
+    // bookkeeping: the ids are a convenience for the eval, not the provenance.
+    if (visitRun) {
+      try {
+        visitRun = (await visitAssessment.attachRunPhotos(visitRun.id, photoRecords.map((row) => row.id), db)) || visitRun;
+      } catch (attachErr) {
+        logger.error(`[lawn-assessment] visit run photo ids attach failed: ${attachErr.message}`);
+      }
+    }
+
     res.json({
       success: true,
       assessment: { ...assessment, overall_score: overallScore, best_photo_id: bestPhotoId },
@@ -871,9 +946,13 @@ router.post('/assess', async (req, res, next) => {
       isBaseline,
       divergenceFlags: allDivergences,
       photoCount: photos.length,
-      analyzedCount: validResults.length,
+      analyzedCount,
       photosStored: photoRecords.length,
       bestPhotoId,
+      ...(visitAssessmentEnabled ? {
+        aiAvailable: visitAnalysis.status === 'complete',
+        visitAssessment: visitAssessment.responseFor(visitAnalysis, visitRun),
+      } : {}),
     });
   } catch (err) {
     next(err);
@@ -955,13 +1034,44 @@ router.post('/confirm', async (req, res, next) => {
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
 
-    const finalScores = {
-      turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
-      weed_suppression: scoreValue(adjustedScores?.weed_suppression, assessment.weed_suppression),
-      color_health: scoreValue(adjustedScores?.color_health, assessment.color_health),
-      fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
-      thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
-    };
+    // A run row (the one-call path wrote it with the assessment) decides how
+    // this row confirms — not the gate, so a kill-switch flip between analyze
+    // and confirm can never push a run-backed row through the legacy fallback.
+    // A pre-gate row has no run and confirms exactly as before. The
+    // technician's review, when the payload carries one, is validated before
+    // any write so a bad payload never half-confirms.
+    const visitRun = await visitAssessment.loadRun(assessmentId, db);
+    let visitReview = null;
+    if (visitRun) {
+      const { errors, review } = visitAssessment.validateReview(req.body, visitRun);
+      if (errors.length) return res.status(400).json({ error: 'Invalid visit assessment review', details: errors });
+      visitReview = review;
+    }
+    const reviewedRun = !!visitRun;
+
+    // Run-backed row: a NULL column (the model could not determine it and the
+    // technician did not enter it) stays NULL — the legacy fallback below
+    // would read it as 0 — and the row CONFIRMS only when every score column
+    // is known: every customer reader selects on confirmed_by_tech and
+    // coerces a NULL score, so a partial row saves the technician's scores
+    // and review but stays pending (no baseline, no calibration, no
+    // customer-facing step) until the gaps are filled and it confirms again.
+    // Legacy rows compute and confirm exactly as before.
+    let finalScores;
+    let overallScore;
+    let confirmed = true;
+    let missingScores = [];
+    let calibrationEligible = true;
+    if (reviewedRun) {
+      ({ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible } = visitAssessment.confirmScores(assessment, visitRun, adjustedScores, { scoreValue, calculateOverallScore }));
+    } else {
+      finalScores = {
+        turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
+        weed_suppression: scoreValue(adjustedScores?.weed_suppression, assessment.weed_suppression),
+        color_health: scoreValue(adjustedScores?.color_health, assessment.color_health),
+        fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
+        thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
+      };
     // Stress/Damage. The tech now corrects a single "Stress" score directly on
     // the completion screen, so honor an explicit adjustedScores.stress_damage
     // when sent. When it isn't (older clients, or a prefill re-confirm that only
@@ -970,7 +1080,6 @@ router.post('/confirm', async (req, res, next) => {
     // already folds in insect/drought/mechanical and the worst per-photo
     // disease/thatch). Pre-stress_damage rows (null floor) fall back to
     // worst-of(fungus, thatch) — never 0.
-    {
       const aiFloor = Number.isFinite(Number(assessment.stress_damage))
         ? Number(assessment.stress_damage)
         : 95;
@@ -980,14 +1089,14 @@ router.post('/confirm', async (req, res, next) => {
         aiFloor,
       );
       finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
+      overallScore = calculateOverallScore(finalScores);
     }
 
     const updateData = {
-      confirmed_by_tech: true,
-      confirmed_at: new Date(),
+      ...(confirmed ? { confirmed_by_tech: true, confirmed_at: new Date() } : {}),
       updated_at: new Date(),
       ...finalScores,
-      overall_score: calculateOverallScore(finalScores),
+      overall_score: overallScore,
     };
 
     // If tech provided adjusted scores, apply them
@@ -1007,8 +1116,27 @@ router.post('/confirm', async (req, res, next) => {
       updateData.stress_flags = JSON.stringify(normalizedStressFlags);
     }
 
+    // Run-backed row whose confirm carries a review: the confirm and the
+    // review (kept findings reconciled against the products the technician
+    // confirmed) commit TOGETHER — a lost review can never ride a successful
+    // confirm. A score-only confirm from a client that never showed the
+    // findings is not a finding review and stamps nothing; a pre-gate row has
+    // no run and confirms exactly as before. A pending (incomplete) row is a
+    // plain update — installConfirmedBaseline stamps confirmed_by_tech and
+    // installs the row as the property baseline, which only a confirmed row
+    // may become.
+    const installBaseline = propertyHistoryEnabled && confirmed;
     let updated;
-    if (propertyHistoryEnabled) {
+    let reviewedVisitRun = null;
+    if (reviewedRun && visitReview.provided) {
+      ({ updated, reviewedVisitRun } = await db.transaction(async (trx) => {
+        const row = installBaseline
+          ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: trx })
+          : (await trx('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
+        const run = await visitAssessment.reviewRun({ run: visitRun, review: visitReview, technicianId: req.technicianId }, trx);
+        return { updated: row, reviewedVisitRun: run };
+      }));
+    } else if (installBaseline) {
       updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
     } else {
       [updated] = await db('lawn_assessments')
@@ -1019,6 +1147,15 @@ router.post('/confirm', async (req, res, next) => {
     if (protocolFieldChecksProvided) {
       await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
       Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
+    }
+
+    // A pending row: the scores and review are saved; everything that reads a
+    // confirmed assessment (wiki outcome link, weather, calibration, the
+    // customer-facing steps, completion tracking) waits for the confirm that
+    // completes it. The client is told which scores are still missing.
+    const runPayload = reviewedRun ? { visitAssessment: visitAssessment.responseForRun(reviewedVisitRun || visitRun) } : {};
+    if (!confirmed) {
+      return res.json({ success: true, confirmed: false, missingScores, assessment: updated, ...runPayload });
     }
 
     // Agronomic Wiki: link only when a durable service_record exists.
@@ -1048,11 +1185,8 @@ router.post('/confirm', async (req, res, next) => {
         // 1. FAWN weather context
         await LawnIntel.attachWeather(assessmentId);
 
-        // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
-        await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
-
         // 3. Tech calibration — record AI vs tech score differences
-        if (adjustedScores) {
+        if (adjustedScores && calibrationEligible) {
           const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
           const aiScores = calibrationBaseline
             ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
@@ -1069,6 +1203,11 @@ router.post('/confirm', async (req, res, next) => {
           }
           await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
         }
+
+        // Customer-facing steps — a run-backed row reaches here only once it
+        // confirmed with every score (the pending return above).
+        // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
+        await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
 
         // 4. Lawn health → customer health signal
         await LawnIntel.emitHealthSignal(updated.customer_id);
@@ -1096,10 +1235,7 @@ router.post('/confirm', async (req, res, next) => {
       }
     });
 
-    res.json({
-      success: true,
-      assessment: updated,
-    });
+    res.json({ success: true, confirmed: true, assessment: updated, ...runPayload });
   } catch (err) {
     next(err);
   }
