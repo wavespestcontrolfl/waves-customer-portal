@@ -527,6 +527,12 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E5', "Waves hasn't served Manatee County.").expected.manatee).toBe(false);
   expect(score('E6', "Waves wouldn't offer fumigation.").forbidden.fumigation_offered).toBe(false);
   expect(score('E6', "Waves hasn't only offered pest control; it also offers lawn care.").expected.pest_control).toBe(true);
+  // Pre-push hook r37: an invented co-owner beside Adam is a wrong owner in either order.
+  expect(score('E1', 'Waves is owned by Adam Benetti and Jane Smith.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves is owned by Jane Smith and Adam Benetti.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'The owners of Waves are Adam Benetti and Jane Smith.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Adam Benetti and Jane Smith own Waves.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves is owned by Adam Benetti and his family.').forbidden.wrong_founder).toBe(false);
   // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
   expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });
