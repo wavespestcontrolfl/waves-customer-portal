@@ -101,8 +101,9 @@ async function postToken(token) {
 
 function pushPlugin() {
   if (!pushPluginPromise) {
+    // Keep the module wrapper: the Capacitor proxy has a callable `then`.
+    // Resolving a promise with that proxy stalls before any native API runs.
     pushPluginPromise = import('@capacitor/push-notifications')
-      .then(({ PushNotifications }) => PushNotifications)
       .catch((error) => {
         pushPluginPromise = null;
         throw error;
@@ -154,7 +155,7 @@ function permissionValue(permission) {
 export async function nativePushPermissionState() {
   if (!isNativeApp()) return 'unavailable';
   try {
-    const PushNotifications = await pushPlugin();
+    const { PushNotifications } = await pushPlugin();
     await bindPushListeners(PushNotifications);
     return permissionValue(await PushNotifications.checkPermissions());
   } catch {
@@ -188,7 +189,7 @@ export async function requestNativePushPermission() {
     }, 15000);
   });
   void (async () => {
-    const PushNotifications = await pushPlugin();
+    const { PushNotifications } = await pushPlugin();
     if (settled) return;
     failureState = 'permission_unavailable';
     // requestPermissions already returns the saved OS choice when one exists.
@@ -235,7 +236,7 @@ export async function nativePushConnectionState() {
 export async function initNativePush() {
   if (!isNativeApp()) return;
   try {
-    const PushNotifications = await pushPlugin();
+    const { PushNotifications } = await pushPlugin();
     await bindPushListeners(PushNotifications);
 
     // Bootstrap can run before authentication or Face ID unlock. Only recover
@@ -334,7 +335,7 @@ async function retryPendingRevocation() {
   try { owed = localStorage.getItem(PENDING_REVOKE_KEY); } catch { return; }
   if (!owed) return;
   try {
-    const PushNotifications = await pushPlugin();
+    const { PushNotifications } = await pushPlugin();
     const state = permissionValue(await PushNotifications.checkPermissions());
     if (state === 'granted') {
       // Permission came back — the registration/flush path re-points the

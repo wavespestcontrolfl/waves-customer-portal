@@ -41,6 +41,7 @@ const {
   buildTreatmentRationale,
   buildReconciliationFlags,
   buildWatchItems,
+  scrubCustomerText,
   CONDITION_LABEL_VALUES,
 } = require('./lawn-diagnostic-report');
 const { CURATED_REFERENCE, AUTO_RELEASE_RULE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
@@ -215,7 +216,10 @@ turf genuinely does not match a known type.
 
 # OBSERVATIONS
 One concise, plain-English paragraph (2-3 sentences, one voice, no lists, no
-contradictions) for the technician: overall condition and photo sufficiency.
+contradictions) a homeowner could read: overall condition and how much the photos
+could show. It is stored where the customer's report can display it, so it carries
+no names, no addresses, no access or gate details, nothing quoted or paraphrased from
+the technician's notes, and no product or brand names.
 
 ${CURATED_REFERENCE}
 
@@ -369,6 +373,9 @@ function validateAssessmentJson(result) {
   if (!Array.isArray(json.findings)) return 'malformed_assessment';
   if (!json.severities || typeof json.severities !== 'object') return 'malformed_assessment';
   if (!json.scores || typeof json.scores !== 'object') return 'malformed_assessment';
+  // A clean lawn is a finding too ("No major visible stress"); an empty set is
+  // a skipped job, not an answer — fail the leg so the fallback runs.
+  if (!json.findings.length) return 'empty_findings';
   return null;
 }
 
@@ -507,7 +514,11 @@ function deriveLegacyScores(analysis) {
     stress_damage: stressParts.length ? Math.min(...stressParts) : null,
     overwatering_signal: level('overwatering_signal') === 'yes',
     drought_stress: drought && drought !== 'unknown' ? drought : null,
-    observations: analysis.observations || '',
+    // lawn_assessments.observations is read verbatim by the customer's Lawn
+    // Report V2, so the column gets the egress-scrubbed copy (brands, URLs,
+    // emails, phones, street addresses out; confirmed-disease language
+    // softened); the run row keeps the model's raw text for the technician.
+    observations: scrubCustomerText(analysis.observations || '').slice(0, 600),
   };
 }
 
@@ -604,8 +615,8 @@ function runRowFor({ assessment, analysis, photoRecords = [] }) {
     photo_ids: JSON.stringify(photoRecords.map((row) => row.id)),
     photo_quality: JSON.stringify(analysis.photoQuality || []),
     findings: JSON.stringify(analysis.findings || []),
-    severities: analysis.severities ? JSON.stringify(analysis.severities) : null,
-    scores_raw: analysis.scores ? JSON.stringify(analysis.scores) : null,
+    severities: analysis.status === 'complete' && analysis.severities ? JSON.stringify(analysis.severities) : null,
+    scores_raw: analysis.status === 'complete' && analysis.scores ? JSON.stringify(analysis.scores) : null,
     observations: analysis.observations || null,
     raw_response: analysis.raw == null ? null : JSON.stringify(analysis.raw),
     tokens_in: usage.input_tokens ?? null,
@@ -760,23 +771,31 @@ function buildReview(run, review = {}) {
   const byId = new Map((review.reviewedFindings || []).map((entry) => [entry.finding_id, entry]));
   const reviewed = parseJsonArray(run?.findings).map((finding) => {
     const entry = byId.get(String(finding.finding_id));
+    // A technician rename is already a canonical allowlisted label
+    // (validateReview) — it IS the label; re-mapping it through the pattern
+    // list would turn "general lawn stress" into "color stress".
     const name = entry?.name || finding.name;
     return {
       ...finding,
       name,
-      label: safeConditionLabel(name, finding.confidence),
+      label: entry?.name ? entry.name : safeConditionLabel(finding.name, finding.confidence),
       keep: entry ? entry.keep !== false : true,
       tech_note: entry?.tech_note || null,
       source: finding.source || 'model',
     };
   });
   const added = (review.addedDetails || []).map(technicianFinding);
-  // A clean-lawn finding ("No major visible stress") is not a condition a
-  // product treats — it stays in the review, out of the reconciliation.
-  const kept = [...reviewed.filter((finding) => finding.keep), ...added].filter((finding) => finding.label !== NO_STRESS_LABEL);
+  // The reconciliation builders interpolate finding NAMES into customer-facing
+  // copy (customer_explanation, watch items, flag wording), so they only ever
+  // see the allowlisted label — never the model's or the technician's raw
+  // text. A clean-lawn finding ("No major visible stress") is not a condition
+  // a product treats — it stays in the review, out of the reconciliation.
+  const reconcilable = [...reviewed.filter((finding) => finding.keep), ...added]
+    .filter((finding) => finding.label !== NO_STRESS_LABEL)
+    .map((finding) => ({ ...finding, name: finding.label }));
   const products = normalizeProducts(review.appliedProducts || []);
-  const treatmentRationale = buildTreatmentRationale({ products, findings: kept });
-  const flags = buildReconciliationFlags({ findings: kept, products, treatmentRationale });
+  const treatmentRationale = buildTreatmentRationale({ products, findings: reconcilable });
+  const flags = buildReconciliationFlags({ findings: reconcilable, products, treatmentRationale });
   return {
     reviewed_findings: reviewed,
     added_details: added,
@@ -784,7 +803,7 @@ function buildReview(run, review = {}) {
       products,
       treatment_rationale: treatmentRationale,
       flags,
-      watch_items: buildWatchItems(kept, flags),
+      watch_items: buildWatchItems(reconcilable, flags),
       computed_at: new Date().toISOString(),
     },
   };
@@ -839,6 +858,50 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue) {
     final.stress_damage = parts.length ? Math.min(...parts) : null;
   }
   return final;
+}
+
+// ── Route helpers (gate-on path, one decision each in the handler) ────
+// Everything /assess derives from the one call once it has answered: the
+// composite the grass capture reads, the legacy display scores, their
+// null-safe seasonal adjustment, the overall score (only when every input
+// exists) and how many photos the answer covered.
+function scoreVisit(analysis, { seasonAdjust, calculateOverallScore }) {
+  const mergedComposite = compositeFor(analysis);
+  const displayScores = deriveLegacyScores(analysis);
+  const adjustedScores = adjustAvailableScores(displayScores, seasonAdjust);
+  return {
+    mergedComposite,
+    displayScores,
+    adjustedScores,
+    overallScore: scoresComplete(adjustedScores) ? calculateOverallScore(adjustedScores) : null,
+    analyzedCount: analysis.status === 'complete' ? (analysis.photoQuality || []).length : 0,
+  };
+}
+
+// lawn_assessment_photos fields for photo i under the gate: the technician's
+// zone label is the type — and the only recorded zone claim.
+function photoFieldsFor(zone) {
+  return { photo_type: photoTypeForZone(zone), ...(zone ? { zone } : {}) };
+}
+
+// /confirm's overall score for a run-backed row: nothing until every input exists.
+function overallScoreFor(finalScores, calculateOverallScore) {
+  return scoresComplete(finalScores) ? calculateOverallScore(finalScores) : null;
+}
+
+// Everything /confirm decides for a run-backed row, in one place: the final
+// scores with NULLs preserved, the overall score only when complete, whether
+// customer-facing output may be built (every score present — an unavailable
+// run or a partial answer never becomes a lawn result until the technician
+// fills the gaps), and whether calibration has AI scores to compare against.
+function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
+  const finalScores = resolveConfirmScores(assessment, adjustedScores, scoreValue);
+  return {
+    finalScores,
+    overallScore: overallScoreFor(finalScores, calculateOverallScore),
+    customerOutputEligible: scoresComplete(finalScores),
+    calibrationEligible: run.status !== 'unavailable',
+  };
 }
 
 // ── Response shapes ───────────────────────────────────────────────────
@@ -916,6 +979,10 @@ module.exports = {
   buildReview,
   reviewRun,
   resolveConfirmScores,
+  scoreVisit,
+  photoFieldsFor,
+  overallScoreFor,
+  confirmScores,
   responseFor,
   responseForRun,
 };
