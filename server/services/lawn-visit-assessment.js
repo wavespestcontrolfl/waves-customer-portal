@@ -75,6 +75,11 @@ const STRESS_SIGNALS = ['fungal_activity', 'insect_damage', 'drought_stress', 'm
 const GRASS_TYPES = ['st_augustine', 'bermuda', 'zoysia', 'bahia', 'mixed', 'unknown'];
 // The four legacy inputs of calculateOverallScore (routes/admin-lawn-assessment.js).
 const OVERALL_INPUTS = ['turf_density', 'weed_suppression', 'color_health', 'stress_damage'];
+// Every score column a confirmed row carries. Customer surfaces read all six
+// (Knowledge Bridge interpolates fungus_control / thatch_level into its prompt;
+// lawn-health-shared derives stress from them on legacy rows), so a row is
+// confirmed — and customer-facing — only when every one of them is known.
+const SCORE_KEYS = [...OVERALL_INPUTS, 'fungus_control', 'thatch_level'];
 // safeConditionLabel's label for a finding that LEADS with a negation / health
 // phrase ("No major visible stress") — a clean lawn, not a condition to treat.
 const NO_STRESS_LABEL = 'no major visible stress';
@@ -556,8 +561,17 @@ function adjustAvailableScores(scores, adjust) {
   return out;
 }
 
+const known = (value) => typeof value === 'number' && Number.isFinite(value);
+// The overall score needs its four inputs.
+function overallInputsComplete(scores) {
+  return !!scores && OVERALL_INPUTS.every((key) => known(scores[key]));
+}
+// A confirmed, customer-facing row needs all six.
 function scoresComplete(scores) {
-  return !!scores && OVERALL_INPUTS.every((key) => typeof scores[key] === 'number' && Number.isFinite(scores[key]));
+  return !!scores && SCORE_KEYS.every((key) => known(scores[key]));
+}
+function missingScores(scores) {
+  return SCORE_KEYS.filter((key) => !known(scores?.[key]));
 }
 
 // The lawn_assessments insert fields the gate-on path writes in place of the
@@ -873,7 +887,7 @@ function scoreVisit(analysis, { seasonAdjust, calculateOverallScore }) {
     mergedComposite,
     displayScores,
     adjustedScores,
-    overallScore: scoresComplete(adjustedScores) ? calculateOverallScore(adjustedScores) : null,
+    overallScore: overallInputsComplete(adjustedScores) ? calculateOverallScore(adjustedScores) : null,
     analyzedCount: analysis.status === 'complete' ? (analysis.photoQuality || []).length : 0,
   };
 }
@@ -886,21 +900,28 @@ function photoFieldsFor(zone) {
 
 // /confirm's overall score for a run-backed row: nothing until every input exists.
 function overallScoreFor(finalScores, calculateOverallScore) {
-  return scoresComplete(finalScores) ? calculateOverallScore(finalScores) : null;
+  return overallInputsComplete(finalScores) ? calculateOverallScore(finalScores) : null;
 }
 
 // Everything /confirm decides for a run-backed row, in one place: the final
-// scores with NULLs preserved, the overall score only when complete, whether
-// customer-facing output may be built (every score present — an unavailable
-// run or a partial answer never becomes a lawn result until the technician
-// fills the gaps), and whether calibration has AI scores to compare against.
+// scores with NULLs preserved, the overall score once its inputs exist, and
+// whether the row CONFIRMS. A row confirms only when every score column is
+// known — every customer reader (lawn-health, Lawn Report, Knowledge Bridge,
+// property score, the history baseline) selects on confirmed_by_tech and
+// coerces a NULL score to 0 or 100 — so an unavailable run or a partial
+// answer saves the technician's scores and review but stays pending, with
+// no customer output, no calibration and no baseline, until the technician
+// fills the gaps and confirms again. `missing` names the gaps for the client.
 function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
   const finalScores = resolveConfirmScores(assessment, adjustedScores, scoreValue);
+  const confirmed = scoresComplete(finalScores);
   return {
     finalScores,
     overallScore: overallScoreFor(finalScores, calculateOverallScore),
-    customerOutputEligible: scoresComplete(finalScores),
-    calibrationEligible: run.status !== 'unavailable',
+    confirmed,
+    missing: missingScores(finalScores),
+    customerOutputEligible: confirmed,
+    calibrationEligible: confirmed && run.status !== 'unavailable',
   };
 }
 
@@ -966,6 +987,9 @@ module.exports = {
   compositeFor,
   adjustAvailableScores,
   scoresComplete,
+  overallInputsComplete,
+  missingScores,
+  SCORE_KEYS,
   assessmentScoreFields,
   photoRowInputs,
   runRowFor,

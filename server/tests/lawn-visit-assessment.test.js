@@ -287,10 +287,17 @@ describe('legacy column derivation — missing is not healthy', () => {
     expect(visit.adjustAvailableScores(null, adjust)).toBeNull();
   });
 
-  test('the overall score needs every input; the insert fields carry NULLs and the unavailable sentinel', () => {
-    expect(visit.scoresComplete({ turf_density: 70, weed_suppression: 80, color_health: 75, stress_damage: 50 })).toBe(true);
-    expect(visit.scoresComplete({ turf_density: 70, weed_suppression: 80, color_health: null, stress_damage: 50 })).toBe(false);
+  test('the overall score needs its four inputs; a confirmed row needs all six; the insert fields carry NULLs and the unavailable sentinel', () => {
+    const four = { turf_density: 70, weed_suppression: 80, color_health: 75, stress_damage: 50 };
+    expect(visit.overallInputsComplete(four)).toBe(true);
+    expect(visit.overallInputsComplete({ ...four, color_health: null })).toBe(false);
+    // stress_damage can be known from one stressor while fungus / thatch are
+    // not — Knowledge Bridge reads those two, so the row is not complete.
+    expect(visit.scoresComplete(four)).toBe(false);
+    expect(visit.missingScores(four)).toEqual(['fungus_control', 'thatch_level']);
+    expect(visit.scoresComplete({ ...four, fungus_control: 75, thatch_level: 85 })).toBe(true);
     expect(visit.scoresComplete(null)).toBe(false);
+    expect(visit.missingScores(null)).toEqual(visit.SCORE_KEYS);
     const fields = visit.assessmentScoreFields({ displayScores: { turf_density: 70, color_health: null, observations: 'obs' }, adjustedScores: { turf_density: 77, color_health: null, observations: 'obs' }, overallScore: null });
     expect(fields).toMatchObject({ claude_raw: null, gemini_raw: null, turf_density: 77, color_health: null, weed_suppression: null, observations: 'obs', overall_score: null, divergence_flags: '[]' });
     expect(JSON.parse(fields.adjusted_scores)).toEqual({ turf_density: 77, color_health: null, observations: 'obs' });
@@ -435,17 +442,24 @@ describe('confirm scores preserve NULLs', () => {
     expect(visit.scoresComplete(nothing)).toBe(false);
   });
 
-  test('confirmScores decides scores, overall and both holds for a run-backed row in one call', () => {
+  test('confirmScores decides scores, overall and whether the row confirms for a run-backed row in one call', () => {
     const assessment = { turf_density: 72, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 };
     const partial = visit.confirmScores(assessment, { status: 'complete' }, {}, { scoreValue, calculateOverallScore: () => 77 });
     expect(partial.finalScores.color_health).toBeNull();
     expect(partial.overallScore).toBeNull();
-    expect(partial.customerOutputEligible).toBe(false); // one score missing → nothing customer-facing
-    expect(partial.calibrationEligible).toBe(true);
+    // one score missing → the row stays pending: nothing customer-facing, no calibration
+    expect(partial).toMatchObject({ confirmed: false, missing: ['color_health'], customerOutputEligible: false, calibrationEligible: false });
     const filled = visit.confirmScores(assessment, { status: 'complete' }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
-    expect(filled).toMatchObject({ overallScore: 77, customerOutputEligible: true });
+    expect(filled).toMatchObject({ overallScore: 77, confirmed: true, missing: [], customerOutputEligible: true, calibrationEligible: true });
+    // the overall inputs can all be known while a sub-score is not — still pending
+    const subScoreMissing = visit.confirmScores({ ...assessment, color_health: 70, thatch_level: null }, { status: 'complete' }, {}, { scoreValue, calculateOverallScore: () => 77 });
+    expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], customerOutputEligible: false });
     const unavailable = visit.confirmScores({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }, { status: 'unavailable' }, {}, { scoreValue, calculateOverallScore: () => 77 });
-    expect(unavailable).toMatchObject({ overallScore: null, customerOutputEligible: false, calibrationEligible: false });
+    expect(unavailable).toMatchObject({ overallScore: null, confirmed: false, customerOutputEligible: false, calibrationEligible: false });
+    expect(unavailable.missing).toEqual(visit.SCORE_KEYS);
+    // an unavailable run the technician scored by hand confirms, but has no AI scores to calibrate against
+    const handScored = visit.confirmScores(assessment, { status: 'unavailable' }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
+    expect(handScored).toMatchObject({ confirmed: true, customerOutputEligible: true, calibrationEligible: false });
   });
 
   test('the AI stress floor still bounds the derivation when it exists', () => {
