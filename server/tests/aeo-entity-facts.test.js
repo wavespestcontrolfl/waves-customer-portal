@@ -487,6 +487,10 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E5', 'Waves serves customers located in Tampa. It is based in Lakewood Ranch.')).toMatchObject({ expected: { hq_lakewood_ranch: true }, forbidden: { out_of_footprint_hq: false } });
   expect(score('E5', 'Waves has technicians based in Tampa.').forbidden.out_of_footprint_hq).toBe(false);
   expect(score('E5', 'It is based in Tampa.').forbidden.out_of_footprint_hq).toBe(true);
+  // Pre-push hook r33: a passive-agent or hedged list intro governs its items.
+  expect(score('E6', 'Services not offered by Waves:\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves may offer:\n- Pest control\n- Lawn care\n- Fumigation')).toMatchObject({ right: 0, forbidden: { fumigation_offered: false } });
+  expect(score('E6', 'Waves offers:\n- Pest control\n- Lawn care\n- Fumigation')).toMatchObject({ right: 2, forbidden: { fumigation_offered: true } });
   expect(ENTITY_COHORT.other_entities.length).toBeGreaterThan(0);
   // Blanket guarantees count only when they modify the termite bond or its re-treatment.
   expect(score('E7', 'Waves offers a money-back guarantee on unused products, but termite bonds cover paid re-treatment only.').forbidden.free_retreat_guarantee).toBe(false);

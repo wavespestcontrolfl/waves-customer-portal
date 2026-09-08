@@ -74,6 +74,12 @@ const ADJACENT_EXCLUSION_RE = new RegExp(`${EXCLUSION_RE.source}\\s+(?:(?:a|an|t
 // begin with the hedged verb ("may cover damage").
 const UNCERTAIN_RE = /\b(?:whether|unclear|unknown|uncertain|unsure|unconfirmed|unverified|possibly|perhaps|probably|presumably|reportedly|allegedly|supposedly|(?:un)?likely|(?:may|might|could)\s+(?!\d|(?:also\s+)?(?:verify|check|look|search|confirm|call|contact|visit|reach|find|use|text|email|see|view|review)\b)|(?:appears?|seems?)\s+(?:to\b|that\b|as if\b))/i;
 const QUESTION_AHEAD_RE = /^[^.!?;\n]*\?/;
+// A list intro that negates or hedges its items ("does not offer:", "may
+// offer:") governs every item under it.
+function qualifiedIntro(head) {
+  const tail = head.slice(-40);
+  return LIST_INTRO_RE.test(head) && (NEGATION_RE.test(tail) || UNCERTAIN_RE.test(tail));
+}
 // Clause boundaries: sentence punctuation, a contrastive conjunction, or a
 // coordinating "and"/"or" that starts a new predicate ("is a franchise and
 // does not offer fumigation"). A bare "or" inside a noun list ("insulation or
@@ -86,7 +92,8 @@ const CLAUSE_BOUNDARY_RE = new RegExp(`[!?;\\n]|\\.(?!\\S)|,?\\s+(?:but|however|
 // "does not offer: fumigation, insulation" — a negated verb right before a
 // colon governs the list that follows; "is not a franchise: it offers …" does not.
 // Active ("does not offer:") and passive ("Services not offered:") intros.
-const LIST_INTRO_RE = /\b(?:offer|offers|offered|include|includes|included|provide|provides|provided|cover|covers|covered|do|does|perform|performs|performed|treat|treats|treated|handle|handles|handled|sell|sells|sold|service|services|serviced|available|are|is)\s*(?:(?:any of |all of )?(?:the following|these|those|the below|this list))?\s*$/i;
+// A passive agent may close the intro ("Services not offered by Waves:").
+const LIST_INTRO_RE = /\b(?:offer|offers|offered|include|includes|included|provide|provides|provided|cover|covers|covered|do|does|perform|performs|performed|treat|treats|treated|handle|handles|handled|sell|sells|sold|service|services|serviced|available|are|is)\s*(?:(?:any of |all of )?(?:the following|these|those|the below|this list))?(?:\s+(?:by|from|through|at)\s+(?:waves|us|it|them|the company|the business|adam(?:\s+benetti)?))?\s*$/i;
 
 // Boundaries are found on the full answer, not the prefix slice: the dot in
 // "www.wavespestcontrol.com" is followed by a word, so it is not a boundary
@@ -104,7 +111,7 @@ function leadClause(answer, start) {
   if (colon < 0) return clause;
   const head = clause.slice(0, colon);
   const list = clause.slice(colon + 1);
-  return LIST_INTRO_RE.test(head) && NEGATION_RE.test(head.slice(-40)) ? `${head.slice(-40)} ${list}` : list;
+  return qualifiedIntro(head) ? `${head.slice(-40)} ${list}` : list;
 }
 
 // Text after the match up to the clause end. A colon normally starts a new
@@ -192,7 +199,7 @@ function normalizeAnswer(text, keepUrls = false) {
     if (isItem && governed) { lines[lines.length - 1] += `, ${line.replace(/[.;!?]+$/, '')}`; continue; }
     if (!isItem) {
       const intro = line.replace(/:\s*$/, '');
-      governed = /:\s*$/.test(line) && LIST_INTRO_RE.test(intro) && NEGATION_RE.test(intro.slice(-40));
+      governed = /:\s*$/.test(line) && qualifiedIntro(intro);
       lines.push(governed ? `${intro}:` : line);
       continue;
     }
