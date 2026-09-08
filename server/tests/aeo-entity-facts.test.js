@@ -436,6 +436,57 @@ test('relations bind to Waves and to the thing they modify; an alternative is an
   expect(score('E7', 'The bond is included in the first year.').forbidden.bond_included_first_year).toBe(true);
 });
 
+test('service facts need an offer context; hedges assert nothing; a modifier "no" governs only its phrase (GitHub review r5)', () => {
+  // Lawn care, termite, mosquito and rodent bind to an offering, a service phrase, or a list item, like pest control.
+  expect(score('E6', 'Waves publishes educational articles about lawn care, termite, mosquito, and rodent control, but offers only pest control.')).toMatchObject({ right: 1, expected: { pest_control: true, lawn_care: false, termite: false, mosquito: false, rodent: false } });
+  expect(score('E6', 'Services include pest control, lawn care, termite treatment, mosquito control and rodent control.')).toMatchObject({ right: 5 });
+  expect(score('E6', '- Pest control\n- Lawn care\n- Termite\n- Mosquito\n- Rodent control')).toMatchObject({ right: 5 });
+  expect(score('E6', 'Lawn care tips are on the blog.').expected.lawn_care).toBe(false);
+  // "Located" credits the base only when it describes Waves, the company, or its office.
+  expect(score('E5', 'Waves serves customers located in Lakewood Ranch, but its headquarters are undisclosed.').expected.hq_lakewood_ranch).toBe(false);
+  expect(score('E5', 'Waves has technicians located in Lakewood Ranch.').expected.hq_lakewood_ranch).toBe(false);
+  expect(score('E5', 'Waves is located in Lakewood Ranch.').expected.hq_lakewood_ranch).toBe(true);
+  expect(score('E5', 'Its office is located in Lakewood Ranch.').expected.hq_lakewood_ranch).toBe(true);
+  // Modal and evidential hedges are uncertainty; permission modals and dates are not.
+  expect(score('E5', 'Waves may serve Manatee, Sarasota, and Charlotte counties.')).toMatchObject({ right: 0 });
+  expect(score('E6', 'Waves might offer fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves appears to offer fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E7', 'The bond may cover termite damage.').forbidden.damage_repair_coverage).toBe(false);
+  expect(score('E3', 'You may verify the license JB351547 at the FDACS lookup.').expected.license_verifiable).toBe(true);
+  expect(score('E3', 'Waves holds FDACS license JB351547; the license appears in the FDACS lookup.').expected.fdacs_license).toBe(true);
+  expect(score('E4', 'Waves Pest Control was founded on May 6, 2024.').expected.founded_2024).toBe(true);
+  // A "no" inside a prepositional modifier does not deny the list items after it.
+  expect(score('E6', 'Waves offers pest control with no annual contracts, plus termite, mosquito, rodent, and lawn care.')).toMatchObject({ right: 5 });
+  expect(score('E6', 'Waves offers pest control with no annual contracts, plus fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves offers no fumigation, insulation, or wildlife trapping.').forbidden.fumigation_offered).toBe(false);
+  // Damage-repair language needs the bond relation in every form.
+  expect(score('E7', 'Waves can refer customers to a damage-repair contractor, but the termite bond does not cover repairs.').forbidden.damage_repair_coverage).toBe(false);
+  expect(score('E7', 'The bond pays for repairs.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E7', 'Damage repair is included under the bond.').forbidden.damage_repair_coverage).toBe(true);
+  // The verification verb must govern the license, in the same clause.
+  expect(score('E3', 'You can verify the office address on Google Maps; its FDACS license is JB351547.').expected.license_verifiable).toBe(false);
+  expect(score('E3', 'The license is JB351547 and you can verify the address on Google Maps.').expected.license_verifiable).toBe(false);
+  expect(score('E3', 'License JB351547, which you can verify at FDACS.').expected.license_verifiable).toBe(true);
+  // An annual term or a renewing agreement counts only when it is the bond.
+  expect(score('E7', 'Termite treatment has an annual term; the bond itself does not renew.').expected.bond_renewable).toBe(false);
+  expect(score('E7', 'The inspection agreement is valid for one year, but the bond is nonrenewable.').expected.bond_renewable).toBe(false);
+  expect(score('E7', 'The inspection renews annually, but the bond does not.').expected.bond_renewable).toBe(false);
+  expect(score('E7', 'The bond has an annual term.').expected.bond_renewable).toBe(true);
+  expect(score('E7', 'The termite agreement is valid for one year.').expected.bond_renewable).toBe(true);
+  // A number attributed to another company after it is not the Waves line.
+  expect(score('E10', '(941) 297-5749 belongs to Orkin, not Waves.').expected.phone).toBe(false);
+  expect(score('E10', 'The number (941) 297-5749 is listed for Orkin; Waves has no published number.').expected.phone).toBe(false);
+  expect(score('E10', 'Call Waves at (941) 297-5749.').expected.phone).toBe(true);
+  // A wrong LLC filing year is a wrong founding year; a filed report is not.
+  expect(score('E4', 'Waves Pest Control, LLC was filed in 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'Waves filed its annual report in 2025.').forbidden.wrong_founding_year).toBe(false);
+  // Blanket guarantees count only when they modify the termite bond or its re-treatment.
+  expect(score('E7', 'Waves offers a money-back guarantee on unused products, but termite bonds cover paid re-treatment only.').forbidden.free_retreat_guarantee).toBe(false);
+  expect(score('E7', 'Its equipment carries a lifetime warranty. The termite bond renews annually and excludes repairs.').forbidden.free_retreat_guarantee).toBe(false);
+  expect(score('E7', 'The termite bond is a lifetime warranty.').forbidden.free_retreat_guarantee).toBe(true);
+  expect(score('E7', 'The bond comes with a money-back guarantee.').forbidden.free_retreat_guarantee).toBe(true);
+});
+
 test('the founding-year fact needs founding context, but a bare year answer still counts', () => {
   expect(score('E4', 'Waves was founded in 2014, and its license was renewed in 2024.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true } });
   expect(score('E4', '2024.').expected.founded_2024).toBe(true);
@@ -533,7 +584,9 @@ test('footprint and contact facts read place names and the main line in any comm
   expect(score('E5', 'Headquarters: Lakewood Ranch, FL.').expected.hq_lakewood_ranch).toBe(true);
   expect(score('E10', 'Call 941.297.5749 or visit https://www.wavespestcontrol.com/.')).toMatchObject({ right: 2 });
   expect(score('E9', 'Yes, Waves Pest Control & Lawn Care is the longer name of the same company.')).toMatchObject({ expected: { alias_same: true }, forbidden: { alias_different: false } });
-  expect(score('E9', 'They appear to be two different companies.').forbidden.alias_different).toBe(true);
+  // A hedged conclusion asserts nothing on either side (GitHub review r5).
+  expect(score('E9', 'They appear to be two different companies.').forbidden.alias_different).toBe(false);
+  expect(score('E9', 'They are two different companies.').forbidden.alias_different).toBe(true);
   expect(score('E9', 'No, they are not the same company.').forbidden.alias_different).toBe(true);
   expect(score('E9', 'Yes, they are the same company.')).toMatchObject({ expected: { alias_same: true }, forbidden: { alias_different: false } });
 });

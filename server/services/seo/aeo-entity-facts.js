@@ -67,7 +67,12 @@ const EXCLUSION_RE = /\b(?:without|except|excluding|other than|aside from|outsid
 const ADJACENT_EXCLUSION_RE = new RegExp(`${EXCLUSION_RE.source}\\s+(?:(?:a|an|the|any|their|its|for|of)\\s+)?(?:[\\w'-]+\\s+){0,3}$`, 'i');
 // A question or an expression of uncertainty asserts nothing: "Does Waves
 // offer fumigation?", "It is unclear whether Waves offers fumigation".
-const UNCERTAIN_RE = /\b(?:whether|unclear|unknown|uncertain|unsure|unconfirmed|unverified)\b/i;
+// A modal or evidential hedge ("may serve", "might offer", "appears to
+// offer") asserts nothing either. A modal before a verification or contact
+// verb is permission ("you may verify"), and "May 6, 2024" is a date. The
+// hedge is read over the clause and the match together, since a match may
+// begin with the hedged verb ("may cover damage").
+const UNCERTAIN_RE = /\b(?:whether|unclear|unknown|uncertain|unsure|unconfirmed|unverified|possibly|perhaps|probably|presumably|reportedly|allegedly|supposedly|(?:un)?likely|(?:may|might|could)\s+(?!\d|(?:also\s+)?(?:verify|check|look|search|confirm|call|contact|visit|reach|find|use|text|email|see|view|review)\b)|(?:appears?|seems?)\s+(?:to\b|that\b|as if\b))/i;
 const QUESTION_AHEAD_RE = /^[^.!?;\n]*\?/;
 // Clause boundaries: sentence punctuation, a contrastive conjunction, or a
 // coordinating "and"/"or" that starts a new predicate ("is a franchise and
@@ -306,12 +311,18 @@ function asserted(compiled, answer) {
 // deliberately matched a negated phrase from its first word ("not a
 // franchise" as evidence of independence). Only the match's final clause
 // counts: "bond is not optional but renews annually" still asserts renewal.
+// A determiner "no" inside a prepositional modifier ("with no annual
+// contracts, plus termite") governs only its own phrase, up to the next list
+// separator; it does not deny the items that follow.
+const MODIFIER_NO_RE = /\b(?:with|at|for|under|in|of)\s+no\b[^,;]*?(?=,|\bplus\b|\band\b|\bincluding\b|\bas well as\b|\bor\b)/gi;
+
 function denied(matched, before, after, rest) {
+  before = before.replace(MODIFIER_NO_RE, ' ');
   const innerClause = matched.split(CLAUSE_BOUNDARY_RE).pop();
   const inner = NEGATION_RE.exec(innerClause) || EXCLUSION_RE.exec(innerClause);
   const innerAtStart = inner && inner.index === 0 && innerClause === matched;
   return (inner && !innerAtStart)
-    || NEGATION_RE.test(before) || ADJACENT_EXCLUSION_RE.test(before) || UNCERTAIN_RE.test(before)
+    || NEGATION_RE.test(before) || ADJACENT_EXCLUSION_RE.test(before) || UNCERTAIN_RE.test(before + matched)
     || AFTER_NEGATION_RE.test(after) || QUESTION_AHEAD_RE.test(rest);
 }
 
