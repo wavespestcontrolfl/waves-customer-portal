@@ -1299,6 +1299,7 @@ export default function EstimateToolViewV2({
     customerPhone,
     customerEmail,
     leadServiceInterest: serviceInterest,
+    notes: "",
     homeSqFt: "",
     stories: "1",
     unitCount: "",
@@ -4067,6 +4068,15 @@ export default function EstimateToolViewV2({
       customerPhone: "",
       customerEmail: "",
       leadServiceInterest: "",
+      // Only the selected services carry to the next customer. Notes and
+      // negotiated discounts belong to the estimate that was just saved.
+      notes: "",
+      manualDiscountPreset: "",
+      manualDiscountType: "NONE",
+      manualDiscountValue: "",
+      manualDiscountLabel: "",
+      manualDiscountInternalReason: "",
+      serviceSpecificDiscountKeys: [],
       _termiteFootprintAuto: false,
       _footprintUnknownLookup: false,
       _trenchingPerimeterAuto: false,
