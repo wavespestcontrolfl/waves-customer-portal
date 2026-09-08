@@ -103,10 +103,10 @@ describe('lawn assessment route contracts', () => {
     const assess = source.slice(source.indexOf("router.post('/assess'"), source.indexOf("router.post('/confirm'"));
     const confirm = source.slice(source.indexOf("router.post('/confirm'"), source.indexOf("router.get('/service/:serviceId'"));
 
-    test('both handlers read the gate once and pass the decision down', () => {
-      for (const handler of [assess, confirm]) {
-        expect(handler.match(/gateEnvValue\('GATE_LAWN_VISIT_ASSESSMENT'\)/g)).toHaveLength(1);
-      }
+    test('/assess reads the gate once; /confirm never reads it — the run row decides', () => {
+      expect(assess.match(/gateEnvValue\('GATE_LAWN_VISIT_ASSESSMENT'\)/g)).toHaveLength(1);
+      expect(confirm).not.toMatch(/GATE_LAWN_VISIT_ASSESSMENT/);
+      expect(confirm).toMatch(/const visitRun = await visitAssessment\.loadRun\(assessmentId, db\);/);
     });
 
     test('/assess keeps the legacy scorer and adds the one call behind the gate', () => {
@@ -118,18 +118,26 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/visitAssessment\.analyzeVisit\(\{ photos, photoZones: visitPhotos\.zones, visionContext \}\)/);
       expect(assess).toMatch(/visitAssessment\.deriveLegacyScores\(visitAnalysis\)/);
       expect(assess).toMatch(/visitAssessment\.adjustAvailableScores\(displayScores, seasonAdjust\)/);
-      expect(assess).toMatch(/visitAssessment\.recordRun\(/);
+      // The run is written in the assessment's transaction — both or neither.
+      expect(assess).toMatch(/db\.transaction\(async \(trx\) => \{[\s\S]{0,400}visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis \}, trx\)/);
+      expect(assess).toMatch(/visitAssessment\.attachRunPhotos\(/);
       // Perception never sees the planned products under the gate.
       expect(assess).toMatch(/const track = visitAssessmentEnabled \? null : grassCtx\.trackKey;/);
       // The provider-miss early return is legacy-only: an unavailable run still stores the row.
       expect(assess).toMatch(/if \(!visitAssessmentEnabled && !validResults\.length\)/);
     });
 
-    test('/confirm validates the review before any write and preserves NULL scores for a run-backed row', () => {
+    test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and holds customer output on an unavailable run', () => {
       expect(confirm.indexOf('visitAssessment.validateReview(')).toBeLessThan(confirm.indexOf('installConfirmedBaseline('));
       expect(confirm).toMatch(/reviewedRun \? visitAssessment\.resolveConfirmScores\(assessment, adjustedScores, scoreValue\)/);
       expect(confirm).toMatch(/reviewedRun && !visitAssessment\.scoresComplete\(finalScores\) \? null : calculateOverallScore\(finalScores\)/);
+      expect(confirm).toMatch(/if \(reviewedRun && visitReview\.provided\)/);
       expect(confirm).toMatch(/if \(adjustedScores && calibrationEligible\)/);
+      expect(confirm).toMatch(/const customerOutputEligible = calibrationEligible \|\| visitAssessment\.scoresComplete\(finalScores\);/);
+      for (const call of ['KnowledgeBridge.generateAssessmentRecommendations(assessmentId)', 'LawnIntel.emitHealthSignal(updated.customer_id)', 'LawnIntel.generateServiceReport(assessmentId)']) {
+        expect(confirm).toContain(`if (customerOutputEligible) await ${call}`);
+      }
+      expect(confirm).toMatch(/if \(!updated\.service_id && customerOutputEligible\) \{/);
       expect(confirm).toMatch(/visitAssessment\.reviewRun\(/);
     });
   });

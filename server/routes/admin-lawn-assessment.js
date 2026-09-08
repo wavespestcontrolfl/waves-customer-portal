@@ -737,7 +737,7 @@ router.post('/assess', async (req, res, next) => {
         observations: adjustedScores.observations,
         overall_score: overallScore,
       };
-    const [assessment] = await db('lawn_assessments').insert({
+    const assessmentRow = {
       customer_id: customerId,
       service_id: serviceId || null,
       technician_id: req.technicianId,
@@ -746,7 +746,19 @@ router.post('/assess', async (req, res, next) => {
       photos: JSON.stringify(photoMeta),
       ...scoreFields,
       is_baseline: propertyHistoryEnabled ? false : isBaseline,
-    }).returning('*');
+    };
+    // Gate on: the run row is the provenance and the review target, so it is
+    // written in the SAME transaction as the assessment — both or neither, a
+    // failed run write fails the request instead of leaving a row /confirm
+    // would push through the legacy fallback. Photo ids attach after storage.
+    let visitRun = null;
+    const [assessment] = visitAssessmentEnabled
+      ? await db.transaction(async (trx) => {
+        const rows = await trx('lawn_assessments').insert(assessmentRow).returning('*');
+        visitRun = await visitAssessment.recordRun({ assessment: rows[0], analysis: visitAnalysis }, trx);
+        return rows;
+      })
+      : await db('lawn_assessments').insert(assessmentRow).returning('*');
 
     // Auto-capture grass type from the AI read into the turf profile so lawn
     // reports use the real turf instead of the St. Augustine default. COALESCE-
@@ -909,15 +921,14 @@ router.post('/assess', async (req, res, next) => {
       await db('lawn_assessments').where({ id: assessment.id }).update({ best_photo_id: bestPhotoId });
     }
 
-    // Gate on: the run row — provenance, findings, photo ids — is what
-    // /confirm reviews and the eval replays. Best-effort like the photo
-    // bookkeeping above: the assessment and its photos are already stored.
-    let visitRun = null;
-    if (visitAssessmentEnabled) {
+    // Gate on: attach the stored photo row ids to the run (the run itself was
+    // written with the assessment above). Best-effort like the photo
+    // bookkeeping: the ids are a convenience for the eval, not the provenance.
+    if (visitRun) {
       try {
-        visitRun = await visitAssessment.recordRun({ assessment, analysis: visitAnalysis, photoRecords }, db);
-      } catch (runErr) {
-        logger.error(`[lawn-assessment] visit run record insert failed: ${runErr.message}`);
+        visitRun = (await visitAssessment.attachRunPhotos(visitRun.id, photoRecords.map((row) => row.id), db)) || visitRun;
+      } catch (attachErr) {
+        logger.error(`[lawn-assessment] visit run photo ids attach failed: ${attachErr.message}`);
       }
     }
 
@@ -993,7 +1004,6 @@ function normalizeStressFlags(input) {
 router.post('/confirm', async (req, res, next) => {
   try {
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
-    const visitAssessmentEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT');
     const {
       assessmentId,
       adjustedScores,
@@ -1022,21 +1032,20 @@ router.post('/confirm', async (req, res, next) => {
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     if (!assessment) return res.status(404).json({ error: 'Assessment not found' });
 
-    // Gate on, and this row came from the one-call path: the technician's one
-    // overall review of the run's findings — validated before any write so a
-    // bad payload never half-confirms. A pre-gate row has no run and confirms
-    // exactly as before.
-    let visitRun = null;
+    // A run row (the one-call path wrote it with the assessment) decides how
+    // this row confirms — not the gate, so a kill-switch flip between analyze
+    // and confirm can never push a run-backed row through the legacy fallback.
+    // A pre-gate row has no run and confirms exactly as before. The
+    // technician's review, when the payload carries one, is validated before
+    // any write so a bad payload never half-confirms.
+    const visitRun = await visitAssessment.loadRun(assessmentId, db);
     let visitReview = null;
-    if (visitAssessmentEnabled) {
-      visitRun = await visitAssessment.loadRun(assessmentId, db);
-      if (visitRun) {
-        const { errors, review } = visitAssessment.validateReview(req.body, visitRun);
-        if (errors.length) return res.status(400).json({ error: 'Invalid visit assessment review', details: errors });
-        visitReview = review;
-      }
+    if (visitRun) {
+      const { errors, review } = visitAssessment.validateReview(req.body, visitRun);
+      if (errors.length) return res.status(400).json({ error: 'Invalid visit assessment review', details: errors });
+      visitReview = review;
     }
-    const reviewedRun = visitAssessmentEnabled && !!visitRun;
+    const reviewedRun = !!visitRun;
 
     // Gate on: a NULL column (the model could not determine it and the
     // technician did not enter it) stays NULL — the legacy fallback below
@@ -1108,20 +1117,27 @@ router.post('/confirm', async (req, res, next) => {
       Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
     }
 
-    // Gate on: apply the review to the run and reconcile the kept findings
-    // against the products the technician confirmed. Best-effort after the
-    // confirm itself — the assessment is confirmed either way; a lost review
-    // is logged, and re-confirming writes it again.
+    // Run-backed row: apply the review to the run and reconcile the kept
+    // findings against the products the technician confirmed — only when the
+    // confirm actually carried a review (a score-only confirm from a client
+    // that never showed the findings is not a finding review and stamps
+    // nothing). Best-effort after the confirm itself — the assessment is
+    // confirmed either way; a lost review is logged, re-confirming writes it.
     let reviewedVisitRun = null;
-    if (reviewedRun) {
+    if (reviewedRun && visitReview.provided) {
       try {
         reviewedVisitRun = await visitAssessment.reviewRun({ run: visitRun, review: visitReview, technicianId: req.technicianId }, db);
       } catch (reviewErr) {
         logger.error(`[lawn-assessment] visit run review write failed: ${reviewErr.message}`);
       }
     }
-    // An unavailable run has no AI scores to calibrate a correction against.
+    // An unavailable run has no AI scores to calibrate against, and nothing
+    // customer-facing (recommendations, the health signal, the standalone
+    // report-ready text, the auto-generated report) may be built from its
+    // NULLs — a provider outage never becomes a lawn result. Both resume once
+    // the technician has supplied a complete set of scores.
     const calibrationEligible = !reviewedRun || visitRun.status !== 'unavailable';
+    const customerOutputEligible = calibrationEligible || visitAssessment.scoresComplete(finalScores);
 
     // Agronomic Wiki: link only when a durable service_record exists.
     // Assessments captured inside Complete Service are back-linked after
@@ -1151,7 +1167,7 @@ router.post('/confirm', async (req, res, next) => {
         await LawnIntel.attachWeather(assessmentId);
 
         // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
-        await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
+        if (customerOutputEligible) await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
 
         // 3. Tech calibration — record AI vs tech score differences
         if (adjustedScores && calibrationEligible) {
@@ -1173,7 +1189,7 @@ router.post('/confirm', async (req, res, next) => {
         }
 
         // 4. Lawn health → customer health signal
-        await LawnIntel.emitHealthSignal(updated.customer_id);
+        if (customerOutputEligible) await LawnIntel.emitHealthSignal(updated.customer_id);
 
         // 5. Standalone lawn assessments (fallback customer picker, no
         //    scheduled service — service_id is null) have no later completion
@@ -1183,12 +1199,12 @@ router.post('/confirm', async (req, res, next) => {
         //    score lives on the report (owner ruling 2026-08-01 retired the
         //    score fold-in). This step runs after recommendation generation
         //    (step 2) so the standalone notification's tip is populated.
-        if (!updated.service_id) {
+        if (!updated.service_id && customerOutputEligible) {
           await LawnIntel.sendAssessmentNotification(assessmentId);
         }
 
         // 6. Auto-generate service report
-        await LawnIntel.generateServiceReport(assessmentId);
+        if (customerOutputEligible) await LawnIntel.generateServiceReport(assessmentId);
 
         // 7. Track assessment completion
         await LawnIntel.trackAssessmentCompletion(updated.service_date);
