@@ -1062,8 +1062,9 @@ router.post('/confirm', async (req, res, next) => {
     let confirmed = true;
     let missingScores = [];
     let calibrationEligible = true;
+    let runAiScores = null;
     if (reviewedRun) {
-      ({ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible } = visitAssessment.confirmScores(assessment, visitRun, adjustedScores, { scoreValue, calculateOverallScore }));
+      ({ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible, aiScores: runAiScores } = visitAssessment.confirmScores(assessment, visitRun, adjustedScores, { scoreValue, calculateOverallScore }));
     } else {
       finalScores = {
         turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
@@ -1185,9 +1186,11 @@ router.post('/confirm', async (req, res, next) => {
         // 1. FAWN weather context
         await LawnIntel.attachWeather(assessmentId);
 
-        // 3. Tech calibration — record AI vs tech score differences
+        // 3. Tech calibration — record AI vs tech score differences. A
+        //    run-backed row compares against the run's own answer (the
+        //    assessment row's JSON may carry a pending confirm's entries).
         if (adjustedScores && calibrationEligible) {
-          const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
+          const calibrationBaseline = runAiScores || assessment.adjusted_scores || assessment.composite_scores;
           const aiScores = calibrationBaseline
             ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
             : {};

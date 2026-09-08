@@ -131,7 +131,9 @@ describe('lawn assessment route contracts', () => {
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
       expect(confirm.indexOf('visitAssessment.validateReview(')).toBeLessThan(confirm.indexOf('installConfirmedBaseline('));
       // One branch: the run-backed row's scores, overall and confirmed verdict come from the module; the legacy block is untouched.
-      expect(confirm).toMatch(/if \(reviewedRun\) \{\s*\(\{ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible \} = visitAssessment\.confirmScores\(assessment, visitRun, adjustedScores, \{ scoreValue, calculateOverallScore \}\)\);/);
+      expect(confirm).toMatch(/if \(reviewedRun\) \{\s*\(\{ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible, aiScores: runAiScores \} = visitAssessment\.confirmScores\(assessment, visitRun, adjustedScores, \{ scoreValue, calculateOverallScore \}\)\);/);
+      // A run-backed row calibrates against the run's own scores, a legacy row against its stored JSON.
+      expect(confirm).toMatch(/const calibrationBaseline = runAiScores \|\| assessment\.adjusted_scores \|\| assessment\.composite_scores;/);
       expect(confirm).toMatch(/overall_score: overallScore,/);
       // confirmed_by_tech / confirmed_at are stamped only on a confirmed row; a pending row never becomes the property baseline.
       expect(confirm).toMatch(/\.\.\.\(confirmed \? \{ confirmed_by_tech: true, confirmed_at: new Date\(\) \} : \{\}\),/);
