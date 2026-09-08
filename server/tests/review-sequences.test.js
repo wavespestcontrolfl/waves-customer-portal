@@ -1207,6 +1207,36 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(new Date(held.nextAllowedAt).getTime()).toBe(manualAt.getTime() + 72 * 3600000);
     });
 
+    test('a policy-blocked immediate ask (opt-out) is reported unsent and blocked, never sent (codex #4156 r2 P2)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'bk-1', first_name: 'Ona', last_name: 'P', phone: '+19410000168', nearest_location_id: 'venice' }],
+        // A tech resend of its own pending templated row (the r4 resend path).
+        review_requests: [{ id: 'rr-bk1', customer_id: 'bk-1', service_record_id: 'sr-bk1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tbk1', location_id: 'venice', triggered_by: 'tech', created_at: new Date(Date.now() - 600000) }],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'OPTED_OUT', auditLogId: 'audit-bk' });
+
+      const request = await ReviewService.create({ customerId: 'bk-1', serviceRecordId: 'sr-bk1', triggeredBy: 'tech' });
+
+      expect(request.id).toBe('rr-bk1');
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+
+      expect(request.sendOutcome).toEqual({ sent: false, failed: 'blocked', code: 'OPTED_OUT', nextAllowedAt: null });
+      expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+    });
+
+    test('an immediate ask with no consented recipient is reported unsent (suppressed), never sent (codex #4156 r2 P2)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'nc-1', first_name: 'Uma', last_name: 'P', phone: null, nearest_location_id: 'venice' }],
+      });
+      db.mockImplementation(mock);
+
+      const request = await ReviewService.create({ customerId: 'nc-1', triggeredBy: 'tech' });
+
+      expect(request.sendOutcome).toEqual({ sent: false, failed: 'suppressed', nextAllowedAt: null });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
     test('a provider failure on an immediate send reports the queued retry, so create() can attach it (codex #4141 r5 P2)', async () => {
       const mock = makeMock({
         customers: [{ id: 'pf-1', first_name: 'Ida', last_name: 'V', phone: '+19410000163', nearest_location_id: 'venice' }],

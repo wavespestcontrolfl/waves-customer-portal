@@ -122,10 +122,14 @@ router.post('/tech-trigger', async (req, res, next) => {
     // will pick it up, so "will go out automatically" would be false.
     // Additive fields.
     const unsent = request.sendOutcome && request.sendOutcome.sent === false ? request.sendOutcome : null;
+    // A block or suppression (opt-out, no consented recipient) will not clear
+    // by retrying; only the unqueued provider failure is worth another try.
     const unsentFields = !unsent ? {}
-      : unsent.failed
+      : unsent.failed === 'send_failed_unqueued'
         ? { failed: unsent.failed, message: 'The review text could not be sent. Try again in a few minutes.' }
-        : { deferred: unsent.deferred, nextAllowedAt: unsent.nextAllowedAt, message: 'The review text is queued and will go out automatically' };
+        : unsent.failed
+          ? { failed: unsent.failed, message: 'The review text was not sent: this customer cannot receive review texts right now.' }
+          : { deferred: unsent.deferred, nextAllowedAt: unsent.nextAllowedAt, message: 'The review text is queued and will go out automatically' };
     res.json({
       sent: !unsent,
       ...unsentFields,

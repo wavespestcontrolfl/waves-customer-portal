@@ -657,11 +657,19 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
 // The caller-facing shape of a sendSMS outcome that did NOT deliver: held
 // (deferred, with the time the retry owner looks again) or failed without a
 // queued retry (failed, no time — nothing will send it).
+// Anything short of { sent: true } is unsent (codex #4156 r2 P2): a policy
+// block (opt-out, suppression list) and a bare return (no consented
+// recipient, deleted or already-reviewed customer, row no longer pending)
+// both leave the row suppressed with no retry owner, so they are failures
+// the caller must not describe as queued.
 function unsentOutcome(outcome) {
+  if (!outcome) return { sent: false, failed: "suppressed", nextAllowedAt: null };
+  if (outcome.blocked) return { sent: false, failed: "blocked", code: outcome.code || null, nextAllowedAt: null };
   return outcome.failed
     ? { sent: false, failed: outcome.failed, nextAllowedAt: null }
     : { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
 }
+const deliveredOrRefused = (outcome) => !!outcome && (outcome.sent === true || !!outcome.refused);
 
 function retryAtForDeferredSend(result) {
   if (!result || !(result.retryable || result.deferred)) {
@@ -806,9 +814,7 @@ const ReviewService = {
       const fresh = (await db("review_requests").where({ id: existing.id }).first()) || existing;
       // Same truth as the fresh-row path (codex #4141 r4 P2): a resend held
       // by the 3-day rule / send window / provider retry is queued, not sent.
-      if (resendOutcome && (resendOutcome.deferred || resendOutcome.failed)) {
-        fresh.sendOutcome = unsentOutcome(resendOutcome);
-      }
+      if (!deliveredOrRefused(resendOutcome)) fresh.sendOutcome = unsentOutcome(resendOutcome);
       return fresh;
     }
 
@@ -908,11 +914,10 @@ const ReviewService = {
       // or a provider retry. The row stays queued for the retry owner, and
       // the caller learns that it was NOT sent (codex #4141 r3 P2: the tech
       // app was told sent:true for a text that could be 72 h out).
-      // A failure that could not even be queued (codex #4156 r1 P2) is
-      // reported as such — never as a held send some job will pick up.
-      if (outcome && (outcome.deferred || outcome.failed)) {
-        request.sendOutcome = unsentOutcome(outcome);
-      }
+      // A failure that could not even be queued (codex #4156 r1 P2), a
+      // policy block or a suppression (r2 P2) are reported as such — never
+      // as a held send some job will pick up, never as sent.
+      if (!deliveredOrRefused(outcome)) request.sendOutcome = unsentOutcome(outcome);
       if (outcome && outcome.refused === "approved_phone_drift") {
         // Remove the row this very call created (pre-push r15 P1): left in
         // place it would later be sent by the scheduler to the unapproved
