@@ -361,6 +361,16 @@ record nouns (`appointment`, `estimate`, `invoice`, …) are non-names. The
 thing being sent introduces its recipient too (`send the response to`,
 `forward the estimate to`), closing B2's open recipient-phrase thread here.
 
-Validation: 157 target cases pass (133 unit and 24 rollback-only isolated
+The fourth round qualified the set grammar (up to two qualifiers between the
+quantifier and the noun: `all active customers`, `each overdue customer`; a
+deictic qualifier such as `all of this customer's fields` still names one
+account), required every person reference in a clause to resolve (a token
+modifying a non-person noun, `flea` in `flea treatment`, is not a person
+reference; `and also`/`and then` open a clause), and made two distinct
+stated recipients refuse any selection while duplicate rows of one stated
+name still accept it. Communication objects (`message`, `receipt`, `text`,
+`link`, …) and the pests and lawn work a request names are non-names.
+
+Validation: 159 target cases pass (135 unit and 24 rollback-only isolated
 PostgreSQL cases). No model, provider, production query, migration, merge or
 gate change occurred.

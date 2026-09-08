@@ -90,27 +90,39 @@ test('every supported action verb supplies name evidence against a stale selecti
   expect((await Context.resolve({ prompt: 'Send the response to Synthetic Person', pageData: {} })).target.customer_id).toBe(A);
 });
 
+test('two distinct resolved recipients refuse a selection while duplicate rows of one name accept it', async () => {
+  rows.customers[1] = { id: B, first_name: 'Second', last_name: 'Person' };
+  lookupRows = [rows.customers[0], rows.customers[1]];
+  const two = 'Forward the estimate to Synthetic Person and text Second Person';
+  expect(await Context.resolve({ prompt: two, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+  expect(await Context.resolve({ prompt: two, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  rows.customers[1] = { id: B, first_name: 'Synthetic', last_name: 'Person' };
+  lookupRows = [rows.customers[0], rows.customers[1]];
+  expect(await Context.resolve({ prompt: 'Text Synthetic Person', pageData: {} })).toMatchObject({ target: null, ambiguous: true });
+  expect((await Context.resolve({ prompt: 'Text Synthetic Person', pageData: {}, selectedTarget: { customer_id: B } })).target).toMatchObject({ customer_id: B, provenance: 'operator_selection' });
+});
+
 test('partly resolved compound name evidence refuses a selection and is never a target', async () => {
   lookupRows = [rows.customers[0]];
-  for (const prompt of ['Update Synthetiic Person and text Synthetic Person', 'Text Synthetic Person and remind Bob']) {
+  for (const prompt of ['Update Synthetiic Person and text Synthetic Person', 'Text Synthetic Person and remind Bob', 'Update Alice Missing and also text Synthetic Person']) {
     expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
     expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
   }
   // A resolved clause may carry other nouns, and an evidence-free clause is not partial.
-  for (const prompt of ['Schedule flea treatment for Synthetic Person', 'Add a note for this customer and text Synthetic Person']) {
+  for (const prompt of ['Schedule flea treatment for Synthetic Person', 'Invoice Synthetic Person for bed bug treatment', 'Add a note for this customer and text Synthetic Person']) {
     expect((await Context.resolve({ prompt, pageData: { customer_id: A } })).target).toMatchObject({ customer_id: A, provenance: 'current_request_lookup' });
   }
 });
 
 test('field nouns after an action are not person names', async () => {
-  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency', 'Update customer city', 'Set waveguard tier', "Let's update this customer", 'Update customer first name', "Update this account's status", 'Update this profile']) {
+  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency', 'Update customer city', 'Set waveguard tier', "Let's update this customer", 'Update customer first name', "Update this account's status", 'Update this profile', 'Send message to this customer', 'Send receipt to this customer', 'Send text to this customer']) {
     const task = await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } });
     expect(task.target).toMatchObject({ customer_id: A, provenance: 'operator_selection' });
   }
 });
 
 test('quantifier spellings are normalized and contact literals are ignored', async () => {
-  for (const prompt of ['Update all of those customers using this customer', 'Update these  customers Synthetic Person and Synthetic Second', 'Update those customers', 'Update all the customers', 'Update all of the customers', 'Text each of the customers', 'Remind every one of the customers', 'Update all customers', 'Text each customer', 'Remind every customer']) {
+  for (const prompt of ['Update all of those customers using this customer', 'Update these  customers Synthetic Person and Synthetic Second', 'Update those customers', 'Update all the customers', 'Update all of the customers', 'Text each of the customers', 'Remind every one of the customers', 'Update all active customers', 'Text each overdue customer', 'Remind all of the inactive lawn customers', 'Update all customers', 'Text each customer', 'Remind every customer']) {
     expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
   }
   const emailed = await Context.resolve({ prompt: 'Reply to both@example.invalid', pageData: {} });
@@ -121,6 +133,8 @@ test('quantifier spellings are normalized and contact literals are ignored', asy
   expect(localPart).toMatchObject({ candidates: [], target: null, explicitEmails: ['synthetic.person@example.invalid'] });
   const nullSelection = await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: A }, selectedTarget: null });
   expect(nullSelection.target.customer_id).toBe(A);
+  // A deictic qualifier names one account, not a set.
+  expect((await Context.resolve({ prompt: "Update all of this customer's fields", pageData: { customer_id: A } })).target.customer_id).toBe(A);
 });
 
 test('a broken page hint fails closed for a page-referencing request even with a selection', async () => {

@@ -39,13 +39,20 @@ const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', '
   'account', 'accounts', 'profile', 'record', 'records',
   // record nouns that follow an action verb name a thing, never a person
   'appointment', 'appointments', 'property', 'properties', 'estimate', 'estimates', 'invoice', 'invoices', 'product', 'products',
-  'call', 'calls', 'visit', 'visits', 'service', 'services', 'reservation', 'treatment', 'quote', 'reminder']);
+  'call', 'calls', 'visit', 'visits', 'service', 'services', 'reservation', 'treatment', 'treatments', 'quote', 'reminder',
+  // communication objects ("send message to this customer") and the pests/lawn work a request names
+  'message', 'messages', 'text', 'texts', 'sms', 'reply', 'replies', 'response', 'responses', 'receipt', 'receipts', 'link', 'links',
+  'bed', 'bug', 'bugs', 'flea', 'fleas', 'tick', 'ticks', 'ant', 'ants', 'roach', 'roaches', 'cockroach', 'cockroaches', 'spider', 'spiders',
+  'wasp', 'wasps', 'rat', 'rats', 'mouse', 'mice', 'fire', 'grub', 'grubs', 'chinch', 'sod', 'weed', 'weeds', 'fungus', 'fertilizer',
+  'aeration', 'irrigation', 'sprinkler', 'sprinklers', 'wdo', 'termites', 'shrub', 'shrubs', 'tree', 'trees', 'palm', 'palms', 'quarterly', 'monthly', 'annual']);
 // A set quantifier ("both A and B", "these customers …", "all of these …") is
 // never a target: one target per request, so the request asks to clarify.
 // Owner decision 2026-09-08: fail closed rather than parse cohorts.
-const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those) customers|all(?: of)?(?: the| these| those)? customers|all of (?:these|those)|(?:each|every)(?: one)?(?: of)?(?: the| these| those)? customers?)\b/;
+// Up to two qualifiers may sit between the quantifier and the noun ("all active
+// customers", "each overdue customer"); a deictic one names one account.
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+){0,2} customers?|all of (?:these|those))\b/;
 // An independently requested operation starts at "and/then <action>".
-const ACTION_CLAUSE_SPLIT = new RegExp(`\\b(?:and|then)\\s+(?=(?:${PERSON_ACTIONS}|revise|add|save|assign|draft|write|post|submit)\\b)`, 'i');
+const ACTION_CLAUSE_SPLIT = new RegExp(`\\b(?:and|then)\\s+(?:(?:also|then|please)\\s+)*(?=(?:${PERSON_ACTIONS}|revise|add|save|assign|draft|write|post|submit)\\b)`, 'i');
 const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
 // An explicit email or phone recipient is a contact, never a name or a quantifier.
 const withoutContacts = clause => clause.replace(CONTACT_LITERAL_RE, ' ');
@@ -149,17 +156,28 @@ async function namedCustomers(prompt) {
     this.whereIn(normalizedStoredName('first_name'), singleNames).orWhereIn(normalizedStoredName('last_name'), singleNames);
   }).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
   const accepted = singleLookup ? singles : fullNames;
-  // Name evidence that only partly resolved — a customer accepted from one
-  // action clause while another clause's person reference matches nobody, as
-  // in "update Jhon Smith and text Alice Owner" — is never a target and no
-  // selection survives it. A resolved clause may still carry other nouns, and
-  // a request that resolved nobody keeps the plain unresolved-name handling.
+  // Name evidence that only partly resolved — a customer accepted while some
+  // person reference in the request matches nobody, as in "update Jhon Smith
+  // and text Alice Owner" — is never a target and no selection survives it. A
+  // token that modifies a non-person noun ("flea" in "flea treatment") is not a
+  // person reference, and a request that resolved nobody keeps the plain
+  // unresolved-name handling.
   const acceptedTokens = new Set(accepted.flatMap(customer => normalizeName(`${customer.first_name || ''} ${customer.last_name || ''}`).split(' ')));
+  const personReferences = clause => {
+    const clauseWords = normalizeName(clause).split(' ');
+    return explicitSingleNames(clause).filter(token => !NON_PERSON_NAMES.has(clauseWords[clauseWords.indexOf(token) + 1] || ''));
+  };
   const partial = accepted.length > 0 && normalized.split(ACTION_CLAUSE_SPLIT).some(clause => {
-    const references = explicitSingleNames(clause);
-    return references.length > 0 && !references.some(token => acceptedTokens.has(token));
+    const references = personReferences(clause);
+    return references.length > 0 && !references.every(token => acceptedTokens.has(token));
   });
-  return { matches: accepted, complete: !capped && singles.length < CUSTOMER_LOOKUP_LIMIT, partial };
+  // Distinct stated names: a selection may disambiguate duplicate rows of ONE
+  // stated name, never choose between two different recipients.
+  const stated = singleLookup
+    ? new Set(singles.flatMap(customer => singleNames.filter(name => [normalizeName(customer.first_name), normalizeName(customer.last_name)].includes(name))))
+    : new Set(fullNames.map(customer => normalizeName(`${customer.first_name || ''} ${customer.last_name || ''}`)));
+  // Either shape is evidence that can never yield one target: refuse it whole.
+  return { matches: accepted, complete: !capped && singles.length < CUSTOMER_LOOKUP_LIMIT, multiple: partial || stated.size > 1 };
 }
 
 // Callers supply only the fixed customer/lead/estimate column expressions below.
@@ -263,8 +281,9 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   // customer. A request relying on the unavailable viewed record still stops.
   if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  // A set quantifier or partly resolved name evidence never yields a target.
-  const cohort = setQuantified(prompt) || namedResult.partial;
+  // A set quantifier, partly resolved name evidence, or two distinct stated
+  // recipients never yields a target, and no selection resolves it.
+  const cohort = setQuantified(prompt) || namedResult.multiple;
   let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort);
   if (selectedId) {
     const selected = await customerById(selectedId);
