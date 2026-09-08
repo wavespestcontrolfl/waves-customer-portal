@@ -128,6 +128,31 @@ const welcome = require('../services/new-recurring-welcome-sms');
     expect(await welcome.queueOneTimeWelcomeEmail(rebooked)).toMatchObject({ queued: true });
   });
 
+  test('a cancelled email queue row is a tombstone, not a guard: the rebooked visit re-enters and delivers once', async () => {
+    await welcome.queueOneTimeWelcomeEmail(service);
+    await mockDatabase('sms_sequences').update({ next_send_at: new Date(Date.now() - 1000) });
+    await mockDatabase('scheduled_services').where({ id: serviceId }).update({ status: 'cancelled' });
+    await welcome.processDueWelcomes();
+    expect((await mockDatabase('sms_sequences').first()).status).toBe('cancelled');
+    const [rebooked] = await mockDatabase('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, is_recurring: false, status: 'confirmed', scheduled_date: '2030-01-09' }).returning('*');
+    expect(await welcome.queueOneTimeWelcomeEmail(rebooked)).toMatchObject({ queued: true });
+    const rows = await mockDatabase('sms_sequences').orderBy('created_at');
+    expect(rows.map(r => r.status)).toEqual(['cancelled', 'active']);
+    await mockDatabase('sms_sequences').where({ id: rows[1].id }).update({ next_send_at: new Date(Date.now() - 1000) });
+    await welcome.processDueWelcomes();
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect((await mockDatabase('sms_sequences').where({ id: rows[1].id }).first()).status).toBe('completed');
+  });
+
+  test.each(['en_route', 'on_site'])('a same-day visit already %s at the delayed recheck still receives the email', async status => {
+    await welcome.queueOneTimeWelcomeEmail(service);
+    await mockDatabase('sms_sequences').update({ next_send_at: new Date(Date.now() - 1000) });
+    await mockDatabase('scheduled_services').where({ id: serviceId }).update({ status });
+    await welcome.processDueWelcomes();
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect((await mockDatabase('sms_sequences').first()).status).toBe('completed');
+  });
+
   test('stale email claims use email proof, even if a welcome SMS already exists', async () => {
     await welcome.queueOneTimeWelcomeEmail(service);
     await mockDatabase('sms_sequences').update({ status: 'sending', updated_at: new Date(Date.now() - 31 * 60 * 1000) });

@@ -91,9 +91,14 @@ async function hasWelcomeSequence(customerId, conn = db, sequenceType = SEQUENCE
     // on the global pool would need a second — at pool saturation every
     // enqueue waits on every other until an acquire timeout.
     if (!(await conn.schema.hasTable('sms_sequences'))) return false;
-    const existing = await conn('sms_sequences')
-      .where({ customer_id: customerId, sequence_type: sequenceType })
-      .first('id');
+    const query = conn('sms_sequences')
+      .where({ customer_id: customerId, sequence_type: sequenceType });
+    // The email-only queue's cancelled rows are tombstones from a delivery
+    // recheck (booking cancelled/parked, gate off, eligibility lost) and must
+    // not block the rebooked visit from re-entering (Codex #4112 r5). The
+    // recurring SMS guard is unchanged: any row, whatever its status, holds.
+    if (sequenceType === EMAIL_SEQUENCE_TYPE) query.whereNot('status', 'cancelled');
+    const existing = await query.first('id');
     return !!existing;
   } catch (err) {
     logger.warn(`[new-recurring-welcome] sequence lookup failed for customer ${customerId}: ${err.message}`);
@@ -106,12 +111,14 @@ async function hasWelcomeSequence(customerId, conn = db, sequenceType = SEQUENCE
 async function oneTimeWelcomeEligibility(service, customer) {
   if (!service?.id || !customer?.id || service.customer_id !== customer.id) return { eligible: false, reason: 'missing_booking' };
   if (service.is_recurring !== false) return { eligible: false, reason: 'not_one_time' };
-  // 'rescheduled' is NOT open here (Codex #4112 r4): with the reschedule
-  // streamline dark, a reschedule request parks the visit as 'rescheduled'
-  // with no booked replacement until staff rebook it. The parked row drops at
-  // delivery; the rebooked visit re-enters through the tagger, and cancelled
-  // queue rows do not consume the once-per-customer guard.
-  if (!['pending', 'confirmed'].includes(service.status)) return { eligible: false, reason: 'booking_not_open' };
+  // Open = booked or actively proceeding. Delivery runs ~60 minutes after
+  // booking, so a same-day visit can already be en_route/on_site at the
+  // recheck (Codex #4112 r5). 'rescheduled' is NOT open (r4): with the
+  // reschedule streamline dark, a reschedule request parks the visit with no
+  // booked replacement until staff rebook it; the parked row drops at
+  // delivery and the rebooked visit re-enters through the tagger (cancelled
+  // email queue rows do not hold the once-per-customer guard).
+  if (!['pending', 'confirmed', 'en_route', 'on_site'].includes(service.status)) return { eligible: false, reason: 'booking_not_open' };
   if (customer.active === false || customer.deleted_at) return { eligible: false, reason: 'inactive_customer' };
   if (!String(customer.email || '').trim()) return { eligible: false, reason: 'no_email' };
   const { tierLabelStatus } = require('./self-booking-plan-sync');
