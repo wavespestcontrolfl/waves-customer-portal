@@ -146,6 +146,28 @@ Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
 PostgreSQL tests. Independent review closed both additional edge cases before
 the fifth remote review. No provider, customer message or production write ran.
 
+Post-merge main integration at `a7c689301` records the nine request sites that
+reached main after Part A's final head: the Customer 360 workspace and unread
+conversation hooks from `481ad658f`, and the controlled staff documents from
+`f4b3490f5`. Each is proved against that already-merged revision and retained
+as unsupported/unverified, for 1,753 cumulative sites. Nothing gains coverage;
+this restores the drift gate on main without grandfathering any new action.
+
+Codex review of that integration tightened one matcher: React state setters
+that merely end in `Request` (`setLinkRequest`, `setNewLeadRequest`,
+`setRequest`) perform no request and no longer produce rows, and neither do lazy
+`import()` module loads, for 1,744 cumulative sites. Dynamic and glued-suffix endpoints stay recorded as
+unresolved / `:param` routes pending hand mapping; the scanner is per-file and
+cannot resolve a shared helper's callers or tell a query suffix from a path
+segment, so nothing else left the denominator.
+
+Main integration at `1bd165d6f` (#4016, SMS commitment follow-up) records the
+`OwedCommitmentsSummary` component's two request sites — the collection GET now
+takes the `open` / `sms` collection as a template segment, and the Mark done /
+Dismiss PATCH moved lines — proved against that merged revision and retained
+as unsupported/unverified; the superseded fixed-`open` GET row leaves the
+denominator, which stays at 1,744 cumulative sites. Nothing gains coverage.
+
 ## B1 selection follow-up
 
 Target validation #4062 stopped receiving pushes at `600841fa52` after its
