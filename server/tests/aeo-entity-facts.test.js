@@ -557,6 +557,26 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E2', 'Adam Benetti founded Waves Pest Control in 2024.').expected.founder).toBe(true);
   expect(score('E2', 'Adam Benetti, founder of Waves Pest Control.').expected.founder).toBe(true);
   expect(score('E2', 'Adam Benetti founded the company in 2024.').expected.founder).toBe(true);
+  // GitHub review r8: belonging to a franchise; structural repairs; same-named places in other states; a current license; a verification method; organization wording; former independence.
+  expect(score('E8', 'Waves belongs to a franchise network.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves is not affiliated with any franchise.').forbidden.franchise).toBe(false);
+  expect(score('E7', 'The bond includes structural repairs.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E7', 'The bond includes annual inspections.').forbidden.damage_repair_coverage).toBe(false);
+  expect(score('E5', 'Waves serves Charlotte, North Carolina.').expected.charlotte).toBe(false);
+  expect(score('E5', 'Waves serves Charlotte, NC.').expected.charlotte).toBe(false);
+  expect(score('E5', 'Waves serves Charlotte County, Florida.').expected.charlotte).toBe(true);
+  expect(score('E5', 'Waves serves Charlotte, Sarasota, and Manatee counties.')).toMatchObject({ expected: { charlotte: true, sarasota: true, manatee: true } });
+  expect(score('E3', 'Waves applied for FDACS license JB351547.').expected.fdacs_license).toBe(false);
+  expect(score('E3', 'Waves formerly held license JB351547.').expected.fdacs_license).toBe(false);
+  expect(score('E3', 'Waves license JB351547 expired.').expected.fdacs_license).toBe(false);
+  expect(score('E3', 'Waves holds FDACS license JB351547, which is active.').expected.fdacs_license).toBe(true);
+  expect(score('E3', 'Waves holds FDACS license JB351547. Check the license before hiring.').expected.license_verifiable).toBe(false);
+  expect(score('E3', 'Waves holds FDACS license JB351547. Check the license in the FDACS lookup.').expected.license_verifiable).toBe(true);
+  expect(score('E3', 'Waves holds FDACS license JB351547. You can verify it online at the state database.').expected.license_verifiable).toBe(true);
+  expect(score('E9', 'Yes, they are the same organization.').expected.alias_same).toBe(true);
+  expect(score('E9', 'Both names refer to the same legal entity.').expected.alias_same).toBe(true);
+  expect(score('E8', 'Waves was independently owned before its acquisition.').expected.independent).toBe(false);
+  expect(score('E8', 'Waves was formerly an independent company.').expected.independent).toBe(false);
   // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
   expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });
