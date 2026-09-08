@@ -526,6 +526,9 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       ['search_messages', { customer_name: nameA }, 'Correct former-phone SMS evidence'],
       ['match_existing_customer', { phone: a.phone }, customerA],
       ['get_partner_call_history', { phone: a.phone }, 'calls'],
+      ['get_partner_call_history', { phone: b.phone }, false],
+      ['query_customers', {}, customerA],
+      ['query_customers', { sort_by: 'name', limit: 50 }, customerA],
       ['search_emails', { from: nameA }, 'Correct unlinked thread reply'],
       ['search_emails', { from: 'fixture-b@example.test' }, '"total":0'],
     ];
@@ -544,6 +547,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(content).toContain(expected || 'target_clarification_required');
     }
     expect(JSON.stringify(results)).not.toContain('Foreign private');
+    // Bare and filter-only customer lists inside the task never list the other customer.
+    expect(JSON.stringify(results)).not.toContain(customerB);
     // No entity scope: an operator can still search the entire inbox.
     mockModel.mockReset();
     mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'search emails' }, 'discover'))

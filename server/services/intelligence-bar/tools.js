@@ -463,9 +463,10 @@ async function queryCustomers(input, readCustomerIds = []) {
   }
 
   // Free text search
-  // A selector-style search inside a customer-scoped task may only find that
-  // customer; a genuinely unscoped list request stays broad.
-  if (search && readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
+  // Inside a customer-scoped task every customer list — searched, filtered or
+  // bare — may only return that customer; a genuinely unscoped request
+  // arrives with an empty scope and stays broad.
+  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
   if (search) {
     const s = `%${search}%`;
     query = query.where(function () {

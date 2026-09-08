@@ -425,10 +425,21 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
 ]);
 
+const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
+
 async function prepareReadInput(params, context, { toolName, schema }) {
   const input = { ...params };
   if (context.targets?.length && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
     return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
+  }
+  // Phone-keyed readers without a customer selector: the phone must belong to
+  // a task customer, so a model-supplied number cannot read another party.
+  if (context.targets?.length && PHONE_KEYED_READERS.has(toolName)) {
+    const digits = String(params.phone || '').replace(/\D/g, '').slice(-10);
+    const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('phone');
+    if (!digits || !owners.some(owner => String(owner.phone || '').replace(/\D/g, '').slice(-10) === digits)) {
+      return { error: 'Use the task customer\'s own phone number for this call history', code: 'target_clarification_required' };
+    }
   }
   let readContext = context;
   if (schema.properties?.customer_id && (params.customer_name || params.phone)) {
