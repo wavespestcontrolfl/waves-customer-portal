@@ -1449,8 +1449,13 @@ priced > 0, no third-party payer) and the standalone lane the GET's
 closure checks (archived customer, payer-billed, unsupported billing
 lane, Auto Pay already active — which retires the row as the GET does),
 all under the lock BEFORE any Stripe state changes (409
-`no_longer_needed`; a lookup failure is 503, never a retirement on an
-unknown answer). The client refetches on either 409. An unfinished or already-
+`no_longer_needed`; a lookup failure — the Auto-Pay-active probe runs
+fail-closed on the locked handle — is 503, never a retirement on an
+unknown answer). The client refetches on either 409. The GET's row
+repoint is a compare-and-set on the pointer that load observed: a
+replacement committing mid-load cannot be overwritten with the retired
+id — the load follows the row to the replacement instead (or renders
+`unavailable` if the row moved on). An unfinished or already-
 retired id has nothing to retire and returns the ordinary mint under the
 same lock. Every minted/replayed intent is re-read LIVE before it is
 judged (an idempotent replay returns the ORIGINAL create body, never a

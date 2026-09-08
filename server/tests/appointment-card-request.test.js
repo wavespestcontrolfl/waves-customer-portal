@@ -2275,6 +2275,38 @@ describe('the page replays a SUCCEEDED capture as a saved-method panel; the mint
     expect(mockCreateAppointmentCardSetupIntent.mock.calls[1][0]).toMatchObject({ generation: 1 });
   });
 
+  // GH Codex #4163 r2 P2: a GET that read the old intent live while a
+  // replacement committed must not write the RETIRED id back on the row.
+  test('the row repoint is a CAS on the pointer this load observed; on a miss the load follows the replacement instead of regressing the row', async () => {
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests = {
+      // Load observed pointer null; by the time the CAS runs, a replacement moved it.
+      first: () => (reads++ === 0 ? { ...REQUEST, stripe_setup_intent_id: null } : { ...REQUEST, stripe_setup_intent_id: 'seti_after' }),
+      update: (chain, patch) => (patch.stripe_setup_intent_id ? 0 : 1),
+    };
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (id === 'seti_1') return { ...GOOD_INTENT, client_secret: 'cs_1', payment_method: { id: 'pm_stripe_9', type: 'card' } };
+      if (id === 'seti_after') return { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card'], metadata: { purpose: 'appointment_card_request', request_id: 'req-1' } };
+      return null;
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res).toMatchObject({ state: 'ready', setupIntentId: 'seti_after', clientSecret: 'cs_after', capturedMethodType: null });
+    const cas = touches('appointment_card_requests').map((t) => t.chain).find((c) => c.calls.some(([op, patch]) => op === 'update' && patch.stripe_setup_intent_id === 'seti_1'));
+    expect(cas.calls.find(([op]) => op === 'where')[1]).toEqual({ id: 'req-1', status: 'pending', stripe_setup_intent_id: null });
+  });
+
+  test('a CAS miss whose row left pending (or whose new pointer is unusable) renders unavailable, never the stale panel', async () => {
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests = {
+      first: () => (reads++ === 0 ? { ...REQUEST, stripe_setup_intent_id: null } : { ...REQUEST, status: 'completed', stripe_setup_intent_id: 'seti_1' }),
+      update: (chain, patch) => (patch.stripe_setup_intent_id ? 0 : 1),
+    };
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_INTENT, client_secret: 'cs_1', payment_method: { id: 'pm_stripe_9', type: 'card' } });
+    expect((await loadSecureCardPageData(REQUEST.token)).state).toBe('unavailable');
+  });
+
   test('a completion whose intent was retired under the claim is refused (page POST path)', async () => {
     mockTableHandlers.payment_methods = { first: () => null };
     // Pre-claim verify sees the succeeded capture; the in-claim re-read sees

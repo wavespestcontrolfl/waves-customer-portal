@@ -1388,14 +1388,40 @@ async function createSecureCardSetupIntent(request, { database = db } = {}) {
       setupIntent = head;
     }
     if (setupIntent.id !== request.stripe_setup_intent_id) {
-      await database('appointment_card_requests')
-        .where({ id: request.id })
+      // CAS on the pointer THIS load observed (GH Codex #4163 r2 P2): a
+      // concurrent "use a different payment method" can commit its
+      // replacement (new pointer + retirement stamp) between this load's
+      // live read and here — an unconditional write would put the RETIRED
+      // id back on the row and render its saved panel, whose continue then
+      // fails intent_mismatch. On a miss, follow the row to where the
+      // replacement pointed it.
+      const n = await database('appointment_card_requests')
+        .where({ id: request.id, status: 'pending', stripe_setup_intent_id: request.stripe_setup_intent_id || null })
         .update({ stripe_setup_intent_id: setupIntent.id, updated_at: new Date() });
+      if (n !== 1) return adoptReplacedSecureCardIntent(request, setupIntent.id, { database });
     }
     return shapeSecureCaptureIntent(setupIntent);
   }
   logger.error(`[appt-card-request] exhausted SetupIntent generations for request ${request.id} — all replays terminal`);
   return null;
+}
+
+// A page load lost the pointer CAS above: re-read the row and, when a
+// replacement moved it to a different pending intent, offer THAT (read
+// live, judged the same way). Anything else — row left pending, pointer
+// unreadable, intent not usable — is null: the page renders unavailable
+// and a refresh re-derives from the row.
+async function adoptReplacedSecureCardIntent(request, observedId, { database = db } = {}) {
+  const fresh = await database('appointment_card_requests').where({ id: request.id }).first('status', 'stripe_setup_intent_id');
+  if (!fresh || fresh.status !== 'pending' || !fresh.stripe_setup_intent_id || fresh.stripe_setup_intent_id === observedId) return null;
+  try {
+    const live = await readLiveSecureCardIntent(fresh.stripe_setup_intent_id);
+    if (!live || live.status === 'canceled' || isRetiredSetupIntent(live) || !secureCardIntentBelongsToRequest(live, request.id)) return null;
+    return shapeSecureCaptureIntent(live);
+  } catch (err) {
+    logger.warn(`[appt-card-request] replaced-intent read failed for request ${request.id}: ${err.message}`);
+    return null;
+  }
 }
 
 // "Use a different payment method" after a capture already succeeded (same

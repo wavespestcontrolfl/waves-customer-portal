@@ -696,6 +696,9 @@ export default function SecureAppointmentPage() {
               busy={busy}
               onStateChange={setCaptureState}
               onReplace={handleReplace}
+              // Replay copy matches the surface (GH Codex #4163 r2 P2): a
+              // one-time visit has no plan.
+              savedFor={standalone ? 'Auto Pay' : (planRecurring ? 'this plan' : 'this visit')}
             />
             {error ? (
               <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>

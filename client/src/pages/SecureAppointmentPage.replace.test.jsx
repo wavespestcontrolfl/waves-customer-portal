@@ -64,7 +64,7 @@ describe('SecureAppointmentPage — use a different payment method', () => {
   it('renders a succeeded replay as a saved-method panel and swaps to the fresh intent the server minted', async () => {
     const fetchMock = installFetch();
     render(<SecureAppointmentPage />);
-    expect(await screen.findByText('Your card is already saved for this plan.')).toBeInTheDocument();
+    expect(await screen.findByText('Your card is already saved for this visit.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Use a different payment method' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/replace-intent'))).toBe(true));
     const [, opts] = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/replace-intent'));
@@ -73,7 +73,7 @@ describe('SecureAppointmentPage — use a different payment method', () => {
     expect(JSON.parse(opts.body)).toEqual({ setupIntentId: 'seti_saved' });
     // The capture remounts on the fresh intent: element path, no saved panel,
     // consent reset.
-    await waitFor(() => expect(screen.queryByText('Your card is already saved for this plan.')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('Your card is already saved for this visit.')).not.toBeInTheDocument());
     expect(screen.queryByRole('button', { name: 'Use a different payment method' })).not.toBeInTheDocument();
     expect(await screen.findByRole('checkbox')).not.toBeChecked();
     // The next save completes with the NEW intent, never the retired one.
@@ -91,7 +91,7 @@ describe('SecureAppointmentPage — use a different payment method', () => {
     render(<SecureAppointmentPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Use a different payment method' }));
     expect(await screen.findByText('We could not switch your payment method. Please refresh this page and try again.')).toBeInTheDocument();
-    expect(screen.getByText('Your card is already saved for this plan.')).toBeInTheDocument();
+    expect(screen.getByText('Your card is already saved for this visit.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Use a different payment method' })).toBeEnabled();
   });
 

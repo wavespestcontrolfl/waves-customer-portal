@@ -1085,6 +1085,11 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
   });
 
+  it('the Auto-Pay-active probe runs FAIL-CLOSED on the locked handle (GH Codex #4163 r2 P0): a swallowed read must not read as "not enrolled"', async () => {
+    await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' });
+    expect(mockCustomerOnAutopay).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }), expect.objectContaining({ failClosed: true, db: expect.any(Function) }));
+  });
+
   it('an unfinished or already-retired intent has nothing to retire — the ordinary mint/replay is returned', async () => {
     mockRetrieveSetupIntent.mockImplementation(async (id) => (id === 'seti_old' ? { ...SAVED, status: 'requires_payment_method', payment_method: null } : null));
     const res = await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' });

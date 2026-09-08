@@ -630,7 +630,11 @@ async function standaloneLinkStillOpen(request, { database = db } = {}) {
   if (await payerExemption(request.customer_id)) return { ok: false, code: 'no_longer_needed' };
   if (!billingLaneSupported(customer)) return { ok: false, code: 'no_longer_needed' };
   const { customerOnAutopay } = require('./autopay-eligibility');
-  if (await customerOnAutopay(customer)) {
+  // failClosed (GH Codex #4163 r2 P0): by default an unreadable
+  // payment_methods state reads as "not on Auto Pay", which here would mint
+  // and retire for a customer who may already be enrolled. Let the read
+  // failure propagate — the caller answers retryable and retires nothing.
+  if (await customerOnAutopay(customer, { failClosed: true, db: database })) {
     await database('appointment_card_requests')
       .where({ id: request.id, status: 'pending' })
       .update({ status: 'expired', completed_at: new Date(), updated_at: new Date() });
