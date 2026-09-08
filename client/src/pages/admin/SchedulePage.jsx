@@ -14050,7 +14050,10 @@ export function CompletionPanel({
   function removeProduct(productId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
-    if (lawnDefaultsEnabled) setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    // A governed row restored while the plan request failed is still a plan
+    // default: its removal must survive a successful retry (pre-push audit).
+    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
+    if (governed) setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
@@ -14064,8 +14067,13 @@ export function CompletionPanel({
       prev.map((p) => {
         if (p.productId !== productId) return p;
         const next = { ...p, [field]: value };
-        if (lawnDefaultsEnabled && ["areaValue", "applicationMethod", "applicationArea"].includes(field)) next.lawnAreaDefault = false;
-        if (lawnDefaultsEnabled) {
+        // Provenance is per row: a governed row restored while the initial
+        // plan request failed (`lawnDefaultsEnabled` false, no defaults
+        // loaded) still records which fields the tech edited, or a successful
+        // retry would overwrite them in reconciliation (pre-push audit P1).
+        const governed = lawnDefaultsEnabled || !!p.lawnPlanDefaults;
+        if (governed && ["areaValue", "applicationMethod", "applicationArea"].includes(field)) next.lawnAreaDefault = false;
+        if (governed) {
           next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
@@ -14088,7 +14096,7 @@ export function CompletionPanel({
             ) {
               next.areaValue = Number(tracedLinearFt);
             }
-          } else if (lawnDefaultsEnabled && value === "spot_treatment") {
+          } else if (governed && value === "spot_treatment") {
             next.areaUnit = "sqft";
             next.areaValue = "";
           } else {
@@ -14099,7 +14107,7 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, serviceTypeForArea),
             serviceTypeForArea,
-            lawnDefaultsEnabled,
+            governed,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -14112,7 +14120,7 @@ export function CompletionPanel({
         // in the rate's unit, so a rate-unit change moves the total unit too.
         if (field === "totalAmount") {
           next.totalAmountManual = true;
-        } else if (lawnDefaultsEnabled && field === "amountUnit") {
+        } else if (governed && field === "amountUnit") {
           // A still-derived total is the plan's quantity in the plan's unit:
           // a unit change alone withdraws it (never keeps the number under
           // the new unit, never converts) until the tech enters the actual.
@@ -14136,13 +14144,13 @@ export function CompletionPanel({
             if (perBasis) next.totalAmount = "";
           }
         }
-        if (lawnDefaultsEnabled && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
+        if (governed && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
           // Selecting zones alone does not measure a partial application.
           next.areaValue = "";
           if (!next.totalAmountManual) next.totalAmount = "";
           next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "areaValue"])];
         }
-        if (lawnDefaultsEnabled && field === "applicationMethod") {
+        if (governed && field === "applicationMethod") {
           if (!next.totalAmountManual) next.totalAmount = "";
           if (p.lawnPlanDefaults && !p.lawnPlanManualFields?.includes("rate")) {
             next.rate = "";

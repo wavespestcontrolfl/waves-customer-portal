@@ -527,3 +527,28 @@ it('a governed draft restored on a tierless visit whose plan failed at open stil
   expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
   expect(screen.queryByRole('button', { name: /complete & send recap/i })).toBeNull();
 });
+
+it('edits and removals on a governed draft restored under an initial plan outage survive a successful retry', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[0], { target: { value: '9' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts[0].totalAmount).toBe('9'));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
+  // Defaults never loaded, but the rows are governed: a measured area and a
+  // removal recorded now must not be undone by the retry (pre-push audit P1).
+  fireEvent.change(screen.getAllByPlaceholderText('Sq ft')[1], { target: { value: '1000' } });
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  failPlan = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry plan' }));
+  await waitFor(() => expect(screen.queryByText('Lawn plan unavailable.')).toBeNull());
+  await waitFor(() => expect(screen.queryByText('Updating plan suggestions…')).toBeNull());
+  expect(totals()).toHaveLength(1);
+  expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('1000');
+});
