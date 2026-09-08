@@ -342,7 +342,16 @@ function decisionLine(seq, sequencesEnabled) {
   // A cadence enrolled before the decision column existed has no decision
   // until its next runner update; its next_run_at is a planned send.
   const planned = !!d.plannedAt || !d.reason;
-  return [whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null, label, owner].filter(Boolean).join(" · ");
+  return [whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null, label, capturedRequestText(seq, d), owner].filter(Boolean).join(" · ");
+}
+// A "Customer asked for the link" captured against a cadence that was already
+// running keeps that cadence's own decision (its schedule is unchanged), so
+// the capture is shown beside it — who and when (codex #4140 r8).
+function capturedRequestText(seq, decision) {
+  const c = seq.customerRequested;
+  if (!c || decision.reason === "customer_requested") return null;
+  const at = c.at ? new Date(c.at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
+  return ["Customer asked for the link", c.byName ? `captured by ${c.byName}` : null, at].filter(Boolean).join(" ");
 }
 
 function fmtDate(d) {

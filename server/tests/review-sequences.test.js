@@ -887,10 +887,31 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
         ],
       });
       db.mockImplementation(mock);
+      // Pinned before the row's schedule: the tick is computed from the row.
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T20:00:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['t-1', 't-2']);
+        expect(map['t-1'].nextSendTickAt.toISOString()).toBe('2026-05-26T20:44:00.000Z');
+        expect(map['t-2']).toMatchObject({ nextSendTickAt: null, sending: true });
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
 
-      const map = await ReviewService.getActiveSequencesForCustomers(['t-1', 't-2']);
-      expect(map['t-1'].nextSendTickAt.toISOString()).toBe('2026-05-26T20:44:00.000Z');
-      expect(map['t-2']).toMatchObject({ nextSendTickAt: null, sending: true });
+    test('an overdue row (missed tick, gate re-enabled between ticks) shows the next tick from now, never one already past (codex #4140 r8)', async () => {
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-t3', customer_id: 't-3', status: 'active', current_step: 0, plan: '[{"day":0}]', next_run_at: new Date('2026-05-26T20:30:00Z') },
+        ],
+      });
+      db.mockImplementation(mock);
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T22:50:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['t-3']);
+        expect(map['t-3'].nextSendTickAt.toISOString()).toBe('2026-05-26T23:14:00.000Z');
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
   });
 

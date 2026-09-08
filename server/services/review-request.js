@@ -440,6 +440,10 @@ function parseDecision(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
+// Service types whose Day-0 ask waits for the customer to see the result
+// (calculateReviewSendPlan): same afternoon before 3 PM, else next morning.
+const RESULTS_FIRST_SERVICE_WORDS = ["mosquito", "waveguard", "lawn", "turf", "tree", "shrub", "dethatch"];
+
 /**
  * Smart review send-time calculator.
  * Instead of a flat 90-180 min delay, pick the moment the customer is most
@@ -513,22 +517,12 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 
   // ── Service-type overrides ──────────────────────────────────
 
-  // Mosquito / WaveGuard: delay until evening when they're outside enjoying the yard
-  if (svc.includes("mosquito") || svc.includes("waveguard")) {
+  // Mosquito / WaveGuard: delay until evening when they're outside enjoying
+  // the yard. Lawn care / tree & shrub: let them see the results first. Same
+  // rule for both: this afternoon before 3 PM, otherwise next morning.
+  if (RESULTS_FIRST_SERVICE_WORDS.some((w) => svc.includes(w))) {
     if (hour < 15) return atHour(completedAt, LATE_AFTERNOON);
     return nextDayAtHour(completedAt, MORNING);
-  }
-
-  // Lawn care / tree & shrub: let them see the results first
-  if (
-    svc.includes("lawn") ||
-    svc.includes("turf") ||
-    svc.includes("tree") ||
-    svc.includes("shrub") ||
-    svc.includes("dethatch")
-  ) {
-    if (hour < 15) return atHour(completedAt, LATE_AFTERNOON); // same afternoon
-    return nextDayAtHour(completedAt, MORNING); // next morning
   }
 
   // WDO / first-time inspections: high anxiety → high relief, capture it fast
@@ -553,8 +547,7 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 
   if (hour >= 7 && hour < 12) return normalizeReviewSendWindow(addMins(completedAt, 120)); // morning: 2-hour delay
   if (hour >= 12 && hour < 15) return normalizeReviewSendWindow(addMins(completedAt, 90)); // early afternoon: 90 min
-  if (hour >= 15 && hour < 17) return nextDayAtHour(completedAt, MORNING); // late afternoon: next morning
-  // After 5 PM or before 7 AM — next morning 10 AM
+  // 3 PM onward, or before 7 AM — next morning 10 AM
   return nextDayAtHour(completedAt, MORNING);
   })();
 
@@ -4723,7 +4716,14 @@ const ReviewService = {
         await db("review_sequences").where({ id: row.id }).del();
         continue;
       }
-      let result = null;
+      // startReviewSequence always returns an outcome object (every path
+      // above returns { started, reason }); a throw is the catch below.
+      let result;
+      // The parked row's own enrollment reason (opener_in_flight carries the
+      // final's reason) becomes the redeemed sequence's decision; the park
+      // time is its planned/next-eval instant (codex #4140 r5).
+      const parkedReason = parseDecision(row.decision)?.enrollmentReason || null;
+      const parkedAtISO = row.started_at || new Date();
       try {
         result = await this.startReviewSequence({
           customerId: row.customer_id,
@@ -4737,13 +4737,7 @@ const ReviewService = {
           firstTouchAt: row.started_at ? new Date(row.started_at) : null,
           seriesFinal: row.series_final === true,
           customerRequested: parseDecision(row.customer_requested),
-          decision: parseDecision(row.decision)?.enrollmentReason
-            ? sequenceDecision({
-              reason: parseDecision(row.decision).enrollmentReason,
-              plannedAt: row.started_at || new Date(),
-              nextEvalAt: row.started_at || new Date(),
-            })
-            : null,
+          decision: parkedReason ? sequenceDecision({ reason: parkedReason, plannedAt: parkedAtISO, nextEvalAt: parkedAtISO }) : null,
         });
       } catch (err) {
         logger.error(`[review] deferred enrollment redeem failed (customerId=${row.customer_id} errType=${err?.name || "Error"})`);
@@ -4754,19 +4748,19 @@ const ReviewService = {
           .catch(() => {});
         continue;
       }
-      if (result?.started) {
+      if (result.started) {
         redeemed += 1;
         await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
         continue;
       }
-      if (result?.reason === "already_active") {
+      if (result.reason === "already_active") {
         // Opener still active — release with backoff.
         await db("review_sequences")
           .where({ id: row.id, status: "redeeming" })
           .update({ status: "deferred", next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
         continue;
       }
-      if (result?.reason === "deferred_inflight") {
+      if (result.reason === "deferred_inflight") {
         // startReviewSequence may have seen THIS claimed row as the
         // existing park and inserted nothing (codex #3243 r24 P2) — only
         // drop it when a DISTINCT replacement actually exists; otherwise
@@ -5311,8 +5305,10 @@ const ReviewService = {
         totalSteps: plan.length,
         nextRunAt: r.next_run_at,
         // The worker tick that will actually pick the row up (null while the
-        // runner holds the claim).
-        nextSendTickAt: r.next_run_at ? nextCadenceTickAt(r.next_run_at) : null,
+        // runner holds the claim). An overdue row (missed tick, gate re-enabled
+        // between ticks) is picked up at the next tick from NOW, not at a tick
+        // that has already passed (codex #4140 r8).
+        nextSendTickAt: r.next_run_at ? nextCadenceTickAt(new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon

@@ -337,9 +337,8 @@ function normalizeReviewTiming(value) {
 // What the chosen timing means, from the server preview (never a client
 // approximation of the smart window).
 function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
-  const fmt = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
   if (reviewTiming === "auto") {
-    return preview?.at ? `Review text goes out separately, about ${fmt(preview.at)}.` : "Review text goes out separately at the smart send window.";
+    return preview?.at ? `Review text goes out separately, about ${fmtReviewTime(preview.at)}.` : "Review text goes out separately at the smart send window.";
   }
   if (reviewTiming === "customer_requested") {
     // `bundled` is the panel's own bundling condition (legacy path, completion
@@ -353,43 +352,56 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
   if (reviewTiming === "tomorrow_8") {
     // In cadence mode 8:00 is the eligibility time; the worker's first tick
     // after it is 8:14 (codex #4140 r6).
-    const eightISO = etDatetimeLocalToISO(`${etDateString(addETDays(new Date(), 1))}T08:00`);
-    const tick = preview?.reviewSequencesEnabled && eightISO ? nextCadenceTickISO(eightISO, preview.cadenceTickMinutesOfHour, { after: true }) : null;
-    return tick ? `Review text goes out separately tomorrow at the first cadence tick after 8:00 AM — about ${fmt(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
+    const tick = windowOpenTickISO(addETDays(new Date(), 1), preview, { after: true });
+    return tick ? `Review text goes out separately tomorrow at the first cadence tick after 8:00 AM — about ${fmtReviewTime(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
   }
-  if (reviewTiming === "custom") {
-    // The datetime-local value is an ET wall clock (the server parses it with
-    // parseETDateTime) — never `new Date(value)`, which reads it in the
-    // browser's zone (codex #4140 r1).
-    const iso = etDatetimeLocalToISO(reviewCustomAt);
-    if (!iso) return "Choose a time for the review text.";
-    // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
-    // outside it is held to the next window (codex #4140 r3) — but only
-    // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
-    // checkSendWindow passes everything, so the copy must not promise a
-    // hold it will not get (codex #4140 r4 P2). The preview says which.
-    const { hour } = etParts(new Date(iso));
-    if ((hour < 8 || hour >= 20) && preview?.smsSendWindowEnabled === true) {
-      // The window opens at 8:00; in cadence mode the worker's first tick
-      // after that is 8:14 (codex #4140 r7).
-      const openISO = etDatetimeLocalToISO(`${etDateString(addETDays(new Date(iso), hour >= 20 ? 1 : 0))}T08:00`);
-      const openTick = preview?.reviewSequencesEnabled && openISO ? nextCadenceTickISO(openISO, preview.cadenceTickMinutesOfHour) : null;
-      return openTick
-        ? `Review text is held for the 8 AM–8 PM window — it goes out at the first cadence tick after 8 AM following ${fmt(iso)}, about ${fmt(openTick)}.`
-        : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmt(iso)}.`;
-    }
-    // In cadence mode the custom time is when the row becomes ELIGIBLE; the
-    // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
-    // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
-    // `after: true`: the server turns the chosen time into a whole-minute delay
-    // and rebuilds the eligibility instant from a later Date.now(), so the row
-    // becomes eligible just AFTER the chosen minute — a time typed exactly on
-    // :14 goes out at :44 (codex #4140 r6).
-    const tick = preview?.reviewSequencesEnabled ? nextCadenceTickISO(iso, preview.cadenceTickMinutesOfHour, { after: true }) : null;
-    if (tick && tick !== iso) return `Review text goes out separately at the next cadence tick after ${fmt(iso)} — about ${fmt(tick)}.`;
-    return `Review text goes out separately ${fmt(iso)}.`;
-  }
+  if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
   return "";
+}
+const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
+// The first cadence tick after the 8 AM send window opens on `day` (an ET
+// date); null with cadences off or when the server did not name the ticks.
+function windowOpenTickISO(day, preview, opts) {
+  const openISO = etDatetimeLocalToISO(`${etDateString(day)}T08:00`);
+  return preview?.reviewSequencesEnabled && openISO ? nextCadenceTickISO(openISO, preview.cadenceTickMinutesOfHour, opts) : null;
+}
+// The custom-time mode: the one whose hint parses operator input and has to
+// reconcile it with the send window and the worker's ticks.
+function customReviewTimingHint(reviewCustomAt, preview) {
+  // The datetime-local value is an ET wall clock (the server parses it with
+  // parseETDateTime) — never `new Date(value)`, which reads it in the
+  // browser's zone (codex #4140 r1).
+  const iso = etDatetimeLocalToISO(reviewCustomAt);
+  if (!iso) return "Choose a time for the review text.";
+  // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
+  // outside it is held to the next window (codex #4140 r3) — but only
+  // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
+  // checkSendWindow passes everything, so the copy must not promise a
+  // hold it will not get (codex #4140 r4 P2). The preview says which.
+  const windowOn = preview?.smsSendWindowEnabled === true;
+  const { hour } = etParts(new Date(iso));
+  // In cadence mode the custom time is when the row becomes ELIGIBLE; the
+  // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
+  // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
+  // `after: true`: the server turns the chosen time into a whole-minute delay
+  // and rebuilds the eligibility instant from a later Date.now(), so the row
+  // becomes eligible just AFTER the chosen minute — a time typed exactly on
+  // :14 goes out at :44 (codex #4140 r6).
+  const tick = preview?.reviewSequencesEnabled ? nextCadenceTickISO(iso, preview.cadenceTickMinutesOfHour, { after: true }) : null;
+  // The window is checked on the TICK when there is one: 7:50 PM is inside
+  // the window but its 8:14 PM tick is not, and the validator holds that
+  // send to the next morning (codex #4140 r8). 8:00 PM is exclusive.
+  const sendHour = tick ? etParts(new Date(tick)).hour : hour;
+  if (windowOn && (sendHour < 8 || sendHour >= 20)) {
+    // The window opens at 8:00; in cadence mode the worker's first tick
+    // after that is 8:14 (codex #4140 r7).
+    const openTick = windowOpenTickISO(addETDays(new Date(iso), sendHour >= 20 ? 1 : 0), preview);
+    return openTick
+      ? `Review text is held for the 8 AM–8 PM window — it goes out at the first cadence tick after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
+      : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmtReviewTime(iso)}.`;
+  }
+  if (tick && tick !== iso) return `Review text goes out separately at the next cadence tick after ${fmtReviewTime(iso)} — about ${fmtReviewTime(tick)}.`;
+  return `Review text goes out separately ${fmtReviewTime(iso)}.`;
 }
 
 // The first worker tick on or after `iso` (ticks are minutes of the hour; every
@@ -410,14 +422,9 @@ function nextCadenceTickISO(iso, tickMinutes, { after = false } = {}) {
   return t.toISOString();
 }
 
-// The key two "Automatic" previews are compared by: the server's `bucket`
-// (the rule behind the time), or the minute of `at` from a server that
-// predates it.
-function reviewPreviewBucket(preview) {
-  if (!preview) return null;
-  if (preview.bucket) return preview.bucket;
-  return typeof preview.at === "string" ? preview.at.slice(0, 16) : null;
-}
+// The key two "Automatic" previews are compared by: the server's `bucket`,
+// the rule behind the time (a relative answer's instant moves every request).
+const reviewPreviewBucket = (preview) => preview?.bucket ?? null;
 
 const CUSTOMER_INTERACTION_ALIASES = {
   spoke: "tech_home_spoke_with_them",

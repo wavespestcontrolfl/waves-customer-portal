@@ -130,10 +130,9 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // Runtime state (a recap already texted on a resumed completion)
       // can only be known at dispatch and is not claimed here (r4 P2).
       bundlesImmediateAsk: !reviewSequencesEnabled && serviceReportV1Delivery === false,
-      // processReviewSequences runs at :14 and :44 — an immediate ask waits for
-      // the next tick, up to 30 minutes. The offsets let the panel say when a
-      // custom time actually goes out (codex #4140 r5 P2).
-      cadenceTickMinutes: 30,
+      // processReviewSequences runs on fixed minutes of the hour (:14/:44);
+      // the panel uses them to say when a custom time actually goes out
+      // (codex #4140 r5 P2).
       cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
     });
   } catch (err) {
