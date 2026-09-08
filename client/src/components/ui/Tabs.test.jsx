@@ -26,6 +26,36 @@ function Harness({ withPanels = true, initial = 'a' }) {
 }
 
 describe('ui/Tabs', () => {
+  it('retains an opted-in draft while hidden, and discards it when the record changes', () => {
+    function Draft() {
+      const [draft, setDraft] = useState('');
+      return <input aria-label="Visit notes" value={draft} onChange={(event) => setDraft(event.target.value)} />;
+    }
+    function Record({ customer, canBill = true }) {
+      const [value, setValue] = useState('notes');
+      return <Tabs key={customer} value={value} onValueChange={setValue}>
+        <TabList><Tab value="notes">Notes</Tab>{canBill && <Tab value="billing">Billing</Tab>}</TabList>
+        <TabPanel value="notes" keepMounted className="flex" style={{ display: 'flex' }}><Draft /></TabPanel>
+        {canBill && <TabPanel value="billing" keepMounted><input aria-label="Billing draft" /></TabPanel>}
+      </Tabs>;
+    }
+    const { rerender } = render(<Record customer="first" />);
+    const notes = screen.getByRole('textbox', { name: 'Visit notes' });
+    fireEvent.change(notes, { target: { value: 'Draft for the first customer' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'Billing' }));
+    const hiddenPanel = notes.closest('[role="tabpanel"]');
+    expect(hiddenPanel).toHaveAttribute('hidden');
+    expect(hiddenPanel).toHaveAttribute('inert');
+    expect(hiddenPanel).toHaveStyle({ display: 'none' });
+    expect(screen.queryByRole('textbox', { name: 'Visit notes' })).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'Notes' }));
+    expect(screen.getByRole('textbox', { name: 'Visit notes' })).toHaveValue('Draft for the first customer');
+    expect(hiddenPanel).not.toHaveAttribute('inert');
+    rerender(<Record customer="second" canBill={false} />);
+    expect(screen.getByRole('textbox', { name: 'Visit notes' })).toHaveValue('');
+    expect(screen.queryByLabelText('Billing draft')).toBeNull();
+  });
+
   it('wires aria-controls / aria-labelledby only for tabs that have a panel, without re-render loops', () => {
     render(<Harness />);
     const alpha = screen.getByRole('tab', { name: 'Alpha' });

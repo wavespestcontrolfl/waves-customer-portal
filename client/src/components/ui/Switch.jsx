@@ -34,7 +34,7 @@ export const Switch = forwardRef(function Switch(
   );
   if (!label) return toggle;
   return (
-    <label htmlFor={id} className="inline-flex items-center gap-2 cursor-pointer text-13 text-zinc-900">
+    <label htmlFor={id} className="ui-choice-label inline-flex items-center gap-2 cursor-pointer text-ui-body text-zinc-900">
       {toggle}
       <span>{label}</span>
     </label>
