@@ -416,6 +416,9 @@ async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId)
     template_id: bouncedMessage.template_id || null,
     template_version_id: bouncedMessage.template_version_id || null,
     template_key: bouncedMessage.template_key || null,
+    // The recovery send is the same event delivered to the corrected address:
+    // aggregates keyed on the trigger (the visit summary effect) settle from it.
+    trigger_event_id: bouncedMessage.trigger_event_id || null,
     suppression_group_key_snapshot: bouncedMessage.suppression_group_key_snapshot || '',
     recipient_type: bouncedMessage.recipient_type || null,
     recipient_id: bouncedMessage.recipient_id || null,

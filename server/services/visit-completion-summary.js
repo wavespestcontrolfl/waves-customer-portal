@@ -137,8 +137,7 @@ async function recheckDeferredSummarySms(meta, database = db) {
   // no send occurred. Its durable scheduler stamp allows exactly that
   // handoff to be retried; an ambiguous timeout carries no status and stays
   // on office review.
-  const refusedAt = [408, 429].includes(Number(meta.provider_retry_http_status)) || Number(meta.provider_retry_http_status) >= 500
-    ? meta.provider_retry_at : null;
+  const refusedAt = providerRefused({ providerHttpStatus: meta.provider_retry_http_status }) ? meta.provider_retry_at : null;
   const provenUnsentAt = [meta.quiet_hours_hold_at, refusedAt].filter(Boolean)
     .find((at) => new Date(at) >= new Date(effect?.claimed_at || 0));
   if (effect?.status === 'unknown_delivery' && provenUnsentAt) {
@@ -187,6 +186,13 @@ async function terminalDeferredSummarySms(meta) {
   if (!result.ok) throw new Error('Visit summary terminal state could not be saved');
 }
 
+// 408 / 429 / 5xx from the provider: no message was created. Anything else
+// after a handoff (a timeout, an unclassified error) is ambiguous.
+function providerRefused(result) {
+  const status = Number(result?.providerHttpStatus);
+  return [408, 429].includes(status) || status >= 500;
+}
+
 async function sendSummarySms({ visit, member, customer, summaryUrl, requested }) {
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
   if (claim?.state !== 'owner') return;
@@ -225,7 +231,9 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
     }
     // Once handed to a non-idempotent provider, an ambiguous result stays
     // unknown for office reconciliation. Never reclaim it after a timeout.
-    if (!result.sent && !result.blocked && dispatched) {
+    // A refusal the provider reported (408 / 429 / 5xx) created no message,
+    // so it is the retryable failure the recovery sweep exists for.
+    if (!result.sent && !result.blocked && dispatched && !providerRefused(result)) {
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'unknown_delivery', new Date(), claim.token);
       return;
     }
@@ -248,10 +256,17 @@ function summaryEmailState(message) {
   return 'unknown_delivery';
 }
 
+// The customer's Email Messages kill switch and the Service Complete Report
+// toggle both apply; the SMS leg honors the latter through the sender policy.
+function summaryEmailRecipients(customer, prefs) {
+  if (prefs?.email_enabled === false || prefs?.service_completed === false) return [];
+  return getServiceReportEmailRecipients(customer, prefs);
+}
+
 async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, visible, database }) {
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
   if (claim?.state !== 'owner') return;
-  const recipients = visible ? getServiceReportEmailRecipients(customer, prefs) : [];
+  const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
   try {
     const messages = await database('email_messages').where({
       trigger_event_id: `visit_summary:${visit.id}`, template_key: 'service.visit_summary', recipient_id: customer.id,
@@ -282,7 +297,7 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
               dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_email',
                 token: claim.token, authorized: async (current, trx) => {
                   const currentPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first() || {};
-                  return getServiceReportEmailRecipients(current, currentPrefs)
+                  return summaryEmailRecipients(current, currentPrefs)
                     .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase());
                 } });
               return dispatched;
@@ -293,7 +308,10 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
         if (result.blocked) continue;
         unknown ||= dispatched;
         pending ||= !dispatched;
-      } catch {
+      } catch (err) {
+        // An administrator archived the template: a deliberate decision, not
+        // a transient failure — the leg is suppressed rather than retried.
+        if (err?.code === 'EMAIL_TEMPLATE_DISABLED') continue;
         if (dispatched) unknown = true;
         else pending = true;
       }
