@@ -2347,7 +2347,7 @@ describe('completion route wiring (source contracts)', () => {
     // so the two later corrections still own the final posture. (Anchor on
     // the downgrade guard: it exists only inside the resume block.)
     const restoreAt = source.indexOf('if (!frozenResume.isBackfillCompletion) {');
-    const frozenDeliveryAt = source.indexOf('const frozenDelivery = parseJsonObject(record.structured_notes)?.typedReportDelivery;');
+    const frozenDeliveryAt = source.indexOf('const frozenDelivery = frozenNotes.typedReportDelivery');
     expect(restoreAt).toBeGreaterThan(-1);
     expect(frozenDeliveryAt).toBeGreaterThan(restoreAt);
   });

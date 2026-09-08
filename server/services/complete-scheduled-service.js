@@ -3177,7 +3177,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // customer-report findings / Pest Pressure pipeline, and its suppression
     // posture is frozen on the record so resumed side effects and downstream
     // customer-facing gates (documents, paid-invoice review) honor it.
-    const isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
+    // let, not const: rehydrated from the record's frozen decision on resume
+    // (see the re-derivation before token mint).
+    let isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
@@ -4997,6 +4999,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // history, crash-resume re-derivation) read the absent field as
             // auto_send and can mint/send anyway (codex P1 r4).
             ...((typedFindingsType || isInternalOnlyCompletion || typedDeliveryMode !== 'auto_send') ? { typedReportDelivery: typedDeliveryMode } : {}),
+            // The internal-only decision is frozen in BOTH directions (codex
+            // #4058 r4 P1): 'disabled' above is ambiguous (a consultation or a
+            // killed profile), and a routine completion persists no posture
+            // at all — so a profile that cuts over to or from
+            // completion_mode='internal_only' between a packet's records
+            // commit and its effects replay could otherwise skip the yard-sign
+            // kit deduction for a treatment or deduct it for a consultation.
+            internalOnlyCompletion: isInternalOnlyCompletion,
             // Companion delivery postures frozen alongside (same rule):
             // graduation flips on the profile never retro-publish stored
             // companion sections.
@@ -6634,6 +6644,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
+    // A packet's records phase made every photo durable before its commit
+    // and froze the counts on the record; the saved form the effects phase
+    // replays carries no bytes, so re-uploading would fail every photo,
+    // overwrite those counts and strip the typed photo summary.
+    if (packetEffects && Array.isArray(completionPhotos) && completionPhotos.length) {
+      completionPhotosUploadedBeforeCommit = true;
+      completionPhotoUploadResult = parseJsonObject(record.structured_notes)?.completionPhotos || null;
+    }
     if (!completionPhotosUploadedBeforeCommit && Array.isArray(completionPhotos) && completionPhotos.length) {
       completionPhotoUploadResult = await uploadServicePhotoDataUrls({
         serviceRecordId: record.id,
@@ -7142,7 +7160,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Only operate on photos that ACTUALLY uploaded — the assessment must never
       // reference an image the report can't show, and scores must reflect the photos
       // it displays. submitted = photos with data; scorable = those with an S3 row.
-      const submitted = completionPhotos.filter((p) => p && p.data);
+      // A packet's effects phase replays the saved form, which strips photo
+      // bytes (#4011's upload rule) — the committed 'after' rows are then the
+      // submitted set and the vision input loads from S3 by key. A signed
+      // preview review cannot be re-verified without the bytes, so that
+      // replay re-scores the durable set instead of skipping the assessment.
+      const durableReplay = packetEffects && completionPhotos.every((p) => !(p && p.data));
+      const submitted = completionPhotos.filter((p) => p && (p.data || durableReplay));
       const scorable = submitted
         .map((p, i) => ({ p, row: rowFor(p, i) }))
         .filter((x) => x.row);
@@ -7159,7 +7183,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // same count, or edited the observation copy) can't forge the HMAC, so it falls
       // back to re-scoring rather than persisting arbitrary client-supplied content.
       const reviewPhotosHash = treeShrubPhotosHash(submitted.map((p) => p.data));
-      const reviewSigned = review && review.signature
+      const reviewSigned = !durableReplay && review && review.signature
         && review.signature === treeShrubReviewSignature(review.scores, review.scoredCount, svc.id, reviewPhotosHash, review.observations);
       let scoringPromise = null;
       if (review && review.scores && typeof review.scores === 'object' && allUploaded && previewCoveredAll && reviewSigned) {
@@ -7184,9 +7208,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const runScore = () => scoreAndStoreTreeShrubAssessment({
             service: assessService,
             photos: scorePhotos,
-            loadImage: (ph) => {
+            loadImage: async (ph) => {
               const m = String(ph.data || '').match(/^data:([^;,]+)?(?:;base64)?,(.*)$/);
-              return m && m[2] ? { base64: m[2], mimeType: m[1] || 'image/jpeg' } : null;
+              if (m && m[2]) return { base64: m[2], mimeType: m[1] || 'image/jpeg' };
+              if (!ph.s3Key) return null;
+              const stored = await require('./photos').getPhotoBase64(ph.s3Key);
+              return { base64: stored.data, mimeType: stored.mimeType || 'image/jpeg' };
             },
           });
           // One bounded background retry when the first attempt stores
@@ -8483,7 +8510,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // consultations — both freeze typedReportDelivery; routine completions
     // never persist it, so frozenDelivery is undefined and nothing changes.
     if (record?.structured_notes) {
-      const frozenDelivery = parseJsonObject(record.structured_notes)?.typedReportDelivery;
+      const frozenNotes = parseJsonObject(record.structured_notes) || {};
+      // The internal-only decision is frozen as a boolean (codex #4058 r4
+      // P1). A stamped record without typedReportDelivery is an untyped
+      // auto_send completion — every other posture freezes above — so the
+      // stamp also restores auto_send when the live profile has since cut
+      // over to internal_only. Pre-stamp records keep the live derivation.
+      const frozenInternalOnly = typeof frozenNotes.internalOnlyCompletion === 'boolean'
+        ? frozenNotes.internalOnlyCompletion : null;
+      if (frozenInternalOnly !== null) isInternalOnlyCompletion = frozenInternalOnly;
+      const frozenDelivery = frozenNotes.typedReportDelivery
+        || (frozenInternalOnly !== null ? 'auto_send' : undefined);
       if (frozenDelivery && frozenDelivery !== typedDeliveryMode) {
         typedDeliveryMode = frozenDelivery;
         suppressTypedCustomerComms = typedDeliveryMode !== 'auto_send';

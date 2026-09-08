@@ -30,6 +30,10 @@ jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(a
   beforeDispatch && (await beforeDispatch()) === false ? { subscriptions: 1, sent: 0, superseded: true } : { sent: 1 })) }));
 jest.mock('../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })) }));
 jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => {}) }));
+jest.mock('../services/tree-shrub-assessment', () => ({
+  ...jest.requireActual('../services/tree-shrub-assessment'),
+  scoreAndStoreTreeShrubAssessment: jest.fn(async () => null),
+}));
 jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
 
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
@@ -515,6 +519,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .every((item) => item.status === 'done')).toBe(true);
     expect(await mockPg('service_photos').whereIn('service_record_id', saved.body.items.map((item) => item.serviceRecordId)))
       .toHaveLength(2);
+    // The replay never re-uploads the byte-less form; the pre-commit counts stay frozen.
+    const records = await mockPg('service_records').whereIn('id', saved.body.items.map((item) => item.serviceRecordId));
+    expect(records.map((record) => record.structured_notes.completionPhotos)).toEqual([
+      expect.objectContaining({ uploaded: 1, failed: 0 }), expect.objectContaining({ uploaded: 1, failed: 0 }),
+    ]);
   });
 
   test('an interrupted first effects claim still writes its operational activity', async () => {
@@ -624,6 +633,86 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((await completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
       body: submission().items[0].body, actor: { techRole: 'technician', technicianId: fixture.techId } })).body.code)
       .toBe('project_required_completion');
+  });
+
+  test.each([
+    ['a treatment whose profile cuts over to internal_only', false],
+    ['a consultation whose profile cuts back to a treatment', true],
+  ])('%s replays its effects from the frozen internal-only decision', async (_label, frozenInternalOnly) => {
+    const profile = { service_key: `fixture_${fixture.catalogId}`,
+      service_name_snapshot: 'Fixture General Pest Control', completion_mode: 'internal_only', active: true };
+    if (frozenInternalOnly) await mockPg('service_completion_profiles').insert(profile);
+    const saved = await saveVisitCompletionPacket(submission());
+    const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => record.structured_notes.internalOnlyCompletion === frozenInternalOnly)).toBe(true);
+    if (frozenInternalOnly) await mockPg('service_completion_profiles').where({ service_key: profile.service_key }).del();
+    else await mockPg('service_completion_profiles').insert(profile);
+    const supplies = jest.spyOn(require('../services/supplies-consumption'), 'consumeCompletionSupplies').mockResolvedValue(undefined);
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(supplies).toHaveBeenCalledTimes(2);
+    expect(supplies.mock.calls.every(([, args]) => args.isInternalOnlyCompletion === frozenInternalOnly)).toBe(true);
+  });
+
+  test('a member another runner finished first is accepted instead of failing the packet', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const completion = require('../services/complete-scheduled-service');
+    const real = completion.completeScheduledService;
+    let raced = false;
+    jest.spyOn(completion, 'completeScheduledService').mockImplementation(async (input, context) => {
+      if (!raced && context?.phase === 'effects') {
+        raced = true;
+        // The sweep read this item as processing; a Resume tap finished it first.
+        await mockPg('visit_completion_packet_items').where({ id: context.itemId })
+          .update({ status: 'done', completed_at: mockPg.fn.now() });
+      }
+      return real(input, context);
+    });
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(raced).toBe(true);
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done')).toBe(true);
+  });
+
+  test('a Tree & Shrub member scores its assessment from the durable photos on replay', async () => {
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'Tree & Shrub Care' });
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const input = submission();
+    for (const item of input.items) {
+      item.body.completionPhotos = [
+        { data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'one.png', caption: 'Front bed' },
+        { data: 'data:image/png;base64,c2Vjb25k', name: 'two.png', caption: 'Palms' },
+      ];
+      item.body.treeShrubCompletion = { ordinanceZone: 'sarasota_venice', bedSqft: 2400, palmCount: 3, palmRootZoneSqft: 600,
+        plantInventory: 'Palms, ixora, hibiscus', pollinatorStatus: 'no_blooms_or_no_bees', targetPestOrDisease: 'Scale crawlers',
+        pestLifeStage: 'crawler', iracFracLogged: true, snapshotAppliedYtd: 2, fertilizerAppliedYtd: 'January palm fert',
+        customerNote: 'Beds treated and palms inspected.' };
+    }
+    const score = require('../services/tree-shrub-assessment').scoreAndStoreTreeShrubAssessment;
+    score.mockReset().mockResolvedValue({ id: randomUUID() });
+    const stored = jest.spyOn(require('../services/photos'), 'getPhotoBase64').mockResolvedValue({ data: 'Zml4dHVyZQ==', mimeType: 'image/png' });
+    let saved;
+    try {
+      saved = await saveVisitCompletionPacket(input);
+      expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+      expect(score).not.toHaveBeenCalled();
+      expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    } finally {
+      config.s3.bucket = priorBucket;
+    }
+    expect(score).toHaveBeenCalledTimes(2);
+    for (const [call] of score.mock.calls) {
+      expect(call.photos.map((photo) => photo.caption)).toEqual(['Front bed', 'Palms']);
+      expect(call.photos.every((photo) => photo.s3Key && !photo.data)).toBe(true);
+      expect(await call.loadImage(call.photos[0])).toEqual({ base64: 'Zml4dHVyZQ==', mimeType: 'image/png' });
+    }
+    expect(stored).toHaveBeenCalledWith(score.mock.calls[0][0].photos[0].s3Key);
   });
 
   test('a push subscription lookup outage keeps the member retryable and the push unclaimed', async () => {

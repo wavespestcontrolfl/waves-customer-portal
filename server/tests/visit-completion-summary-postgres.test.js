@@ -176,9 +176,10 @@ postgres('visit summary recipient recovery', () => {
 
   test('revocation between replay validation and the atomic dispatch claim still blocks sending', async () => {
     const queued = await heldSummary();
-    const execute = mockPg.client._query;
+    // The claim runs on a transaction client, which inherits the prototype.
+    const execute = mockPg.client.constructor.prototype._query;
     let revoked = false;
-    jest.spyOn(mockPg.client, '_query').mockImplementation(async function revokeBeforeClaim(connection, query) {
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function revokeBeforeClaim(connection, query) {
       if (!revoked && query.sql.startsWith('update "visit_effects"') && query.bindings.includes('unknown_delivery')) {
         revoked = true;
         await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
@@ -254,10 +255,11 @@ postgres('visit summary recipient recovery', () => {
     jest.spyOn(gates, 'isEnabled').mockImplementation((gate) => gate === 'cronJobs' || isEnabled(gate));
     require('../services/scheduler').initScheduledJobs();
     const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
-    const execute = mockPg.client._query;
+    // The final recheck runs on the claim transaction's client (prototype-inherited).
+    const execute = mockPg.client.constructor.prototype._query;
     let checkingFinal = false;
     let interrupted = false;
-    jest.spyOn(mockPg.client, '_query').mockImplementation(function failFinalRead(connection, query) {
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failFinalRead(connection, query) {
       if (checkingFinal && !interrupted && query.sql.startsWith('select "id" from "service_visits"')) {
         interrupted = true;
         return Promise.reject(new Error('Synthetic final recheck outage'));
@@ -410,6 +412,112 @@ postgres('visit summary recipient recovery', () => {
       .mockRejectedValueOnce(new Error('template temporarily unavailable'));
     expect(await deliver()).toEqual({ state: 'delivery_pending' });
     expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(sendOne).toHaveBeenCalledTimes(2);
+  });
+
+  test('a contact edit cannot slip between the replay recheck and the dispatch claim', async () => {
+    const queued = await heldSummary();
+    const execute = mockPg.client.constructor.prototype._query;
+    let raced = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function editDuringClaim(connection, query) {
+      if (!raced && query.sql.startsWith('update "visit_effects"') && query.bindings.includes('unknown_delivery')) {
+        raced = true;
+        // The customer row is held by the claim transaction: an edit that
+        // would swap the authorized number waits instead of interleaving.
+        await expect(mockPg.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '200ms'");
+          await trx('customers').where({ id: fixture.customerId }).update({ service_contact_phone: '+12025550125' });
+        })).rejects.toMatchObject({ code: '55P03' });
+      }
+      return execute.call(this, connection, query);
+    });
+    const replay = require('../services/messaging/deferred-replay-registry');
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    expect(raced).toBe(true);
+  });
+
+  test('the summary SMS keeps its own message type so no push-routing layer converts the bearer link', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ channel: 'sms', purpose: 'service_completion',
+      metadata: { original_message_type: 'visit_summary' } });
+    const { APP_FIRST_TYPES } = require('../services/messaging/push-channel-routing');
+    expect(APP_FIRST_TYPES.has('visit_summary')).toBe(false);
+  });
+
+  test('an internal-only packet closes without minting a summary link or needing the key', async () => {
+    await mockPg('service_records').whereIn('id', fixture.recordIds)
+      .update({ structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'internal_only' }) });
+    await mockPg('service_visits').where({ id: fixture.visitId })
+      .update({ summary_token_hash: null, summary_token_enc: null, summary_token_issued_at: null });
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    const key = process.env.DATA_HYGIENE_VAULT_KEY;
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({
+        status: 200, body: { state: 'done', delivery: { state: 'delivered' }, summaryUrl: null },
+      });
+    } finally {
+      process.env.DATA_HYGIENE_VAULT_KEY = key;
+    }
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+      .toMatchObject({ status: 'closed', summary_token_hash: null, summary_token_issued_at: null });
+    expect((await mockPg('visit_effects').where({ visit_id: fixture.visitId }).whereIn('effect_type', ['completion_sms', 'completion_email']))
+      .map((effect) => effect.status)).toEqual(['suppressed', 'suppressed']);
+    expect(sendOne).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a bounce on the only accepted summary email reopens delivery for office review, once', async () => {
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    expect(messages).toHaveLength(2);
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    const bounce = (message) => handleEmailMessageEvent({ event: 'bounce', reason: 'mailbox unavailable',
+      timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
+    await bounce(messages[0]);
+    // One recipient still proves an accepted send: delivery stands.
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent' });
+    await bounce(messages[1]);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    const { getCloseoutStatus } = require('../services/closeout-status');
+    expect((await getCloseoutStatus(fixture.serviceIds[0])).facts.reportDelivery).toMatchObject({ state: 'unknown' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
+    // A redelivered bounce cannot raise a second alert.
+    await bounce({ ...messages[1], bounced_at: null });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
+  });
+
+  test('a claim read failure on the immediate SMS keeps the request retryable', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    jest.spyOn(VisitGroups, 'beginVisitNotificationDispatch').mockRejectedValueOnce(new Error('Synthetic claim read outage'));
+    // The canonical sender converts a thrown check into a non-retryable
+    // PRE_DISPATCH_CHECK_FAILED block; only an explicit verdict carries retryable.
+    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
+      let verdict;
+      try { verdict = await preDispatchCheck(); } catch (err) { verdict = { ok: false, code: 'PRE_DISPATCH_CHECK_FAILED', reason: err.message }; }
+      return verdict.ok ? { sent: true } : { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable === true };
+    });
+    expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'failed' });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test('a packet that retained terminal members still publishes its one recorded service', async () => {
+    await mockPg('visit_completion_packet_items').where({ packet_id: fixture.packetId, scheduled_service_id: fixture.serviceIds[1] }).del();
+    await mockPg('service_records').where({ id: fixture.recordIds[1] }).del();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ status: 'cancelled' });
+    const summary = await Summary.getVisitCompletionSummary(fixture.token);
+    expect(summary.services.map((service) => service.id)).toEqual([fixture.recordIds[0]]);
+    expect(await deliver()).toEqual({ state: 'delivered' });
     expect(sendOne).toHaveBeenCalledTimes(2);
   });
 

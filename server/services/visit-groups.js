@@ -1499,11 +1499,11 @@ async function claimVisitNotification(row, kind) {
 // The non-idempotent provider handoff is durable BEFORE sending a summary.
 // SMS ambiguity cannot be reclaimed. Email recovery skips uncertain
 // recipient rows and fences each subsequent handoff with its new token.
-async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey = null, scheduled = false } = {}) {
+async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey = null, scheduled = false, database = db } = {}) {
   const effectType = effectTypeForKind(kind);
   if (!PACKET_EFFECT_TYPES.has(effectType) || !token) return false;
   if (scheduled && effectType !== 'completion_sms') return false;
-  const rows = await db('visit_effects').where({ visit_id: visitId, effect_type: effectType,
+  const rows = await database('visit_effects').where({ visit_id: visitId, effect_type: effectType,
     dedupe_key: dedupeKey || `${visitId}:${effectType}`, claim_token: token,
   }).modify((query) => {
     if (scheduled) query.where({ status: 'pending' }).whereNotNull('scheduled_at');
@@ -1513,9 +1513,9 @@ async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey 
       });
     });
     if (['completion_sms', 'completion_email'].includes(effectType)) {
-      query.whereExists(db('service_visits').select(db.raw('1')).where({ id: visitId }).whereNull('summary_token_revoked_at'));
+      query.whereExists(database('service_visits').select(database.raw('1')).where({ id: visitId }).whereNull('summary_token_revoked_at'));
     }
-  }).update({ status: 'unknown_delivery', last_error: null, claimed_at: new Date(), updated_at: db.fn.now() }).returning('id');
+  }).update({ status: 'unknown_delivery', last_error: null, claimed_at: new Date(), updated_at: database.fn.now() }).returning('id');
   return rows.length > 0;
 }
 
