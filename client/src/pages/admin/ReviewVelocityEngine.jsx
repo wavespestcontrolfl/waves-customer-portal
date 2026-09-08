@@ -347,9 +347,9 @@ function decisionLine(seq, sequencesEnabled) {
   // so the planned send is the next tick the server computes
   // (nextSendTickAt) — a 4:30 PM row cannot text before 4:44 (codex #4140 r4).
   const when = seq.nextSendTickAt || seq.nextRunAt || d.plannedAt || d.nextEvalAt;
-  // An email step that falls back to text at send time meets the send window
-  // — say both ticks when they differ (codex #4140 r14 P2).
-  const fallback = seq.smsFallbackTickAt ? ` by email, or ${fmtETWhen(seq.smsFallbackTickAt)} if it falls back to text` : "";
+  // An ask step that swaps channel at send time lands on the other channel's
+  // tick — say both when they differ (codex #4140 r14, r16 P2).
+  const fallback = seq.fallbackTickAt ? ` by ${seq.plannedChannel}, or ${fmtETWhen(seq.fallbackTickAt)} if it falls back to ${seq.fallbackChannel}` : "";
   const whenText = when ? `${fmtETWhen(when)}${fallback}` : null;
   const owner = d.ownerAction && d.ownerAction !== "none" ? `Owner action: ${d.ownerAction}` : "Owner action: none";
   // A cadence enrolled before the decision column existed has no decision

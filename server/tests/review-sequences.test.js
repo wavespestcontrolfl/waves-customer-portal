@@ -939,10 +939,13 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
         const map = await ReviewService.getActiveSequencesForCustomers(['w-1', 'w-2']);
         // Next morning 8:00 AM EDT = 12:00Z; first tick after it is 8:14.
         expect(map['w-1'].nextSendTickAt.toISOString()).toBe('2026-05-27T12:14:00.000Z');
-        expect(map['w-1'].smsFallbackTickAt).toBeNull();
+        // Either ask step can swap channel at send time (codex #4140 r14, r16 P2):
+        // the SMS step's email fallback escapes the window; the email step's SMS fallback meets it.
+        expect(map['w-1']).toMatchObject({ fallbackChannel: 'email', plannedChannel: 'text' });
+        expect(map['w-1'].fallbackTickAt.toISOString()).toBe('2026-05-27T00:14:00.000Z');
         expect(map['w-2'].nextSendTickAt.toISOString()).toBe('2026-05-27T00:14:00.000Z');
-        // The email step's runtime SMS fallback meets the window (codex #4140 r14 P2).
-        expect(map['w-2'].smsFallbackTickAt.toISOString()).toBe('2026-05-27T12:14:00.000Z');
+        expect(map['w-2']).toMatchObject({ fallbackChannel: 'text', plannedChannel: 'email' });
+        expect(map['w-2'].fallbackTickAt.toISOString()).toBe('2026-05-27T12:14:00.000Z');
       } finally {
         nowSpy.mockRestore();
         mockGates.smsSendWindow = false;

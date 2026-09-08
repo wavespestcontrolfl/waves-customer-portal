@@ -599,13 +599,20 @@ const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
 function nextSendTickFor(step, from) {
   return isEmailAskStep(step) ? nextCadenceTickAt(from) : windowedSmsTickAt(from);
 }
-// The tick an email ask step lands on if it falls back to SMS; null when the
-// step is SMS anyway or the fallback tick is the same instant.
-function smsFallbackTickFor(step, from) {
-  if (!isEmailAskStep(step)) return null;
+// The tick an ask step lands on if it swaps to the OTHER channel at send
+// time ({ fallbackChannel, fallbackTickAt }); both null when the step is not
+// an ask (a check-in is always SMS) or the other channel's tick is the same.
+function fallbackTickFor(step, from) {
+  const none = { fallbackChannel: null, plannedChannel: null, fallbackTickAt: null };
+  if (!from || !OUTREACH.isAskTemplate(step?.templateKey)) return none;
   const emailTick = nextCadenceTickAt(from);
   const smsTick = windowedSmsTickAt(from);
-  return emailTick && smsTick && smsTick.getTime() !== emailTick.getTime() ? smsTick : null;
+  if (!emailTick || !smsTick || smsTick.getTime() === emailTick.getTime()) return none;
+  // Both channel names are spelled here (text/email) so the page renders
+  // them without deciding anything.
+  return isEmailAskStep(step)
+    ? { fallbackChannel: "text", plannedChannel: "email", fallbackTickAt: smsTick }
+    : { fallbackChannel: "email", plannedChannel: "text", fallbackTickAt: emailTick };
 }
 function isEmailAskStep(step) {
   return String(step?.channel || "sms").toLowerCase() === "email" && OUTREACH.isAskTemplate(step?.templateKey);
@@ -5378,10 +5385,11 @@ const ReviewService = {
         // between ticks) is picked up at the next tick from NOW, not at a tick
         // that has already passed (codex #4140 r8).
         nextSendTickAt: r.next_run_at ? nextSendTickFor(plan[r.current_step], new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
-        // An email ask step can fall back to SMS at send time (sendOutreachTouch:
-        // no email / opted out of email) and then meets the send window — the
-        // page shows both ticks when they differ (codex #4140 r14 P2).
-        smsFallbackTickAt: r.next_run_at ? smsFallbackTickFor(plan[r.current_step], new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
+        // An ask step can swap channel at send time (sendOutreachTouch: the
+        // intended channel unavailable, the other allowed) — email→SMS then
+        // meets the send window, SMS→email escapes it — so the page shows the
+        // other channel's tick when it differs (codex #4140 r14, r16 P2).
+        ...fallbackTickFor(plan[r.current_step], r.next_run_at ? new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now())) : null),
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon
