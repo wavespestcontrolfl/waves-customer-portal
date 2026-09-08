@@ -15,7 +15,24 @@ const ReviewService = require('../services/review-request');
 const { etParts } = require('../utils/datetime-et');
 
 describe('review request send-time calculator', () => {
-  const { calculateReviewSendTime } = ReviewService.__private;
+  const { calculateReviewSendTime, calculateReviewSendPlan } = ReviewService.__private;
+
+  test('a jitter-free plan names the eligibility range live jitter can land in: ±15 min, clamped inside the hour for an anchored answer (codex #4140 r14 P2)', () => {
+    // 1 PM ET lawn → anchored 4:30 PM; minute clamped to the hour → 4:15..4:45.
+    const anchored = calculateReviewSendPlan(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });
+    expect(anchored.kind).toBe('anchored');
+    expect(anchored.earliestAt.toISOString()).toBe('2026-05-26T20:15:00.000Z');
+    expect(anchored.latestAt.toISOString()).toBe('2026-05-26T20:45:00.000Z');
+    // 10 AM next-morning anchor: the clamp keeps the range inside 10:00..10:15.
+    const morning = calculateReviewSendPlan(new Date('2026-05-26T21:30:00Z'), 'pest control', { jitter: false });
+    expect(morning.earliestAt.toISOString()).toBe(morning.at.toISOString());
+    expect(morning.latestAt.getTime() - morning.at.getTime()).toBe(15 * 60000);
+    // 11 AM pest → relative +120 → 1 PM; the range moves freely.
+    const relative = calculateReviewSendPlan(new Date('2026-05-26T15:00:00Z'), 'pest control', { jitter: false });
+    expect(relative.kind).toBe('relative');
+    expect(relative.latestAt.getTime() - relative.earliestAt.getTime()).toBe(30 * 60000);
+  });
+
 
   test('keeps lawn and mosquito review requests before 5 PM ET', () => {
     const lawn = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care');

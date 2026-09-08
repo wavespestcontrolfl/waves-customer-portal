@@ -348,7 +348,14 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awai
 }
 function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
   if (reviewTiming === "auto") {
-    return preview?.at ? `Review text goes out separately, about ${fmtReviewTime(preview.at)}.` : "Review text goes out separately at the smart send window.";
+    if (!preview?.at) return "Review text goes out separately at the smart send window.";
+    // In cadence mode `at` is a jitter-free eligibility time: enrollment
+    // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
+    // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
+    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, preview.cadenceTickMinutesOfHour) : null;
+    const hi = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.latestAt || preview.at, preview.cadenceTickMinutesOfHour, { after: true }) : null;
+    if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
+    return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
   }
   if (reviewTiming === "customer_requested") {
     // `bundled` is the panel's own bundling condition (legacy path, completion

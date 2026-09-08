@@ -442,6 +442,7 @@ function parseDecision(v) {
 
 // Service types whose Day-0 ask waits for the customer to see the result
 // (calculateReviewSendPlan): same afternoon before 3 PM, else next morning.
+const JITTER_MAX_MINUTES = 15;
 const RESULTS_FIRST_SERVICE_WORDS = ["mosquito", "waveguard", "lawn", "turf", "tree", "shrub", "dethatch"];
 
 /**
@@ -467,7 +468,7 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 
   // ±15 min jitter so messages don't all land at the same second. Off for
   // the completion panel's preview (same rules, stable answer).
-  const jitter = () => (withJitter ? Math.floor(Math.random() * 31) - 15 : 0);
+  const jitter = () => (withJitter ? Math.floor(Math.random() * (2 * JITTER_MAX_MINUTES + 1)) - JITTER_MAX_MINUTES : 0);
 
   // Last writer wins: normalizeReviewSendWindow may turn a relative answer
   // into an anchored one (9 AM / 5 PM fences).
@@ -557,7 +558,15 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
   const bucket = kind === "relative"
     ? `relative:${dayKey}:+${relativeMinutes}m`
     : `anchored:${dayKey}T${pad(p.hour)}:${pad(p.minute)}`;
-  return { at, kind, bucket };
+  // The eligibility RANGE a jitter-free answer stands for (codex #4140 r14
+  // P2): live enrollment adds up to ±15 min — an anchored answer's minute is
+  // clamped inside its hour (atHour), a relative one moves freely. The
+  // completion panel names the cadence ticks either end lands on.
+  const hourStart = new Date(at.getTime());
+  hourStart.setUTCMinutes(0, 0, 0); // ET offsets are whole hours
+  const earliestAt = new Date(Math.max(at.getTime() - JITTER_MAX_MINUTES * 60000, kind === "anchored" ? hourStart.getTime() : 0));
+  const latestAt = new Date(Math.min(at.getTime() + JITTER_MAX_MINUTES * 60000, kind === "anchored" ? hourStart.getTime() + 59 * 60000 : Infinity));
+  return { at, kind, bucket, earliestAt, latestAt };
 }
 
 function calculateReviewSendTime(completedAt, serviceType, opts) {
@@ -577,10 +586,22 @@ const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
 // check-in labelled "email" is forced to SMS by sendOutreachTouch, so only
 // an ask step's own "email" channel is email here.
 function nextSendTickFor(step, from) {
+  return isEmailAskStep(step) ? nextCadenceTickAt(from) : windowedSmsTickAt(from);
+}
+// The tick an email ask step lands on if it falls back to SMS; null when the
+// step is SMS anyway or the fallback tick is the same instant.
+function smsFallbackTickFor(step, from) {
+  if (!isEmailAskStep(step)) return null;
+  const emailTick = nextCadenceTickAt(from);
+  const smsTick = windowedSmsTickAt(from);
+  return emailTick && smsTick && smsTick.getTime() !== emailTick.getTime() ? smsTick : null;
+}
+function isEmailAskStep(step) {
+  return String(step?.channel || "sms").toLowerCase() === "email" && OUTREACH.isAskTemplate(step?.templateKey);
+}
+function windowedSmsTickAt(from) {
   const tick = nextCadenceTickAt(from);
-  if (!tick) return tick;
-  const isEmail = String(step?.channel || "sms").toLowerCase() === "email" && OUTREACH.isAskTemplate(step?.templateKey);
-  if (isEmail || !require("../config/feature-gates").isEnabled("smsSendWindow")) return tick;
+  if (!tick || !require("../config/feature-gates").isEnabled("smsSendWindow")) return tick;
   const { isWithinSendWindowET, nextSendWindowOpenET } = require("./messaging/send-window");
   return isWithinSendWindowET(tick) ? tick : nextCadenceTickAt(nextSendWindowOpenET(tick));
 }
@@ -5346,6 +5367,10 @@ const ReviewService = {
         // between ticks) is picked up at the next tick from NOW, not at a tick
         // that has already passed (codex #4140 r8).
         nextSendTickAt: r.next_run_at ? nextSendTickFor(plan[r.current_step], new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
+        // An email ask step can fall back to SMS at send time (sendOutreachTouch:
+        // no email / opted out of email) and then meets the send window — the
+        // page shows both ticks when they differ (codex #4140 r14 P2).
+        smsFallbackTickAt: r.next_run_at ? smsFallbackTickFor(plan[r.current_step], new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon

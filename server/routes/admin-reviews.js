@@ -121,6 +121,10 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // Names the rule behind `at`; the panel compares buckets, not instants
       // (a relative answer moves with every request) — codex #4140 r4 P1.
       bucket: plan ? plan.bucket : `legacy:+${ReviewService.LEGACY_REVIEW_DELAY_MINUTES}m`,
+      // The eligibility range live enrollment's jitter can land in; the
+      // panel names the cadence ticks either end reaches (codex #4140 r14 P2).
+      earliestAt: plan ? plan.earliestAt.toISOString() : null,
+      latestAt: plan ? plan.latestAt.toISOString() : null,
       reviewSequencesEnabled,
       // The 8 AM–8 PM hold only exists while GATE_SMS_SEND_WINDOW is on; the
       // panel must not promise a hold the server will not apply (r4 P2).

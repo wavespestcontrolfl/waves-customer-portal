@@ -320,6 +320,7 @@ const DECISION_LABELS = {
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
   cap_stats_unavailable: "Re-checking the ask cap",
 };
+const fmtETWhen = (d) => new Date(d).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 function decisionLine(seq, sequencesEnabled) {
   if (!seq) return null;
   // A stranded claim (null schedule the worker never re-selects) needs a hand
@@ -343,9 +344,10 @@ function decisionLine(seq, sequencesEnabled) {
   // so the planned send is the next tick the server computes
   // (nextSendTickAt) — a 4:30 PM row cannot text before 4:44 (codex #4140 r4).
   const when = seq.nextSendTickAt || seq.nextRunAt || d.plannedAt || d.nextEvalAt;
-  const whenText = when
-    ? new Date(when).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
-    : null;
+  // An email step that falls back to text at send time meets the send window
+  // — say both ticks when they differ (codex #4140 r14 P2).
+  const fallback = seq.smsFallbackTickAt ? ` by email, or ${fmtETWhen(seq.smsFallbackTickAt)} if it falls back to text` : "";
+  const whenText = when ? `${fmtETWhen(when)}${fallback}` : null;
   const owner = d.ownerAction && d.ownerAction !== "none" ? `Owner action: ${d.ownerAction}` : "Owner action: none";
   // A cadence enrolled before the decision column existed has no decision
   // until its next runner update; its next_run_at is a planned send.
@@ -358,7 +360,7 @@ function decisionLine(seq, sequencesEnabled) {
 function capturedRequestText(seq, decision) {
   const c = seq.customerRequested;
   if (!c || decision.reason === "customer_requested") return null;
-  const at = c.at ? new Date(c.at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
+  const at = c.at ? fmtETWhen(c.at) : null;
   return ["Customer asked for the link", c.byName ? `captured by ${c.byName}` : null, at].filter(Boolean).join(" ");
 }
 
