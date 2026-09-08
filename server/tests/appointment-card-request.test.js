@@ -2073,6 +2073,8 @@ describe('replaceSecureCardIntent — "use a different payment method"', () => {
       customers: { first: () => ({ ...CUSTOMER }) },
     });
     mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after' });
+    // Implementations persist across clearAllMocks — pin the happy path.
+    mockRetireSetupIntent.mockResolvedValue({});
     mockRetrieveSetupIntent.mockImplementation(async (id) => {
       if (id === 'seti_1') return { ...SAVED };
       if (id === 'seti_after') return { ...FRESH };
@@ -2168,6 +2170,32 @@ describe('replaceSecureCardIntent — "use a different payment method"', () => {
     expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'verification_failed' });
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  // GH Codex #4163 r4 P1: the plan gate completion runs is re-judged too —
+  // mode before the lock, the SELECTION from the locked row.
+  test('a plan-bearing RECURRING request without a per_application selection is refused (plan_required) — nothing minted or retired', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'buildSecurePlanContext').mockResolvedValue({ mode: 'recurring' });
+    try {
+      for (const selected of [null, 'prepay_annual']) {
+        mockTableHandlers.appointment_card_requests.first = () => ({ ...ROW, selected_plan: selected });
+        expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'plan_required' });
+      }
+      expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+      expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+      // A durable per_application selection proceeds; one-time / no-context requests are unaffected.
+      mockTableHandlers.appointment_card_requests.first = () => ({ ...ROW, selected_plan: 'per_application' });
+      expect((await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).ok).toBe(true);
+      spy.mockResolvedValue({ mode: 'one_time' });
+      mockTableHandlers.appointment_card_requests.first = () => ({ ...ROW, selected_plan: null });
+      expect((await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).ok).toBe(true);
+      // The selection is judged from the LOCKED row read (selected_plan requested there).
+      const locked = touches('appointment_card_requests').map((t) => t.chain).find((c) => c.calls.some(([op]) => op === 'forUpdate'));
+      expect(locked).toBeTruthy();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('the visit-lane payer re-check under the replacement lock rides the transaction handle (GH Codex #4163 r3 P1)', async () => {

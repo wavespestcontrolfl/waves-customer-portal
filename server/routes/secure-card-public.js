@@ -123,6 +123,12 @@ router.post('/:token/replace-intent', async (req, res) => {
     });
     if (!result.ok) {
       if (result.code === 'not_found') return res.status(404).json({ error: 'Not found' });
+      if (result.code === 'plan_required') {
+        // Plan-choice lane: the selection moved (or became required) since
+        // page load — nothing retired; the client refetches and re-renders
+        // the plan choice.
+        return res.status(409).json({ error: 'Please choose how you’d like to pay first.', code: 'plan_required' });
+      }
       if (result.code === 'request_closed' || result.code === 'no_longer_needed') {
         // Completed by another tab / the webhook, closed by the office,
         // expired, or the visit/customer no longer needs a card (cancelled,

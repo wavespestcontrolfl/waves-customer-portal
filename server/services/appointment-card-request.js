@@ -1463,8 +1463,19 @@ async function replaceSecureCardIntent({ token, setupIntentId }) {
     return { ok: false, code: 'verification_failed' };
   }
   if (!secureCardIntentBelongsToRequest(current, request.id)) return { ok: false, code: 'intent_mismatch' };
+  // Plan-choice lane (GH Codex #4163 r4 P1): a plan-bearing RECURRING
+  // request completes only with a durable per_application selection —
+  // completion refuses plan_required otherwise — so a replacement must not
+  // retire the saved intent and offer a card form the selection state
+  // forbids. The plan MODE is derived here, before the lock (the probe
+  // reads several tables through the pool and never throws); the
+  // SELECTION is re-read from the locked row below, which is the only
+  // place select-plan can move it (a selection can only change while the
+  // row is pending).
+  const { buildSecurePlanContext } = require('./secure-appointment-plans');
+  const planMode = (await buildSecurePlanContext({ request, visitId: request.scheduled_service_id }))?.mode || null;
   return db.transaction(async (trx) => {
-    const row = await trx('appointment_card_requests').where({ id: request.id }).forUpdate().first('id', 'status', 'stripe_setup_intent_id');
+    const row = await trx('appointment_card_requests').where({ id: request.id }).forUpdate().first('id', 'status', 'stripe_setup_intent_id', 'selected_plan');
     if (!row) return { ok: false, code: 'not_found' };
     // Every outcome under the lock: a stale tab must not mint a fresh
     // capture for a row another tab completed, the office closed, or the
@@ -1479,6 +1490,10 @@ async function replaceSecureCardIntent({ token, setupIntentId }) {
     const stillNeeded = await secureVisitStillNeedsCard(request, { database: trx });
     if (!stillNeeded.ok) {
       return { ok: false, code: stillNeeded.code === 'no_longer_needed' ? 'no_longer_needed' : 'verification_failed' };
+    }
+    if (planMode === 'recurring' && row.selected_plan !== 'per_application') {
+      logger.info(`[appt-card-request] replace refused for request ${request.id}: plan selection required (selected: ${row.selected_plan || 'none'})`);
+      return { ok: false, code: 'plan_required' };
     }
     if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
       const intent = await createSecureCardSetupIntent({ ...request, ...row }, { database: trx });

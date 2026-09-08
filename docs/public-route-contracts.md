@@ -1445,7 +1445,10 @@ backstop (which trusts its event payload — the intent as it succeeded).
 A non-pending / expired row under the lock retires nothing (409
 `request_closed`), and neither does a link the GET would render closed —
 the visit lane re-runs the completion predicate (visit live, not past,
-priced > 0, no third-party payer) and the standalone lane the GET's
+priced > 0, no third-party payer) and the plan gate (a plan-bearing
+recurring request needs a durable `per_application` selection — the plan
+mode is derived before the lock, the selection read from the locked
+row; 409 `plan_required`, the client re-renders the choice) and the standalone lane the GET's
 closure checks (archived customer, payer-billed, unsupported billing
 lane, Auto Pay paused, Auto Pay already active — which retires the row as
 the GET does),
