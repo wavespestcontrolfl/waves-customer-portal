@@ -896,3 +896,27 @@ test('prospective coverage and a former franchise assert nothing; treatment and 
   expect(score('E6', 'Waves has a guide explaining how technicians eliminate termites.').expected.termite).toBe(false);
   expect(score('E6', 'Our technicians eliminate termites.').expected.termite).toBe(true);
 });
+
+test('a future marker after the county and an explanatory context after the verb assert nothing (#4155 r2)', () => {
+  // Prospective coverage worded after the county.
+  expect(score('E5', 'Waves will serve Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County starting next year.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Sarasota County beginning in 2027.').expected.sarasota).toBe(false);
+  expect(score('E5', 'Waves serves Charlotte County in the future.').expected.charlotte).toBe(false);
+  expect(score('E6', 'Waves offers fumigation starting next year.').forbidden.fumigation_offered).toBe(false);
+  // The trailing guard stays in its clause and ignores a noun phrase.
+  expect(score('E5', 'Waves serves Manatee County, but will add Hillsborough next year.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves has served Manatee County since 2015.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves began serving Manatee County in 2015.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County; call soon for a quote.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County, so book your next year of service today.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  // Explanatory context after the treatment verb.
+  expect(score('E6', 'Our technicians eliminate termites in a how-to guide for homeowners.').expected.termite).toBe(false);
+  expect(score('E6', 'The team eliminates termites in an educational video.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves controls mosquitoes in a blog post.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves removes rodents in an instructional article.').expected.rodent).toBe(false);
+  expect(score('E6', 'Our technicians eliminate termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves controls mosquitoes and rodents.')).toMatchObject({ expected: { mosquito: true, rodent: true } });
+  expect(score('E6', 'Waves eliminates termites, but read our guide on prevention.').expected.termite).toBe(true);
+});
