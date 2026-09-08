@@ -21,8 +21,7 @@ async function main() {
     consoleErrors: [],
   };
   const server = await previewServer(root, process.argv[2]);
-  const browser = await launchBrowser();
-  let safari;
+  let browser, safari;
   async function openPage(engine, viewport, coarse) {
     const context = await engine.newContext({
       viewport,
@@ -372,6 +371,7 @@ async function main() {
     report.scenarios.push({ name, passed: true });
   }
   try {
+    browser = await launchBrowser();
     for (const coarse of [false, true]) {
       for (const width of [390, 700, 820, 1024, 1440]) {
         const { context, page } = await openPage(
@@ -461,13 +461,15 @@ async function main() {
       }),
     );
   } finally {
-    fs.writeFileSync(
-      path.join(output, "report.json"),
-      JSON.stringify(report, null, 2),
-    );
-    await browser.close();
-    if (safari) await safari.close();
-    await server.close();
+    try {
+      fs.writeFileSync(
+        path.join(output, "report.json"),
+        JSON.stringify(report, null, 2),
+      );
+    } finally {
+      await Promise.allSettled([browser?.close(), safari?.close()]);
+      await server.close();
+    }
   }
 }
 main().catch((error) => {
