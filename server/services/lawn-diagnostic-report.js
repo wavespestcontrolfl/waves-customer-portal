@@ -546,6 +546,12 @@ const CAUSE_LABELS = new Set([
   'drought stress',
 ]);
 const GENERIC_STRESS_LABEL = 'general lawn stress';
+// Every label safeConditionLabel can publish — the allowlist a technician's
+// finding rename is validated against (lawn-visit-assessment.js), so a renamed
+// finding can never carry free text into customer copy.
+const CONDITION_LABEL_VALUES = Object.freeze([
+  ...new Set([...CONDITION_LABELS.map(([, label]) => label), GENERIC_STRESS_LABEL, 'a lawn condition we are monitoring']),
+]);
 
 // A finding is "clean" only when it LEADS with a negation / health phrase. This catches
 // "No visible disease" / "Healthy, dense turf" without misreading a positive finding
@@ -819,6 +825,7 @@ module.exports = {
   buildDiagnosis,
   buildReconciliationFlags,
   buildTreatmentRationale,
+  buildWatchItems,
   buildWateringPlan,
   classifyReleaseMode,
   applyAutoReleaseRepair,
@@ -832,6 +839,7 @@ module.exports = {
   safeConditionLabel,
   safeCustomerSummary,
   lowerConfidence,
+  CONDITION_LABEL_VALUES,
   MINIMAL_SAFE_SUMMARY,
   NO_VISIBLE_STRESS_FINDING,
 };

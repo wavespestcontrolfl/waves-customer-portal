@@ -2218,3 +2218,97 @@ The retained `CompletionPanel` uses the existing treatment-plan GET/build endpoi
 Saved customer turf area seeds only a proven matching service property. A visit-only area edit refreshes untouched quantities from verified planner math; manual quantities and product-area overrides remain technician-owned. Front/back/side selections inherit to products, and removals and overrides persist in the existing draft. Choosing partial zones clears unmeasured whole-lawn area. Unverified or blocked suggestions leave an actual-amount input. The property progress card uses the shared confirmed, installed, one-result-per-visit resolver, including baseline resets. This keeps the panel's inline monochrome style and existing completion serialization. Property templates, broader actuals-ledger coverage and assessment/report generation remain subsequent work.
 
 Exact assigned protocol versions remain usable after archival; unassigned selection still requires an active protocol. Catalog formulation distinguishes spreader granules from weighed spray concentrates. Selected default products keep their bookkeeping and safety metadata, with plan blocks still suppressing unverified quantities. The editable visit area travels in the existing `lawnProtocolCompletion.treatedSqft` field to the completion planner, protocol record and nutrient writer; square footage stays an integer and never updates the saved profile.
+
+## 2026-09-08 — Lawn visit assessment: one call per visit, Gemini first, GPT-6 Astra second (feat/lawn-visit-assessment-server)
+
+### Why
+
+Today a lawn visit's photos run through nine model calls — a per-photo Opus
+quality gate and a per-photo Claude + Gemini scorer whose results are averaged —
+and the technician's review is a row of ±5 score tiles. The output is a set of
+numbers with no evidence trail: nothing records which photo showed what, what was
+looked for and not seen, or what the photos could not settle. This is stage 2 of
+the lawn workflow rebuild (stage 1: property history #4039, completion defaults
+#4126/#4086, actuals ledger #4113). Customer-facing rendering does not change here;
+the frozen per-issue customer story is stage 3.
+
+### Decisions
+
+- **One multimodal call per visit** (`services/lawn-visit-assessment.js`, dark behind
+  `GATE_LAWN_VISIT_ASSESSMENT`, read once per request). Every photo of the visit —
+  up to six (owner: raised from three), each optionally labeled with the zone the
+  technician shot — goes to the model at once, numbered, with the same known-visit
+  context the legacy prompt used minus the planned products (they bias perception;
+  reconciliation gets them at confirm). Native JSON schema on both providers.
+- **Providers — the owner's ruling overrides the standing Claude-fallback rule for
+  this lane only:** the Gemini vision model reads first; when it misses (any
+  provider failure, refusal, truncation or malformed answer), ChatGPT takes over on
+  the best available model — GPT-6 Astra, its own registry selector
+  `MODEL_OPENAI_FRONTIER` so the premium rate is paid only on this fallback leg.
+  No Claude vision leg, never both providers in parallel. Recorded in
+  `TEXT_POLICIES.lawnVisitAssessment`, the model switchboard, and the `waves-llm`
+  skill.
+- **Evidence-first findings reuse the staff diagnostic contract.** Findings ride
+  `lawn-diagnostic-report.js`'s shape and naming gate (`safeConditionLabel`) plus
+  `photo_refs`, `zone`, `can_determine` / `cannot_determine_reason`; the system
+  prompt is composed from that module's curated reference, confidence rubric and
+  false-precision rules so the two lawn lanes cannot drift. The customer label is
+  derived server-side, once; a technician rename is validated against the exported
+  label allowlist, never free text.
+- **Legacy columns keep their units, with one change.** Turf density, weed
+  suppression, color, fungus, thatch, stress and the overall score derive from the
+  run's scores and native severities so every existing reader is untouched — but a
+  signal the model could not determine is NULL, never the legacy "missing =
+  healthy" 95; the seasonal adjusters run over the known fields only; the overall
+  score is NULL until every input exists; `/confirm` preserves NULLs instead of
+  coercing them to 0.
+- **Unavailable is a recorded state, not an error.** Both providers missing writes
+  an `unavailable` run with the reason; the assessment row still exists with NULL
+  scores and `observations = 'Visual analysis unavailable'`, its photos are stored,
+  the technician confirms it, and the completion preflight (confirmed-row check) is
+  satisfied — the visit closes honestly. Technician calibration is skipped for such
+  a row (no AI scores to calibrate against).
+- **Provenance row.** `lawn_assessment_runs` (additive migration, one row per
+  assessment row, UNIQUE) records provider, requested model, fallback use and leg
+  failures, prompt version, a sha256 of the perception input (context + photo
+  bytes + zones), the photo row ids, per-photo quality, findings, severities, raw
+  scores, tokens (including thinking) and latency. A re-analyze is a fresh
+  assessment row with its own run, exactly as today.
+- **One overall review on `/confirm`** (owner ruling: no per-finding approvals):
+  optional `reviewedFindings` (keep / allowlisted rename / tech note),
+  `addedDetails` (technician findings, capped at moderate confidence — the
+  diagnostic tool's evidence rule) and `appliedProducts`; the deterministic
+  reconciliation (`buildTreatmentRationale` / `buildReconciliationFlags` /
+  `buildWatchItems`) runs over the kept findings and those products and is stored
+  on the run. Absent products → every finding reads untreated until the completion
+  records what was applied. Technician `customer_wording` edits are deliberately
+  not accepted: customer copy is derived server-side (AGENTS.md lawn-diagnostic
+  lockstep).
+- **Photo zones become real.** The technician's zone label writes
+  `lawn_assessment_photos.zone` and a matching `photo_type`; the report's
+  before/after pairing keys on recorded zones, so the pairing that was dead on this
+  path starts working under the gate. The model may only echo a technician zone.
+- **Dispatcher additions (all lanes may use them):** image `label` text parts
+  placed before each image on every provider; Gemini `thinkingLevel`
+  (LOW | MEDIUM | HIGH; the eval compares levels before one is pinned — the route
+  passes none); Gemini legs return `usage`; the GPT-6 line takes the same
+  `reasoning` object as GPT-5 with `low` as its floor.
+- **Not in this stage:** the technician review UI (stage 2c, behind the same gate
+  and the per-user `lawn-completion-improvements` flag), the read-only eval harness
+  (stage 2b, replays confirmed assessments by id from S3 and compares derived
+  scores against confirmed ones before any flip), customer rendering (stage 3),
+  EXIF/GPS preservation, the prospect diagnostic tool's migration to this contract.
+
+### Verification
+
+Unit suites drive the module with a scripted dispatcher (schema shape, prompt
+composition without products, photo numbering and zones, normalization, NULL-not-95
+derivation, null-safe seasonal adjustment and overall score, unavailable path,
+review validation and reconciliation, confirm score resolution); the dispatcher
+suite pins image labels, `thinkingLevel`, Gemini usage and GPT-6 reasoning; the
+registry and switchboard contract tests cover the new selector, policy and lane.
+A real-PostgreSQL suite clones the lawn tables into a test-owned schema, runs the
+migration, and exercises the run insert, review write and confirm-score
+resolution. Gate off = the existing code paths; the existing lawn suites must stay
+green unchanged. No customer communications are sent or triggered anywhere in this
+change.
