@@ -232,6 +232,10 @@ async function retryOne(message) {
         status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
       })
       .returning('*');
+    if (updated?.template_key === 'service.visit_summary') {
+      await require('./visit-completion-summary').reconcileSummaryEmailRecovery(updated)
+        .catch((err) => logger.warn(`[email-provider-retry] visit summary recovery not reconciled for ${message.id}: ${err.message}`));
+    }
     return { sent: true, message: updated || message };
   } catch (err) {
     await markRetryFailure(message, err);
