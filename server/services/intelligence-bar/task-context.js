@@ -24,8 +24,10 @@ const normalizeName = value => String(value || '').toLowerCase().replace(/[’']
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
 // Overlapping selectors matter: "update customer Jhon" must still inspect
 // "customer Jhon" after seeing "update customer".
-const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update|set|edit|mark|make';
-const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named`;
+const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update|set|edit|mark|make|rename|relabel|forward|resend';
+// "send the response to Jhon" / "forward the estimate to Jhon": the thing being
+// sent introduces its recipient just as the verb does.
+const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|(?:reply|response|message|text|email|reminder|invoice|estimate|quote|note|details|receipt|link)\\s+(?:to|for)|for|customer|named`;
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
@@ -33,11 +35,17 @@ const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'h
 const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'status', 'billing', 'type', 'plan', 'frequency', 'autopay', 'balance', 'schedule', 'tags', 'tag', 'preferences', 'details',
   // every update_customer field (tools.js) and the contractions a request may open with
   'first', 'last', 'city', 'state', 'zip', 'waveguard', 'tier', 'pipeline', 'stage', 'source', 'monthly', 'rate', 'mode', 'membership',
-  'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
+  'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using',
+  'account', 'accounts', 'profile', 'record', 'records',
+  // record nouns that follow an action verb name a thing, never a person
+  'appointment', 'appointments', 'property', 'properties', 'estimate', 'estimates', 'invoice', 'invoices', 'product', 'products',
+  'call', 'calls', 'visit', 'visits', 'service', 'services', 'reservation', 'treatment', 'quote', 'reminder']);
 // A set quantifier ("both A and B", "these customers …", "all of these …") is
 // never a target: one target per request, so the request asks to clarify.
 // Owner decision 2026-09-08: fail closed rather than parse cohorts.
-const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all) customers|all of (?:these|those)|(?:each|every) customer)\b/;
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those) customers|all(?: of)?(?: the| these| those)? customers|all of (?:these|those)|(?:each|every)(?: one)?(?: of)?(?: the| these| those)? customers?)\b/;
+// An independently requested operation starts at "and/then <action>".
+const ACTION_CLAUSE_SPLIT = new RegExp(`\\b(?:and|then)\\s+(?=(?:${PERSON_ACTIONS}|revise|add|save|assign|draft|write|post|submit)\\b)`, 'i');
 const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
 // An explicit email or phone recipient is a contact, never a name or a quantifier.
 const withoutContacts = clause => clause.replace(CONTACT_LITERAL_RE, ' ');
@@ -135,13 +143,23 @@ async function namedCustomers(prompt) {
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
     .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));
-  if (fullNames.length || !singleNames.length || matches.length === CUSTOMER_LOOKUP_LIMIT) {
-    return { matches: fullNames, complete: matches.length < CUSTOMER_LOOKUP_LIMIT };
-  }
-  const singles = await db('customers').whereNull('deleted_at').where(function () {
+  const capped = matches.length === CUSTOMER_LOOKUP_LIMIT;
+  const singleLookup = !fullNames.length && singleNames.length && !capped;
+  const singles = singleLookup ? await db('customers').whereNull('deleted_at').where(function () {
     this.whereIn(normalizedStoredName('first_name'), singleNames).orWhereIn(normalizedStoredName('last_name'), singleNames);
-  }).limit(CUSTOMER_LOOKUP_LIMIT).select(columns);
-  return { matches: singles, complete: singles.length < CUSTOMER_LOOKUP_LIMIT };
+  }).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
+  const accepted = singleLookup ? singles : fullNames;
+  // Name evidence that only partly resolved — a customer accepted from one
+  // action clause while another clause's person reference matches nobody, as
+  // in "update Jhon Smith and text Alice Owner" — is never a target and no
+  // selection survives it. A resolved clause may still carry other nouns, and
+  // a request that resolved nobody keeps the plain unresolved-name handling.
+  const acceptedTokens = new Set(accepted.flatMap(customer => normalizeName(`${customer.first_name || ''} ${customer.last_name || ''}`).split(' ')));
+  const partial = accepted.length > 0 && normalized.split(ACTION_CLAUSE_SPLIT).some(clause => {
+    const references = explicitSingleNames(clause);
+    return references.length > 0 && !references.some(token => acceptedTokens.has(token));
+  });
+  return { matches: accepted, complete: !capped && singles.length < CUSTOMER_LOOKUP_LIMIT, partial };
 }
 
 // Callers supply only the fixed customer/lead/estimate column expressions below.
@@ -245,7 +263,8 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   // customer. A request relying on the unavailable viewed record still stops.
   if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  const cohort = setQuantified(prompt);
+  // A set quantifier or partly resolved name evidence never yields a target.
+  const cohort = setQuantified(prompt) || namedResult.partial;
   let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort);
   if (selectedId) {
     const selected = await customerById(selectedId);
@@ -274,8 +293,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   const explicitRecords = {};
   // A content noun ends its own action clause. An independently requested
   // operation after "and/then <action>" retains its explicit target IDs.
-  const explicitRecordClause = targetClause(prompt, true)
-    .split(new RegExp(`\\b(?:and|then)\\s+(?=(?:${PERSON_ACTIONS}|revise|change|set|rename|relabel|add|save|assign|draft|write|post|submit)\\b)`, 'i'))
+  const explicitRecordClause = targetClause(prompt, true).split(ACTION_CLAUSE_SPLIT)
     .map(clause => clause.split(/\b(?:notes?|messages?|instructions|comments)\b/i)[0]).join(' and ');
   for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
     (explicitRecords[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());

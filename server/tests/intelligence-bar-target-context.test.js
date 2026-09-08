@@ -81,22 +81,36 @@ test.each(['both', 'these customers', 'all of these'])('a "%s" cohort asks for c
 });
 
 test('every supported action verb supplies name evidence against a stale selection', async () => {
-  for (const prompt of ['Set Synthetiic Owner inactive', 'Mark Synthetiic Owner inactive', 'Edit Synthetiic Owner', 'Make Synthetiic Owner active']) {
+  for (const prompt of ['Set Synthetiic Owner inactive', 'Mark Synthetiic Owner inactive', 'Edit Synthetiic Owner', 'Make Synthetiic Owner active', 'Rename Synthetiic Owner to Alice Jones', 'Relabel Synthetiic Owner', 'Send the response to Synthetiic Owner', 'Forward the estimate to Synthetiic Owner']) {
     expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
   }
   lookupRows = [rows.customers[0]];
   expect((await Context.resolve({ prompt: 'Set Synthetic Person inactive', pageData: {} })).target.customer_id).toBe(A);
+  expect((await Context.resolve({ prompt: 'Rename Synthetic Person to Alice Jones', pageData: {} })).target.customer_id).toBe(A);
+  expect((await Context.resolve({ prompt: 'Send the response to Synthetic Person', pageData: {} })).target.customer_id).toBe(A);
+});
+
+test('partly resolved compound name evidence refuses a selection and is never a target', async () => {
+  lookupRows = [rows.customers[0]];
+  for (const prompt of ['Update Synthetiic Person and text Synthetic Person', 'Text Synthetic Person and remind Bob']) {
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+    expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+  }
+  // A resolved clause may carry other nouns, and an evidence-free clause is not partial.
+  for (const prompt of ['Schedule flea treatment for Synthetic Person', 'Add a note for this customer and text Synthetic Person']) {
+    expect((await Context.resolve({ prompt, pageData: { customer_id: A } })).target).toMatchObject({ customer_id: A, provenance: 'current_request_lookup' });
+  }
 });
 
 test('field nouns after an action are not person names', async () => {
-  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency', 'Update customer city', 'Set waveguard tier', "Let's update this customer", 'Update customer first name']) {
+  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency', 'Update customer city', 'Set waveguard tier', "Let's update this customer", 'Update customer first name', "Update this account's status", 'Update this profile']) {
     const task = await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } });
     expect(task.target).toMatchObject({ customer_id: A, provenance: 'operator_selection' });
   }
 });
 
 test('quantifier spellings are normalized and contact literals are ignored', async () => {
-  for (const prompt of ['Update all of those customers using this customer', 'Update these  customers Synthetic Person and Synthetic Second', 'Update those customers', 'Update all customers', 'Text each customer', 'Remind every customer']) {
+  for (const prompt of ['Update all of those customers using this customer', 'Update these  customers Synthetic Person and Synthetic Second', 'Update those customers', 'Update all the customers', 'Update all of the customers', 'Text each of the customers', 'Remind every one of the customers', 'Update all customers', 'Text each customer', 'Remind every customer']) {
     expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
   }
   const emailed = await Context.resolve({ prompt: 'Reply to both@example.invalid', pageData: {} });

@@ -133,6 +133,15 @@ suite('IB target validation against isolated PostgreSQL', () => {
       expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
       expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
     }
+    for (const set of ['all the', 'all of the', 'each of the', 'every one of the']) {
+      expect(await Context.resolve({ prompt: `Update ${set} customers`, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
+    }
+    // A rename names its customer; a compound whose other clause resolved nobody is never a target.
+    expect(await Context.resolve({ prompt: 'Rename Synthetic Targetfixture to Synthetic Renamed', pageData: {}, selectedTarget: { customer_id: second } })).toMatchObject({ code: 'context_mismatch' });
+    const compound = 'Update Synthetiic Targetfixture and text Synthetic Secondfixture';
+    expect(await Context.resolve({ prompt: compound, pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt: compound, pageData: {}, selectedTarget: { customer_id: second } })).toMatchObject({ code: 'context_mismatch' });
+    expect((await Context.resolve({ prompt: 'Schedule flea treatment for Synthetic Secondfixture', pageData: {} })).target.customer_id).toBe(second);
   });
 
   test('eleven explicit customer names cannot silently become ten approved targets', async () => {

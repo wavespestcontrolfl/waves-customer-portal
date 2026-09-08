@@ -226,6 +226,18 @@ The second round added the ordinary set spellings (`all customers`,
 lookup as well, listed every `update_customer` field and the opening
 contractions as non-names, and reads a `null` selection as absent.
 
+The third round added the determiner forms (`all the customers`, `all of the
+customers`, `each of the customers`, `every one of the customers`), made
+`rename`/`relabel` selector verbs, and closed partly resolved compound
+evidence: when one action clause accepted a customer and another clause's
+person reference matches nobody ("update Jhon Smith and text Alice Owner"),
+the request has no target, is ambiguous, and refuses any selection. A request
+that resolved nobody keeps the plain unresolved-name handling, and a resolved
+clause may still carry service nouns. `account`/`profile`/`record` and the
+record nouns (`appointment`, `estimate`, `invoice`, …) are non-names. The
+thing being sent introduces its recipient too (`send the response to`,
+`forward the estimate to`), closing B2's open recipient-phrase thread here.
+
 Validation: 157 target cases pass (133 unit and 24 rollback-only isolated
 PostgreSQL cases). No model, provider, production query, migration, merge or
 gate change occurred.
