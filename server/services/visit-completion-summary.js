@@ -81,7 +81,9 @@ async function getVisitCompletionSummary(token, database = db) {
     .where('i.packet_id', packet.id).orderBy('s.window_start').orderBy('s.id')
     .select('i.status', 'r.id', 'r.service_type', 'r.structured_notes', 'r.report_view_token',
       'r.customer_id', 'r.scheduled_service_id', 's.id as member_id', 's.visit_id');
-  if (items.length < 2 || items.some((item) => item.status !== 'done'
+  // The packet's own membership is the floor: a visit that retained
+  // cancelled or skipped members can close with one recorded service.
+  if (!items.length || items.some((item) => item.status !== 'done'
       || item.customer_id !== visit.customer_id || item.visit_id !== visit.id
       || item.scheduled_service_id !== item.member_id)) return null;
   const visible = publishableSummaryItems(items);
@@ -189,7 +191,11 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
       // row already carries this type).
       metadata: { original_message_type: 'visit_summary' },
       preDispatchCheck: async () => {
-        dispatched = await VisitGroups.beginVisitNotificationDispatch(visit.id, 'completion_sms', claim.token);
+        // A claim that cannot be read is not a lost claim: no provider
+        // handoff happened, so the requested SMS stays retryable.
+        try {
+          dispatched = await VisitGroups.beginVisitNotificationDispatch(visit.id, 'completion_sms', claim.token);
+        } catch { return { ok: false, code: 'VISIT_SUMMARY_CLAIM_UNAVAILABLE', retryable: true }; }
         return { ok: dispatched, code: 'VISIT_SUMMARY_CLAIM_LOST' };
       },
     });
@@ -284,11 +290,17 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
   const visitId = match[1];
+  // Two recipients can bounce in concurrent webhook transactions; holding
+  // the shared effect serializes them so the second reads the first's
+  // committed outcome instead of its stale 'sent'.
+  const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'sent' })
+    .forUpdate().first('id');
+  if (!effect) return { reconciled: false };
   const messages = await database('email_messages').where({ trigger_event_id: message.trigger_event_id,
     template_key: 'service.visit_summary', recipient_id: message.recipient_id })
     .select('status', 'sent_at', 'provider_message_id', 'error_message');
   if (messages.map(summaryEmailState).includes('sent')) return { reconciled: false };
-  const flipped = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'sent' })
+  const flipped = await database('visit_effects').where({ id: effect.id, status: 'sent' })
     .update({ status: 'unknown_delivery', last_error: 'provider_bounce', updated_at: database.fn.now() }).returning('id');
   if (!flipped.length) return { reconciled: false };
   const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');

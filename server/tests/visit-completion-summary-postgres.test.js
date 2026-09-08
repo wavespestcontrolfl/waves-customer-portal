@@ -493,6 +493,31 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
   });
 
+  test('a claim read failure on the immediate SMS keeps the request retryable', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    jest.spyOn(VisitGroups, 'beginVisitNotificationDispatch').mockRejectedValueOnce(new Error('Synthetic claim read outage'));
+    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
+      const verdict = await preDispatchCheck();
+      return verdict.ok ? { sent: true } : { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable === true };
+    });
+    expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'failed' });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test('a packet that retained terminal members still publishes its one recorded service', async () => {
+    await mockPg('visit_completion_packet_items').where({ packet_id: fixture.packetId, scheduled_service_id: fixture.serviceIds[1] }).del();
+    await mockPg('service_records').where({ id: fixture.recordIds[1] }).del();
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ status: 'cancelled' });
+    const summary = await Summary.getVisitCompletionSummary(fixture.token);
+    expect(summary.services.map((service) => service.id)).toEqual([fixture.recordIds[0]]);
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendOne).toHaveBeenCalledTimes(2);
+  });
+
   test('the full coordinator closes the visit and replay preserves one email per recipient', async () => {
     expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({
       status: 200, body: { state: 'done', payment: { state: 'no_charge' }, delivery: { state: 'delivered' } },
