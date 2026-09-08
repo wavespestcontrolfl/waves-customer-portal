@@ -3861,7 +3861,9 @@ function initScheduledJobs() {
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
+              // The provider's HTTP status is the replay's proof of a refusal
+              // (408/429/5xx = no message created) versus an ambiguous timeout.
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text, 'provider_retry_http_status', ?::int)", [completedAt, smsResult.code || null, Number.isInteger(smsResult.providerHttpStatus) ? smsResult.providerHttpStatus : null]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {

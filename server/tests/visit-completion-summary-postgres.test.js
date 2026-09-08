@@ -215,6 +215,44 @@ postgres('visit summary recipient recovery', () => {
     expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', heldMeta)).toMatchObject({ ok: false });
   });
 
+  test.each([
+    ['a provider refusal (429) is retried by the actual scheduled worker', 429, 1],
+    ['an ambiguous provider timeout stays on office review', undefined, 0],
+  ])('%s', async (_label, providerHttpStatus, sendsAfterRetry) => {
+    const queued = await heldSummary();
+    const cron = require('../utils/scheduled-cron');
+    cron.schedule.mockClear();
+    const gates = require('../config/feature-gates');
+    const isEnabled = gates.isEnabled;
+    jest.spyOn(gates, 'logGateStatus').mockImplementation(() => {});
+    jest.spyOn(gates, 'isEnabled').mockImplementation((gate) => gate === 'cronJobs' || isEnabled(gate));
+    require('../services/scheduler').initScheduledJobs();
+    const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
+    let providerCalls = 0;
+    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
+      const verdict = await preDispatchCheck();
+      if (!verdict.ok) return { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable };
+      providerCalls += 1;
+      if (providerCalls === 1) return { sent: false, retryable: true, code: 'PROVIDER_UNAVAILABLE', providerHttpStatus };
+      return { sent: true, providerMessageId: 'fixture-scheduled-provider-id' };
+    });
+    await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+    await tick();
+    expect(providerCalls).toBe(1);
+    expect(await mockPg('sms_log').where({ id: queued.id }).first()).toMatchObject({ status: 'scheduled' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'unknown_delivery' });
+    await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+    await tick();
+    expect(providerCalls).toBe(1 + sendsAfterRetry);
+    if (sendsAfterRetry) {
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } else {
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+        .toMatchObject({ status: 'unknown_delivery' });
+    }
+  });
+
   test('an initial consent lookup failure retries the requested SMS instead of suppressing it', async () => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });

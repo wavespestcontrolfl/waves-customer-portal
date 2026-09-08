@@ -133,10 +133,16 @@ async function recheckDeferredSummarySms(meta, database = db) {
   if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
   const effect = await database('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
     claim_token: meta.visit_summary_claim_token }).first();
-  // A late provider-boundary quiet-hours block proves no send occurred.
-  // Its durable scheduler stamp allows exactly that handoff to be retried.
-  if (effect?.status === 'unknown_delivery' && meta.quiet_hours_hold_at
-    && new Date(meta.quiet_hours_hold_at) >= new Date(effect.claimed_at)) {
+  // A late provider-boundary quiet-hours block, or a provider refusal the
+  // scheduler is retrying (408 / 429 / 5xx: no message was created), proves
+  // no send occurred. Its durable scheduler stamp allows exactly that
+  // handoff to be retried; an ambiguous timeout carries no status and stays
+  // on office review.
+  const refusedAt = [408, 429].includes(Number(meta.provider_retry_http_status)) || Number(meta.provider_retry_http_status) >= 500
+    ? meta.provider_retry_at : null;
+  const provenUnsentAt = [meta.quiet_hours_hold_at, refusedAt].filter(Boolean)
+    .find((at) => new Date(at) >= new Date(effect?.claimed_at || 0));
+  if (effect?.status === 'unknown_delivery' && provenUnsentAt) {
     await database('visit_effects').where({ id: effect.id, status: 'unknown_delivery', claimed_at: effect.claimed_at,
       claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', updated_at: database.fn.now() });
     effect.status = 'pending';
