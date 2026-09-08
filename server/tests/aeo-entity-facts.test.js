@@ -487,6 +487,19 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E5', 'Waves serves customers located in Tampa. It is based in Lakewood Ranch.')).toMatchObject({ expected: { hq_lakewood_ranch: true }, forbidden: { out_of_footprint_hq: false } });
   expect(score('E5', 'Waves has technicians based in Tampa.').forbidden.out_of_footprint_hq).toBe(false);
   expect(score('E5', 'It is based in Tampa.').forbidden.out_of_footprint_hq).toBe(true);
+  // GitHub review r6: an affirmative answer to a repeated question asserts it; "outside the service area" excludes a place or a list of places; an explicit refutation is not a claim.
+  expect(score('E8', 'Is Waves Pest Control a franchise? Yes.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Does Waves Pest Control offer fumigation? Yes.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Does Waves Pest Control offer fumigation? No.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Does Waves Pest Control offer fumigation?').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Does Waves serve Manatee County? Yes, it does.').expected.manatee).toBe(true);
+  expect(score('E5', "Manatee County is outside Waves' service area.").expected.manatee).toBe(false);
+  expect(score('E5', 'Manatee, Sarasota, and Charlotte counties fall outside its service area.')).toMatchObject({ right: 0 });
+  expect(score('E5', 'Waves serves Manatee, Sarasota, and Charlotte counties; Tampa is outside its service area.')).toMatchObject({ right: 3 });
+  expect(score('E8', 'It is false that Waves is a franchise.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'The claim that Waves offers fumigation is false.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Reports that Waves is headquartered in Tampa are incorrect.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Reports that Waves is headquartered in Tampa are accurate.').forbidden.out_of_footprint_hq).toBe(true);
   // Pre-push hook r33: a passive-agent or hedged list intro governs its items.
   expect(score('E6', 'Services not offered by Waves:\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves may offer:\n- Pest control\n- Lawn care\n- Fumigation')).toMatchObject({ right: 0, forbidden: { fumigation_offered: false } });

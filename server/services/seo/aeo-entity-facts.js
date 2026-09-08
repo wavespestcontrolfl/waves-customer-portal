@@ -63,7 +63,7 @@ const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|doesn'?t|does not|
 // fumigation" and "without fumigation" deny, but "pest control without
 // contracts, including lawn care" does not reach lawn care. "As an
 // alternative to fumigation" and "in place of fumigation" exclude it too.
-const EXCLUSION_RE = /\b(?:without|except|excluding|other than|aside from|outside of|rather than|instead of|(?:an?\s+)?(?:alternatives?|substitutes?|replacements?)\s+(?:to|for)|in\s+(?:place|lieu)\s+of)\b/i;
+const EXCLUSION_RE = /\b(?:without|except|excluding|other than|aside from|outside(?:\s+of)?|beyond|rather than|instead of|(?:an?\s+)?(?:alternatives?|substitutes?|replacements?)\s+(?:to|for)|in\s+(?:place|lieu)\s+of)\b/i;
 const ADJACENT_EXCLUSION_RE = new RegExp(`${EXCLUSION_RE.source}\\s+(?:(?:a|an|the|any|their|its|for|of)\\s+)?(?:[\\w'-]+\\s+){0,3}$`, 'i');
 // A question or an expression of uncertainty asserts nothing: "Does Waves
 // offer fumigation?", "It is unclear whether Waves offers fumigation".
@@ -74,6 +74,24 @@ const ADJACENT_EXCLUSION_RE = new RegExp(`${EXCLUSION_RE.source}\\s+(?:(?:a|an|t
 // begin with the hedged verb ("may cover damage").
 const UNCERTAIN_RE = /\b(?:whether|unclear|unknown|uncertain|unsure|unconfirmed|unverified|possibly|perhaps|probably|presumably|reportedly|allegedly|supposedly|(?:un)?likely|(?:may|might|could)\s+(?!\d|(?:also\s+)?(?:verify|check|look|search|confirm|call|contact|visit|reach|find|use|text|email|see|view|review)\b)|(?:appears?|seems?)\s+(?:to\b|that\b|as if\b))/i;
 const QUESTION_AHEAD_RE = /^[^.!?;\n]*\?/;
+// A repeated question asserts nothing on its own ("Does Waves offer
+// fumigation?"), but a plain affirmative answer right after it does
+// ("… fumigation? Yes."); a negative or absent answer leaves it unasserted.
+const AFFIRMATIVE_ANSWER_RE = /^\s*(?:yes|yep|correct|indeed|absolutely|definitely|certainly|true|it (?:is|does|did|has|was)|they (?:are|do|did|have))\b/i;
+function unansweredQuestion(rest) {
+  const question = QUESTION_AHEAD_RE.exec(rest);
+  return Boolean(question) && !AFFIRMATIVE_ANSWER_RE.test(rest.slice(question[0].length));
+}
+// The answer refutes the assertion outright: "it is false that Waves is a
+// franchise", "the claim that Waves offers fumigation is incorrect".
+const REFUTED_BEFORE_RE = /\b(?:false|incorrect|untrue|inaccurate|wrong|mistaken|a myth|a misconception)\s+(?:to say\s+)?that\b/i;
+const REPORTED_BEFORE_RE = /\b(?:claims?|reports?|rumou?rs?|suggestions?|statements?|assertions?|the idea|the notion|beliefs?|listings?|sources?)\s+(?:saying\s+|stating\s+)?that\b/i;
+const REFUTED_AFTER_RE = /\b(?:is|are|was|were)\s+(?:simply\s+|just\s+|entirely\s+|completely\s+)?(?:false|incorrect|untrue|inaccurate|wrong|unfounded|mistaken|a myth|a misconception|not (?:true|accurate|correct))\b|\b(?:has|have)\s+been\s+(?:debunked|refuted|corrected|disproved)\b/i;
+// The place sits outside the service area: "Manatee County is outside its
+// service area", "Manatee, Sarasota and Charlotte counties fall outside
+// Waves' footprint" — read over the sentence tail so a list subject excludes
+// every item.
+const OUTSIDE_AREA_AFTER_RE = /^(?:(?!\b(?:but|however|whereas|although|though|yet)\b)[^.;!?\n]){0,80}?\b(?:is|are|was|were|falls?|fell|lies?|sits?|remains?)\s+(?:well\s+|just\s+|currently\s+|entirely\s+|now\s+)?(?:outside|beyond)\b(?:\s+of)?\s+(?:waves'?s?\s+|its\s+|their\s+|the\s+|our\s+)?(?:current\s+|normal\s+|regular\s+)?(?:service|coverage)?\s*(?:areas?|territory|footprint|range|region|coverage)\b/i;
 // A list intro that negates or hedges its items ("does not offer:", "may
 // offer:") governs every item under it.
 function qualifiedIntro(head) {
@@ -335,7 +353,9 @@ function denied(matched, before, after, rest) {
   const innerAtStart = inner && inner.index === 0 && innerClause === matched;
   return (inner && !innerAtStart)
     || NEGATION_RE.test(before) || ADJACENT_EXCLUSION_RE.test(before) || UNCERTAIN_RE.test(before + matched)
-    || AFTER_NEGATION_RE.test(after) || QUESTION_AHEAD_RE.test(rest);
+    || AFTER_NEGATION_RE.test(after) || unansweredQuestion(rest)
+    || REFUTED_BEFORE_RE.test(before) || (REPORTED_BEFORE_RE.test(before) && REFUTED_AFTER_RE.test(`${matched}${rest}`.split(/[.;!?\n]/)[0]))
+    || OUTSIDE_AREA_AFTER_RE.test(rest);
 }
 
 const FACTS = Object.fromEntries(Object.entries(cohort.facts).map(([key, def]) => [key, compile(def)]));
