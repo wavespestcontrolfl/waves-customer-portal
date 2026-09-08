@@ -84,6 +84,9 @@ export default function CustomerPropertiesPanelV2({
     setLoadErr("");
     setCanChangePrimary(false);
     setPrimaryPreview(null);
+    // A request still in flight for the previous customer must not keep this
+    // customer's controls disabled, and must not clear its own busy state later.
+    setRowBusy(null);
     adminFetch(`/admin/customers/${customerId}/properties`)
       .then((d) => {
         if (!cancelled) {
@@ -165,7 +168,7 @@ export default function CustomerPropertiesPanelV2({
     } catch (err) {
       setRowErr(err.message || "Could not update property");
     } finally {
-      setRowBusy(null);
+      if (activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
@@ -189,7 +192,7 @@ export default function CustomerPropertiesPanelV2({
     } catch (err) {
       if (activeCustomer.current === customerId) setRowErr(err.message || "Could not preview the primary change");
     } finally {
-      setRowBusy(null);
+      if (activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
@@ -213,7 +216,7 @@ export default function CustomerPropertiesPanelV2({
         setRowErr(err.message || "Could not change the primary property. Refresh to check its saved state.");
       }
     } finally {
-      setRowBusy(null);
+      if (activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 

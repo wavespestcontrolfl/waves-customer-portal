@@ -688,7 +688,13 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
   const base = { proposal: true, customer: { id: customerId, name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') } };
   let preview;
   if (kind === 'add') {
-    if (!isNewAddress(properties, changes) || addressKey(customer) === addressKey(changes)) {
+    // The writer first completes a same-street account or primary address that
+    // is missing its city or ZIP (completePrimaryFromCall), so the candidate is
+    // compared against those completed forms here, before an approval exists.
+    const completed = record => (record && streetKey(record.address_line1) === streetKey(changes.address_line1)
+      ? { ...record, city: record.city || changes.city, zip: record.zip || changes.zip } : record);
+    const existing = properties.map(p => p.is_primary && p.active ? completed(p) : p);
+    if (!isNewAddress(existing, changes) || addressKey(completed(customer)) === addressKey(changes)) {
       throw propertyActionError('A property with that street already exists for this customer', 409, 'property_exists');
     }
     const firstProperty = !properties.some(p => p.is_primary) && !customer.address_line1;
