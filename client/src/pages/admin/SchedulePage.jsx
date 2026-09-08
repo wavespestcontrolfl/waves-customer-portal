@@ -357,7 +357,7 @@ function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     // 8 AM–8 PM send window (codex #4140 r2).
     return bundled
       ? "Review link is included in the completion text."
-      : "Review text goes out separately as soon as the send window allows. The request is recorded.";
+      : "Review text goes out separately as soon as the send window allows. The request is recorded on this visit.";
   }
   if (reviewTiming === "tomorrow_8") {
     // In cadence mode 8:00 is the eligibility time; the worker's first tick
@@ -11989,8 +11989,13 @@ export function CompletionPanel({
     effectiveSendSms &&
     (oneTimeRecapOnly ||
       (reviewTiming === "customer_requested" && reviewSendPreview?.bundlesImmediateAsk === true));
+  // The server's invoiceBlocksReview: an UNPAID invoice after completion —
+  // one minted now (willInvoice) or one already sent from dispatch and still
+  // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
+  // paid invoices never hold the ask.
+  const reviewAwaitsPayment = willInvoice || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
   const reviewTimingHintText = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms, awaitsPayment: willInvoice })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms, awaitsPayment: reviewAwaitsPayment })
     : "";
   const smsPreview = [
     smsRecapPreview(customerRecap),

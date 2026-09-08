@@ -946,6 +946,23 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       }
     });
 
+    test('a parked series final is a cadence in the candidate map (parked, next re-check), and an active row wins over it (codex #4140 r12 P2)', async () => {
+      const parkAt = new Date(Date.now() + 20 * 60000);
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-pk1', customer_id: 'pk-1', status: 'deferred', stop_reason: 'opener_in_flight', current_step: 0, plan: '[{"day":0},{"day":4}]', next_run_at: parkAt, decision: JSON.stringify({ reason: 'opener_in_flight', enrollmentReason: 'customer_requested' }) },
+          { id: 'seq-pk2a', customer_id: 'pk-2', status: 'active', current_step: 1, plan: '[{"day":0},{"day":4}]', next_run_at: new Date(Date.now() + 3600000) },
+          { id: 'seq-pk2d', customer_id: 'pk-2', status: 'redeeming', current_step: 0, plan: '[{"day":0}]', next_run_at: parkAt },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      const map = await ReviewService.getActiveSequencesForCustomers(['pk-1', 'pk-2']);
+      expect(map['pk-1']).toMatchObject({ id: 'seq-pk1', parked: true, sending: false, stranded: false, totalSteps: 2, decision: { reason: 'opener_in_flight' } });
+      expect(new Date(map['pk-1'].nextRunAt).getTime()).toBe(parkAt.getTime());
+      expect(map['pk-2']).toMatchObject({ id: 'seq-pk2a', parked: false, currentStep: 1 });
+    });
+
     test('an overdue row (missed tick, gate re-enabled between ticks) shows the next tick from now, never one already past (codex #4140 r8)', async () => {
       const mock = makeMock({
         review_sequences: [

@@ -325,6 +325,13 @@ function decisionLine(seq, sequencesEnabled) {
   // A stranded claim (null schedule the worker never re-selects) needs a hand
   // whether or not the gate is on — say so first (codex #4140 r6 P2).
   if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
+  // A parked series final (deferred until the opener's send settles) is a
+  // durable enrollment the redemption sweep redeems — not "no cadence"
+  // (codex #4140 r12 P2). Its next_run_at is the next redemption check.
+  if (seq.parked) {
+    const at = seq.nextRunAt ? new Date(seq.nextRunAt).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
+    return [at ? `Re-check ${at}` : null, DECISION_LABELS.opener_in_flight, "Owner action: none"].filter(Boolean).join(" · ");
+  }
   // The worker skips every run while GATE_REVIEW_SEQUENCES is off, so an
   // active row's next tick is not a plan — it is frozen (codex #4140 r5 P2).
   if (sequencesEnabled === false) return "Paused — cadences are off (GATE_REVIEW_SEQUENCES) · Owner action: turn the gate on, or stop this cadence";
@@ -2142,7 +2149,7 @@ function CustomerDrawer({
 
   const startSequence = async () => {
     if (c.sequence) {
-      showToast("Already in an active cadence");
+      showToast(c.sequence.parked ? "A cadence is already parked for this customer" : "Already in an active cadence");
       return;
     }
     setSeqStarting(true);

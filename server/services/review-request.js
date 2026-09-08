@@ -5323,13 +5323,21 @@ const ReviewService = {
   /** Map of customerId → active sequence summary (for candidate annotation). */
   async getActiveSequencesForCustomers(ids = []) {
     if (!ids.length) return {};
-    const rows = await db("review_sequences").whereIn("customer_id", ids).where("status", "active");
+    // Parked series finals (deferred / redeeming, _parkDeferredFinal) are a
+    // durable enrollment too (codex #4140 r12 P2): after the opener settles
+    // and before the redemption sweep the customer has no active row, and
+    // the page must not read that as "no cadence" and offer Start Cadence.
+    // An active row wins over a parked one for the same customer.
+    const rows = await db("review_sequences").whereIn("customer_id", ids).whereIn("status", ["active", "deferred", "redeeming"]);
     const map = {};
     rows.forEach((r) => {
+      const parked = r.status !== "active";
+      if (parked && map[r.customer_id] && !map[r.customer_id].parked) return;
       const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
 
       map[r.customer_id] = {
         id: r.id,
+        parked,
         currentStep: r.current_step,
         totalSteps: plan.length,
         nextRunAt: r.next_run_at,
@@ -5344,8 +5352,8 @@ const ReviewService = {
         // is a stranded claim (process exit mid-send), not a live one — the
         // cron never re-selects a NULL schedule, so say so instead of
         // "Sending now" forever (codex #4140 r1).
-        sending: r.next_run_at == null && !claimIsStale(r),
-        stranded: r.next_run_at == null && claimIsStale(r),
+        sending: !parked && r.next_run_at == null && !claimIsStale(r),
+        stranded: !parked && r.next_run_at == null && claimIsStale(r),
         decision: parseDecision(r.decision),
         customerRequested: parseDecision(r.customer_requested),
       };
