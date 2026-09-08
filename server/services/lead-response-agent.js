@@ -139,6 +139,10 @@ const LeadResponseAgent = {
       logger.warn('[lead-agent] Missing LEAD_AGENT_ENVIRONMENT_ID (or ANTHROPIC_ENVIRONMENT_ID) — skipping agent processing');
       return null;
     }
+    if (!lead?.leadId || !lead?.customerId) {
+      logger.warn('[lead-agent] Skipping lead without assigned customer', { leadId: lead?.leadId || null });
+      return { skipped: true, error: 'Agent processing requires an assigned lead and customer' };
+    }
 
     const startTime = Date.now();
 
@@ -253,7 +257,7 @@ const LeadResponseAgent = {
               if (isToolFailure(toolResult)) {
                 failed = true;
                 toolError = toolResult.error || 'tool returned error';
-                leadToolBreaker.recordFailure();
+                if (!toolResult.validationError) leadToolBreaker.recordFailure();
                 if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
               } else {
                 leadToolBreaker.recordSuccess();

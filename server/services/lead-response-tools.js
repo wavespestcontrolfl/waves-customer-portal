@@ -16,21 +16,21 @@ const { phoneMatchDigits } = require('../utils/phone');
 
 // Authority comes from the server's assigned session, never model arguments.
 async function resolveLeadSubject(input, context, conn = db, lock = false) {
-  if (!context?.leadId || !context?.customerId) return { error: 'Missing assigned lead context' };
+  if (!context?.leadId || !context?.customerId) return { error: 'Missing assigned lead context', validationError: true };
   if ((input.lead_id && input.lead_id !== context.leadId) ||
       (input.customer_id && input.customer_id !== context.customerId)) {
-    return { error: 'Tool target does not match assigned lead' };
+    return { error: 'Tool target does not match assigned lead', validationError: true };
   }
   const query = conn('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at');
   if (lock) query.forUpdate();
   const lead = await query.first();
-  if (!lead) return { error: 'Assigned lead is unavailable' };
+  if (!lead) return { error: 'Assigned lead is unavailable', validationError: true };
   const customer = await conn('customers').where('id', context.customerId).whereNull('deleted_at').first();
-  if (!customer) return { error: 'Assigned customer is unavailable' };
+  if (!customer) return { error: 'Assigned customer is unavailable', validationError: true };
   if (input.phone != null) {
     const variants = phoneMatchDigits(input.phone);
     const matches = [lead.phone, customer.phone].some(phone => phoneMatchDigits(phone).some(value => variants.includes(value)));
-    if (!matches) return { error: 'Tool phone does not match assigned lead' };
+    if (!matches) return { error: 'Tool phone does not match assigned lead', validationError: true };
   }
   return { lead, customer };
 }
@@ -403,7 +403,7 @@ async function executeLeadTool(toolName, input, context) {
     }
 
     case 'queue_for_adam': {
-      if (!context.sessionId || !context.toolUseId) return { error: 'Missing queue invocation identity' };
+      if (!context.sessionId || !context.toolUseId) return { error: 'Missing queue invocation identity', validationError: true };
       const queued = await db.transaction(async trx => {
         const current = await resolveLeadSubject(input, context, trx, true);
         if (current.error) return current;
@@ -462,7 +462,6 @@ async function executeLeadTool(toolName, input, context) {
 
       // Map stage names to pipeline events
       const eventMap = {
-        new_lead: 'lead_created',
         estimate_viewed: 'estimate_viewed',
         contacted: 'first_contact',
         estimate_sent: 'estimate_sent',
@@ -472,7 +471,7 @@ async function executeLeadTool(toolName, input, context) {
       };
 
       const event = Object.hasOwn(eventMap, input.stage) ? eventMap[input.stage] : null;
-      if (!event) return { error: 'Unsupported lead pipeline stage' };
+      if (!event) return { error: 'Unsupported lead pipeline stage', validationError: true };
       await PipelineManager.onEvent(input.customer_id, event);
 
       if (input.lead_id && input.note) {

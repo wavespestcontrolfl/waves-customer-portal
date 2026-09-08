@@ -8,6 +8,7 @@
 
 const mockRecordSessionUsage = jest.fn();
 const mockExecuteLeadTool = jest.fn();
+const mockBreakerFailure = jest.fn();
 jest.mock('../services/llm-dispatch-metrics', () => ({ recordSessionUsage: (...a) => mockRecordSessionUsage(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/bi-agent-tools', () => ({ executeBITool: jest.fn() }));
@@ -17,7 +18,7 @@ jest.mock('../services/content/content-agent-config', () => ({ CONTENT_AGENT_CON
 jest.mock('../models/db', () => () => ({ insert: async () => {}, where: () => ({ first: async () => null }) }));
 jest.mock('../services/lead-response-tools', () => ({ executeLeadTool: (...args) => mockExecuteLeadTool(...args) }));
 jest.mock('../services/lead-response-agent-config', () => ({ LEAD_RESPONSE_AGENT_CONFIG: { model: 'lead-model' } }));
-jest.mock('../services/intelligence-bar/circuit-breaker', () => ({ getBreaker: jest.fn(() => ({ isTripped: () => false, recordSuccess() {}, recordFailure() {} })) }));
+jest.mock('../services/intelligence-bar/circuit-breaker', () => ({ getBreaker: jest.fn(() => ({ isTripped: () => false, recordSuccess() {}, recordFailure: mockBreakerFailure })) }));
 jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: jest.fn() }));
 
 const ORIGINAL_ENV = { ...process.env };
@@ -110,6 +111,7 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
   beforeEach(() => {
     jest.resetModules();
     mockExecuteLeadTool.mockReset();
+    mockBreakerFailure.mockClear();
     mockRecordSessionUsage.mockReset();
     mockRecordSessionUsage.mockResolvedValue(null);
     now = 1_000_000;
@@ -129,6 +131,23 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(mockExecuteLeadTool).toHaveBeenCalledWith('get_lead_details', input, {
       leadId: 'lead-1', customerId: 'cust-1', sessionId: 'sess-1', toolUseId: 'tool-1',
     });
+  });
+
+  it('rejects an unlinked lead before creating a paid managed-agent session', async () => {
+    global.fetch = jest.fn();
+    expect(await load(path).processLead({ leadId: 'lead-1', customerId: null })).toMatchObject({ skipped: true, error: expect.any(String) });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(mockExecuteLeadTool).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('counts infrastructure failures but excludes validationError=%s from the shared breaker', async validationError => {
+    mockExecuteLeadTool.mockResolvedValue({ error: 'Tool rejected', validationError });
+    global.fetch = fetchFor([
+      ...Array.from({ length: 5 }, (_, index) => ({ event: 'tool_use', data: { id: `tool-${index}`, name: 'get_lead_details', input: {} } })),
+      { event: 'done', data: {} },
+    ]);
+    await run(load(path));
+    expect(mockBreakerFailure).toHaveBeenCalledTimes(validationError ? 0 : 5);
   });
 
   it('a failed fallback draft save cannot be reported as queued', async () => {

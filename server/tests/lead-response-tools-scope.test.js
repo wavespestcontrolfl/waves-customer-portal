@@ -57,7 +57,7 @@ test.each([
   { lead_id: '00000000-0000-4000-8000-000000000099' },
   { phone: '+19415550199' }, { phone: 'anonymous' }, { phone: '+4419415550100' },
 ])('rejects foreign or malformed target %j', async input => {
-  expect(await executeLeadTool('get_customer_context', input, context)).toHaveProperty('error');
+  expect(await executeLeadTool('get_customer_context', input, context)).toMatchObject({ error: expect.any(String), validationError: true });
   expect(mockContext).not.toHaveBeenCalled();
 });
 test.each(['deleted', 'repointed', 'customer_deleted'])('refuses %s subject', async mode => {
@@ -71,7 +71,7 @@ test('uses resolved customer without shared-phone lookup', async () => {
   expect(await executeLeadTool('get_customer_context', { phone: '(941) 555-0100' }, context)).toEqual({ customerId: context.customerId });
   expect(mockContext).toHaveBeenCalledWith(mockState.customer);
 });
-test.each(['service_completed', 'subscription_cancelled', '__proto__'])('rejects non-lead event %s', async stage => {
+test.each(['new_lead', 'service_completed', 'subscription_cancelled', '__proto__'])('rejects unsupported lead stage %s', async stage => {
   expect(await executeLeadTool('update_lead_pipeline', { stage }, context)).toHaveProperty('error');
   expect(mockPipeline).not.toHaveBeenCalled();
 });

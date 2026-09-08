@@ -203,7 +203,7 @@ NEVER: send a generic template, promise pricing, book without availability check
         properties: {
           customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           lead_id: { type: 'string', description: 'Lead UUID' },
-          stage: { type: 'string', enum: ['new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'won', 'lost'], description: 'New pipeline stage' },
+          stage: { type: 'string', enum: ['contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'won', 'lost'], description: 'New pipeline stage' },
           note: { type: 'string', description: 'Activity note explaining the transition' },
         },
         required: ['customer_id', 'stage'],
