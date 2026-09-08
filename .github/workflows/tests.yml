@@ -293,6 +293,8 @@ jobs:
           pod --version
       - name: Generate and sync the pinned iOS app
         run: bash scripts/mobile/bootstrap-ios.sh
+      - name: Verify iOS push signing setup and release checks
+        run: python3 scripts/mobile/test_ios_push.py
       - name: Compile iOS simulator app without signing
         working-directory: client/ios/App
         run: >-
