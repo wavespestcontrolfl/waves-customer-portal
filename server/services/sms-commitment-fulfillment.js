@@ -52,7 +52,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     email: conn('emails').where({ customer_id: customerId }).where('received_at', '>', after)
       .where('received_at', '<=', now).orderBy('received_at', 'desc').limit(LIMIT + 1)
       .select('id', 'label_ids', 'body_text', 'subject', 'has_attachments', 'received_at'),
-    email_delivery: conn('email_messages').where({ recipient_type: 'customer', recipient_id: customerId })
+    // Unowned commercial proposals are sent to the lead, not the customer
+    // row; their delivery emails are reached through the estimate they name.
+    email_delivery: conn('email_messages').where(function addressee() {
+      this.where({ recipient_type: 'customer', recipient_id: customerId })
+        .orWhereIn('trigger_event_id', conn('estimates').modify((q) => whereEstimateCustomerOwnership(q, customerId))
+          .select(conn.raw("'estimate_delivery:' || id")));
+    })
       .where(function deliveryWindow() {
         this.where((q) => q.where('sent_at', '>', after).where('sent_at', '<=', now))
           .orWhere((q) => q.where('delivered_at', '>', after).where('delivered_at', '<=', now));
@@ -79,6 +85,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .orWhereExists(conn('reschedule_log as r').select(conn.raw('1'))
             .whereRaw('r.scheduled_service_id = scheduled_services.id')
             .whereRaw('r.original_date IS NOT NULL AND r.new_date IS NOT NULL AND r.new_date <> r.original_date')
+            .whereRaw('scheduled_services.updated_at > ?', [after])
             .where('r.created_at', '>', after).where('r.created_at', '<=', now));
       })
       .orderBy('scheduled_date', 'desc').limit(LIMIT + 1)
@@ -89,10 +96,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
             AND h.transitioned_at > ? AND h.transitioned_at <= ?) as booked_at`, [after, now]),
         // A move chain proves a move only when its net result is the visit's
         // current date: the latest logged new date must be that date and the
-        // earliest logged original date must not be (a reverted chain).
+        // earliest logged original date must not be (a reverted chain). The
+        // log row is written after the move commits, so the row's own change
+        // time must also postdate the request.
         conn.raw(`(SELECT MIN(r.created_at) FROM reschedule_log r
           WHERE r.scheduled_service_id = scheduled_services.id
             AND r.original_date IS NOT NULL AND r.new_date IS NOT NULL AND r.new_date <> r.original_date
+            AND scheduled_services.updated_at > ?
             AND r.created_at > ? AND r.created_at <= ?
             AND scheduled_services.scheduled_date = (SELECT l.new_date FROM reschedule_log l
               WHERE l.scheduled_service_id = scheduled_services.id
@@ -102,7 +112,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
               WHERE f.scheduled_service_id = scheduled_services.id
                 AND f.original_date IS NOT NULL AND f.new_date IS NOT NULL AND f.new_date <> f.original_date
                 AND f.created_at > ? AND f.created_at <= ? ORDER BY f.created_at ASC LIMIT 1)) as moved_at`,
-        [after, now, after, now, after, now]),
+        [after, after, now, after, now, after, now]),
         conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
           WHERE h.job_id = scheduled_services.id AND h.to_status = scheduled_services.status
             AND h.transitioned_at > ? AND h.transitioned_at <= ?) as transitioned_at`, [after, now])),
@@ -205,8 +215,10 @@ function admissibleWitness(record, commitment, records = []) {
 // the kind must be complete; a supporting message channel may be truncated
 // only when its retained window still reaches back to the witness time, so
 // nothing said after the witness (a retraction, a correction) can hide in
-// the cut. Estimates and visits are ordered by handoff and scheduled date,
-// not activity, so their truncation is always fatal.
+// the cut. The window must reach STRICTLY before the witness: rows tied at
+// the witness instant may straddle the cut. Estimates and visits are
+// ordered by handoff and scheduled date, not activity, so their truncation
+// is always fatal.
 const ORDERING_TIME = {
   sms: (row) => row.created_at, call: (row) => row.created_at, email: (row) => row.received_at,
   email_delivery: (row) => row.delivered_at || row.sent_at, invoice: (row) => row.sent_at,
@@ -233,7 +245,7 @@ function fatalFailures(evidence, commitment, witness) {
     if (!type || type === witness?.type) return true;
     const retained = evidence.records.filter((r) => r.type === type).map((r) => new Date(ORDERING_TIME[type](r)))
       .filter((d) => !Number.isNaN(d.getTime()));
-    return !retained.length || !witness?.matched_at || Math.min(...retained.map((d) => d.getTime())) > witness.matched_at.getTime();
+    return !retained.length || !witness?.matched_at || Math.min(...retained.map((d) => d.getTime())) >= witness.matched_at.getTime();
   });
 }
 

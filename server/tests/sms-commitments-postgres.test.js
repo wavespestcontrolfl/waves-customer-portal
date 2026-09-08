@@ -645,9 +645,14 @@ postgres('SMS commitments on PostgreSQL', () => {
       service_type: 'Quarterly Lawn', scheduled_date: etDateString(after), window_start: '09:00:00',
       status: 'confirmed', created_at: before, updated_at: after };
     const nextWeek = etDateString(new Date(after.getTime() + 7 * 86400000));
-    const [moved, touched, sameDate, earlyMove, noShow] = await mockPg('scheduled_services')
-      .insert([{ ...base, scheduled_date: nextWeek }, base, base, { ...base, scheduled_date: nextWeek }, base]).returning('id');
+    const [moved, touched, sameDate, earlyMove, noShow, movedBeforeRequest] = await mockPg('scheduled_services')
+      .insert([{ ...base, scheduled_date: nextWeek }, base, base, { ...base, scheduled_date: nextWeek }, base,
+        { ...base, scheduled_date: nextWeek, updated_at: before }]).returning('id');
     await mockPg('reschedule_log').insert([
+      // The log row lands after the move commits: a row last changed before
+      // the request was moved before it, whatever the log's insert time.
+      { scheduled_service_id: movedBeforeRequest.id, customer_id: message.customer_id, original_date: etDateString(after),
+        new_date: nextWeek, initiated_by: 'admin_ib', created_at: after },
       // A no-show entry records the missed date with no new date: not a move.
       { scheduled_service_id: noShow.id, customer_id: message.customer_id, original_date: etDateString(after),
         new_date: null, reason_code: 'customer_noshow', initiated_by: 'system', created_at: after },
@@ -664,6 +669,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(ids).toEqual([moved.id]);
     expect(ids).not.toContain(touched.id);
     expect(ids).not.toContain(noShow.id);
+    expect(ids).not.toContain(movedBeforeRequest.id);
     const record = evidence.records.find((r) => r.id === moved.id);
     expect(record.text).toContain('moved after the request');
     const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString() };
@@ -743,6 +749,24 @@ postgres('SMS commitments on PostgreSQL', () => {
     });
   });
 
+  test('a lead-addressed proposal delivery is reached through the customer\'s estimate', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      status: 'sent', service_interest: 'Commercial', estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    const [email] = await mockPg('email_messages').insert({ recipient_type: 'lead', recipient_id: null,
+      recipient_email_snapshot: 'synthetic@example.invalid', trigger_event_id: `estimate_delivery:${estimate.id}`,
+      status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your commercial proposal is attached' }).returning('id');
+    await mockPg('email_messages').insert({ recipient_type: 'lead', recipient_id: null,
+      recipient_email_snapshot: 'synthetic@example.invalid', trigger_event_id: `estimate_delivery:${randomUUID()}`,
+      status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Another business\'s proposal' });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, now);
+    expect(evidence.records.filter((r) => r.type === 'email_delivery').map((r) => r.id)).toEqual([email.id]);
+    const commitment = { kind: 'send_estimate', evidence: [{ quote: 'Email the proposal to synthetic@example.invalid' }],
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    expect(admissibleWitness(evidence.records.find((r) => r.id === email.id), commitment, evidence.records)).toBe(true);
+  });
+
   test.each([
     ['delivery email names an admissible estimate', 'ok', true],
     ['delivery email names an estimate handed off before the request', 'early', false],
@@ -792,7 +816,8 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test.each([
     ['witness channel truncated', 'call', 60, false],
-    ['supporting channel truncated but its window reaches the witness', 'sms', 60, true],
+    ['supporting channel truncated but its window reaches before the witness', 'sms', 60, true],
+    ['supporting channel truncated with its oldest retained row tied at the witness instant', 'sms', 59, false],
     ['supporting channel truncated past the witness', 'sms', 0, false],
   ])('evidence completeness: %s', async (_label, channel, witnessOffsetSeconds, fulfilled) => {
     const after = new Date(message.created_at.getTime() + 1000);
@@ -802,11 +827,11 @@ postgres('SMS commitments on PostgreSQL', () => {
       from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
       transcription: 'Returned your call about the gate code', created_at: witnessAt }).returning('id');
     // 51 rows of the truncated channel: the oldest is dropped. When the window
-    // must reach the witness, the second-oldest row sits exactly at the
-    // witness time; otherwise every row postdates a witness the cut hides.
+    // must reach the witness, the second-oldest row sits one second before
+    // the witness; otherwise every row postdates a witness the cut hides.
     const rows = Array.from({ length: 51 }, (_, i) => ({ customer_id: message.customer_id, direction: 'outbound',
       from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'delivered',
-      created_at: new Date(after.getTime() + (channel === 'call' || witnessOffsetSeconds === 0 ? 1 : 59) * 1000 + i * 1000) }));
+      created_at: new Date(after.getTime() + (channel === 'call' || witnessOffsetSeconds === 0 ? 1 : 58) * 1000 + i * 1000) }));
     if (channel === 'call') {
       await mockPg('call_log').insert(rows.map((r) => ({ ...r, duration_seconds: 5, transcription: 'voicemail' })));
     } else {
