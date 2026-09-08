@@ -191,7 +191,7 @@ router.post('/', async (req, res) => {
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
-      pickedStart, pickedEnd, sameDayFloorMin, propertyId,
+      pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -248,14 +248,23 @@ router.post('/', async (req, res) => {
       ? { serviceId, propertyId }
       : { serviceId, propertyId, customerId, address, lat, lng });
     // The pending edit as the save probe would hand it to the arrival
-    // checker (`changes: updates`): the duration the form will save and,
-    // when the operator re-picked the Service address, that property's
-    // stamp — so the route simulation runs on the visit being saved. The
-    // picked verdict adds its window (scorePickedHour); the ranking's
-    // candidates carry their own. Gap mode has no route context to feed.
+    // checker (`changes: updates`): when the operator re-picked the Service
+    // address, that property's stamp — so the route simulation runs on the
+    // visit being saved. The picked verdict adds its window (scorePickedHour);
+    // the ranking's candidates carry their own. Gap mode has no route
+    // context to feed.
+    //
+    // The duration rides along ONLY for an explicit duration edit
+    // (`durationEdit`, the edit form — update-details writes the form's
+    // duration). A move (manual reschedule, drag-drop confirm) sends its
+    // stored window span and the reschedule save keeps the stored estimate,
+    // so overriding it here would simulate a 60-minute job for a 120-minute
+    // visit and promise an hour the save's route check refuses (pre-push
+    // hook P1). The checker already takes the larger of the stored work
+    // duration and `durationMinutes`, so a lengthened window still counts.
     const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
     const hintChanges = useArrivalWindows
-      ? { estimated_duration_minutes: spanMin, ...(pendingStamp || {}) }
+      ? { ...(durationEdit === true ? { estimated_duration_minutes: spanMin } : {}), ...(pendingStamp || {}) }
       : undefined;
 
     const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);

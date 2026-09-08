@@ -92,7 +92,7 @@ function normalizeDay(day, scopedToTech) {
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
-  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin,
+  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false,
 }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [picked, setPicked] = useState(null);
@@ -142,6 +142,10 @@ export function useBestTimes({
             lat: lat ?? undefined,
             lng: lng ?? undefined,
             durationMinutes,
+            // Only the edit form saves `durationMinutes` as the visit's
+            // estimate; a move keeps the stored one, so the arrival
+            // simulation must not adopt the requested span there.
+            durationEdit: durationEdit ? true : undefined,
             technicianId: technicianId || undefined,
             excludeServiceIds: excludeKey ? excludeKey.split(',') : undefined,
             // Appointment windows always start on the hour (owner directive),
@@ -173,6 +177,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin]);
   return { bestTimes, picked, bestInRange, checking };
 }

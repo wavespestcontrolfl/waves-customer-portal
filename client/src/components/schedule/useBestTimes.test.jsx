@@ -82,3 +82,17 @@ it('a pending Service address travels as propertyId and a change re-runs the sea
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({ propertyId: 'prop-2', serviceId: 'fixture' });
 });
+
+it('durationEdit rides only when the caller saves the duration (edit form); a move sends none', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  const { rerender } = renderHook(
+    (props) => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', arrivalWindows: true, durationMinutes: 60, ...props }),
+    { initialProps: { durationEdit: undefined } },
+  );
+  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  expect('durationEdit' in JSON.parse(fetch.mock.calls[0][1].body)).toBe(false);
+  rerender({ durationEdit: true });
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({ durationEdit: true, durationMinutes: 60 });
+});

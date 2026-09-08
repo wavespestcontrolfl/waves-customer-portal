@@ -1549,6 +1549,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
     durationMinutes: slotCheckDuration,
+    // update-details writes this duration, so the arrival simulation may
+    // adopt it; the move surfaces leave the stored estimate in place.
+    durationEdit: true,
     technicianId: form.technicianId || undefined,
     excludeServiceIds: [service.id],
     // The picked verdict prices ONE technician's route; with the visit set
