@@ -2176,7 +2176,9 @@ describe('replaceSecureCardIntent — "use a different payment method"', () => {
   // mode before the lock, the SELECTION from the locked row.
   test('a plan-bearing RECURRING request without a per_application selection is refused (plan_required) — nothing minted or retired', async () => {
     const plans = require('../services/secure-appointment-plans');
-    const spy = jest.spyOn(plans, 'buildSecurePlanContext').mockResolvedValue({ mode: 'recurring' });
+    // The THROWING derivation (GH Codex #4163 r6 P1) — never the render
+    // helper that collapses a failed read to "not recurring".
+    const spy = jest.spyOn(plans, 'deriveSecurePlanContext').mockResolvedValue({ mode: 'recurring' });
     try {
       for (const selected of [null, 'prepay_annual']) {
         mockTableHandlers.appointment_card_requests.first = () => ({ ...ROW, selected_plan: selected });
@@ -2193,6 +2195,11 @@ describe('replaceSecureCardIntent — "use a different payment method"', () => {
       // The selection is judged from the LOCKED row read (selected_plan requested there).
       const locked = touches('appointment_card_requests').map((t) => t.chain).find((c) => c.calls.some(([op]) => op === 'forUpdate'));
       expect(locked).toBeTruthy();
+      // A failed derivation is UNKNOWN, not "one-time": retryable, nothing retired.
+      spy.mockRejectedValue(new Error('plan read failed'));
+      mockRetireSetupIntent.mockClear();
+      expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'verification_failed' });
+      expect(mockRetireSetupIntent).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }

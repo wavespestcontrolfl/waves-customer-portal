@@ -570,6 +570,19 @@ async function replayRowIntent(request, tender) {
   }
 }
 
+// A generation mint lost the pointer CAS: re-read the row and, when a
+// replacement moved it to a different pending intent that is replayable
+// under the current tender, offer THAT; otherwise stale (the loader
+// re-reads the row and renders its true state).
+async function adoptRepointedIntent(request, tender, { database }) {
+  const fresh = await database('appointment_card_requests').where({ id: request.id }).first('status', 'stripe_setup_intent_id');
+  if (!fresh || fresh.status !== 'pending' || !fresh.stripe_setup_intent_id || fresh.stripe_setup_intent_id === request.stripe_setup_intent_id) {
+    return { stale: true };
+  }
+  const replayed = await replayRowIntent({ ...request, stripe_setup_intent_id: fresh.stripe_setup_intent_id }, tender);
+  return replayed || { stale: true };
+}
+
 // Deterministic idempotency per (request, tender, generation) — same
 // self-heal as the visit lane: concurrent page loads replay ONE intent
 // (pre-push Codex P1), and a canceled or retired replay walks the salt
@@ -596,15 +609,18 @@ async function mintGenerationIntent(request, tender, { database }) {
     }
     if (!live || live.status === 'canceled' || isRetiredSetupIntent(live)) continue;
     if (minted.setupIntentId !== request.stripe_setup_intent_id) {
-      // Persist ONLY on a still-pending row (GH Codex #3726 P2): a
-      // concurrent tab/webhook may have completed the request against the
-      // earlier intent — overwriting its stripe_setup_intent_id would tie
-      // the row to an unused intent. A CAS miss means the row moved on; the
-      // loader re-reads it instead of rendering a form that can't complete.
+      // Persist ONLY on a still-pending row whose pointer is the one THIS
+      // load observed (GH Codex #3726 P2; #4163 r6 P2): a concurrent
+      // tab/webhook may have completed the request against the earlier
+      // intent, or a "use a different payment method" replacement may have
+      // committed a new pointer while this load waited — overwriting either
+      // would tie the row to an intent the customer is not on. A CAS miss
+      // means the row moved on: follow the fresh pointer when it is a
+      // usable intent of ours, else report stale so the loader re-reads.
       const n = await database('appointment_card_requests')
-        .where({ id: request.id, status: 'pending' })
+        .where({ id: request.id, status: 'pending', stripe_setup_intent_id: request.stripe_setup_intent_id || null })
         .update({ stripe_setup_intent_id: minted.setupIntentId, updated_at: new Date() });
-      if (n !== 1) return { stale: true };
+      if (n !== 1) return adoptRepointedIntent(request, tender, { database });
     }
     return { ...minted, capturedMethodType: null };
   }

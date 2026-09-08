@@ -1447,8 +1447,9 @@ A non-pending / expired row under the lock retires nothing (409
 the visit lane re-runs the completion predicate (visit live, not past,
 priced > 0, no third-party payer) and the plan gate (a plan-bearing
 recurring request needs a durable `per_application` selection — the plan
-mode is derived before the lock, the selection read from the locked
-row; 409 `plan_required`, the client re-renders the choice) and the standalone lane the GET's
+mode is derived before the lock through the THROWING derivation (an
+unknown mode is 503, never "not recurring"), the selection read from the
+locked row; 409 `plan_required`, the client re-renders the choice) and the standalone lane the GET's
 closure checks (archived customer, payer-billed, unsupported billing
 lane, Auto Pay paused, Auto Pay already active — which retires the row as
 the GET does),
@@ -1460,7 +1461,9 @@ repoint is a compare-and-set on the pointer that load observed: a
 replacement committing mid-load cannot be overwritten with the retired
 id — the load follows the row to the replacement instead, adopts the
 intent when a concurrent first load stored the same one, or renders
-`unavailable` if the row moved on. Every nested read under the
+`unavailable` if the row moved on; the standalone lane's generation
+mint uses the same observed-pointer CAS and follows a replacement
+pointer on a miss. Every nested read under the
 replacement lock (visit, payer, tender, customer, Auto Pay probe, and
 the Stripe-customer link-up inside the mint) rides the transaction
 handle — one pool connection per request. An unfinished or already-

@@ -1471,9 +1471,18 @@ async function replaceSecureCardIntent({ token, setupIntentId }) {
   // reads several tables through the pool and never throws); the
   // SELECTION is re-read from the locked row below, which is the only
   // place select-plan can move it (a selection can only change while the
-  // row is pending).
-  const { buildSecurePlanContext } = require('./secure-appointment-plans');
-  const planMode = (await buildSecurePlanContext({ request, visitId: request.scheduled_service_id }))?.mode || null;
+  // row is pending). The THROWING derivation (GH Codex #4163 r6 P1): the
+  // render helper collapses a failed read to null, which here would read
+  // as "not recurring" and retire a saved intent the plan gate forbids
+  // replacing — an unknown mode is retryable, never a retirement.
+  let planMode = null;
+  try {
+    const { deriveSecurePlanContext } = require('./secure-appointment-plans');
+    planMode = (await deriveSecurePlanContext({ request, visitId: request.scheduled_service_id }))?.mode || null;
+  } catch (err) {
+    logger.warn(`[appt-card-request] replace: plan context derivation failed for request ${request.id}: ${err.message}`);
+    return { ok: false, code: 'verification_failed' };
+  }
   return db.transaction(async (trx) => {
     const row = await trx('appointment_card_requests').where({ id: request.id }).forUpdate().first('id', 'status', 'stripe_setup_intent_id', 'selected_plan');
     if (!row) return { ok: false, code: 'not_found' };
