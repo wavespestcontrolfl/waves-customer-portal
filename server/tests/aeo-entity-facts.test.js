@@ -920,3 +920,26 @@ test('a future marker after the county and an explanatory context after the verb
   expect(score('E6', 'Waves controls mosquitoes and rodents.')).toMatchObject({ expected: { mosquito: true, rodent: true } });
   expect(score('E6', 'Waves eliminates termites, but read our guide on prevention.').expected.termite).toBe(true);
 });
+
+test('a guard stops at a coordinated finite predicate; "plans on" is prospective; a company-qualified technician subject counts (#4155 r3)', () => {
+  // Trailing guards never cross "and <finite verb>".
+  expect(score('E5', 'Waves serves Manatee County and will add Hillsborough next year.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County and plans to expand next year.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves offers fumigation and plans to expand next year.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves controls mosquitoes and provides educational resources.').expected.mosquito).toBe(true);
+  expect(score('E5', 'Waves plans to serve Sarasota and Manatee County next year.').expected.manatee).toBe(false);
+  // Leading guards never cross one either.
+  expect(score('E8', 'Waves was formerly family-owned and is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves was formerly a franchise but is now independently owned.').forbidden.franchise).toBe(false);
+  expect(score('E5', 'Waves formerly served Tampa and now serves Manatee County.').expected.manatee).toBe(true);
+  // "plans on" is as prospective as "plans to".
+  expect(score('E6', 'Waves plans on offering fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves is planning on offering fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves plans on serving Manatee County.').expected.manatee).toBe(false);
+  // Company-qualified technician subjects.
+  for (const text of ["Waves' technicians eliminate termites.", 'Waves technicians eliminate termites.', 'Waves Pest Control technicians eliminate termites.']) {
+    expect(score('E6', text).expected.termite).toBe(true);
+  }
+  expect(score('E6', "Waves Pest Control's technicians control mosquitoes.").expected.mosquito).toBe(true);
+  expect(score('E6', "Orkin's technicians eliminate termites.").expected.termite).toBe(false);
+});
