@@ -77,7 +77,7 @@ const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // member will confirm timing", "you will get a receipt" or "the portal will
 // send you a receipt" is service guidance, not a commitment the office must
 // have on file.
-const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)) (?:call|text|email|reach out|follow up|send|get back|contact|be in touch)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
+const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)) (?:call|text|email|reach out|follow up|send|get back|contact|be in touch)|(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
 // Commitments are graded per clause: a negation or condition governs only the
 // promise in ITS clause ("I cannot access your schedule, so we will call you
 // back" still commits), and a trailing offer condition ("… if you would
@@ -139,6 +139,19 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
     return helpers.message('response needs non-empty text, a side effect, or hang: true');
   }),
 ).required());
+// One scripted turn: the caller's words, optionally preceded by a barge-in
+// over the last agent utterance — `true` (cut at the halfway word),
+// `{ words: n }` or `{ heard: '…' }` (exactly the forms injectInterrupt
+// reads). Exact keys only: a misspelled `interupt` would otherwise be
+// ignored and grade a barge-in scenario that never barged in.
+const TURN_SCHEMA = Joi.object({
+  caller: Joi.string().pattern(/\S/).required(),
+  interrupt: Joi.alternatives().try(
+    Joi.boolean(),
+    Joi.object({ words: Joi.number().integer().min(1) }).length(1),
+    Joi.object({ heard: Joi.string().pattern(/\S/) }).length(1),
+  ),
+});
 
 // ── Fixture ───────────────────────────────────────────────────────────────
 
@@ -245,7 +258,8 @@ function scenarioShapeRules(s) {
     [!s.caller || typeof s.caller.from !== 'string' || !/^\+1\d{10}$/.test(s.caller.from), 'caller.from must be an E.164 US number'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
     ...Object.entries(s.gates || {}).map(([key, v]) => [!GATE_ENV[key] || typeof v !== 'boolean', GATE_ENV[key] ? `gate "${key}" must be boolean` : `unknown gate "${key}"`]),
-    [!turns.some((t) => t && typeof t.caller === 'string' && t.caller.trim()), 'needs at least one caller turn'],
+    [!turns.length, 'needs at least one caller turn'],
+    ...turns.map((t, i) => { const { error } = TURN_SCHEMA.validate(t, { convert: false }); return [!!error, `turns[${i}]: ${error ? error.message : ''}`]; }),
     [!spec, 'spec is required'],
     ...['required_facts', 'prohibited_facts', 'acceptable_actions'].map((k) => [spec && spec[k] != null && !Array.isArray(spec[k]), `spec.${k} must be an array`]),
     [spec && spec.required_action != null && typeof spec.required_action !== 'string', 'spec.required_action must be a string'],
