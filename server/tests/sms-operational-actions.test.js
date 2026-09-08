@@ -349,6 +349,17 @@ describe('SMS operational evidence and ownership', () => {
       expect(result.dropped).toBe(1);
     });
 
+  test.each(['Please call tomorrow at 9am or 10am', 'Please call tomorrow 9-10am', 'Please call tomorrow between 9am and 11am',
+    'Please call tomorrow at 9am-ish', 'Please call tomorrow at 9am or later'])(
+    'ambiguous source timing cannot become a firm deadline from a shortened due_text: %s', (body) => {
+      const message = source(body);
+      const result = groundExtraction(extracted([obligation(message.message_body, {
+        kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+      })]), { message, properties });
+      expect(result.obligations[0]).toMatchObject({ due_at: null, timing_unverified: true });
+      expect(result.dropped).toBe(1);
+    });
+
   test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate'], ['Please send 2 a month of the estimates', 'send_estimate']])(
     'a number that is not a clock hour stays undated without review: %s', (body, kind) => {
       const message = source(body);

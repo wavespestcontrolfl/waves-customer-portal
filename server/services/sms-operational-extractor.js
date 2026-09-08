@@ -175,9 +175,16 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     // at 3", "before five") or SMS shorthand ("3p", "9a") is stated timing
     // the parser cannot resolve, so it must reach review rather than stay
     // undated.
-    const clockStated = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|\d{1,2}[ap]|o['’]?clock|noon|midnight)(?=\s|[,.!?;]|$)/i.test(body)
+    const clocks = body.match(/\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|\d{1,2}[ap]|o['’]?clock|noon|midnight)(?=\s|[,.!?;–-]|$)/gi) || [];
+    const clockStated = clocks.length > 0
       || /\b(?:at|by|around|before|after|until|till)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?=\s|[,.!?;]|$)/i.test(body);
-    const resolved = timingGrounded && clockStated ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
+    // A shortened due_text can drop an alternative or a hedge the source
+    // states ("9am or 10am", "9-10am", "3pm-ish"); substring grounding
+    // cannot see what it omitted, so such timing stays a review item.
+    const timingAmbiguous = clocks.length > 1
+      || /\b\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m?\.?\s*)?(?:-|–|to|or)\s*\d{1,2}\b|\b(?:between|sometime|anytime|or so|or later|or earlier)\b|-?ish\b/i.test(body);
+    const resolved = timingGrounded && clockStated && !timingAmbiguous
+      ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
     const proposed = item.due_at ? parseDueAt(item.due_at) : resolved;
     const due = resolved && proposed instanceof Date && proposed.getTime() === resolved.getTime() ? resolved : null;
     return { ...item, property_id: properties.length === 1 ? item.property_id : null,
