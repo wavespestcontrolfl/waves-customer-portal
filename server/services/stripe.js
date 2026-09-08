@@ -1062,6 +1062,22 @@ const StripeService = {
     return stripe.setupIntents.retrieve(setupIntentId, options);
   },
 
+  /**
+   * Retire a SUCCEEDED SetupIntent the customer chose to replace (a succeeded
+   * intent cannot be canceled, so the retirement rides its metadata). The
+   * accept gate and the deterministic-idempotency mint both read the stamp
+   * from Stripe — the same source they already re-derive trust from — so a
+   * retired capture is never enrolled and never replayed.
+   */
+  async retireSetupIntent(setupIntentId) {
+    if (!setupIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.setupIntents.update(setupIntentId, {
+      metadata: { retired: 'true', retired_at: new Date().toISOString() },
+    });
+  },
+
   async retrievePaymentMethod(paymentMethodId) {
     if (!paymentMethodId) return null;
     const stripe = getStripe();

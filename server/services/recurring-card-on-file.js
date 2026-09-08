@@ -347,7 +347,11 @@ async function createRecurringCardSetupIntentForEstimate(estimate) {
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
     const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
     if (!setupIntent) return null;
-    if (setupIntent.status === 'canceled') continue;
+    // A RETIRED replay is walked past exactly like a canceled one: the
+    // customer chose to replace that capture (retireRecurringCardIntent),
+    // and a succeeded intent cannot be canceled, so its metadata stamp is
+    // what keeps it from being offered again.
+    if (setupIntent.status === 'canceled' || isRetiredSetupIntent(setupIntent)) continue;
     // A SUCCEEDED replay already holds a payment method the customer will
     // not re-enter — the capture UI must render the consent for THAT
     // tender (Codex #3723 r1 P1: a bank captured earlier must not sit under
@@ -379,16 +383,65 @@ async function createRecurringCardSetupIntentForEstimate(estimate) {
   return null;
 }
 
-// A live-retrieved SetupIntent counts only when Stripe says it succeeded, it
-// carries a saved payment_method, AND its metadata pins it to THIS estimate
-// as a recurring card-on-file capture (a one-time HOLD intent must never
-// satisfy this gate — different consent, different semantics).
-function recurringCardIntentMatchesEstimate(setupIntent, estimateId) {
+// Retirement stamp (retireRecurringCardIntent): the customer replaced this
+// capture with a different payment method. Read from Stripe's own metadata
+// so the accept gate and the mint agree without a local row.
+function isRetiredSetupIntent(setupIntent) {
+  return setupIntent?.metadata?.retired === 'true';
+}
+
+// The intent's metadata pins it to THIS estimate as a recurring card-on-file
+// capture (a one-time HOLD intent must never satisfy the accept gate —
+// different consent, different semantics).
+function recurringCardIntentBelongsToEstimate(setupIntent, estimateId) {
   return !!setupIntent
-    && setupIntent.status === 'succeeded'
     && setupIntent.metadata?.purpose === 'estimate_recurring_card'
-    && String(setupIntent.metadata?.estimate_id) === String(estimateId)
+    && String(setupIntent.metadata?.estimate_id) === String(estimateId);
+}
+
+// A live-retrieved SetupIntent counts only when Stripe says it succeeded, it
+// carries a saved payment_method, it belongs to this estimate, AND the
+// customer has not retired it in favour of another payment method.
+function recurringCardIntentMatchesEstimate(setupIntent, estimateId) {
+  return recurringCardIntentBelongsToEstimate(setupIntent, estimateId)
+    && setupIntent.status === 'succeeded'
+    && !isRetiredSetupIntent(setupIntent)
     && !!setupIntent.payment_method;
+}
+
+// "Use a different payment method" after a capture already succeeded: the
+// deterministic idempotency key replays the succeeded intent on every reopen
+// and refresh, and Stripe will not cancel a succeeded SetupIntent, so without
+// this the first tender saved is the only one the accept can ever enroll
+// (customer report 2026-09-08: a credit card saved, then no way to switch to
+// a bank account to avoid the surcharge). Stamps the intent retired in Stripe
+// so the next mint walks past it and the accept gate refuses it. Only an
+// intent pinned to THIS estimate can be retired (an echoed foreign id is a
+// mismatch); a non-succeeded intent is left alone — the customer can still
+// pick any tender inside it. Returns { ok } or { ok: false, reason }.
+async function retireRecurringCardIntent({ estimate, setupIntentId }) {
+  if (!setupIntentId) return { ok: false, reason: 'no_setup_intent' };
+  let setupIntent = null;
+  try {
+    setupIntent = await StripeService.retrieveSetupIntent(setupIntentId);
+  } catch (err) {
+    logger.warn('[recurring-cof] retire: live SetupIntent lookup failed', { error: err.message });
+    return { ok: false, reason: 'verification_failed' };
+  }
+  if (!recurringCardIntentBelongsToEstimate(setupIntent, estimate.id)) {
+    return { ok: false, reason: 'intent_mismatch' };
+  }
+  if (setupIntent.status !== 'succeeded' || isRetiredSetupIntent(setupIntent)) {
+    return { ok: true, retired: false };
+  }
+  try {
+    await StripeService.retireSetupIntent(setupIntent.id);
+  } catch (err) {
+    logger.warn(`[recurring-cof] retire: metadata update failed for ${setupIntent.id}`, { error: err.message });
+    return { ok: false, reason: 'retire_failed' };
+  }
+  logger.info(`[recurring-cof] retired succeeded SetupIntent ${setupIntent.id} for estimate ${estimate.id} — customer chose a different payment method`);
+  return { ok: true, retired: true };
 }
 
 // Accept GATE (pre-commit): live-verify the named SetupIntent WITHOUT writing.
@@ -1365,6 +1418,7 @@ module.exports = {
   prepayChargeMethodKey,
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
+  retireRecurringCardIntent,
   resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
   bankTenderAllowedUnderLock,

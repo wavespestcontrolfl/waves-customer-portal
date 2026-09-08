@@ -75,6 +75,7 @@ const {
 } = require('../services/estimate-card-holds');
 const {
   createRecurringCardSetupIntentForEstimate,
+  retireRecurringCardIntent,
   resolveRecurringCardPolicyForEstimate,
 } = require('../services/recurring-card-on-file');
 const { recordCheckoutStepReached, CHECKOUT_KIND } = require('../services/estimate-checkout-events');
@@ -777,6 +778,23 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     });
     if (!policy.required) {
       return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: policy.exemptReason || null });
+    }
+
+    // "Use a different payment method": the customer already saved one on
+    // this estimate's succeeded intent and wants to replace it. Retire it in
+    // Stripe first so the mint below walks past it instead of replaying it
+    // (and the accept gate refuses it from here on). Fails closed on an id
+    // that is not this estimate's own capture.
+    const replaceSetupIntentId = typeof req.body?.replaceSetupIntentId === 'string'
+      ? req.body.replaceSetupIntentId.trim()
+      : '';
+    if (replaceSetupIntentId) {
+      const retired = await retireRecurringCardIntent({ estimate, setupIntentId: replaceSetupIntentId });
+      if (!retired.ok) {
+        return res.status(retired.reason === 'intent_mismatch' ? 400 : 503).json({
+          error: 'We could not switch your payment method. Please refresh this page and try again.',
+        });
+      }
     }
 
     const intent = await createRecurringCardSetupIntentForEstimate(estimate);

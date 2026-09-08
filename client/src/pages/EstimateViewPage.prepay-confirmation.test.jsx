@@ -150,10 +150,16 @@ function prepayPayload(prepayInLane = true) {
 function prepayFetch(p) {
   return vi.fn(async (url, opts) => {
     const u = String(url);
-    if (u.includes('/recurring-card-intent')) return jsonResponse({
-      clientSecret: 'seti_synthetic_secret',
-      publishableKey: 'pk_test_synthetic'
-    });
+    if (u.includes('/recurring-card-intent')) {
+      // A replace mints a FRESH intent (new secret) — the retired one is
+      // never handed back.
+      const replacing = !!(opts?.body && JSON.parse(opts.body).replaceSetupIntentId);
+      return jsonResponse({
+        clientSecret: replacing ? 'seti_synthetic_secret_2' : 'seti_synthetic_secret',
+        setupIntentId: replacing ? 'seti_synthetic_2' : 'seti_synthetic',
+        publishableKey: 'pk_test_synthetic'
+      });
+    }
     if (u.includes('/reserve')) return jsonResponse({
       scheduledServiceId: 'ss-1',
       expiresAt: new Date(Date.now() + 900000).toISOString()
@@ -253,6 +259,31 @@ describe('annual prepay confirmation', () => {
     expect(screen.getByRole('button', { name: 'Switch back to pay per application' })).toBeDisabled();
     releaseAccept();
     expect(await screen.findByRole('button', { name: 'Confirm & pay $600.00' })).toBeEnabled();
+  });
+
+  // Customer report 2026-09-08: a credit card saved at capture, the surcharge
+  // seen at this step, and no way to switch to the no-surcharge bank rail —
+  // the deterministic mint replayed the saved card on every reopen/refresh.
+  it('offers "Use a different payment method" at the exact-total step and re-captures on a fresh intent', async () => {
+    const fetchMock = await reachPrepayQuote();
+    const intentCallsBefore = fetchMock.mock.calls.filter(([u]) => String(u).includes('/recurring-card-intent')).length;
+    fireEvent.click(screen.getByRole('button', { name: 'Use a different payment method' }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('/recurring-card-intent'))).toHaveLength(intentCallsBefore + 1));
+    const replaceCall = fetchMock.mock.calls.filter(([u]) => String(u).includes('/recurring-card-intent')).at(-1);
+    // The retired capture is named so the server can stamp it; the fresh
+    // intent replaces it on the inline surface and the stale quote is gone.
+    expect(JSON.parse(replaceCall[1].body)).toMatchObject({ replaceSetupIntentId: 'seti_synthetic', paymentMethodPreference: 'prepay_annual' });
+    await waitFor(() => expect(screen.queryByText('Confirm your annual prepay total')).not.toBeInTheDocument());
+    expect(await screen.findByRole('checkbox')).not.toBeChecked();
+    // The next confirm re-captures (new consent) and re-quotes — the retired
+    // card's acknowledged total never rides the accept.
+    fireEvent.click(screen.getByRole('checkbox'));
+    const confirm = await screen.findByRole('button', { name: 'Confirm & pay the 12-month plan' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await screen.findByText('Confirm your annual prepay total');
+    const acceptBodies = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/accept')).map(([, o]) => JSON.parse(o.body));
+    expect(acceptBodies.at(-1).prepayChargeAcknowledgedTotalCents).toBeUndefined();
   });
 
   it('clears the annual quote when switching back to per application', async () => {

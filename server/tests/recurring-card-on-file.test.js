@@ -30,11 +30,13 @@ const mockRetrieveSetupIntent = jest.fn();
 const mockCreateRecurringCardSetupIntent = jest.fn();
 const mockSavePaymentMethod = jest.fn();
 const mockRetrievePaymentMethod = jest.fn();
+const mockRetireSetupIntent = jest.fn();
 jest.mock('../services/stripe', () => ({
   retrieveSetupIntent: (...a) => mockRetrieveSetupIntent(...a),
   createRecurringCardSetupIntent: (...a) => mockCreateRecurringCardSetupIntent(...a),
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
   retrievePaymentMethod: (...a) => mockRetrievePaymentMethod(...a),
+  retireSetupIntent: (...a) => mockRetireSetupIntent(...a),
 }));
 
 const mockQualifyingRows = jest.fn(async () => []);
@@ -98,6 +100,7 @@ const {
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
   verifyRecurringCardIntent,
+  retireRecurringCardIntent,
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
   _private: { recurringCardIntentMatchesEstimate },
@@ -463,6 +466,17 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
     expect(recurringCardIntentMatchesEstimate(null, 'est-1')).toBe(false);
   });
 
+  // "Use a different payment method" (customer report 2026-09-08): a
+  // succeeded capture the customer retired must never be the one the accept
+  // enrolls, even though Stripe still reports it succeeded.
+  it('refuses a retired (replaced) succeeded intent', async () => {
+    const retired = { ...GOOD_SI, metadata: { ...GOOD_SI.metadata, retired: 'true' } };
+    expect(recurringCardIntentMatchesEstimate(retired, 'est-1')).toBe(false);
+    mockRetrieveSetupIntent.mockResolvedValue(retired);
+    expect(await verifyRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' }))
+      .toEqual({ ok: false, reason: 'intent_mismatch' });
+  });
+
   // Kill switch at the trust boundary (pre-push Codex P1): a bank-capable
   // intent minted while GATE_ACCEPT_ACH_CAPTURE was on must not accept a bank
   // method once the gate is off or the customer's ACH state turned unhealthy.
@@ -544,6 +558,45 @@ describe('verifyRecurringCardIntent (trust boundary)', () => {
   });
 });
 
+describe('retireRecurringCardIntent ("use a different payment method")', () => {
+  it('stamps a succeeded capture pinned to this estimate retired in Stripe', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockRetireSetupIntent.mockResolvedValue({ ...GOOD_SI, metadata: { ...GOOD_SI.metadata, retired: 'true' } });
+    expect(await retireRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: true, retired: true });
+    expect(mockRetireSetupIntent).toHaveBeenCalledWith('seti_1');
+  });
+
+  it.each([
+    ['another estimate\'s intent', { ...GOOD_SI, metadata: { ...GOOD_SI.metadata, estimate_id: 'est-OTHER' } }],
+    ['a one-time HOLD intent', { ...GOOD_SI, metadata: { purpose: 'estimate_card_hold', estimate_id: 'est-1' } }],
+  ])('refuses %s without touching Stripe', async (_label, si) => {
+    mockRetrieveSetupIntent.mockResolvedValue(si);
+    expect(await retireRecurringCardIntent({ estimate: EST, setupIntentId: si.id })).toEqual({ ok: false, reason: 'intent_mismatch' });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  it('leaves a not-yet-confirmed or already-retired intent alone (nothing to replace)', async () => {
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, status: 'requires_payment_method', payment_method: null });
+    expect(await retireRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: true, retired: false });
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_SI, metadata: { ...GOOD_SI.metadata, retired: 'true' } });
+    expect(await retireRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: true, retired: false });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the lookup or the stamp fails', async () => {
+    mockRetrieveSetupIntent.mockRejectedValue(new Error('stripe down'));
+    expect(await retireRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'verification_failed' });
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_SI);
+    mockRetireSetupIntent.mockRejectedValue(new Error('stripe down'));
+    expect(await retireRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'retire_failed' });
+  });
+
+  it('rejects a missing id', async () => {
+    expect(await retireRecurringCardIntent({ estimate: EST, setupIntentId: '' })).toEqual({ ok: false, reason: 'no_setup_intent' });
+    expect(mockRetrieveSetupIntent).not.toHaveBeenCalled();
+  });
+});
+
 describe('createRecurringCardSetupIntentForEstimate', () => {
   it('returns null when Stripe is not configured', async () => {
     mockCreateRecurringCardSetupIntent.mockResolvedValue(null);
@@ -565,6 +618,19 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
       .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2', paymentMethodTypes: ['card'], capturedMethodType: null });
     expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(1, { estimateId: 'est-1', generation: 0, paymentMethodType: 'card' });
     expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(2, { estimateId: 'est-1', generation: 1, paymentMethodType: 'card' });
+  });
+
+  // A retired capture replays succeeded forever under the deterministic
+  // key — the mint must walk past it the way it walks past a canceled one,
+  // or "use a different payment method" hands the customer the same card.
+  it('walks the generation salt past a retired succeeded replay', async () => {
+    mockCreateRecurringCardSetupIntent
+      .mockResolvedValueOnce({ id: 'seti_old', client_secret: 'cs_old', status: 'succeeded', payment_method: 'pm_old', metadata: { retired: 'true' } })
+      .mockResolvedValueOnce({ id: 'seti_2', client_secret: 'cs_2', status: 'requires_payment_method' });
+    expect(await createRecurringCardSetupIntentForEstimate(EST))
+      .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2', paymentMethodTypes: ['card'], capturedMethodType: null });
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(2, { estimateId: 'est-1', generation: 1, paymentMethodType: 'card' });
+    expect(mockRetrievePaymentMethod).not.toHaveBeenCalled();
   });
 
   // GATE_ACCEPT_ACH_CAPTURE (owner ruling 2026-09-01): bank joins the accept

@@ -280,8 +280,17 @@ ach_status lookup failure). The accept-time verify re-resolves the same
 tender policy and refuses a captured bank method (402
 RECURRING_CARD_REQUIRED → the client re-mints card-only) once the gate is
 off or the customer's ACH state is unhealthy, so a previously minted
-bank-capable intent cannot outlive the kill switch. The one-time
-card-hold-intent route above stays card-only regardless).
+bank-capable intent cannot outlive the kill switch. Optional body
+`replaceSetupIntentId` ("use a different payment method" after a capture
+already succeeded): the named intent must be THIS estimate's own
+`estimate_recurring_card` capture (else 400); a succeeded one is stamped
+`metadata.retired='true'` in Stripe, the deterministic-idempotency mint
+walks past it (same as a canceled replay) and returns a fresh intent, and
+the accept-time verify refuses the retired id from then on (402
+RECURRING_CARD_REQUIRED). A succeeded replay's response carries
+`capturedMethodType`, and the capture UIs render it as a saved-method
+panel with a continue/replace choice instead of a Payment Element. The
+one-time card-hold-intent route above stays card-only regardless).
 `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
 per-service details-packet PDF for the estimate view's "full details"
 buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —

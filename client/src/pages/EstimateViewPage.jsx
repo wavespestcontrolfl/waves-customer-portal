@@ -2801,9 +2801,12 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 // card is charged the 12-month total right after booking, so the modal copy
 // and the recorded consent variant must say so (the exact surcharged total
 // is quoted in the PREPAY_CHARGE_QUOTE step before any charge).
-function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
+// onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
+// method" after a capture already succeeded — the parent retires the saved
+// intent and remounts this modal with a fresh one.
+function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = false }) {
   // Escape dismisses from anywhere (not only while focus sits inside) and the page behind stays put.
-  const dialogRef = useModalFocus(true, () => { if (!submitting) onCancel(); });
+  const dialogRef = useModalFocus(true, () => { if (!submitting && !replacing) onCancel(); });
   useLockBodyScroll(true);
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
@@ -2813,6 +2816,17 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
   const [agreed, setAgreed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  // A succeeded REPLAY (the mint returned an intent that already holds a
+  // method): there is nothing to enter, so no Payment Element is mounted on
+  // the finished intent — the customer continues with what is saved or
+  // replaces it. Before this, a re-tap here was a dead end (customer report
+  // 2026-09-08: a credit card saved, then no way to switch to a bank account).
+  const replay = !!intent?.capturedMethodType;
+  // Stale replay: the element's own retrieve found the intent succeeded but
+  // this intent object predates it (no capturedMethodType), so the consent
+  // on screen may not match the saved tender — only replacement is offered.
+  const [staleReplay, setStaleReplay] = useState(false);
+  const [replacing, setReplacing] = useState(false);
   // Tender picked inside the Payment Element — a bank tab only exists when
   // the intent was minted card_or_bank (GATE_ACCEPT_ACH_CAPTURE). Copy and
   // the consent text follow it; the checkbox re-arms on a switch so the
@@ -2831,6 +2845,10 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
 
   useEffect(() => {
     let cancelled = false;
+    if (replay) {
+      setReady(true);
+      return undefined;
+    }
     loadStripeSdk().then((StripeCtor) => {
       if (cancelled || !mountRef.current) return;
       const stripe = StripeCtor(intent.publishableKey);
@@ -2859,10 +2877,31 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       if (!cancelled) setError('Could not load the secure card form. Check your connection and try again.');
     });
     return () => { cancelled = true; };
-  }, [intent]);
+  }, [intent, replay]);
+
+  const handleReplace = useCallback(async () => {
+    if (!onReplace || !intent?.setupIntentId) return;
+    setReplacing(true);
+    setError(null);
+    // The parent remounts this modal (keyed on the new intent) on success;
+    // only the failure path returns here.
+    const swapped = await onReplace(intent.setupIntentId);
+    if (!swapped) {
+      setReplacing(false);
+      setError('We could not switch your payment method. Please refresh this page and try again.');
+    }
+  }, [onReplace, intent]);
 
   const handleSave = useCallback(async () => {
-    if (!stripeRef.current || !elementsRef.current || !agreedRef.current) return;
+    if (!agreedRef.current) return;
+    if (replay) {
+      // Consent was ticked for the tender the server told us is saved; the
+      // accept gate re-verifies the intent against Stripe regardless.
+      setSubmitting(true);
+      onSuccess(intent.setupIntentId);
+      return;
+    }
+    if (!stripeRef.current || !elementsRef.current) return;
     setSubmitting(true);
     setError(null);
     // Lock the Payment Element for the whole confirm (Codex #3723 r2 P1):
@@ -2879,7 +2918,8 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
         const replayedTypes = existing.setupIntent.payment_method_types || [];
         if (replayedTypes.includes('us_bank_account') && !intent?.capturedMethodType) {
           lock(false);
-          setError('Your payment method was already saved. Please refresh this page to continue.');
+          setStaleReplay(true);
+          setError('Your payment method was already saved. Choose "Use a different payment method" below, or refresh this page to continue.');
           setSubmitting(false);
           return;
         }
@@ -2914,8 +2954,9 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
       setError(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
       setSubmitting(false);
     }
-  }, [intent, onSuccess, bank]);
+  }, [intent, onSuccess, bank, replay]);
 
+  const busy = submitting || replacing;
   return (
     <div
       ref={dialogRef}
@@ -2931,18 +2972,24 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
           are the non-glass fallback. */}
       <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>
-          {prepay
-            ? (bankOffered ? 'Save your card or bank account — annual prepay' : 'Save your card — annual prepay')
-            : 'Set up Auto Pay'}
+          {replay
+            ? 'Payment method already saved'
+            : prepay
+              ? (bankOffered ? 'Save your card or bank account — annual prepay' : 'Save your card — annual prepay')
+              : 'Set up Auto Pay'}
         </div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
-          {prepay
-            ? (bank
-              ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
-              : 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
-            : (bank
-              ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
-              : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`)}
+          {replay
+            ? (prepay
+              ? `Your ${bank ? 'bank account' : 'card'} is already saved for this plan. When you continue, we show your exact 12-month total${bank ? ' — bank transfers have no added card surcharge' : ' — including any card surcharge'} — before anything is charged.`
+              : `Your ${bank ? 'bank account' : 'card'} is already saved for this plan — nothing is charged today.`)
+            : prepay
+              ? (bank
+                ? 'Save your bank account to confirm your plan. When you confirm, we show your exact 12-month total and debit this account. Bank transfers have no added card surcharge.'
+                : 'Save your card to confirm your plan. When you confirm, we show your exact 12-month total — including any card surcharge — and charge this card.')
+              : (bank
+                ? 'Save your bank account to confirm your recurring plan — nothing is charged today. After each completed service, that service’s amount is debited automatically. Bank transfers have no added card surcharge.'
+                : `Save your ${bankOffered ? 'card or bank account' : 'card'} to confirm your recurring plan — nothing is charged today. After each completed service, your card is charged that service’s amount automatically.`)}
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -2950,7 +2997,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
             type="checkbox"
             checked={agreed}
             onChange={(e) => setAgreedSync(e.target.checked)}
-            disabled={submitting}
+            disabled={busy}
             style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
           />
           <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
@@ -2966,13 +3013,25 @@ function RecurringCardModal({ intent, onSuccess, onCancel, prepay = false }) {
           <button
             type="button"
             onClick={handleSave}
-            disabled={!ready || !agreed || submitting}
-            style={{ ...estimateCtaStyle, opacity: !ready || !agreed || submitting ? 0.6 : 1 }}
-          >{submitting ? 'Saving…' : (bank ? 'Agree & save bank account' : 'Agree & save card')}</button>
+            disabled={!ready || !agreed || busy}
+            style={{ ...estimateCtaStyle, opacity: !ready || !agreed || busy ? 0.6 : 1 }}
+          >{submitting
+            ? 'Saving…'
+            : replay
+              ? (bank ? 'Agree & continue with saved bank account' : 'Agree & continue with saved card')
+              : (bank ? 'Agree & save bank account' : 'Agree & save card')}</button>
+          {(replay || staleReplay) && onReplace ? (
+            <button
+              type="button"
+              onClick={handleReplace}
+              disabled={busy}
+              style={estimateSecondaryCtaStyle}
+            >{replacing ? 'Switching…' : 'Use a different payment method'}</button>
+          ) : null}
           <button
             type="button"
             onClick={onCancel}
-            disabled={submitting}
+            disabled={busy}
             style={estimateSecondaryCtaStyle}
           >Not now</button>
         </div>
@@ -6450,6 +6509,45 @@ function EstimateViewPageInner({ websiteMode = false }) {
     setRecurringCardIntent(null);
   }, []);
 
+  // "Use a different payment method" after a capture already succeeded
+  // (customer report 2026-09-08): the deterministic mint replays the
+  // succeeded intent on every reopen and refresh, so without this the first
+  // tender saved was the only one the accept could enroll. The server
+  // retires that intent in Stripe and mints a fresh one; whichever capture
+  // surface is live (inline element or modal) remounts on it, and any prepay
+  // quote — priced for the retired method — is dropped so the next confirm
+  // re-quotes. Returns true on success; the caller shows the failure copy.
+  const handleReplacePaymentMethod = useCallback(async (setupIntentId) => {
+    if (!setupIntentId) return false;
+    try {
+      const r = await fetch(`${API_BASE}/public/estimates/${token}/recurring-card-intent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference, replaceSetupIntentId: setupIntentId }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body?.clientSecret) return false;
+      recurringCardSetupIntentIdRef.current = null;
+      prepayChargeAckRef.current = null;
+      setPrepayChargeQuote(null);
+      setPrepayConsentChecked(false);
+      setError(null);
+      if (recurringCardIntentOpenRef.current) {
+        setRecurringCardIntent(body);
+      } else if (inlineCardIntent) {
+        // The inline element is the live surface (it stays mounted through
+        // the prepay quote step) — swap its intent; the key remounts it.
+        setInlineCardIntent(body);
+      } else {
+        recurringCardIntentOpenRef.current = true;
+        setRecurringCardIntent(body);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }, [token, serviceMode, paymentPreference, inlineCardIntent]);
+
   // Stable identity (Codex #2681 r2 P1): an inline arrow here re-created the
   // handler every render, and the capture's onStateChange effect re-fired on
   // that new identity with a fresh state object — render loop to max depth.
@@ -7713,6 +7811,24 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 }}
                 style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, fontSize: 16 }}
               >{`Confirm & pay ${fmtMoney(prepayChargeQuote.total)}`}</button>
+              {/* The quoted method is THIS accept's fresh capture: offer the
+                  way out of it here, where the surcharge is first seen (the
+                  customer who saved a credit card and wants the no-surcharge
+                  bank rail). A quote bound to a different saved method has
+                  no capture to replace. */}
+              {prepayChargeQuote.capturedMethod === true && recurringCardSetupIntentIdRef.current ? (
+                <div style={{ marginTop: 12 }}>
+                  <button
+                    type="button"
+                    disabled={ctaPhase === 'submitting'}
+                    onClick={async () => {
+                      const swapped = await handleReplacePaymentMethod(recurringCardSetupIntentIdRef.current);
+                      if (!swapped) setError('We could not switch your payment method. Please refresh this page and try again.');
+                    }}
+                    style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
+                  >Use a different payment method</button>
+                </div>
+              ) : null}
             </div>
             );
           })() : null}
@@ -7767,6 +7883,9 @@ function EstimateViewPageInner({ websiteMode = false }) {
                   : null))}
             autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
               <InlineAutoPayCapture
+                // A replaced intent remounts the capture from scratch
+                // (fresh ready/agreed/tender state for the new element).
+                key={inlineCardIntent.clientSecret || 'inline-capture'}
                 ref={inlineCaptureRef}
                 intent={inlineCardIntent}
                 loadStripeSdk={loadStripeSdk}
@@ -7776,6 +7895,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 borderColor={websiteMode ? '#e2e8f0' : undefined}
                 busy={ctaPhase === 'submitting' || inlineConfirmBusy}
                 onStateChange={handleInlineCardState}
+                onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}
               />
             ) : null}
@@ -7838,9 +7958,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
           ) : null}
           {recurringCardIntent ? (
             <RecurringCardModal
+              key={recurringCardIntent.clientSecret || 'recurring-card'}
               intent={recurringCardIntent}
               onSuccess={handleRecurringCardSuccess}
               onCancel={handleRecurringCardCancel}
+              onReplace={handleReplacePaymentMethod}
               prepay={paymentPreference === 'prepay_annual'}
             />
           ) : null}
