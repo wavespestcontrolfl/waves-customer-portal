@@ -102,3 +102,10 @@ that merely end in `Request` (`setLinkRequest`, `setNewLeadRequest`,
 unresolved / `:param` routes pending hand mapping; the scanner is per-file and
 cannot resolve a shared helper's callers or tell a query suffix from a path
 segment, so nothing else left the denominator.
+
+Main integration at `1bd165d6f` (#4016, SMS commitment follow-up) records the
+`OwedCommitmentsSummary` component's two request sites — the collection GET now
+takes the `open` / `sms` collection as a template segment, and the Mark done /
+Dismiss PATCH moved lines — proved against that merged revision and retained
+as unsupported/unverified; the superseded fixed-`open` GET row leaves the
+denominator, which stays at 1,744 cumulative sites. Nothing gains coverage.
