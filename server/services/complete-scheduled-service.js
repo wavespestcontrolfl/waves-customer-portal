@@ -2691,8 +2691,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // retires only, replay-aware creates), so idempotent resumes of an
     // already-committed completion pass straight through to the
     // stored-response path.
+    // A packet's effects phase replays a COMMITTED record (the claim below
+    // refuses an effects call without one). The intake rules that read
+    // mutable state — the station inventory here, the profile-keyed
+    // specialty lane below — were satisfied at commit; re-judging them
+    // against later state would park a recorded, invoiced member for
+    // office review with a billing hold (codex #4058 r5 P1). The pure
+    // shape checks above still run: the saved form is the committed form.
     const stationProgram = TermiteStations.stationProgramForProfile(completionProfile);
-    if (Array.isArray(termiteStations) && termiteStations.length && stationProgram && svc.customer_id
+    if (!packetEffects && Array.isArray(termiteStations) && termiteStations.length && stationProgram && svc.customer_id
       && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations, stationProgram)) {
       return ({ status: 400, body: {
         error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
@@ -3310,7 +3317,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const invalidStructuredObservation = formObservations.find(
       (value) => !allowedStructuredObservations.has(value),
     );
-    if (invalidStructuredObservation) {
+    if (invalidStructuredObservation && !packetEffects) {
       return ({ status: 422, body: {
         error: 'A structured observation is not valid for customer report publication.',
         code: 'invalid_structured_observation',
@@ -3336,7 +3343,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         visitOutcome,
       },
     );
-    if (structuredObservationConflict) {
+    if (structuredObservationConflict && !packetEffects) {
       return ({ status: 422, body: {
         error: structuredObservationConflict,
         code: 'conflicting_structured_observations',
@@ -3354,7 +3361,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const invalidSpecialtyArea = validateSpecialtyAreas(resolvedSpecialtyServiceKey, [...completionAreas, ...productApplicationAreas], {
       enforcePresetAreas: explicitSpecialtyLane,
     });
-    if (invalidSpecialtyArea) {
+    if (invalidSpecialtyArea && !packetEffects) {
       return ({ status: 422, body: { error: invalidSpecialtyArea, code: 'invalid_specialty_area' } });
     }
     // report-data treats treatmentApplied as authoritative for applicationMade,
