@@ -6403,7 +6403,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const estimateRefusedAcceptance = !!(linkedEstimate
           && linkedEstimate.status !== 'accepted'
           && !estimateAutoAccepted);
-        if (!estimateRefusedAcceptance) {
+        // A Waves Assessment is not a closed deal either (owner ruling
+        // 2026-09-08, services/assessment-booking.js): the owner goes out to
+        // look and quote. The lead stays open and the customer row keeps its
+        // lead stage; conversion happens when the quote is accepted.
+        const assessmentBooking = require('../services/assessment-booking').isAssessmentServiceType(serviceType);
+        if (!estimateRefusedAcceptance && !assessmentBooking) {
           try {
             const { convertLeadFromEvent } = require('../services/lead-estimate-link');
             const conversion = await convertLeadFromEvent({

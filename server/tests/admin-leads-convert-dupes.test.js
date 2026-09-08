@@ -1190,3 +1190,58 @@ describe('POST /admin/leads/:id/schedule-appointment — customer_id linked WITH
     });
   });
 });
+
+// An assessment is NOT a win (owner ruling 2026-09-08): booking a Waves
+// Assessment from the leads page claims the lead for the customer but leaves
+// it OPEN, provisions the customer in a lead stage, and stamps no funnel win.
+describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does not convert', () => {
+  const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
+  beforeEach(() => { db.mockReset(); bridgeLeadFunnelStage.mockClear(); });
+
+  it('new lead: customer provisioned at new_lead, lead claimed but not won, no funnel bridge', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null, status: 'new' } }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { serviceType: 'Waves Assessment' });
+      expect(res.status).toBe(200);
+      const custInsert = calls.find((c) => c.table === 'customers' && c.op === 'insert');
+      expect(custInsert.args[0].pipeline_stage).toBe('new_lead');
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.args[0]).toMatchObject({ customer_id: 'cust-new', is_qualified: true });
+      expect(leadUpdate.args[0]).not.toHaveProperty('status');
+      expect(leadUpdate.args[0]).not.toHaveProperty('converted_at');
+      // Claim only — never gated on converted_at like a conversion is.
+      expect(leadUpdate.ops.filter((o) => o.op === 'whereNull').map((o) => o.args[0])).toEqual(['deleted_at']);
+      const activities = calls.filter((c) => c.table === 'lead_activities' && c.op === 'insert').map((c) => c.args[0]);
+      expect(activities.map((a) => a.activity_type)).toEqual(['appointment_scheduled']);
+      expect(activities[0].description).toMatch(/kept OPEN/);
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    });
+  });
+
+  it('a closed lead (unresponsive) reopens to new when the assessment is booked', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null, status: 'unresponsive' } }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { serviceType: 'Waves Assessment' });
+      expect(res.status).toBe(200);
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.args[0]).toMatchObject({ status: 'new', customer_id: 'cust-new' });
+      expect(leadUpdate.args[0]).not.toHaveProperty('converted_at');
+    });
+  });
+
+  it('a paid service still converts: customer at won, lead won + converted_at, funnel bridged', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({ preLead: baseLead(), lockedLead: { customer_id: null, converted_at: null, status: 'new' } }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { serviceType: 'WDO Inspection Service' });
+      expect(res.status).toBe(200);
+      expect(calls.find((c) => c.table === 'customers' && c.op === 'insert').args[0].pipeline_stage).toBe('won');
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.args[0]).toMatchObject({ status: 'won' });
+      expect(leadUpdate.args[0].converted_at).toBeInstanceOf(Date);
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith(LEAD_ID, 'won');
+    });
+  });
+});

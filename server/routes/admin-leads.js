@@ -1369,17 +1369,30 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
+    // The catalog row (when the client sent one): duration default + the
+    // assessment check below.
+    let catalogService = null;
+    if (serviceId) {
+      try {
+        catalogService = await db('services').where({ id: serviceId }).first();
+      } catch (e) { logger.warn(`[leads] service lookup failed: ${e.message}`); }
+    }
+
     // Resolve appointment duration: explicit override → service default → 60 min.
     let duration = Number.parseInt(durationMinutes, 10);
     if (!Number.isInteger(duration) || duration <= 0) {
-      duration = 60;
-      if (serviceId) {
-        try {
-          const svc = await db('services').where({ id: serviceId }).first();
-          if (svc?.default_duration_minutes) duration = svc.default_duration_minutes;
-        } catch (e) { logger.warn(`[leads] service duration lookup failed: ${e.message}`); }
-      }
+      duration = catalogService?.default_duration_minutes || 60;
     }
+
+    // A Waves Assessment is NOT a win (owner ruling 2026-09-08,
+    // services/assessment-booking.js): the owner goes out to look and quote,
+    // nothing has sold. The booking still claims the lead for the customer
+    // (so it can't be reused elsewhere) and logs on its timeline, but the
+    // lead stays OPEN, the customer row keeps its lead stage, and no
+    // member_since / funnel 'won' is stamped — the deal converts when the
+    // quote is accepted or a paid service books, like every other path.
+    const { isAssessmentServiceType, isAssessmentServiceRow } = require('../services/assessment-booking');
+    const assessmentVisit = isAssessmentServiceType(svcType) || isAssessmentServiceRow(catalogService);
 
     // Compute the time window from start + duration.
     const windowStart = /^\d{2}:\d{2}$/.test(time) ? time : null;
@@ -1457,7 +1470,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         // Every contact field the conversion uses comes from THIS locked row
         // (matching inputs, customer payload, estimate link) — never from the
         // unlocked pre-read, which can be stale by the time we hold the lock.
-        .first('id', 'customer_id', 'converted_at', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip');
+        .first('id', 'customer_id', 'converted_at', 'status', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip');
       if (!lockedLead) {
         const gone = new Error('Lead was deleted while booking — appointment not created');
         gone.status = 409;
@@ -1553,7 +1566,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           member_since: etDateString(),
           referral_code: code,
           lead_source: 'lead_pipeline',
-          pipeline_stage: 'won',
+          pipeline_stage: assessmentVisit ? 'new_lead' : 'won',
           pipeline_stage_changed_at: new Date(),
           assigned_to: req.technicianId,
         })).returning('*');
@@ -1568,7 +1581,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         //  2) reactivation — always flip a deactivated or churn-stamped row back
         //     to active and clear churn, even one already in a customer stage
         //     (a deactivated active_customer who books should be live again).
-        const inCustomerStage = ['active_customer', 'won', 'at_risk'].includes(existingCustomer.pipeline_stage);
+        // An assessment never promotes the stage (see assessmentVisit above);
+        // reactivation of a deactivated row still applies, as for any booking.
+        const inCustomerStage = assessmentVisit
+          || ['active_customer', 'won', 'at_risk'].includes(existingCustomer.pipeline_stage);
         const customerUpdates = {};
         if (!inCustomerStage) {
           customerUpdates.pipeline_stage = 'won';
@@ -1688,16 +1704,36 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // converted_at (lead-attribution.js uses it as the revenue cutoff /
       // earliest-source selector — re-stamping it would drop earlier
       // revenue) and skip the conversion-only activity below.
-      const isConversion = !lockedLead.converted_at;
+      // An assessment (assessmentVisit) never converts: it only CLAIMS the
+      // lead for this customer. An already-converted lead re-booking an
+      // assessment (rebook) keeps its won status untouched.
+      const isConversion = !assessmentVisit && !lockedLead.converted_at;
       let convertQuery = trx('leads').where('id', req.params.id).whereNull('deleted_at');
       if (isConversion) convertQuery = convertQuery.whereNull('converted_at');
-      const converted = await convertQuery.update({
-        status: 'won',
-        customer_id: customerId,
-        ...(isConversion ? { converted_at: new Date() } : {}),
-        is_qualified: true,
-        updated_at: new Date(),
-      });
+      let leadUpdate;
+      if (assessmentVisit) {
+        // Claim, keep visibly open: a closed status (lost / unresponsive /
+        // disqualified) reopens to 'new' so the promised quote can't hide in
+        // a lead the pipeline view never shows — mirrors the phone-booking
+        // quote-pending claim in call-recording-processor.js.
+        const OPEN_LEAD_STATUSES = new Set(['new', 'contacted', 'estimate_sent', 'estimate_viewed', 'won']);
+        const currentStatus = String(lockedLead.status || '').toLowerCase();
+        leadUpdate = {
+          customer_id: customerId,
+          is_qualified: true,
+          updated_at: new Date(),
+          ...(OPEN_LEAD_STATUSES.has(currentStatus) ? {} : { status: 'new' }),
+        };
+      } else {
+        leadUpdate = {
+          status: 'won',
+          customer_id: customerId,
+          ...(isConversion ? { converted_at: new Date() } : {}),
+          is_qualified: true,
+          updated_at: new Date(),
+        };
+      }
+      const converted = await convertQuery.update(leadUpdate);
       if (!converted) throw alreadyConverted('Lead was deleted or already converted while booking — appointment not created');
       // Attach the lead's quote to this customer (same txn) so it becomes a
       // customer estimate visible in the New Appointment "Estimate source".
@@ -1719,7 +1755,8 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       await trx('lead_activities').insert({
         lead_id: req.params.id,
         activity_type: 'appointment_scheduled',
-        description: `Appointment scheduled: ${svcType} on ${date}${windowStart ? ` at ${time}` : ''}`,
+        description: `Appointment scheduled: ${svcType} on ${date}${windowStart ? ` at ${time}` : ''}`
+          + (assessmentVisit ? ' — lead kept OPEN: an assessment is not a win' : ''),
         performed_by: performedBy,
         metadata: JSON.stringify({
           appointmentId: appt.id, customerId, date, time,
@@ -1772,8 +1809,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // same settlement markConverted runs (a booked wizard repeat lands on its
     // root's row or its own rebuilt one, codex #3834 r32 P1). Post-commit
     // deliberately: it must never abort the booking transaction, and it is
-    // monotonic + idempotent on its own.
-    await leadAttribution.settleWonFunnelRow(req.params.id, customerId);
+    // monotonic + idempotent on its own. An assessment converted nothing, so
+    // there is no win to settle.
+    if (!assessmentVisit) await leadAttribution.settleWonFunnelRow(req.params.id, customerId);
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({
