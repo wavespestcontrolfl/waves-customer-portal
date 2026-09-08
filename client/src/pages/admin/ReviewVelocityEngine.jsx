@@ -185,6 +185,12 @@ const STAGES = {
 // 2026-08-06: keep in lockstep when either side changes.
 const TEMPLATES = [
   {
+    id: "day0_ask",
+    name: "Day-0 Ask",
+    sentiment: "happy",
+    body: "Hi {first}! {sender}. If we earned it, a Google review means a lot: {review_url} Reply if anything's off.",
+  },
+  {
     id: "friendly_ask",
     name: "Friendly Ask",
     sentiment: "happy",
@@ -321,6 +327,10 @@ function hydrate(body, c) {
     // server's own first-name substitution never runs on it, and a full name
     // would tip the one-segment ask templates into a second segment.
     .replace(/\{tech\}/g, String(c.lastTech || "Adam").trim().split(/\s+/)[0] || "Adam")
+    // {sender} is deliberately NOT hydrated here (codex #4139 r1): the
+    // candidates feed carries no technician, so the server renders it from
+    // the record ("<tech> with Waves", else "Waves Pest Control") — the same
+    // way it swaps {review_url} for the tokenized link.
     .replace(/\{service_type\}/g, c.lastSvc || "pest control")
     .replace(/\{review_url\}/g, c.reviewUrl)
     .replace(/\{date\}/g, c.lastDate);
@@ -369,7 +379,9 @@ function apiToCustomer(row) {
     email: "",
     lastDate: svcDate ? fmtDate(svcDate) : "—",
     lastSvc: svc,
-    lastTech: "Adam",
+    // No technician in the candidates feed: the server resolves the tech
+    // from the latest completed service when the drawer sends none.
+    lastTech: null,
     sentiment,
     stage,
     score,
@@ -616,6 +628,11 @@ export default function ReviewVelocityEngine() {
     async (customer, opts = {}) => {
       const svcType = customer.lastSvc;
       try {
+        // `techName` is sent as-is (null when the candidates feed carries no
+        // technician): the route coalesces null to "no tech" and resolves the
+        // sender from the record. Keep this request expression byte-identical
+        // to main — the IB coverage gate fingerprints it, and its operation
+        // has not changed.
         const res = await adminFetch("/admin/reviews/send-request", {
           method: "POST",
           body: JSON.stringify({
