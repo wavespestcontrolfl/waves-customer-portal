@@ -31,7 +31,11 @@ jest.mock('../services/twilio', () => ({
 // no_connection). The lock's own behavior is covered by its suite — here it
 // just runs the body.
 jest.mock('../utils/cron-lock', () => ({
-  runExclusive: async (_key, fn) => fn(),
+  runExclusive: async (key, fn) => {
+    (global.__reviewLockKeys = global.__reviewLockKeys || []).push(key);
+    if (global.__reviewLockHeld && global.__reviewLockHeld.has(key)) return { skipped: true, reason: 'lease_held' };
+    return fn();
+  },
 }));
 
 const db = require('../models/db');
@@ -93,6 +97,8 @@ function insertReturning(inserted) {
 describe('review request follow-up flow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    global.__reviewLockKeys = [];
+    global.__reviewLockHeld = null;
     jest.useFakeTimers().setSystemTime(new Date('2026-06-03T14:00:00.000Z'));
     shortenOrPassthrough.mockImplementation((url) => Promise.resolve(url));
   });
@@ -163,6 +169,34 @@ describe('review request follow-up flow', () => {
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       followup_sent: true,
     }));
+  });
+
+  test('the follow-up spacing check and send run under the per-customer review-send lock; a held lock leaves the row for the next run (codex #4141 r3 P2)', async () => {
+    const updateQuery = chain();
+    const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
+      collection([]),
+      collection([{ id: 'rr-old', customer_id: 'cust-1', sms_sent_at: '2026-05-30T15:00:00.000Z', status: 'sent', score: null }]),
+      chain({ first: jest.fn().mockResolvedValue(null) }), // dedup #2
+      // Everything from the spacing read on happens inside the lock — never reached while it is held.
+      rows([{ sms_sent_at: new Date(Date.now() - 10 * 3600000), sent_at: null }]),
+      updateQuery,
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    // The scheduled-ask batch holds this customer's lock right now.
+    global.__reviewLockHeld = new Set(['review-send:cust-1']);
+
+    const result = await ReviewService.processFollowups();
+
+    expect(global.__reviewLockKeys).toContain('review-send:cust-1');
+    expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updateQuery.update).not.toHaveBeenCalled();
+    // The spacing read and the send were not attempted outside the lock.
+    expect(reviewRequestQueries).toHaveLength(2);
   });
 
   test('the 3-day rule holds the legacy follow-up while a newer ask to the customer is under 72h old (codex #4141 r1)', async () => {

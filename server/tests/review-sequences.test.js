@@ -915,8 +915,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     test('an unavailable last-ask lookup defers the ask instead of sending inside 72h (codex #4141 r1 P1)', async () => {
       const mock = makeMock(fixture('seq-3d5', { lastAskAgoMs: 20 * 3600000 }), {
         // The runner's own last-ask lookup: review_requests, delivered asks,
-        // bounded by created_at > now-30d (the cap-stats read has no such bound).
-        throwSelectWhen: (q) => q.table === 'review_requests' && q.ops.some(([k, op]) => k === 'created_at' && op === '>') && (q.selected || []).includes('sequence_id'),
+        // bounded by delivery time (the cap-stats read has no such bound).
+        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /COALESCE\(sms_sent_at, sent_at, created_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
       });
       db.mockImplementation(mock);
 
@@ -1009,6 +1009,65 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const queued = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-dq1');
       expect(queued.status).toBe('pending');
       expect(new Date(queued.scheduled_for).getTime()).toBe(emailAt.getTime() + 72 * 3600000);
+    });
+
+    test('a direct EMAIL ask inside 72h is refused with the date, not queued — no job retries a standalone email (codex #4141 r3 P1)', async () => {
+      const smsAt = new Date(Date.now() - 20 * 3600000);
+      const mock = makeMock({
+        customers: [{ id: 'dq-e', first_name: 'Flo', last_name: 'Q', phone: '+19410000157', email: 'flo@example.com', nearest_location_id: 'bradenton' }],
+        notification_prefs: [{ customer_id: 'dq-e', review_request: true, email_enabled: true, sms_enabled: true }],
+        review_requests: [{ id: 'rr-dqe', customer_id: 'dq-e', channel: 'sms', status: 'sent', template_key: 'day0_ask', sms_sent_at: smsAt, created_at: smsAt, token: 'tqe' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'email', triggeredBy: 'admin', manageRetryVia: 'cron', strictChannel: true,
+      });
+
+      expect(result).toMatchObject({ ok: false, blocked: true, terminal: false, reason: 'ask_spacing', code: 'ASK_SPACING', channel: 'email' });
+      expect(new Date(result.nextAllowedAt).getTime()).toBe(smsAt.getTime() + 72 * 3600000);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      // The row this call created is gone: nothing sits "pending" that processScheduled would never select.
+      expect(mock.__state.rows.review_requests.map((r) => r.id)).toEqual(['rr-dqe']);
+    });
+
+    test('the spacing anchor is the DELIVERY time — a row created 40 days ago and texted an hour ago is an hour-old ask (codex #4141 r3 P2)', async () => {
+      const sentAt = new Date(Date.now() - 3600000);
+      const mock = makeMock({
+        review_requests: [{ id: 'rr-old', customer_id: 'la-1', channel: 'sms', status: 'sent', template_key: 'day0_ask', created_at: new Date(Date.now() - 40 * 86400000), sms_sent_at: sentAt }],
+      });
+      db.mockImplementation(mock);
+
+      const at = await ReviewService.__private.lastDeliveredAskAt('la-1');
+      expect(at.getTime()).toBe(sentAt.getTime());
+    });
+
+    test('an email-labelled private check-in in an admin plan is not held behind the 3-day rule either (codex #4141 r3 P2)', async () => {
+      const mock = makeMock(fixture('seq-3d4e', { lastAskAgoMs: 20 * 3600000, step: { day: 1, channel: 'email', templateKey: 'resolution_check' } }));
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).not.toContain('/rate/');
+    });
+
+    test('a tech-triggered immediate ask held by the 3-day rule reports itself as NOT sent (codex #4141 r3 P2)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'ct-1', first_name: 'Sam', last_name: 'R', phone: '+19410000158', nearest_location_id: 'venice' }],
+        // A staff-sent link with no request row — the gate stack does not see it; the shared sender does.
+        sms_log: [{ id: 'sms-ct1', customer_id: 'ct-1', direction: 'outbound', status: 'delivered', message_body: 'Here is our Google review link https://g.page/r/waves/review', created_at: new Date(Date.now() - 3 * 3600000) }],
+      });
+      db.mockImplementation(mock);
+
+      const request = await ReviewService.create({ customerId: 'ct-1', triggeredBy: 'tech' });
+
+      expect(request.sendOutcome).toMatchObject({ sent: false, deferred: 'spacing' });
+      expect(Math.abs(new Date(request.sendOutcome.nextAllowedAt).getTime() - (Date.now() + 69 * 3600000))).toBeLessThan(5000);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending');
+      expect(new Date(row.scheduled_for).getTime()).toBe(new Date(request.sendOutcome.nextAllowedAt).getTime());
     });
 
     test('the first ask has no timing gate: a Day-0 step with no prior ask sends at its scheduled time', async () => {

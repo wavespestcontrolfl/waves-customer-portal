@@ -2004,6 +2004,10 @@ const EMAIL_LEG_REASONS = {
   // The email WENT but the row could not be stamped (twice): the ask is
   // invisible to the cooldown, so the operator must not click again.
   email_sent_unrecorded: 'The review email was sent, but it could not be recorded — do not send it again',
+  // The 3-day rule (owner ruling 2026-09-07): a deferred email has no retry
+  // owner, so the sender refuses instead of queueing (codex #4141 r3 P1).
+  ask_spacing: 'A review ask reached this customer less than 3 days ago — the next one can go out after the 72-hour mark',
+  ask_spacing_lookup_unavailable: 'The last-ask lookup failed, so the 3-day rule could not be checked — try again in a few minutes',
   email_uncertain_unrecorded: "The review email may or may not have gone out and could not be recorded — do not send it again; check the customer's email log",
   // The address was rejected AND the retry marker could not be restored:
   // this ask cannot be retried from here, and the text's cooldown refuses a
@@ -2096,11 +2100,16 @@ async function emailReviewAskNow(primaryId) {
     deferred: 'A review request to this customer is already queued and will send automatically.',
   };
   const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
-  const error = REVIEW_GATE_REASONS[ask.outcome]
+  let error = REVIEW_GATE_REASONS[ask.outcome]
     || (ask.outcome === 'blocked' && EMAIL_LEG_REASONS[ask.reason])
     || outcomeReasons[ask.outcome]
     || 'Review request email could not be sent';
-  return { status: ask.outcome === 'no_customer' ? 404 : 409, body: { error, outcome: ask.outcome } };
+  if (ask.outcome === 'blocked' && ask.reason === 'ask_spacing' && ask.nextAllowedAt) {
+    const { formatETDate, formatETTime } = require('../utils/datetime-et');
+    const at = new Date(ask.nextAllowedAt);
+    error = `A review ask reached this customer less than 3 days ago — the next one can go out after ${formatETDate(at)} at ${formatETTime(at)} ET`;
+  }
+  return { status: ask.outcome === 'no_customer' ? 404 : 409, body: { error, outcome: ask.outcome, ...(ask.nextAllowedAt ? { nextAllowedAt: ask.nextAllowedAt } : {}) } };
 }
 
 const REVIEW_LINK_CHANNELS = ['sms', 'email', 'both'];
