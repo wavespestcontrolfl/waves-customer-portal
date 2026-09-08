@@ -329,7 +329,10 @@ function decisionLine(seq, sequencesEnabled) {
   // The worker skips every run while GATE_REVIEW_SEQUENCES is off — the
   // redemption sweep included — so neither an active row's next tick nor a
   // parked row's re-check is a plan: both are frozen (codex #4140 r5, r13 P2).
-  if (sequencesEnabled === false) return `Paused — cadences are off (GATE_REVIEW_SEQUENCES) · Owner action: turn the gate on, or stop this ${seq.parked ? "parked " : ""}cadence`;
+  // An UNKNOWN gate state is not a plan either (codex #4140 r15 P2): only a
+  // confirmed-on worker earns a "Next" time. Both gates are needed — the
+  // cadence cron registers only under the master GATE_CRON_JOBS.
+  if (sequencesEnabled !== true) return `Paused — cadences are off (GATE_REVIEW_SEQUENCES / GATE_CRON_JOBS)${sequencesEnabled == null ? " or the gate state is unavailable" : ""} · Owner action: turn the gates on, or stop this ${seq.parked ? "parked " : ""}cadence`;
   if (seq.sending) return "Sending now · Owner action: none";
   // A parked series final (deferred until the opener's send settles) is a
   // durable enrollment the redemption sweep redeems — not "no cadence"
@@ -594,6 +597,9 @@ export default function ReviewVelocityEngine() {
   // sends from other sessions; it's replaced by /outreach-activity.
   const [activityLog, setActivityLog] = useState([]);
   const [analytics, setAnalytics] = useState(null);
+  // GATE_REVIEW_SEQUENCES && GATE_CRON_JOBS as the candidates response reports
+  // them; null until known.
+  const [sequencesEnabled, setSequencesEnabled] = useState(null);
   const [drawerCust, setDrawerCust] = useState(null);
   const [toast, setToast] = useState("");
   const [batchModal, setBatchModal] = useState(false);
@@ -633,6 +639,9 @@ export default function ReviewVelocityEngine() {
     adminFetch("/admin/reviews/outreach-candidates")
       .then((d) => {
         setCustomers((d.customers || []).map(apiToCustomer));
+        // The gate rides with the rows (codex #4140 r15 P2); an absent value
+        // stays unknown, which decisionLine treats as paused.
+        setSequencesEnabled(typeof d.reviewSequencesEnabled === "boolean" ? d.reviewSequencesEnabled : null);
         setLoading(false);
       })
       .catch((err) => {
@@ -962,7 +971,7 @@ export default function ReviewVelocityEngine() {
           setPipeSearch={setPipeSearch}
           quickSend={quickSend}
           quickStartSequence={quickStartSequence}
-          sequencesEnabled={analytics?.reviewSequencesEnabled}
+          sequencesEnabled={sequencesEnabled}
           setDrawerCust={setDrawerCust}
           setBatchModal={setBatchModal}
           addLog={addLog}
@@ -985,7 +994,7 @@ export default function ReviewVelocityEngine() {
           showToast={showToast}
           sendReviewRequest={sendReviewRequest}
           startSequence={startSequence}
-          sequencesEnabled={analytics?.reviewSequencesEnabled}
+          sequencesEnabled={sequencesEnabled}
         />
       )}
       {/* Batch Modal */}

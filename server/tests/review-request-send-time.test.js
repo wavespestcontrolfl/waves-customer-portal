@@ -31,6 +31,14 @@ describe('review request send-time calculator', () => {
     const relative = calculateReviewSendPlan(new Date('2026-05-26T15:00:00Z'), 'pest control', { jitter: false });
     expect(relative.kind).toBe('relative');
     expect(relative.latestAt.getTime() - relative.earliestAt.getTime()).toBe(30 * 60000);
+    // 3:29 PM WDO → relative +90 → 4:59 PM; a jitter past the 5 PM fence is
+    // dropped by normalizeReviewSendWindow, so the late end collapses to `at`
+    // (codex #4140 r15 P2).
+    const fenced = calculateReviewSendPlan(new Date('2026-05-26T19:29:00Z'), 'wdo inspection', { jitter: false });
+    expect(fenced.kind).toBe('relative');
+    expect(fenced.at.toISOString()).toBe('2026-05-26T20:59:00.000Z');
+    expect(fenced.latestAt.toISOString()).toBe(fenced.at.toISOString());
+    expect(fenced.earliestAt.toISOString()).toBe('2026-05-26T20:44:00.000Z');
   });
 
 

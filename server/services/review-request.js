@@ -562,10 +562,21 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
   // P2): live enrollment adds up to ±15 min — an anchored answer's minute is
   // clamped inside its hour (atHour), a relative one moves freely. The
   // completion panel names the cadence ticks either end lands on.
+  // A relative answer keeps its jitter only inside the 9 AM–5 PM fences
+  // (normalizeReviewSendWindow falls back to the unjittered instant), so an
+  // end that crosses a fence collapses to `at` (codex #4140 r15 P2).
   const hourStart = new Date(at.getTime());
   hourStart.setUTCMinutes(0, 0, 0); // ET offsets are whole hours
-  const earliestAt = new Date(Math.max(at.getTime() - JITTER_MAX_MINUTES * 60000, kind === "anchored" ? hourStart.getTime() : 0));
-  const latestAt = new Date(Math.min(at.getTime() + JITTER_MAX_MINUTES * 60000, kind === "anchored" ? hourStart.getTime() + 59 * 60000 : Infinity));
+  const insideFences = (d) => { const h = etParts(d).hour; return h >= 9 && h < 17; };
+  let earliestAt = new Date(at.getTime() - JITTER_MAX_MINUTES * 60000);
+  let latestAt = new Date(at.getTime() + JITTER_MAX_MINUTES * 60000);
+  if (kind === "anchored") {
+    earliestAt = new Date(Math.max(earliestAt.getTime(), hourStart.getTime()));
+    latestAt = new Date(Math.min(latestAt.getTime(), hourStart.getTime() + 59 * 60000));
+  } else {
+    if (!insideFences(earliestAt)) earliestAt = at;
+    if (!insideFences(latestAt)) latestAt = at;
+  }
   return { at, kind, bucket, earliestAt, latestAt };
 }
 

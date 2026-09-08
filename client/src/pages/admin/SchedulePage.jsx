@@ -341,6 +341,12 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awai
   // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
   // relative timing is re-derived from the payment time; an absolute one is
   // kept if it is still ahead (codex #4140 r10 P2).
+  // The master cron gate is dark: nothing automated sends at all — not the
+  // cadence ticks, not the legacy 15-minute scheduler (codex #4140 r15 P1).
+  // Only a link bundled into the completion text itself still goes.
+  if (preview?.schedulerEnabled === false && !(reviewTiming === "customer_requested" && bundled)) {
+    return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
+  }
   if (awaitsPayment && reviewTiming === "auto") return "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment.";
   if (awaitsPayment && reviewTiming === "customer_requested") return "Review text waits for the invoice to be paid, then goes out at the next cadence tick the send window allows. The request is recorded.";
   const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
@@ -11922,9 +11928,11 @@ export function CompletionPanel({
     service.prepaidAmount != null &&
     Number(service.prepaidAmount) > 0 &&
     Number(service.prepaidAmount) >= invoiceAmount;
+  // paid and prepaid are both settled to the server (invoiceBlocksReview,
+  // report-only completion) — codex #4140 r15 P2.
   const invoiceAlreadyPaid =
-    service.checkoutInvoiceStatus === "paid" ||
-    service.invoiceStatus === "paid";
+    ["paid", "prepaid"].includes(service.checkoutInvoiceStatus) ||
+    ["paid", "prepaid"].includes(service.invoiceStatus);
   const reportOnlyCompletion =
     prepaidCovered ||
     invoiceAlreadyPaid ||
@@ -14798,8 +14806,11 @@ export function CompletionPanel({
       // comparison alerted on every submit. Only a rule change — a
       // different day, an anchored hour, relative → anchored — needs a
       // second look from the operator.
+      // A successful refresh is always applied — a same-bucket answer can
+      // still carry a later tick range after a tick boundary (codex #4140
+      // r15 P2); only a bucket change needs the operator's confirmation.
+      if (fresh) setReviewSendPreview(fresh);
       if (fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
-        setReviewSendPreview(fresh);
         alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
         return;
       }
