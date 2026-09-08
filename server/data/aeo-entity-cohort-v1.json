@@ -13,7 +13,7 @@
     },
     "fdacs_license": {
       "label": "License JB351547",
-      "pattern": "(?:(?<=(?:\\b(?:waves|licen[cs]e\\w*|number|no\\.|holds?|holding|under|is|its|their)\\b|#|:)[^.;!?\\n]{0,60})\\bJB\\s?351547\\b|\\bJB\\s?351547\\b(?=[^.;!?\\n]{0,60}\\b(?:waves|held by|holder|its licen[cs]e)\\b))(?![^.;!?\\n]{0,60}\\b(?:belongs?|belonging|registered|issued|assigned|granted|licensed|held)\\s+(?:to|by)\\s+(?!waves\\b|it\\b|them\\b|adam\\b|the (?:company|business)\\b))"
+      "pattern": "(?:(?<=(?:\\b(?:waves|licen[cs]e\\w*|number|no\\.|holds?|holding|under|is|its|their)\\b|#|:)[^.;!?\\n]{0,60})\\bJB\\s?351547\\b|\\bJB\\s?351547\\b(?=[^.;!?\\n]{0,60}\\b(?:waves|held by|holder|its licen[cs]e)\\b))(?![^.;!?\\n]{0,60}\\b(?:belongs?|belonging|registered|assigned|granted|licensed|held)\\s+(?:to|by)\\s+(?!waves\\b|it\\b|them\\b|adam\\b|the (?:company|business)\\b|fdacs\\b|the (?:florida\\s+)?department\\b|florida department\\b|the state\\b))"
     },
     "fdacs": {
       "label": "Names FDACS as the licensing agency",
