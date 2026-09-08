@@ -202,7 +202,7 @@ export default function TechLayout() {
             type="button"
             onClick={() => {
               const next = location.pathname.startsWith('/tech')
-                ? location.pathname
+                ? `${location.pathname}${location.search}`
                 : '/tech';
               navigate(`/admin/login?next=${encodeURIComponent(next)}`);
             }}

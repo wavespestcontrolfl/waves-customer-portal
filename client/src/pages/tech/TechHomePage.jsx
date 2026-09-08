@@ -40,7 +40,7 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { lazy, Suspense, useCallback, useEffect, useState, useRef } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
@@ -489,7 +489,7 @@ export default function TechHomePage({ section = 'today' }) {
   // moves the accordion until the action settles.
   const [busyStopId, setBusyStopId] = useState(null);
   const navigationBusy = Boolean(busyStopId || enRouteState.pendingId || onSiteState.pendingId);
-  useEffect(() => {
+  useLayoutEffect(() => {
     setNavigationBusy?.(navigationBusy);
     return () => setNavigationBusy?.(false);
   }, [navigationBusy, setNavigationBusy]);
@@ -562,7 +562,7 @@ export default function TechHomePage({ section = 'today' }) {
     openProjectForService(service);
   }, [openProjectForService]);
   const projectServices = fieldWorkspace
-    ? (selectedVisit?.services || myServices).filter((service) => !TERMINAL_STATUSES_VISIT.has(service.status))
+    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => !TERMINAL_STATUSES_VISIT.has(service.status))
     : myServices;
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {

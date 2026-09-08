@@ -1,8 +1,8 @@
-import { useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { CalendarDays, MoreHorizontal, Waves, Wrench } from 'lucide-react';
 import { useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './AddToHomeScreenHint';
+import { useTechNavigationLock } from './TechNavigationLock';
 import './tech-field.css';
 
 // Mounted only after TechLayout verifies the staff profile. One flag read
@@ -10,7 +10,7 @@ import './tech-field.css';
 export default function TechFieldShell({ children, techName, techRole, documentsAvailable }) {
   const { enabled, ready } = useFeatureFlagReady('tech-field-workspace', false);
   const { pathname, search } = useLocation();
-  const [navigationBusy, setNavigationBusy] = useState(false);
+  const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
   const visit = new URLSearchParams(search).get('visit');
   const visitSearch = visit ? `?visit=${encodeURIComponent(visit)}` : '';
   const legacyTool = ['/tech/protocols', '/tech/lawn-diagnostic', '/tech/social-post'].includes(pathname);
@@ -28,7 +28,9 @@ export default function TechFieldShell({ children, techName, techRole, documents
         <AddToHomeScreenHint />
         {visit && pathname !== '/tech' && <Link className="tf-button" to={`/tech${visitSearch}`} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>Return to visit</Link>}
         <div className={legacyTool ? 'tf-existing' : undefined}>
-          <Outlet context={{ fieldWorkspace: true, techRole, documentsAvailable, setNavigationBusy }} />
+          {pathname === '/tech/documents' && !documentsAvailable
+            ? <p>Staff documents are unavailable.</p>
+            : <Outlet context={{ fieldWorkspace: true, techRole, documentsAvailable, setNavigationBusy }} />}
         </div>
       </main>
       <nav className="tf-nav" aria-label="Field navigation">

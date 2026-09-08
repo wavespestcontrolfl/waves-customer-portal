@@ -246,6 +246,7 @@ import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
 import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
+import TechNavigationLock from './components/tech/TechNavigationLock';
 import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
@@ -520,6 +521,7 @@ function ProtectedRoute({ children }) {
 export default function App() {
   const app = (
     <AuthProvider>
+      <TechNavigationLock>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <PublicFunnelTracking />
         <AdminSafariShell />
@@ -714,6 +716,7 @@ export default function App() {
         <CustomerDialogHost />
         </BiometricGate>
       </BrowserRouter>
+      </TechNavigationLock>
     </AuthProvider>
   );
   return app;

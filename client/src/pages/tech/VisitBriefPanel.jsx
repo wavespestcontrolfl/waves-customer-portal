@@ -25,7 +25,7 @@
 //
 // Tech portal style rule (CLAUDE.md): inline styles + dark palette,
 // Montserrat headings per-element. No Tailwind, no components/ui.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { stopPropertyAlerts } from './routeStops';
 import {
   fmtMoney,
@@ -600,7 +600,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   if (busy) { if (!heldLine.current) heldLine.current = liveLine; } else heldLine.current = null;
   const line = busy ? heldLine.current : liveLine;
   const lineUnknown = busy ? false : liveLineUnknown;
-  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
+  // Publish the lock before a swipe can follow the Sending paint.
+  useLayoutEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   // A dispatch refresh can remove or reassign the stop while its action is
   // in flight; the panel then unmounts without ever reporting false, and
   // the list's busy lock would refuse every header for the rest of the

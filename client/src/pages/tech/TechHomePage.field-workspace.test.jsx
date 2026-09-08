@@ -151,6 +151,15 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(screen.getByRole('button', { name: 'Today' })).toBeDisabled();
   });
 
+  it('keeps Project Report disabled when the selected visit is missing despite another live service', async () => {
+    rows = [row('one')];
+    await act(async () => { mount('/tech/tools?visit=row%3Amissing'); });
+    await screen.findByRole('heading', { name: 'Tools' });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(screen.getByRole('button', { name: /Project Report/ })).toBeDisabled();
+    expect(screen.queryByText('Existing recap form')).not.toBeInTheDocument();
+  });
+
   it('preserves owner-only estimating and the social feature gate in Tools', async () => {
     mount('/tech/tools');
     expect(await screen.findByRole('heading', { name: 'Tools' })).toBeInTheDocument();

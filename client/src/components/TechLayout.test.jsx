@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import {
   MemoryRouter,
   Outlet,
@@ -18,6 +18,7 @@ vi.mock('../hooks/useFeatureFlag', () => ({
 
 import { refetchFlags, useFeatureFlagReady } from '../hooks/useFeatureFlag';
 import TechLayout from './TechLayout';
+import TechNavigationLock from './tech/TechNavigationLock';
 
 function LocationResult({ label }) {
   const location = useLocation();
@@ -26,17 +27,18 @@ function LocationResult({ label }) {
 
 function renderTech(initialPath = '/tech/protocols?day=monday') {
   return render(
-    <MemoryRouter initialEntries={[initialPath]}>
+    <TechNavigationLock><MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/tech" element={<TechLayout />}>
           <Route index element={<div>Protected field route</div>} />
           <Route path="protocols" element={<div>Protected field protocols</div>} />
+          <Route path="documents" element={<div>Protected staff documents</div>} />
         </Route>
         <Route path="/admin/login" element={<LocationResult label="Staff login" />} />
         <Route path="/admin/change-password" element={<LocationResult label="Change password" />} />
         <Route path="*" element={<Outlet />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter></TechNavigationLock>,
   );
 }
 
@@ -72,6 +74,21 @@ describe('TechLayout staff-session verification', () => {
     expect(screen.getByRole('link', { name: 'Tools' })).toHaveAttribute('href', '/tech/tools');
     expect(screen.getByRole('link', { name: 'More' })).toHaveAttribute('href', '/tech/more');
     expect(screen.queryByText('Messages')).not.toBeInTheDocument();
+  });
+
+  it('retains a selected visit in the unauthenticated sign-in destination', () => {
+    renderTech('/tech?visit=row%3Atwo');
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(screen.getByText('Staff login /admin/login?next=%2Ftech%3Fvisit%3Drow%253Atwo')).toBeInTheDocument();
+  });
+
+  it('keeps controlled documents unavailable inside the enabled field shell', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: true, ready: true });
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', role: 'technician' })));
+    renderTech('/tech/documents');
+    expect(await screen.findByText('Staff documents are unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText('Protected staff documents')).not.toBeInTheDocument();
   });
 
   it('holds the outlet until the workspace flag resolves', async () => {
