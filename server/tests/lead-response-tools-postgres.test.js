@@ -153,6 +153,35 @@ const SKIP = !process.env.DATABASE_URL;
     }
   }, 30000);
 
+  test.each(['send_lead_response', 'update_lead_pipeline'])('%s follows Customer 360 customer-before-lead lock order', async tool => {
+    const editor = await db.transaction();
+    let started;
+    let timer;
+    let pending;
+    const waiting = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('Tool did not attempt its customer lock')), 10000);
+      started = query => { if (query.sql.includes('"customers"') && query.sql.includes('for no key update')) resolve(); };
+    });
+    try {
+      await editor('customers').where({ id: customerId }).forUpdate().first();
+      db.on('query', started);
+      mockMessage.mockResolvedValueOnce({ sent: true });
+      pending = executeLeadTool(tool, { stage: 'won', message: 'Synthetic reply' }, context);
+      await waiting;
+      await editor.raw("SET LOCAL lock_timeout = '1s'");
+      await editor('leads').where({ id: leadId }).update({ first_name: 'QA updated' });
+      await editor.commit();
+      expect(await pending).toMatchObject(tool === 'send_lead_response' ? { sent: true } : { updated: true });
+      expect((await db('leads').where({ id: leadId }).first()).first_name).toBe('QA updated');
+      expect((await db('customers').where({ id: customerId }).first()).pipeline_stage).toBe(tool === 'send_lead_response' ? 'contacted' : 'won');
+    } finally {
+      clearTimeout(timer);
+      db.removeListener('query', started);
+      if (!editor.isCompleted()) await editor.rollback();
+      if (pending) await pending.catch(() => {});
+    }
+  }, 30000);
+
   test('pipeline and interaction writes roll back with a rejected note, then commit together', async () => {
     await expect(executeLeadTool('update_lead_pipeline', { stage: 'won', note: 'QA\u0000reject' }, context)).rejects.toThrow();
     expect((await db('customers').where({ id: customerId }).first()).pipeline_stage).toBe('new_lead');
@@ -163,17 +192,24 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'pipeline_update' })).toHaveLength(1);
   });
 
-  test('send lock permits audit foreign keys and blocks lead correction through provider handoff', async () => {
+  test('send locks permit audit foreign keys and block contact correction or archival through provider handoff', async () => {
     mockMessage.mockImplementationOnce(async ({ preDispatchCheck }) => {
       expect(await preDispatchCheck()).toEqual({ ok: true });
       await db.transaction(async probe => {
         await probe.raw("SET LOCAL lock_timeout = '250ms'");
         await probe('lead_activities').insert({ lead_id: leadId, activity_type: 'qa_provider_fk_probe', description: 'Synthetic provider audit probe' });
+        await probe('customer_interactions').insert({ customer_id: customerId, interaction_type: 'note', subject: 'Synthetic provider audit probe' });
       });
       await expect(db.transaction(async correction => {
         await correction.raw("SET LOCAL lock_timeout = '250ms'");
         await correction('leads').where({ id: leadId }).update({ customer_id: foreignCustomerId });
       })).rejects.toMatchObject({ code: '55P03' });
+      for (const change of [{ deleted_at: new Date() }, { phone: '+19415550199' }]) {
+        await expect(db.transaction(async correction => {
+          await correction.raw("SET LOCAL lock_timeout = '250ms'");
+          await correction('customers').where({ id: customerId }).update(change);
+        })).rejects.toMatchObject({ code: '55P03' });
+      }
       return { sent: true };
     });
     expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context)).toMatchObject({ sent: true });

@@ -21,13 +21,18 @@ async function resolveLeadSubject(input, context, conn = db, lock = false) {
       (input.customer_id && input.customer_id !== context.customerId)) {
     return { error: 'Tool target does not match assigned lead', validationError: true };
   }
+  // Customer 360 edits lock the customer before their lead fanout. Follow
+  // that order, and hold customer liveness/contact through message handoff.
+  // NO KEY UPDATE permits messaging audit foreign-key reads on other connections.
+  const customerQuery = conn('customers').where('id', context.customerId).whereNull('deleted_at');
+  if (lock) customerQuery.forNoKeyUpdate();
+  const customer = await customerQuery.first();
+  if (!customer) return { error: 'Assigned customer is unavailable', validationError: true };
   const query = conn('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at');
   if (lock === 'send') query.forNoKeyUpdate();
   else if (lock) query.forUpdate();
   const lead = await query.first();
   if (!lead) return { error: 'Assigned lead is unavailable', validationError: true };
-  const customer = await conn('customers').where('id', context.customerId).whereNull('deleted_at').first();
-  if (!customer) return { error: 'Assigned customer is unavailable', validationError: true };
   if (input.phone != null) {
     const variants = phoneMatchDigits(input.phone);
     const matches = [lead.phone, customer.phone].some(phone => phoneMatchDigits(phone).some(value => variants.includes(value)));
