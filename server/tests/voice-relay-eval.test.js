@@ -823,12 +823,18 @@ describe('voice relay eval — the judge', () => {
     // tools line — a change to any of them moves the fingerprint.
     const render = (opts) => judge.buildJudgePrompt({ fixture_facts: ['F'], required_facts: ['R'], prohibited_facts: ['P'], required_action: 'A', acceptable_actions: ['B'], ideal_move: 'I', response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40, ...opts.spec }, 'X', opts).text;
     const parts = [judge.JUDGE_PROMPT_VERSION, judge._internals.SYSTEM_PROMPT, JSON.stringify(judge.JUDGE_SCHEMA)];
-    for (const language of ['en', 'es']) for (const transfer_required of [false, true]) for (const callerBlock of [null, 'BLOCK']) for (const toolsAvailable of [[], ['T']]) parts.push(render({ language, toolsAvailable, callerBlock, spec: { transfer_required } }));
+    for (const language of ['en', 'es']) for (const transfer_required of [false, true]) for (const callerBlock of [null, 'BLOCK']) for (const standingInstructions of [null, 'SYS']) for (const toolsAvailable of [[], ['T']]) parts.push(render({ language, toolsAvailable, callerBlock, standingInstructions, spec: { transfer_required } }));
     const crypto = require('crypto');
     expect(sha).toBe(crypto.createHash('sha256').update(parts.join('\n')).digest('hex'));
     expect(parts.filter((x) => /Spanish/.test(x)).length).toBeGreaterThan(0);
     expect(parts.filter((x) => /transfer_required: true/.test(x)).length).toBeGreaterThan(0);
-    expect(judge._internals.cartesian(judge._internals.TEMPLATE_AXES)).toHaveLength(16);
+    expect(judge._internals.cartesian(judge._internals.TEMPLATE_AXES)).toHaveLength(32);
+    // The standing instructions Sandy ran under are agent-visible context too:
+    // "we serve Manatee, Sarasota and Charlotte" traces to them, not to a tool.
+    const grounded = judge.buildJudgePrompt({}, 'Agent: We serve Sarasota County.', { standingInstructions: 'You are the phone assistant for Waves Pest Control (Manatee, Sarasota, and Charlotte counties).' }).text;
+    expect(grounded).toMatch(/Standing instructions the agent ran under[\s\S]*Manatee, Sarasota, and Charlotte/);
+    expect(judge.buildJudgePrompt({}, 'x').text).toMatch(/Standing instructions[\s\S]*\(not supplied/);
+    expect(judge.buildJudgePrompt({}, 'x').system).toMatch(/its standing\s+instructions/);
   });
 
   test('judgeTranscript dispatches the voiceJudge policy on its lane and stamps model, provider, fallback and prompt sha', async () => {
@@ -1024,6 +1030,47 @@ describe('voice relay eval — the harness', () => {
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
+  test('the judge receives complete tool evidence while the record keeps the clipped display line', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const late = `${'Standard pest control pricing follows. '.repeat(20)}Quarterly is $129 per application.`; // the price sits past 600 characters
+    expect(late.length).toBeGreaterThan(700);
+    script.push(toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }), say('Quarterly is $129 per application.'));
+    const judgeFn = jest.fn(async ({ transcript }) => {
+      expect(transcript).toMatch(/\[tool\] get_pricing\(.*\) → Standard pest control pricing follows\. [\s\S]*Quarterly is \$129 per application\./);
+      expect(transcript).not.toContain('…');
+      return { ok: true, judge_fallback: false, judge_model: 'm', judge_prompt_sha: 'x', verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'none', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4 } };
+    });
+    const s = scenario({ id: 'harness-evidence', allowedTools: ['get_pricing', 'capture_lead'], fixtures: { officeHours: 'unknown', toolResponses: { get_pricing: [{ when: { service: 'pest_control' }, text: late }] } }, turns: [{ caller: 'How much is quarterly for two thousand square feet?' }], expect: [] });
+    const result = await replay.runScenario(s, { judge: true, judgeFn });
+    expect(result.error).toBeUndefined();
+    expect(judgeFn).toHaveBeenCalledTimes(1);
+    expect(result.transcript).toMatch(/→ Standard pest control pricing follows\.[\s\S]*…$/m);
+    expect(result.transcript).not.toContain('Quarterly is $129 per application.\n');
+  });
+
+  test('a dedupe answer marked receipt: true backs the follow-up it tells Sandy to promise, without an effect', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((x) => x.id === 'reservice-duplicate');
+    expect(fixture.fixtures.toolResponses.request_reservice[0]).toMatchObject({ receipt: true });
+    expect(fixture.fixtures.toolResponses.request_reservice[0].reservice).toBeUndefined();
+    // The live duplicate branch: verified open ticket, nothing filed, "a team member will follow up".
+    script.push(toolUse('request_reservice', { lane: 'pest', issue: 'ants back in the kitchen' }), say('Yes — that request is already in with the office, and a Waves team member will follow up.'));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] });
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls[0]).toMatchObject({ name: 'request_reservice', ok: true, receipt: true });
+    expect(result.checks.find((c) => c.check === 'commitment_requires_receipt')).toMatchObject({ status: 'pass' });
+    expect(result.status).toBe('pass');
+    // The effect latches were never touched: no capture, no re-service mark, so the session is still open after the goodbye.
+    expect(result.endSession).toBeNull();
+    // A receipt is meaningless on a read tool — lint says so.
+    const bad = { schemaVersion: 'voice-relay-scenarios.v1', scenarios: [{ ...fixture, id: 'receipt-on-read', fixtures: { ...fixture.fixtures, toolResponses: { ...fixture.fixtures.toolResponses, get_call_history: { text: 'x', receipt: true } } } }] };
+    expect(replay.lintFixture(bad).join('\n')).toMatch(/receipt-on-read: toolResponses.get_call_history: "receipt" belongs to a write tool/);
+  });
+
   test('runs the live loop against fixture tools: capture latch ends the session, end() never runs, the db is never touched, gates are restored', async () => {
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; // must be restored after the run
     // One fresh registry per test (beforeEach resetModules); everything the
@@ -1040,10 +1087,12 @@ describe('voice relay eval — the harness', () => {
       toolUse('capture_lead', { first_name: 'Sam', last_name: 'Okafor', call_summary: 'ants in kitchen' }),
       say('Thanks, Sam — a Waves team member will follow up as soon as possible.'),
     );
-    const judgeFn = jest.fn(async ({ transcript, toolsAvailable, callerBlock }) => {
+    const judgeFn = jest.fn(async ({ transcript, toolsAvailable, callerBlock, standingInstructions }) => {
       expect(require('../services/agent-control/context').current()).toMatchObject({ workload: 'replay', laneId: 'voice_relay_judge' });
       expect(transcript).not.toContain('[clock]');
       expect(callerBlock).toBeNull();
+      // The frozen system prompt Sandy ran under reaches the judge as grounding, off the record's JSON.
+      expect(standingInstructions).toMatch(/phone assistant for Waves Pest Control/);
       expect(transcript).toMatch(/^Caller: Hi, ants/);
       expect(transcript).toMatch(/\[tool\] capture_lead\(.*"first_name":"Sam"/);
       expect(transcript).toMatch(/Agent: Thanks, Sam/);
@@ -1054,6 +1103,8 @@ describe('voice relay eval — the harness', () => {
     const result = await replay.runScenario(scenario(), { judge: true, judgeFn });
 
     expect(result.error).toBeUndefined();
+    expect(result.standingInstructions).toMatch(/phone assistant for Waves Pest Control/);
+    expect(JSON.stringify(result)).not.toContain('phone assistant for Waves Pest Control');
     expect(result.checks.filter((c) => c.status === 'fail')).toEqual([]);
     expect(result.status).toBe('pass');
     expect(result.modelRounds).toBe(2);

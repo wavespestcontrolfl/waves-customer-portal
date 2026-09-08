@@ -1243,7 +1243,8 @@
               "when": {
                 "lane": "pest"
               },
-              "text": "A re-service request for this issue is already on file for this account (pest), filed earlier this week — do NOT file a second one and do not say you filed anything. Tell the caller it is already in with the office and a Waves team member will follow up."
+              "text": "A re-service request for this issue is already on file for this account (pest), filed earlier this week — do NOT file a second one and do not say you filed anything. Tell the caller it is already in with the office and a Waves team member will follow up.",
+              "receipt": true
             }
           ],
           "capture_lead": {

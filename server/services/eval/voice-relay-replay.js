@@ -128,6 +128,7 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
     when: INPUT_MATCHER_SCHEMA,
     once: Joi.boolean(),
     ok: Joi.boolean(),
+    receipt: Joi.boolean(),
     hang: Joi.boolean(),
     transfer: Joi.boolean(),
     booking: Joi.boolean(),
@@ -273,8 +274,10 @@ function toolResponseEntryRules(name, raw) {
   const { error } = TOOL_RESPONSES_SCHEMA.validate(entries, { convert: false });
   // An effect belongs to the tool that performs it live — never to another.
   const foreign = [...new Set(entries.flatMap((e) => (e && typeof e === 'object' ? Object.values(TOOL_EFFECT).filter((key) => e[key] !== undefined && TOOL_EFFECT[name] !== key) : [])))];
+  const receiptOnRead = !WRITE_TOOLS.includes(name) && entries.some((e) => e && typeof e === 'object' && e.receipt !== undefined);
   return [
     [!!error, `toolResponses.${name}: ${error ? error.message : ''}`],
+    [receiptOnRead, `toolResponses.${name}: "receipt" belongs to a write tool (${WRITE_TOOLS.join(', ')}), not ${name}`],
     ...foreign.map((key) => [true, `toolResponses.${name}: "${key}" is the effect of ${Object.keys(TOOL_EFFECT).find((t) => TOOL_EFFECT[t] === key)}, not ${name}`]),
   ];
 }
@@ -537,15 +540,20 @@ function matcherInput(record, event, name, input) {
 /**
  * The ctx side effects the real write tools perform — capture latch, booking /
  * re-service / transfer marks. Never a write. Returns the answer text and
- * whether a RECEIPT was produced: only a fixture answer that performed one of
- * these effects is a receipt — a refusal ("that time is gone", "already on
- * file", "transfer not available") is an answer, never a receipt.
+ * whether a RECEIPT was produced: a fixture answer that performed one of these
+ * effects is a receipt, and so is a dedupe answer marked `receipt: true`; a
+ * refusal ("that time is gone", "transfer not available") is an answer, never
+ * a receipt.
  */
 function applyToolSideEffects(response, { input, ctx, scenario }) {
   const text = response.text || '';
   if (response.ok === false) return { text, receipt: false };
   const ctxCall = (fn, ...args) => (typeof ctx[fn] === 'function' ? ctx[fn](...args) : undefined);
-  let receipt = false;
+  // `receipt: true` without an effect is the live dedupe branch: the tool
+  // verified the durable record already exists (a re-service already open, a
+  // visit already booked), performed nothing, and its answer still backs the
+  // follow-up it tells Sandy to promise — relay-reservice's alreadyOpenText.
+  let receipt = response.receipt === true;
   if (response.capture) {
     ctxCall('markCaptured', response.capture === true ? {} : response.capture);
     if (input.call_summary) ctxCall('noteCallSummary', input.call_summary);
@@ -823,18 +831,36 @@ async function driveTurns(convo, scenario, record) {
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
-/** The labelled dialogue for manual review. Tool lines carry name, input and result. */
-function renderTranscript(events = []) {
+/**
+ * The labelled dialogue. Tool lines carry name, input and result — clipped
+ * for the reviewable record, complete (`full`) for the judge, which must see
+ * every fact Sandy saw or an accurate readback of a late fact grades as
+ * invented.
+ */
+function renderTranscript(events = [], { full = false } = {}) {
   const lines = [];
+  const evidence = (value, n) => (full ? String(value || '').replace(/\s+/g, ' ').trim() : clip(value, n));
   for (const e of events) {
     if (e.kind === 'caller') lines.push(`Caller: ${e.text}${e.ignored ? ' (not heard — the session was already ending)' : ''}`);
     else if (e.kind === 'agent') lines.push(`Agent: ${e.text}`);
     else if (e.kind === 'clock') lines.push(`[clock] ${e.text}`);
     else if (e.kind === 'resume') lines.push(`[earlier call segment]\n${e.text}\n[end earlier call segment]`);
     else if (e.kind === 'interrupt') lines.push(`[caller interrupted the agent after: "${e.text}"]`);
-    else if (e.kind === 'tool') lines.push(`[tool] ${e.name}(${clip(JSON.stringify(e.input || {}), 240)}) → ${clip(e.text, 600)}`);
+    else if (e.kind === 'tool') lines.push(`[tool] ${e.name}(${evidence(JSON.stringify(e.input || {}), 240)}) → ${evidence(e.text, 600)}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * What Sandy was told to be and do on this call — the system prompt frozen
+ * for the session, minus the per-caller block the judge receives separately.
+ * Null until the first model round composes the prompt.
+ */
+function standingInstructionsOf(convo, scenario) {
+  const frozen = convo._systemBlocks && convo._systemBlocks[0] ? String(convo._systemBlocks[0].text || '') : '';
+  if (!frozen.trim()) return null;
+  const block = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
+  return (block ? frozen.replace(block, '') : frozen).replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // ── Deterministic checks ──────────────────────────────────────────────────
@@ -1092,7 +1118,8 @@ async function judgeRecord(scenario, record, judgeFn) {
   const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
   const callerBlock = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
   const { runAsReplay } = require('../llm-dispatch-metrics');
-  record.judge = await runAsReplay(() => run({ spec: scenario.spec || {}, transcript: record.transcript, language: record.language, toolsAvailable: record.toolsAvailable, callerBlock }), 'voice_relay_judge')
+  const transcript = renderTranscript(record.events, { full: true });
+  record.judge = await runAsReplay(() => run({ spec: scenario.spec || {}, transcript, language: record.language, toolsAvailable: record.toolsAvailable, callerBlock, standingInstructions: record.standingInstructions || null }), 'voice_relay_judge')
     .catch((err) => ({ ok: false, reason: `judge_error:${err && err.message ? err.message : err}` }));
   record.checks.push(...judgeChecks(scenario, record.judge));
   record.qualityScore = qualityScore(record.checks);
@@ -1131,6 +1158,9 @@ async function runScenario(scenario, { judge = false, judgeFn = null } = {}) {
     await driveTurns(convo, scenario, record);
     record.toolsAvailable = (convo._tools || []).map((t) => t.name);
     record.promptSha = convo._promptSha || null;
+    // Judge grounding, not a result: non-enumerable so the run's JSON does
+    // not repeat the prompt per scenario (promptSha fingerprints it).
+    Object.defineProperty(record, 'standingInstructions', { value: standingInstructionsOf(convo, scenario), enumerable: false, writable: true });
     // Any REAL provider error (an injected failure is expected and excluded,
     // a barge-in abort is deliberate) means the conversation did not run as
     // scripted — before the first round or after ten, the checks would be
