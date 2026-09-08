@@ -15392,7 +15392,8 @@ export default function PortalPage() {
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
   // cancelled banner, and hides every action that creates work.
   const cancelledAccount = customer?.cancelled === true;
-  const [refreshEnabled] = useState(() => new URLSearchParams(window.location.search).get('appRefresh') === '1');
+  // Rollback applies to this mounted session, including tab/property navigation.
+  const [refreshEnabled] = useState(() => new URLSearchParams(window.location.search).get('appRefresh') !== '0');
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
   // Returns [tabId, visitsSubTab, openRequest, planService]. Legacy
