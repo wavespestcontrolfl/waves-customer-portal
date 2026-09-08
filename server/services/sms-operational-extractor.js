@@ -76,7 +76,7 @@ function explicitContactPreference(quote) {
 
 // Questions in SMS frequently omit punctuation. Check every clause, not only
 // the start of the message, and normalize compatibility question marks.
-const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however|please)[, ]+)?(?:(?:are|is|am|was|were|do(?!\s+not\b)|does|did|can|could|would|should|will|won't|have|has|had|may|might|shall|what|where|when|why|who|whose|which|how)\b|ok(?:ay)? (?:to|if)\b|mind if\b|(?:want|need|like) (?:me|us) to\b)|\b(?:any chance|(?:is|would) it (?:ok|okay|possible|alright)|(?:could|can|would) you)\b/i;
+const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however|please)[, ]+)?(?:(?:are|is|am|was|were|do(?!\s+not\b)|does|did|can|could|would|should|will(?=\s+(?:you|we|i|he|she|they|it|that|this|the|a|an|someone|somebody|anyone|your|our|my|his|her|their)\b)|won't|have|has|had|may|might|shall|what|where|when|why|who|whose|which|how)\b|ok(?:ay)? (?:to|if)\b|mind if\b|(?:want|need|like) (?:me|us) to\b)|\b(?:any chance|(?:is|would) it (?:ok|okay|possible|alright)|(?:could|can|would) you)\b/i;
 // Indirect questions do not invert the subject and auxiliary. Keep the
 // inquiry verb and its embedded question in the same clause; any such
 // clause makes a whole-message fact unsuitable for automatic persistence.
@@ -189,10 +189,10 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     const clockStated = clocks.length > 0
       || /\b(?:at|by|around|before|after|until|till)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?=\s|[,.!?;]|$)/i.test(body);
     // A shortened due_text can drop an alternative or a hedge the source
-    // states ("9am or 10am", "9-10am", "3pm-ish"); substring grounding
+    // states ("9am or 10am", "9-10am", "3pm-ish", "9am, I think"); substring grounding
     // cannot see what it omitted, so such timing stays a review item.
     const timingAmbiguous = clocks.length > 1 || hasClockRange(body)
-      || /\b(?:between|sometime|anytime|or so|or later|or earlier)\b|(?:[ap]\.?m\.?|[ap]|o['’]?clock|noon|midnight|\d)\s*-?\s*ish\b/i.test(body);
+      || /\b(?:between|sometime|anytime|or so|or later|or earlier|i think|i believe|i guess|probably|maybe|perhaps|possibly|roughly|approximately|give or take|not sure|if i can|if possible|hopefully|tentatively)\b|(?:[ap]\.?m\.?|[ap]|o['’]?clock|noon|midnight|\d)\s*-?\s*ish\b/i.test(body);
     const resolved = timingGrounded && clockStated && !timingAmbiguous
       ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
     const proposed = item.due_at ? parseDueAt(item.due_at) : resolved;

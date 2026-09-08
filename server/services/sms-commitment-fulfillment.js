@@ -54,7 +54,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         this.where((q) => q.where('sent_at', '>', after).where('sent_at', '<=', now))
           .orWhere((q) => q.where('delivered_at', '>', after).where('delivered_at', '<=', now));
       }).orderByRaw('COALESCE(delivered_at, sent_at) DESC').limit(LIMIT + 1)
-      .select('id', 'status', 'recipient_email_snapshot', 'text_snapshot', 'subject_snapshot', 'sent_at', 'delivered_at', 'bounced_at', 'created_at'),
+      .select('id', 'status', 'recipient_email_snapshot', 'text_snapshot', 'subject_snapshot', 'sent_at', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at', 'created_at'),
     estimate: conn('estimates').modify((q) => whereEstimateCustomerOwnership(q, customerId))
       .modify((q) => handedOffWithin(q, after, now)).orderByRaw(handoffOrder(conn, after, now)).limit(LIMIT + 1)
       .select(...HANDOFF_COLS(conn), 'property_id', 'service_interest', 'address'),
@@ -143,7 +143,10 @@ function admissibleWitness(record, commitment) {
     sms: () => record.status === 'delivered'
       && (SMS_TYPES[commitment.kind] || HUMAN_SMS_TYPES).includes(record.message_type),
     call: () => record.status === 'completed' && Number(record.duration_seconds) >= 60,
-    email_delivery: () => ['delivered', 'opened', 'clicked'].includes(record.status)
+    // The SendGrid writer records an open or click as a timestamp without
+    // moving status past 'sent'; engagement proves receipt even when the
+    // delivery event was lost.
+    email_delivery: () => (['delivered', 'opened', 'clicked'].includes(record.status) || !!record.opened_at || !!record.clicked_at)
       && !!record.sent_at && !record.bounced_at
       && requestedEmails.size === 1 && requestedEmails.has(normalized(record.recipient_email_snapshot)),
     estimate: () => !!witnessAt(record, new Date(commitment.sms_context?.source_at)),

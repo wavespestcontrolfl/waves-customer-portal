@@ -77,8 +77,17 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts).toEqual([]);
   });
 
+  test('a subjectless "Will …" staff declaration is a promise, not a question', () => {
+    const message = source('Will call you tomorrow at 9am', 'outbound');
+    const result = groundExtraction(extracted([obligation('call you tomorrow at 9am', {
+      basis: 'promise', kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+    })]), { message, properties });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.obligations[0]).toMatchObject({ due_at: '2040-03-11T13:00:00.000Z', timing_unverified: false });
+  });
+
   test.each(['Should I call you tomorrow at 9am?', 'Should I call you tomorrow at 9am', 'Want me to call you tomorrow at 9am',
-    'Need us to call you tomorrow at 9am'])('an outbound question cannot be recorded as a promise: %s', (body) => {
+    'Need us to call you tomorrow at 9am', 'Will we call you tomorrow at 9am'])('an outbound question cannot be recorded as a promise: %s', (body) => {
     const message = source(body, 'outbound');
     const result = groundExtraction(extracted([obligation('call you tomorrow at 9am', {
       basis: 'promise', kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
@@ -350,7 +359,8 @@ describe('SMS operational evidence and ownership', () => {
     });
 
   test.each(['Please call tomorrow at 9am or 10am', 'Please call tomorrow 9-10am', 'Please call tomorrow between 9am and 11am',
-    'Please call tomorrow at 9am-ish', 'Please call tomorrow at 9am or later'])(
+    'Please call tomorrow at 9am-ish', 'Please call tomorrow at 9am or later', 'Please call tomorrow at 9am, I think',
+    'Please call tomorrow at 9am probably', 'Please call tomorrow at 9am give or take'])(
     'ambiguous source timing cannot become a firm deadline from a shortened due_text: %s', (body) => {
       const message = source(body);
       const result = groundExtraction(extracted([obligation(message.message_body, {

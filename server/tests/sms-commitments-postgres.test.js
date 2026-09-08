@@ -523,6 +523,20 @@ postgres('SMS commitments on PostgreSQL', () => {
       evidence: [{ quote: 'Send the confirmation to another@example.invalid' }] })).toBe(false);
   });
 
+  test.each([
+    [{ opened_at: true }, true], [{ clicked_at: true }, true], [{}, false], [{ opened_at: true, bounced_at: true }, false],
+  ])('an opened or clicked email whose delivery event was lost still proves receipt: %j → %s', async (marks, admissible) => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const stamps = Object.fromEntries(Object.keys(marks).map((k) => [k, after]));
+    await mockPg('email_messages').insert({ recipient_type: 'customer', recipient_id: message.customer_id,
+      recipient_email_snapshot: 'synthetic@example.invalid', text_snapshot: 'Your appointment is confirmed',
+      status: 'sent', sent_at: after, ...stamps });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
+    expect(evidence.records.filter((r) => r.type === 'email_delivery')).toHaveLength(1);
+    expect(admissibleWitness(evidence.records[0], { kind: 'send_appointment_confirmation',
+      evidence: [{ quote: 'Send the confirmation to synthetic@example.invalid' }] })).toBe(admissible);
+  });
+
   test('persisted evidence checks avoid repeated LLM calls and rerun after a delivery changes', async () => {
     result.obligations[0] = { ...result.obligations[0], kind: 'other',
       due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
