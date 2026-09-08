@@ -290,8 +290,51 @@ export default function SecureAppointmentPage() {
     // searchParams once on mount; re-running on param cleanup would refetch.
   }, [token]);
 
+  // "Use a different payment method" after a capture already succeeded on
+  // this link (same shape as EstimateViewPage.handleReplacePaymentMethod,
+  // PR #4144): the server mints the replacement, retires the saved intent in
+  // Stripe, and returns the fresh capture slice; setting it into `data`
+  // remounts the capture (keyed on clientSecret) with the element path. A
+  // synchronous latch keeps a second tap — or a save — from riding the
+  // intent being retired. Returns false on any failure; the capture shows
+  // its own retry copy and the saved method stays usable.
+  const replacingRef = useRef(false);
+  const handleReplace = useCallback(async (setupIntentId) => {
+    if (!setupIntentId || replacingRef.current || busy) return false;
+    replacingRef.current = true;
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/public/secure-card/${token}/replace-intent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ setupIntentId }),
+      });
+      if (res.status === 404) { setState('notfound'); return false; }
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 409 && body?.code === 'request_closed') {
+        // Completed / closed / expired under us — render the row's true state.
+        await refresh();
+        return false;
+      }
+      if (!res.ok || !body?.clientSecret) return false;
+      setData((d) => (d ? {
+        ...d,
+        clientSecret: body.clientSecret,
+        setupIntentId: body.setupIntentId,
+        paymentMethodTypes: body.paymentMethodTypes,
+        capturedMethodType: body.capturedMethodType || null,
+        publishableKey: body.publishableKey || d.publishableKey,
+      } : d));
+      return true;
+    } catch {
+      return false;
+    } finally {
+      replacingRef.current = false;
+    }
+  }, [token, busy, refresh]);
+
   const handleSave = useCallback(async () => {
-    if (busy || !captureRef.current?.isReady()) return;
+    if (busy || replacingRef.current || !captureRef.current?.isReady()) return;
     setBusy(true);
     setError(null);
     // Hoisted so the completion_in_progress retry below can re-POST the
@@ -650,6 +693,7 @@ export default function SecureAppointmentPage() {
               loadStripeSdk={loadStripeSdk}
               busy={busy}
               onStateChange={setCaptureState}
+              onReplace={handleReplace}
             />
             {error ? (
               <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>

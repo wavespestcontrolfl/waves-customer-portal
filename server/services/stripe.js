@@ -1190,9 +1190,15 @@ const StripeService = {
   // — same card-only, off-session shape as the recurring-accept intent, keyed
   // to the request row so the /secure/:token page's verify can pin the intent
   // to ITS appointment and reject any other SetupIntent id echoed back.
-  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0 }) {
+  // `replacing`: the "use a different payment method" mint — keyed on the
+  // retired intent's id (unbounded, no generation consumed) so re-requesting
+  // the same replacement replays the same fresh intent.
+  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0, replacing = null }) {
     const stripe = getStripe();
     if (!stripe) return null;
+    const salt = replacing
+      ? `_after_${String(replacing)}`
+      : (Number(generation) > 0 ? `_g${Number(generation)}` : '');
     return stripe.setupIntents.create({
       payment_method_types: ['card'],
       usage: 'off_session',
@@ -1201,8 +1207,9 @@ const StripeService = {
         purpose: 'appointment_card_request',
         request_id: String(requestId),
         scheduled_service_id: String(scheduledServiceId),
+        ...(replacing ? { replaces: String(replacing) } : {}),
       },
-    }, { idempotencyKey: `appointment_card_request_${requestId}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+    }, { idempotencyKey: `appointment_card_request_${requestId}${salt}` });
   },
 
   /**

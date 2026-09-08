@@ -4,6 +4,7 @@
  * appointment-card-request funnel texts a link to.
  *
  *   GET  /api/public/secure-card/:token           → page payload by state
+ *   POST /api/public/secure-card/:token/replace-intent → "use a different payment method"
  *   POST /api/public/secure-card/:token/complete  → live-verify + save card
  *
  * Token-scoped public routes, same trust contract as the other /:token
@@ -20,6 +21,7 @@ const logger = require('../services/logger');
 const {
   loadSecureCardPageData,
   completeSecureCardCapture,
+  replaceSecureCardIntent,
 } = require('../services/appointment-card-request');
 
 // Two minted shapes: 22-char base64url (randomBytes(16), current — sized so
@@ -97,6 +99,55 @@ router.post('/:token/select-plan', async (req, res) => {
       return res.status(409).json({ error: 'That option is no longer available. Refresh to see current options.', code: 'plan_unavailable' });
     }
     logger.error(`[secure-card-public] select-plan failed: ${err.message}`);
+    return res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+// "Use a different payment method" after a capture already SUCCEEDED on
+// this link (same design as the estimate accept's replaceRecurringCardIntent,
+// PR #4144): the deterministic mint replays the succeeded SetupIntent on
+// every reopen and Stripe will not cancel it, so without this the first
+// method saved is the only one the visit can ever charge. The service mints
+// the replacement first, then retires the old intent in Stripe; the
+// completion tail refuses a retired intent from here on. Both row kinds
+// (visit + standalone Auto Pay) route through the service. The response is
+// the same capture slice the page payload carries — the client remounts
+// the capture (keyed) on it.
+router.post('/:token/replace-intent', async (req, res) => {
+  const token = String(req.params.token || '');
+  if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
+  try {
+    const result = await replaceSecureCardIntent({
+      token,
+      setupIntentId: typeof req.body?.setupIntentId === 'string' ? req.body.setupIntentId.trim() : null,
+    });
+    if (!result.ok) {
+      if (result.code === 'not_found') return res.status(404).json({ error: 'Not found' });
+      if (result.code === 'request_closed') {
+        // Completed by another tab / the webhook, closed by the office, or
+        // expired since page load — the client refetches and renders the
+        // row's true state.
+        return res.status(409).json({ error: 'This link is no longer open for changes. Refresh to see its current status.', code: 'request_closed' });
+      }
+      // intent_mismatch (an id that is not this link's own capture, or one
+      // Stripe has never heard of) is the client's error; mint_failed /
+      // retire_failed / verification_failed are Stripe-side and retryable —
+      // the saved method is untouched in every failure.
+      return res.status(result.code === 'intent_mismatch' ? 400 : 503).json({
+        error: 'We could not switch your payment method. Please refresh this page and try again.',
+      });
+    }
+    return res.json({
+      success: true,
+      replaced: !!result.retired,
+      clientSecret: result.intent.clientSecret,
+      setupIntentId: result.intent.setupIntentId,
+      paymentMethodTypes: result.intent.paymentMethodTypes || ['card'],
+      capturedMethodType: result.intent.capturedMethodType || null,
+      publishableKey: require('../config/stripe-config').publishableKey,
+    });
+  } catch (err) {
+    logger.error(`[secure-card-public] replace-intent failed: ${err.message}`);
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });

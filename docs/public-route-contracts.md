@@ -1373,7 +1373,7 @@ own late claim can fall back to voicemail without changing another ring; a predi
 to a newer reconnect returns a bare response instead of stale fallback TwiML.
 Any change to the claim, the owner fence, the reconnect fence, the sandbox
 branch or what the whisper may speak is security-critical).
-`/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
+`/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`, `/:token/replace-intent`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up
 Auto Pay" link (`appointment_card_requests.kind='customer'`, dark behind
@@ -1421,9 +1421,38 @@ pay link; terminal invoices release the anchor). A recurring
 plan-bearing request REFUSES `/complete` until a durable
 `per_application` selection exists, and the completion claim is
 plan-value-guarded so a selection switch cannot cross a capture
-mid-flight. Treat the token, the verification
-gates, the selection/mint transaction, and the claim mechanics as
-security-critical.
+mid-flight. `/:token/replace-intent` (POST `{ setupIntentId }`, both row
+kinds; "use a different payment method" after a capture already
+SUCCEEDED, 2026-09-08 — same design as the estimate accept's
+`replaceSetupIntentId`): the deterministic mint replays a succeeded
+SetupIntent on every reopen and Stripe will not cancel it, so the GET
+renders a succeeded replay as a saved-method panel (`capturedMethodType`
+set from the live payment method; `paymentMethodTypes` alongside) with
+"Use a different payment method". The named intent must be THIS
+request's own capture (purpose + request id; foreign or unknown id →
+400). The replacement is minted FIRST (key salted by the retired id —
+no generation consumed; the standalone lane mints under the CURRENT
+tender policy), then the succeeded intent is stamped
+`metadata.retired='true'` + `replaced_by=<new id>` in Stripe, then the
+row is re-pointed; a mint or stamp failure leaves the saved method
+untouched (503). Everything runs under the request ROW LOCK (`FOR
+UPDATE`), which is how it serializes with completion: the completion
+claim (pending → completing) waits behind it and the tail re-reads the
+intent LIVE under its claim — a retired capture is refused there (claim
+reverted, nothing saved or enrolled; an unreadable one stays
+retryable), on the page POST AND on the `setup_intent.succeeded` webhook
+backstop (which trusts its event payload — the intent as it succeeded).
+A non-pending / expired row under the lock retires nothing (409
+`request_closed` — the client refetches). An unfinished or already-
+retired id has nothing to retire and returns the ordinary mint under the
+same lock. Every minted/replayed intent is re-read LIVE before it is
+judged (an idempotent replay returns the ORIGINAL create body, never a
+later success or retirement stamp); a retired replay follows
+`replaced_by` to the live head, refusing a chain that leaves the
+request's own capture family, and a broken/canceled chain walks the
+generation salt as before. Treat the token, the verification
+gates, the selection/mint transaction, the replacement lock, and the
+claim mechanics as security-critical.
 **Appointment-card enforcement rails (2026-08-01, both dark, fail-closed
 `feature-gates.js` money gates):** the /secure page RENDER stamps the
 disclosed terms onto the pending request row (`no_show_fee_amount` /

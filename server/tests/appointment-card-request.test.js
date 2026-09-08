@@ -78,11 +78,27 @@ jest.mock('../services/payment-method-consents', () => ({
 const mockRetrieveSetupIntent = jest.fn();
 const mockCreateAppointmentCardSetupIntent = jest.fn();
 const mockSavePaymentMethod = jest.fn(async () => ({ id: 'pm-row-9', method_type: 'card' }));
+const mockRetireSetupIntent = jest.fn(async () => ({}));
+const mockRetrievePaymentMethod = jest.fn(async () => ({ id: 'pm_stripe_9', type: 'card' }));
 jest.mock('../services/stripe', () => ({
   retrieveSetupIntent: (...a) => mockRetrieveSetupIntent(...a),
   createAppointmentCardSetupIntent: (...a) => mockCreateAppointmentCardSetupIntent(...a),
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
+  retireSetupIntent: (...a) => mockRetireSetupIntent(...a),
+  retrievePaymentMethod: (...a) => mockRetrievePaymentMethod(...a),
 }));
+// The mint re-reads every minted/replayed intent LIVE before judging it (an
+// idempotent replay returns the ORIGINAL create body — see
+// createSecureCardSetupIntent) — echo the minted fixture by id so page-state
+// tests see the intent they minted. Last mint wins for a re-minted id.
+async function echoMintedIntent(id) {
+  let found = null;
+  for (const r of mockCreateAppointmentCardSetupIntent.mock.results) {
+    const v = await r.value;
+    if (v?.id === id) found = v;
+  }
+  return found;
+}
 const mockNotifyAdmin = jest.fn(async () => {});
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...a) => mockNotifyAdmin(...a),
@@ -1245,15 +1261,46 @@ describe('completeSecureCardCaptureFromWebhook — durability backstop', () => {
       customers: { first: () => ({ ...CUSTOMER }) },
       scheduled_services: { first: () => ({ ...VISIT }) },
     };
+    mockRetrieveSetupIntent.mockResolvedValue(GOOD_INTENT);
   });
 
-  test('pending request + matching signed intent completes without a re-retrieve', async () => {
+  test('pending request + matching signed intent completes; the ONLY Stripe read is the in-claim retirement re-read', async () => {
     const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
     const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
     expect(res).toEqual({ ok: true });
-    expect(mockRetrieveSetupIntent).not.toHaveBeenCalled();
+    // The signed payload is trusted for verification (no pre-claim
+    // retrieve); the one read is the retirement check under the claim.
+    expect(mockRetrieveSetupIntent).toHaveBeenCalledTimes(1);
+    expect(mockRetrieveSetupIntent).toHaveBeenCalledWith('seti_1');
     expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_stripe_9', expect.anything());
     expect(mockEnrollConsentedMethod).toHaveBeenCalled();
+  });
+
+  // "Use a different payment method" (customer report 2026-09-08): the
+  // webhook trusts its event payload — the intent AS IT SUCCEEDED — so a
+  // retirement stamped after the event must be caught under the claim, or
+  // the replaced card gets saved and enrolled anyway.
+  test('a capture retired under the claim is refused and the claim reverted — never saved or enrolled', async () => {
+    const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_INTENT, metadata: { ...GOOD_INTENT.metadata, retired: 'true', replaced_by: 'seti_2' } });
+    const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
+    expect(res).toEqual({ ok: false, code: 'intent_mismatch' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    const updates = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'update')).map(([, patch]) => patch);
+    expect(updates.some((p) => p.status === 'completing')).toBe(true);
+    expect(updates.some((p) => p.status === 'pending')).toBe(true);
+    expect(updates.some((p) => p.status === 'completed')).toBe(false);
+  });
+
+  test('an unreadable intent under the claim stays retryable (completion_failed) with the claim reverted', async () => {
+    const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
+    mockRetrieveSetupIntent.mockRejectedValue(new Error('stripe down'));
+    const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
+    expect(res).toEqual({ ok: false, code: 'completion_failed' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    const updates = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'update')).map(([, patch]) => patch);
+    expect(updates.some((p) => p.status === 'pending')).toBe(true);
   });
 
   test('non-pending request no-ops (the page path won)', async () => {
@@ -1301,6 +1348,7 @@ describe('loadSecureCardPageData — page state machine', () => {
       customers: { first: () => ({ ...CUSTOMER }) },
     };
     mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    mockRetrieveSetupIntent.mockImplementation(echoMintedIntent);
   });
 
   test('unknown token → null (route 404s, no existence oracle)', async () => {
@@ -1705,6 +1753,7 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
       customers: { first: () => ({ ...PLAN_CUSTOMER }) },
     });
     mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    mockRetrieveSetupIntent.mockImplementation(echoMintedIntent);
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('ready');
     expect(Object.keys(res).sort()).toEqual([
@@ -1713,7 +1762,10 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
       // stickyDisclosureVersion joined 2026-08-10 (sticky cancel window) —
       // the completing tab's echo token; attached ONLY to the ready state
       // (Codex #3342 r8 P1), unrelated to the plan gate this test pins.
-      'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'stickyDisclosureVersion', 'windowDisplay',
+      // paymentMethodTypes + capturedMethodType joined 2026-09-08 ("use a
+      // different payment method") — the capture UI's tender slice, present
+      // whenever a SetupIntent is offered; unrelated to the plan gate.
+      'cancelFeeNote', 'capturedMethodType', 'clientSecret', 'dateDisplay', 'firstName', 'paymentMethodTypes', 'serviceType', 'setupIntentId', 'state', 'stickyDisclosureVersion', 'windowDisplay',
     ]);
   });
 
@@ -1757,6 +1809,7 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
         customers: { first: () => ({ ...PLAN_CUSTOMER }) },
       });
       mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+      mockRetrieveSetupIntent.mockImplementation(echoMintedIntent);
       const res = await loadPageGateOn(REQUEST.token);
       expect(res.state).toBe('ready');
       expect(res.planContext).toMatchObject({
@@ -1780,6 +1833,7 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
         invoices: { first: () => ({ id: 'inv-9', token: 'ptok', status: 'sent' }) },
       });
       mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+      mockRetrieveSetupIntent.mockImplementation(echoMintedIntent);
       const res = await loadPageGateOn(REQUEST.token);
       expect(res.state).toBe('prepay_selected');
       expect(res.payUrl).toMatch(/\/pay\/ptok$/);
@@ -1998,5 +2052,204 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
         .find((p) => p.status === 'satisfied');
       expect(heal).toBeTruthy();
     });
+  });
+});
+
+// ── "Use a different payment method" (customer report 2026-09-08) ──────────
+// The deterministic mint replays a SUCCEEDED SetupIntent on every reopen and
+// Stripe will not cancel a succeeded intent — without replacement the first
+// card saved on /secure/:token is the only one the visit can ever charge.
+// Same design as the estimate accept's replaceRecurringCardIntent (#4144).
+describe('replaceSecureCardIntent — "use a different payment method"', () => {
+  const { replaceSecureCardIntent } = require('../services/appointment-card-request');
+  const SAVED = { ...GOOD_INTENT, client_secret: 'cs_1', payment_method: { id: 'pm_stripe_9', type: 'card' }, payment_method_types: ['card'] };
+  const FRESH = { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card'], metadata: { purpose: 'appointment_card_request', request_id: 'req-1', replaces: 'seti_1' } };
+  const ROW = { ...REQUEST, stripe_setup_intent_id: 'seti_1' };
+
+  beforeEach(() => {
+    mockTableHandlers = baseHandlers({
+      appointment_card_requests: { first: () => ({ ...ROW }) },
+      scheduled_services: { first: () => ({ ...VISIT }) },
+      customers: { first: () => ({ ...CUSTOMER }) },
+    });
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after' });
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (id === 'seti_1') return { ...SAVED };
+      if (id === 'seti_after') return { ...FRESH };
+      return echoMintedIntent(id);
+    });
+  });
+
+  test('mints the replacement FIRST (keyed on the retired id, no generation), then stamps the old intent retired + replaced_by, then re-points the row', async () => {
+    const order = [];
+    mockCreateAppointmentCardSetupIntent.mockImplementation(async () => { order.push('mint'); return { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after' }; });
+    mockRetireSetupIntent.mockImplementation(async () => { order.push('retire'); return {}; });
+    const res = await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' });
+    expect(res).toMatchObject({ ok: true, retired: true, intent: { clientSecret: 'cs_after', setupIntentId: 'seti_after', paymentMethodTypes: ['card'], capturedMethodType: null } });
+    expect(order).toEqual(['mint', 'retire']);
+    expect(mockCreateAppointmentCardSetupIntent).toHaveBeenCalledWith({ requestId: 'req-1', scheduledServiceId: 'svc-1', replacing: 'seti_1' });
+    expect(mockRetireSetupIntent).toHaveBeenCalledWith('seti_1', { replacedBy: 'seti_after' });
+    // Row lock + the re-point on a still-pending row only.
+    const chains = touches('appointment_card_requests').map((t) => t.chain);
+    expect(chains.some((c) => c.calls.some(([op]) => op === 'forUpdate'))).toBe(true);
+    const repoint = chains.flatMap((c) => c.calls).find(([op, patch]) => op === 'update' && patch.stripe_setup_intent_id === 'seti_after');
+    expect(repoint).toBeTruthy();
+    const repointChain = chains.find((c) => c.calls.some(([op, patch]) => op === 'update' && patch.stripe_setup_intent_id === 'seti_after'));
+    expect(repointChain.calls.find(([op]) => op === 'where')[1]).toEqual({ id: 'req-1', status: 'pending' });
+  });
+
+  test('a mint failure retires NOTHING — the saved card stays usable', async () => {
+    mockCreateAppointmentCardSetupIntent.mockRejectedValue(new Error('stripe down'));
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'mint_failed' });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue(null);
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'mint_failed' });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('a retire-stamp failure reports retire_failed and does not re-point the row', async () => {
+    mockRetireSetupIntent.mockRejectedValue(new Error('stripe down'));
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'retire_failed' });
+    const repoint = touches('appointment_card_requests').flatMap((t) => t.chain.calls).find(([op, patch]) => op === 'update' && patch.stripe_setup_intent_id);
+    expect(repoint).toBeUndefined();
+  });
+
+  test.each([
+    ['another request\'s intent', { ...SAVED, metadata: { purpose: 'appointment_card_request', request_id: 'req-OTHER' } }],
+    ['another purpose', { ...SAVED, metadata: { purpose: 'estimate_recurring_card', request_id: 'req-1' } }],
+  ])('refuses %s (intent_mismatch) and touches Stripe for nothing else', async (_label, intent) => {
+    mockRetrieveSetupIntent.mockResolvedValue(intent);
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'intent_mismatch' });
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('an id Stripe has never heard of is the client\'s error (intent_mismatch); a Stripe outage stays retryable (verification_failed)', async () => {
+    mockRetrieveSetupIntent.mockRejectedValueOnce(Object.assign(new Error('No such setupintent'), { code: 'resource_missing', statusCode: 404 }));
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_nope' })).toEqual({ ok: false, code: 'intent_mismatch' });
+    mockRetrieveSetupIntent.mockRejectedValueOnce(new Error('stripe down'));
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'verification_failed' });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('missing id / unknown token', async () => {
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: null })).toEqual({ ok: false, code: 'intent_mismatch' });
+    mockTableHandlers.appointment_card_requests.first = () => null;
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'not_found' });
+  });
+
+  test.each(['completed', 'completing', 'satisfied', 'expired'])('a %s row under the lock retires nothing (request_closed) — a stale tab cannot mint for a row that moved on', async (status) => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...ROW, status });
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'request_closed' });
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('an unfinished intent has nothing to retire — the ordinary mint is returned under the same lock', async () => {
+    mockRetrieveSetupIntent.mockImplementation(async (id) => (id === 'seti_1' ? { ...SAVED, status: 'requires_payment_method', payment_method: null } : echoMintedIntent(id)));
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    const res = await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' });
+    expect(res).toMatchObject({ ok: true, retired: false, intent: { setupIntentId: 'seti_1' } });
+    expect(mockCreateAppointmentCardSetupIntent).toHaveBeenCalledWith(expect.objectContaining({ generation: 0 }));
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('an already-retired intent is not retired twice — the mint follows replaced_by to the live head', async () => {
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (id === 'seti_1') return { ...SAVED, metadata: { ...SAVED.metadata, retired: 'true', replaced_by: 'seti_after' } };
+      if (id === 'seti_after') return { ...FRESH };
+      return echoMintedIntent(id);
+    });
+    // The deterministic generation-0 key replays the retired intent.
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'succeeded', client_secret: 'cs_1' });
+    const res = await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' });
+    expect(res).toMatchObject({ ok: true, retired: false, intent: { setupIntentId: 'seti_after', clientSecret: 'cs_after' } });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('a replacement replay that is itself retired or canceled is never offered — nothing retired', async () => {
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (id === 'seti_1') return { ...SAVED };
+      if (id === 'seti_after') return { ...FRESH, status: 'canceled' };
+      return echoMintedIntent(id);
+    });
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'mint_failed' });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('a standalone Auto Pay row (kind=customer) routes to the Auto Pay lane\'s replacement — the visit lane never mints or retires for it', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...ROW, kind: 'customer' });
+    // The (real) Auto Pay lane judges the id against ITS purpose: a visit-
+    // lane intent handed to a customer-kind row is a mismatch there.
+    const res = await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'intent_mismatch' });
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+});
+
+describe('the page replays a SUCCEEDED capture as a saved-method panel; the mint follows a retired replay to its replacement', () => {
+  beforeEach(() => {
+    mockTableHandlers = baseHandlers({
+      appointment_card_requests: { first: () => ({ ...REQUEST, stripe_setup_intent_id: 'seti_1' }) },
+      scheduled_services: { first: () => ({ ...VISIT }) },
+      customers: { first: () => ({ ...CUSTOMER }) },
+    });
+  });
+
+  test('succeeded replay → ready with capturedMethodType from the expanded payment method (no re-entry, "use a different payment method" offered)', async () => {
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_INTENT, client_secret: 'cs_1', payment_method: { id: 'pm_stripe_9', type: 'us_bank_account' }, payment_method_types: ['card'] });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res).toMatchObject({ state: 'ready', setupIntentId: 'seti_1', clientSecret: 'cs_1', capturedMethodType: 'us_bank_account', paymentMethodTypes: ['card'] });
+    expect(mockRetrieveSetupIntent).toHaveBeenCalledWith('seti_1', { expand: ['payment_method'] });
+  });
+
+  test('the replay body says requires_payment_method but Stripe says SUCCEEDED — the live read wins', async () => {
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    mockRetrieveSetupIntent.mockResolvedValue({ ...GOOD_INTENT, client_secret: 'cs_1', payment_method: 'pm_stripe_9' });
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_stripe_9', type: 'card' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.capturedMethodType).toBe('card');
+  });
+
+  test('retired replay → the live replacement is offered (row re-pointed), no generation consumed', async () => {
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'succeeded', client_secret: 'cs_1' });
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (id === 'seti_1') return { ...GOOD_INTENT, client_secret: 'cs_1', metadata: { ...GOOD_INTENT.metadata, retired: 'true', replaced_by: 'seti_after' } };
+      if (id === 'seti_after') return { id: 'seti_after', status: 'requires_payment_method', client_secret: 'cs_after', payment_method_types: ['card'], metadata: { purpose: 'appointment_card_request', request_id: 'req-1' } };
+      return null;
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res).toMatchObject({ state: 'ready', setupIntentId: 'seti_after', clientSecret: 'cs_after', capturedMethodType: null });
+    expect(mockCreateAppointmentCardSetupIntent).toHaveBeenCalledTimes(1);
+    const repoint = touches('appointment_card_requests').flatMap((t) => t.chain.calls).find(([op, patch]) => op === 'update' && patch.stripe_setup_intent_id === 'seti_after');
+    expect(repoint).toBeTruthy();
+  });
+
+  test('a replacement chain that leaves this request\'s capture family is refused — the next generation is minted instead', async () => {
+    mockCreateAppointmentCardSetupIntent
+      .mockResolvedValueOnce({ id: 'seti_1', status: 'succeeded', client_secret: 'cs_1' })
+      .mockResolvedValueOnce({ id: 'seti_g1', status: 'requires_payment_method', client_secret: 'cs_g1' });
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (id === 'seti_1') return { ...GOOD_INTENT, metadata: { ...GOOD_INTENT.metadata, retired: 'true', replaced_by: 'seti_foreign' } };
+      if (id === 'seti_foreign') return { id: 'seti_foreign', status: 'requires_payment_method', client_secret: 'cs_x', metadata: { purpose: 'appointment_card_request', request_id: 'req-OTHER' } };
+      return echoMintedIntent(id);
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res).toMatchObject({ state: 'ready', setupIntentId: 'seti_g1' });
+    expect(mockCreateAppointmentCardSetupIntent.mock.calls[1][0]).toMatchObject({ generation: 1 });
+  });
+
+  test('a completion whose intent was retired under the claim is refused (page POST path)', async () => {
+    mockTableHandlers.payment_methods = { first: () => null };
+    // Pre-claim verify sees the succeeded capture; the in-claim re-read sees
+    // the retirement stamp that landed between them.
+    mockRetrieveSetupIntent
+      .mockResolvedValueOnce({ ...GOOD_INTENT })
+      .mockResolvedValueOnce({ ...GOOD_INTENT, metadata: { ...GOOD_INTENT.metadata, retired: 'true' } });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'intent_mismatch' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 });

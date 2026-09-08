@@ -33,6 +33,7 @@
 
 const crypto = require('crypto');
 const db = require('../models/db');
+const { isRetiredSetupIntent, isStripeResourceMissing, followReplacementChain } = require('./setup-intent-replacement');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -494,16 +495,26 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
 // Mint (or replay) the capture SetupIntent for a pending standalone row.
 // createSetupIntent carries no idempotency key, so an existing confirmable
 // intent on the row is replayed instead of minting a new one per page load.
-async function mintOrReplaySetupIntent(request) {
+// `database`: the caller's transaction handle when the mint runs under the
+// request row lock (replaceAutopaySetupIntent) — the CAS below must ride
+// that connection or it deadlocks behind the lock it is inside of.
+async function mintOrReplaySetupIntent(request, { database = db } = {}) {
   const StripeService = require('./stripe');
   // Current policy FIRST (pre-push Codex P1): a replayed intent that still
   // allows bank must not expose the bank tab once the kill switch is off or
   // the customer's ACH state turned unhealthy — the tender-salted
   // idempotency key below then mints a card-only generation instead.
   const tender = await resolveTender(request.customer_id);
+  const readLive = (id) => StripeService.retrieveSetupIntent(id);
   if (request.stripe_setup_intent_id) {
     try {
-      const existing = await StripeService.retrieveSetupIntent(request.stripe_setup_intent_id);
+      let existing = await StripeService.retrieveSetupIntent(request.stripe_setup_intent_id);
+      // A RETIRED capture ("use a different payment method") points at its
+      // live replacement — replay THAT; a broken chain falls through to the
+      // generation mint below.
+      if (isRetiredSetupIntent(existing)) {
+        existing = await followReplacementChain(existing, readLive, (si) => intentBelongsToRequest(si, request.id));
+      }
       const existingTypes = existing?.payment_method_types || ['card'];
       const bankNoLongerOffered = tender === 'card' && existingTypes.includes('us_bank_account');
       // The reverse too (GH Codex P0): a card-only intent minted while bank
@@ -559,13 +570,25 @@ async function mintOrReplaySetupIntent(request) {
       idempotencyKey: `${PURPOSE}_${request.id}_${tender}${generation > 0 ? `_g${generation}` : ''}`,
     });
     if (minted.status === 'canceled') continue;
+    // The deterministic key replays the ORIGINAL create body — a capture
+    // retired since then still reads as usable there. Judge it live; a
+    // retired replay walks the salt like a canceled one (its replacement is
+    // already the row's intent and was replayed above).
+    let live = null;
+    try {
+      live = await readLive(minted.setupIntentId);
+    } catch (err) {
+      logger.warn(`[autopay-setup-link] live SetupIntent read failed after mint ${minted.setupIntentId}: ${err.message}`);
+      return null;
+    }
+    if (!live || live.status === 'canceled' || isRetiredSetupIntent(live)) continue;
     if (minted.setupIntentId !== request.stripe_setup_intent_id) {
       // Persist ONLY on a still-pending row (GH Codex #3726 P2): a
       // concurrent tab/webhook may have completed the request against the
       // earlier intent — overwriting its stripe_setup_intent_id would tie
       // the row to an unused intent. A CAS miss means the row moved on; the
       // loader re-reads it instead of rendering a form that can't complete.
-      const n = await db('appointment_card_requests')
+      const n = await database('appointment_card_requests')
         .where({ id: request.id, status: 'pending' })
         .update({ stripe_setup_intent_id: minted.setupIntentId, updated_at: new Date() });
       if (n !== 1) return { stale: true };
@@ -577,12 +600,87 @@ async function mintOrReplaySetupIntent(request) {
   // replacement until expiry (GH Codex P2) — retire it so the office can
   // mint a fresh link.
   logger.error(`[autopay-setup-link] exhausted SetupIntent generations for request ${request.id} — retiring the link`);
-  await db('appointment_card_requests')
+  await database('appointment_card_requests')
     .where({ id: request.id, status: 'pending' })
     .update({ status: 'expired', updated_at: new Date() });
   return null;
 }
 const MAX_SETUP_INTENT_GENERATIONS = 5;
+
+// "Use a different payment method" on the standalone link (same design as
+// replaceRecurringCardIntent / replaceSecureCardIntent): the replacement is
+// minted FIRST under the CURRENT tender policy (keyed on the retired id),
+// then the succeeded intent is stamped retired + `replaced_by` in Stripe,
+// all under the request row lock so the completion claim serializes with
+// it (the tail re-reads the intent live under its claim). A non-pending row
+// retires nothing; an unfinished or already-retired intent hands back the
+// ordinary mint. Returns { ok, intent, retired } or { ok: false, code }.
+async function replaceAutopaySetupIntent({ request, setupIntentId }) {
+  if (!request || request.kind !== KIND) return { ok: false, code: 'not_found' };
+  if (!setupIntentId) return { ok: false, code: 'intent_mismatch' };
+  const StripeService = require('./stripe');
+  const readLive = (id) => StripeService.retrieveSetupIntent(id, { expand: ['payment_method'] });
+  let current = null;
+  try {
+    current = await readLive(setupIntentId);
+  } catch (err) {
+    if (isStripeResourceMissing(err)) return { ok: false, code: 'intent_mismatch' };
+    logger.warn(`[autopay-setup-link] replace: live SetupIntent lookup failed: ${err.message}`);
+    return { ok: false, code: 'verification_failed' };
+  }
+  if (!intentBelongsToRequest(current, request.id)) return { ok: false, code: 'intent_mismatch' };
+  return db.transaction(async (trx) => {
+    const row = await trx('appointment_card_requests').where({ id: request.id }).forUpdate().first('id', 'status', 'stripe_setup_intent_id', 'expires_at');
+    if (!row) return { ok: false, code: 'not_found' };
+    if (row.status !== 'pending' || isExpired({ ...request, ...row })) return { ok: false, code: 'request_closed' };
+    if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
+      const intent = await mintOrReplaySetupIntent({ ...request, ...row }, { database: trx });
+      return intent && !intent.stale ? { ok: true, intent, retired: false } : { ok: false, code: 'mint_failed' };
+    }
+    let tender = 'card';
+    try {
+      tender = await resolveTender(request.customer_id, { throwOnError: true });
+    } catch (err) {
+      logger.warn(`[autopay-setup-link] replace: tender resolution failed for request ${request.id}: ${err.message}`);
+      return { ok: false, code: 'mint_failed' };
+    }
+    let replacement = null;
+    try {
+      const minted = await StripeService.createSetupIntent(request.customer_id, tender, {
+        metadata: { purpose: PURPOSE, request_id: String(request.id), replaces: String(current.id) },
+        verificationMethod: 'instant',
+        idempotencyKey: `${PURPOSE}_${request.id}_${tender}_after_${current.id}`,
+      });
+      replacement = minted?.setupIntentId ? await readLive(minted.setupIntentId) : null;
+    } catch (err) {
+      logger.warn(`[autopay-setup-link] replace: replacement mint failed for ${current.id}: ${err.message}`);
+      return { ok: false, code: 'mint_failed' };
+    }
+    if (!replacement || replacement.status === 'canceled' || isRetiredSetupIntent(replacement)) {
+      return { ok: false, code: 'mint_failed' };
+    }
+    try {
+      await StripeService.retireSetupIntent(current.id, { replacedBy: replacement.id });
+    } catch (err) {
+      logger.warn(`[autopay-setup-link] replace: retire stamp failed for ${current.id}: ${err.message}`);
+      return { ok: false, code: 'retire_failed' };
+    }
+    await trx('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update({ stripe_setup_intent_id: replacement.id, updated_at: new Date() });
+    logger.info(`[autopay-setup-link] retired succeeded SetupIntent ${current.id} for request ${request.id} → replaced by ${replacement.id} (customer chose a different payment method)`);
+    return {
+      ok: true,
+      retired: true,
+      intent: {
+        clientSecret: replacement.client_secret,
+        setupIntentId: replacement.id,
+        paymentMethodTypes: replacement.payment_method_types || ['card'],
+        capturedMethodType: null,
+      },
+    };
+  });
+}
 
 // GET /secure/:token payload for a kind='customer' row. Shares the visit
 // lane's state vocabulary (ready / secured / closed) so the page renders
@@ -673,11 +771,16 @@ async function loadAutopaySetupPageData(request, { reloaded = false } = {}) {
   };
 }
 
-function intentMatchesRequest(setupIntent, requestId) {
+function intentBelongsToRequest(setupIntent, requestId) {
   return !!setupIntent
-    && setupIntent.status === 'succeeded'
     && setupIntent.metadata?.purpose === PURPOSE
-    && String(setupIntent.metadata?.request_id) === String(requestId)
+    && String(setupIntent.metadata?.request_id) === String(requestId);
+}
+
+function intentMatchesRequest(setupIntent, requestId) {
+  return intentBelongsToRequest(setupIntent, requestId)
+    && setupIntent.status === 'succeeded'
+    && !isRetiredSetupIntent(setupIntent)
     && !!setupIntent.payment_method;
 }
 
@@ -816,6 +919,27 @@ async function finishVerifiedCapture({ request, stripePaymentMethod, setupIntent
       logger.warn(`[autopay-setup-link] claim revert failed for request ${request.id}: ${revertErr.message}`);
     }
   };
+
+  // Re-read the intent LIVE under the claim: replaceAutopaySetupIntent runs
+  // under this row's lock and stamps the old intent retired in Stripe; the
+  // verify that admitted this call ran BEFORE the claim (the webhook path
+  // trusts its event payload), so a retirement that landed in between must
+  // not save/enroll the replaced method. Read failure stays retryable.
+  {
+    let live = null;
+    try {
+      live = await require('./stripe').retrieveSetupIntent(setupIntentId);
+    } catch (err) {
+      logger.warn(`[autopay-setup-link] in-claim SetupIntent re-read failed for request ${request.id}: ${err.message}`);
+      await revertClaim();
+      return { ok: false, code: 'verification_failed' };
+    }
+    if (!live || isRetiredSetupIntent(live)) {
+      logger.info(`[autopay-setup-link] SetupIntent ${setupIntentId} was retired by the customer — not completing request ${request.id} with it`);
+      await revertClaim();
+      return { ok: false, code: 'intent_mismatch' };
+    }
+  }
 
   try {
     let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePaymentMethodId }).first();
@@ -1067,5 +1191,6 @@ module.exports = {
   loadAutopaySetupPageData,
   completeAutopaySetupCapture,
   completeAutopaySetupCaptureFromWebhook,
+  replaceAutopaySetupIntent,
   _test: { isExpired, intentMatchesRequest, resolveTender },
 };

@@ -39,6 +39,7 @@
 
 const crypto = require('crypto');
 const db = require('../models/db');
+const { isRetiredSetupIntent, isStripeResourceMissing, followReplacementChain } = require('./setup-intent-replacement');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
@@ -1313,32 +1314,171 @@ const MAX_SETUP_INTENT_GENERATIONS = 5;
 // (same self-heal as createRecurringCardSetupIntentForEstimate). Persists
 // the intent id on the row: Phase 4's abandonment stage keys on a pending
 // row whose intent never succeeded.
-async function createSecureCardSetupIntent(request) {
+// Live read (payment_method expanded so a succeeded replay's tender resolves
+// without a second call). An idempotent replay returns the ORIGINAL create
+// body — status and metadata as they were at mint, never what happened since
+// (a later success, a retirement stamp) — so every judgement runs on this.
+async function readLiveSecureCardIntent(setupIntentId) {
+  return require('./stripe').retrieveSetupIntent(setupIntentId, { expand: ['payment_method'] });
+}
+
+// The intent's metadata pins it to THIS request's capture family.
+function secureCardIntentBelongsToRequest(setupIntent, requestId) {
+  return !!setupIntent
+    && setupIntent.metadata?.purpose === 'appointment_card_request'
+    && String(setupIntent.metadata?.request_id) === String(requestId);
+}
+
+// The capture UI's contract for one usable intent. A SUCCEEDED replay
+// already holds a card the customer will not re-enter — carry its tender so
+// the page renders the saved-method panel (continue / use a different
+// payment method) instead of a Payment Element on a finished intent.
+async function shapeSecureCaptureIntent(setupIntent) {
+  let capturedMethodType = null;
+  if (setupIntent.status === 'succeeded' && setupIntent.payment_method) {
+    const pm = setupIntent.payment_method;
+    try {
+      capturedMethodType = typeof pm === 'object' && pm?.type
+        ? pm.type
+        : (await require('./stripe').retrievePaymentMethod(typeof pm === 'string' ? pm : pm.id))?.type || null;
+    } catch (err) {
+      logger.warn(`[appt-card-request] captured method type lookup failed for replayed intent ${setupIntent.id}: ${err.message}`);
+    }
+  }
+  return {
+    clientSecret: setupIntent.client_secret,
+    setupIntentId: setupIntent.id,
+    paymentMethodTypes: Array.isArray(setupIntent.payment_method_types) && setupIntent.payment_method_types.length
+      ? setupIntent.payment_method_types : ['card'],
+    capturedMethodType,
+  };
+}
+
+async function createSecureCardSetupIntent(request, { database = db } = {}) {
   const StripeService = require('./stripe');
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
-    const setupIntent = await StripeService.createAppointmentCardSetupIntent({
+    const created = await StripeService.createAppointmentCardSetupIntent({
       requestId: request.id,
       scheduledServiceId: request.scheduled_service_id,
       generation,
     });
+    if (!created) return null;
+    let setupIntent;
+    try {
+      setupIntent = await readLiveSecureCardIntent(created.id);
+    } catch (err) {
+      // Fail closed (no capture offered) rather than judge a stale body.
+      logger.warn(`[appt-card-request] live SetupIntent read failed after mint ${created.id}: ${err.message}`);
+      return null;
+    }
     if (!setupIntent) return null;
     if (setupIntent.status === 'canceled') continue;
+    // A RETIRED replay: the customer replaced that capture ("use a different
+    // payment method") — hand back its live replacement. A broken chain
+    // falls through to the next generation like a canceled replay.
+    if (isRetiredSetupIntent(setupIntent)) {
+      let head = null;
+      try {
+        head = await followReplacementChain(setupIntent, readLiveSecureCardIntent, (si) => secureCardIntentBelongsToRequest(si, request.id));
+      } catch (err) {
+        logger.warn(`[appt-card-request] replacement chain read failed from ${setupIntent.id}: ${err.message}`);
+        return null;
+      }
+      if (!head) continue;
+      setupIntent = head;
+    }
     if (setupIntent.id !== request.stripe_setup_intent_id) {
-      await db('appointment_card_requests')
+      await database('appointment_card_requests')
         .where({ id: request.id })
         .update({ stripe_setup_intent_id: setupIntent.id, updated_at: new Date() });
     }
-    return { clientSecret: setupIntent.client_secret, setupIntentId: setupIntent.id };
+    return shapeSecureCaptureIntent(setupIntent);
   }
   logger.error(`[appt-card-request] exhausted SetupIntent generations for request ${request.id} — all replays terminal`);
   return null;
 }
 
+// "Use a different payment method" after a capture already succeeded (same
+// design as replaceRecurringCardIntent on the estimate accept): the
+// deterministic key replays the succeeded intent on every reopen and Stripe
+// will not cancel a succeeded SetupIntent, so without this the first card
+// saved is the only one the visit can ever charge. The replacement is MINTED
+// FIRST (keyed on the retired id), then the old intent is stamped retired +
+// `replaced_by` in Stripe, so a mint failure leaves the saved card usable.
+// Serialized with completion on the request ROW LOCK: the completion claim
+// (pending → completing) waits behind it and the tail re-reads the intent
+// live under the claim, so either this commits first and the old intent is
+// refused there, or the claim commits first and this sees a non-pending row
+// and retires nothing. Only an intent pinned to THIS request can be
+// replaced; an unfinished or already-retired one has nothing to retire, so
+// the ordinary mint is returned (under the same lock and pending check).
+// Returns { ok, intent, retired } or { ok: false, code }.
+async function replaceSecureCardIntent({ token, setupIntentId }) {
+  const request = await db('appointment_card_requests').where({ token }).first();
+  if (!request) return { ok: false, code: 'not_found' };
+  if (request.kind === 'customer') {
+    return require('./autopay-setup-link').replaceAutopaySetupIntent({ request, setupIntentId });
+  }
+  if (!setupIntentId) return { ok: false, code: 'intent_mismatch' };
+  const StripeService = require('./stripe');
+  let current = null;
+  try {
+    current = await readLiveSecureCardIntent(setupIntentId);
+  } catch (err) {
+    // An id Stripe has never heard of is the client's error (400), not an
+    // outage; a genuine Stripe failure stays retryable (503).
+    if (isStripeResourceMissing(err)) return { ok: false, code: 'intent_mismatch' };
+    logger.warn(`[appt-card-request] replace: live SetupIntent lookup failed: ${err.message}`);
+    return { ok: false, code: 'verification_failed' };
+  }
+  if (!secureCardIntentBelongsToRequest(current, request.id)) return { ok: false, code: 'intent_mismatch' };
+  return db.transaction(async (trx) => {
+    const row = await trx('appointment_card_requests').where({ id: request.id }).forUpdate().first('id', 'status', 'stripe_setup_intent_id');
+    if (!row) return { ok: false, code: 'not_found' };
+    // Every outcome under the lock: a stale tab must not mint a fresh
+    // capture for a row another tab completed, the office closed, or the
+    // funnel satisfied meanwhile.
+    if (row.status !== 'pending') return { ok: false, code: 'request_closed' };
+    if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
+      const intent = await createSecureCardSetupIntent({ ...request, ...row }, { database: trx });
+      return intent ? { ok: true, intent, retired: false } : { ok: false, code: 'mint_failed' };
+    }
+    let replacement = null;
+    try {
+      const created = await StripeService.createAppointmentCardSetupIntent({
+        requestId: request.id,
+        scheduledServiceId: request.scheduled_service_id,
+        replacing: current.id,
+      });
+      replacement = created ? await readLiveSecureCardIntent(created.id) : null;
+    } catch (err) {
+      logger.warn(`[appt-card-request] replace: replacement mint failed for ${current.id}: ${err.message}`);
+      return { ok: false, code: 'mint_failed' };
+    }
+    // The replacement key is deterministic per retired id, so a replay that
+    // has itself been retired or canceled cannot be offered — nothing is
+    // retired in that case and the customer keeps the saved card.
+    if (!replacement || replacement.status === 'canceled' || isRetiredSetupIntent(replacement)) {
+      return { ok: false, code: 'mint_failed' };
+    }
+    try {
+      await StripeService.retireSetupIntent(current.id, { replacedBy: replacement.id });
+    } catch (err) {
+      logger.warn(`[appt-card-request] replace: retire stamp failed for ${current.id}: ${err.message}`);
+      return { ok: false, code: 'retire_failed' };
+    }
+    await trx('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update({ stripe_setup_intent_id: replacement.id, updated_at: new Date() });
+    logger.info(`[appt-card-request] retired succeeded SetupIntent ${current.id} for request ${request.id} → replaced by ${replacement.id} (customer chose a different payment method)`);
+    return { ok: true, intent: await shapeSecureCaptureIntent(replacement), retired: true };
+  });
+}
+
 function secureCardIntentMatchesRequest(setupIntent, requestId) {
-  return !!setupIntent
+  return secureCardIntentBelongsToRequest(setupIntent, requestId)
     && setupIntent.status === 'succeeded'
-    && setupIntent.metadata?.purpose === 'appointment_card_request'
-    && String(setupIntent.metadata?.request_id) === String(requestId)
+    && !isRetiredSetupIntent(setupIntent)
     && !!setupIntent.payment_method;
 }
 
@@ -1615,6 +1755,29 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     }
   };
 
+  // Re-read the intent LIVE under the claim: a "use a different payment
+  // method" replacement (replaceSecureCardIntent) runs under this row's lock
+  // and stamps the old intent retired in Stripe; the verify that admitted
+  // this call ran BEFORE the claim (and the webhook path trusts its event
+  // payload — the intent as it succeeded), so a retirement that landed in
+  // between must not save/enroll the replaced card. A read failure stays
+  // retryable; a retired capture is a permanent refusal for THIS intent.
+  {
+    let live = null;
+    try {
+      live = await require('./stripe').retrieveSetupIntent(setupIntentId);
+    } catch (err) {
+      logger.warn(`[appt-card-request] in-claim SetupIntent re-read failed for request ${request.id}: ${err.message}`);
+      await revertClaim();
+      return { ok: false, code: 'completion_failed' };
+    }
+    if (!live || isRetiredSetupIntent(live)) {
+      logger.info(`[appt-card-request] SetupIntent ${setupIntentId} was retired by the customer — not completing request ${request.id} with it`);
+      await revertClaim();
+      return { ok: false, code: 'intent_mismatch' };
+    }
+  }
+
   try {
     // Idempotent save: stripe_payment_method_id is unique — a retry after a
     // partial first attempt continues with the existing row.
@@ -1748,6 +1911,19 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
 // GET /secure/:token page payload. The page keeps working for already-sent
 // links even if the send gate is later switched off — the gate governs new
 // sends; stranding a customer mid-flow is never the kill-switch behavior.
+// The capture UI's slice of the page payload. capturedMethodType is set only
+// on a SUCCEEDED replay (the customer already saved a method on this intent)
+// — the page then renders the saved-method panel with "Use a different
+// payment method" instead of a Payment Element on a finished intent.
+function captureIntentFields(intent) {
+  return {
+    clientSecret: intent.clientSecret,
+    setupIntentId: intent.setupIntentId,
+    paymentMethodTypes: intent.paymentMethodTypes || ['card'],
+    capturedMethodType: intent.capturedMethodType || null,
+  };
+}
+
 async function loadSecureCardPageData(token) {
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return null;
@@ -2098,8 +2274,7 @@ async function loadSecureCardPageData(token) {
       state: 'prepay_selected',
       ...base,
       payUrl: planState.payUrl,
-      clientSecret: intent.clientSecret,
-      setupIntentId: intent.setupIntentId,
+      ...captureIntentFields(intent),
       ...(planContext ? { planContext } : {}),
     };
   }
@@ -2107,8 +2282,7 @@ async function loadSecureCardPageData(token) {
     state: 'ready',
     ...base,
     ...readyEcho,
-    clientSecret: intent.clientSecret,
-    setupIntentId: intent.setupIntentId,
+    ...captureIntentFields(intent),
     ...(planContext ? { planContext } : {}),
   };
 }
@@ -3484,6 +3658,7 @@ async function settleAppointmentNoShowFee(paymentIntent) {
 }
 
 module.exports = {
+  replaceSecureCardIntent,
   requestCardForAppointment,
   isAppointmentCardRequestEnabled,
   isSecureCardLaneReady,
