@@ -84,7 +84,10 @@ if (limitIdx > -1) {
     // address).
     .whereRaw("btrim(coalesce(c.address_line1, '')) <> ''")
     .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
-    .orderBy('c.created_at', 'asc')
+    // created_at is not unique (one batch insert shares a timestamp), so a
+    // --limit cut through a tie would be undefined and the dry run could
+    // list different ids than execute (codex #4115 r4 P1): id breaks ties.
+    .orderBy([{ column: 'c.created_at', order: 'asc' }, { column: 'c.id', order: 'asc' }])
     .select('c.id', 'c.pipeline_stage', 'c.created_at');
   if (limit) q = q.limit(limit);
   const candidates = await q;

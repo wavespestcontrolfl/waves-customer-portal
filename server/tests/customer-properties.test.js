@@ -303,6 +303,9 @@ describe('ops/agents/primary-property-backfill.js rollback guards (codex #4115 r
     expect(src).toMatch(/md5\(jsonb_build_array\(/);
     expect(src).not.toMatch(/concat_ws\(/);
   });
+  test('a --limit cut is deterministic: created_at ties are broken by id', () => {
+    expect(src).toMatch(/\.orderBy\(\[\{ column: 'c\.created_at', order: 'asc' \}, \{ column: 'c\.id', order: 'asc' \}\]\)/);
+  });
   test('the printed rollback locks the FK-less visual_service_moments table before the row locks', () => {
     expect(src).toMatch(/BEGIN; LOCK TABLE visual_service_moments IN SHARE ROW EXCLUSIVE MODE; `\s*\n\s*\+ `SELECT 1 FROM customer_properties WHERE id = ANY/);
   });
