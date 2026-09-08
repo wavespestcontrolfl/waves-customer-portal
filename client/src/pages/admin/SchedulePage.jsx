@@ -350,7 +350,13 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
       ? "Review link is included in the completion text."
       : "Review text goes out separately as soon as the send window allows. The request is recorded.";
   }
-  if (reviewTiming === "tomorrow_8") return "Review text goes out separately tomorrow at 8:00 AM.";
+  if (reviewTiming === "tomorrow_8") {
+    // In cadence mode 8:00 is the eligibility time; the worker's first tick
+    // after it is 8:14 (codex #4140 r6).
+    const eightISO = etDatetimeLocalToISO(`${etDateString(addETDays(new Date(), 1))}T08:00`);
+    const tick = preview?.reviewSequencesEnabled && eightISO ? nextCadenceTickISO(eightISO, preview.cadenceTickMinutesOfHour, { after: true }) : null;
+    return tick ? `Review text goes out separately tomorrow at the first cadence tick after 8:00 AM — about ${fmt(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
+  }
   if (reviewTiming === "custom") {
     // The datetime-local value is an ET wall clock (the server parses it with
     // parseETDateTime) — never `new Date(value)`, which reads it in the
@@ -369,7 +375,11 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     // In cadence mode the custom time is when the row becomes ELIGIBLE; the
     // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
     // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
-    const tick = preview?.reviewSequencesEnabled ? nextCadenceTickISO(iso, preview.cadenceTickMinutesOfHour) : null;
+    // `after: true`: the server turns the chosen time into a whole-minute delay
+    // and rebuilds the eligibility instant from a later Date.now(), so the row
+    // becomes eligible just AFTER the chosen minute — a time typed exactly on
+    // :14 goes out at :44 (codex #4140 r6).
+    const tick = preview?.reviewSequencesEnabled ? nextCadenceTickISO(iso, preview.cadenceTickMinutesOfHour, { after: true }) : null;
     if (tick && tick !== iso) return `Review text goes out separately at the next cadence tick after ${fmt(iso)} — about ${fmt(tick)}.`;
     return `Review text goes out separately ${fmt(iso)}.`;
   }
@@ -379,12 +389,13 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
 // The first worker tick on or after `iso` (ticks are minutes of the hour; every
 // ET offset is a whole hour, so UTC minutes are the same minutes). Null when
 // the server did not name the ticks.
-function nextCadenceTickISO(iso, tickMinutes) {
+function nextCadenceTickISO(iso, tickMinutes, { after = false } = {}) {
   if (!Array.isArray(tickMinutes) || !tickMinutes.length) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
   const minute = d.getUTCMinutes();
-  const pastTheMinute = d.getUTCSeconds() > 0 || d.getUTCMilliseconds() > 0;
+  // `after`: the eligibility instant lands strictly after this minute.
+  const pastTheMinute = after || d.getUTCSeconds() > 0 || d.getUTCMilliseconds() > 0;
   const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
   const t = new Date(d.getTime());
   t.setUTCSeconds(0, 0);

@@ -322,11 +322,13 @@ const DECISION_LABELS = {
 };
 function decisionLine(seq, sequencesEnabled) {
   if (!seq) return null;
+  // A stranded claim (null schedule the worker never re-selects) needs a hand
+  // whether or not the gate is on — say so first (codex #4140 r6 P2).
+  if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
   // The worker skips every run while GATE_REVIEW_SEQUENCES is off, so an
   // active row's next tick is not a plan — it is frozen (codex #4140 r5 P2).
   if (sequencesEnabled === false) return "Paused — cadences are off (GATE_REVIEW_SEQUENCES) · Owner action: turn the gate on, or stop this cadence";
   if (seq.sending) return "Sending now · Owner action: none";
-  if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
   const d = seq.decision || {};
   const label = DECISION_LABELS[d.reason] || (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
   // nextRunAt is when the row becomes ELIGIBLE; the worker runs at :14/:44,
