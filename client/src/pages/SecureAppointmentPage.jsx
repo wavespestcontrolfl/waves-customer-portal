@@ -646,7 +646,7 @@ export default function SecureAppointmentPage() {
               // consent still ticked (GH Codex P1).
               key={data.clientSecret}
               ref={captureRef}
-              intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey, paymentMethodTypes: data.paymentMethodTypes, capturedMethodType: data.capturedMethodType || null }}
+              intent={{ clientSecret: data.clientSecret, setupIntentId: data.setupIntentId || null, publishableKey: data.publishableKey, paymentMethodTypes: data.paymentMethodTypes, capturedMethodType: data.capturedMethodType || null }}
               loadStripeSdk={loadStripeSdk}
               busy={busy}
               onStateChange={setCaptureState}

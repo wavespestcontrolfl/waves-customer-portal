@@ -1062,6 +1062,27 @@ const StripeService = {
     return stripe.setupIntents.retrieve(setupIntentId, options);
   },
 
+  /**
+   * Retire a SUCCEEDED SetupIntent the customer chose to replace (a succeeded
+   * intent cannot be canceled, so the retirement rides its metadata), and
+   * link it to its replacement. The accept gate and the deterministic-
+   * idempotency mint both read the stamps from Stripe — the same source they
+   * already re-derive trust from — so a retired capture is never enrolled,
+   * and a mint that replays it follows `replaced_by` to the live capture.
+   */
+  async retireSetupIntent(setupIntentId, { replacedBy = null } = {}) {
+    if (!setupIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.setupIntents.update(setupIntentId, {
+      metadata: {
+        retired: 'true',
+        retired_at: new Date().toISOString(),
+        ...(replacedBy ? { replaced_by: String(replacedBy) } : {}),
+      },
+    });
+  },
+
   async retrievePaymentMethod(paymentMethodId) {
     if (!paymentMethodId) return null;
     const stripe = getStripe();
@@ -1133,10 +1154,17 @@ const StripeService = {
    * tender family's parameters (Stripe rejects a key reuse with different
    * params).
    */
-  async createRecurringCardSetupIntent({ estimateId, generation = 0, paymentMethodType = 'card' }) {
+  async createRecurringCardSetupIntent({ estimateId, generation = 0, paymentMethodType = 'card', replacing = null }) {
     const stripe = getStripe();
     if (!stripe) return null;
     const withBank = paymentMethodType === 'card_or_bank';
+    // A replacement ("use a different payment method") is keyed on the
+    // intent it replaces instead of a generation: unbounded replacements
+    // without a durable counter, and re-requesting the same replacement
+    // replays the same fresh intent.
+    const salt = replacing
+      ? `_after_${replacing}`
+      : (Number(generation) > 0 ? `_g${Number(generation)}` : '');
     return stripe.setupIntents.create({
       payment_method_types: withBank ? ['card', 'us_bank_account'] : ['card'],
       usage: 'off_session',
@@ -1155,7 +1183,7 @@ const StripeService = {
         purpose: 'estimate_recurring_card',
         estimate_id: String(estimateId),
       },
-    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${withBank ? '_cb' : ''}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${withBank ? '_cb' : ''}${salt}` });
   },
 
   // "Secure your appointment" card capture (appointment-card-request funnel)
@@ -1932,7 +1960,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireVisitCompletionPacketId = null } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2070,7 +2098,9 @@ const StripeService = {
             .forUpdate()
             .first('status');
           if (seq && String(seq.status || '').toLowerCase() === 'stopped') {
-            throw new Error('Collection is stopped for this invoice. Review before charging.');
+            throw Object.assign(new Error('Collection is stopped for this invoice. Review before charging.'), {
+              code: 'INVOICE_COLLECTION_STOPPED',
+            });
           }
         }
         // Auto Pay SERIALIZED with the charge (Codex #3153 r13 P1): the
@@ -2274,6 +2304,17 @@ const StripeService = {
         // The pre-lock invoice read is only an early eligibility snapshot. Use
         // this locked baseline for reservation ownership so credit applied by a
         // concurrent request before our lock is never attributed to this attempt.
+        if (requireVisitCompletionPacketId) {
+          await require('./visit-completion-payment').assertVisitCompletionCharge(trx, lockedInvoice, requireVisitCompletionPacketId);
+          // A downward edit can land after the coordinator's locked decision.
+          // Release this unsubmitted attempt; packet recovery will take the
+          // non-cash settlement path from its next fresh invoice snapshot.
+          if (invoiceAmountDue(lockedInvoice) === 0) {
+            throw Object.assign(new Error('Visit invoice now has no balance to collect. Retry closeout.'), {
+              code: 'VISIT_PAYMENT_ZERO_BALANCE',
+            });
+          }
+        }
         chargeOriginalCreditApplied = Number(lockedInvoice.credit_applied) || 0;
         chargeCreditAppliedTotal = chargeOriginalCreditApplied;
         let stalePaymentIntentToCancel = null;

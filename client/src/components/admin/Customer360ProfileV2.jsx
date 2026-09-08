@@ -3229,6 +3229,10 @@ function AdminAutopayPanelV2({
   const [charging, setCharging] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  const outcomeRef = useRef(null);
+  useEffect(() => {
+    if (msg || err) outcomeRef.current?.scrollIntoView?.({ block: "center" });
+  }, [msg, err]);
 
   const load = () => {
     fetch(`${API_BASE}/admin/customers/${customerId}/autopay-state`, {
@@ -3257,11 +3261,20 @@ function AdminAutopayPanelV2({
     setErr("");
     setMsg("");
     try {
-      await adminFetch(`/admin/customers/${customerId}/charge-now`, {
+      const result = await adminFetch(`/admin/customers/${customerId}/charge-now`, {
         method: "POST",
         body: JSON.stringify({}),
       });
-      setMsg(`Charged $${amt.toFixed(2)} successfully`);
+      const payment = result?.payment;
+      const collected = Number.parseFloat(payment?.amount);
+      const amountLabel = Number.isFinite(collected) ? ` $${collected.toFixed(2)}` : "";
+      if (payment?.status === "paid") {
+        setMsg(`Payment${amountLabel} completed`);
+      } else if (payment?.status === "processing") {
+        setMsg(`Payment${amountLabel} is processing. Settlement is pending.`);
+      } else {
+        setMsg("Payment status is not confirmed. Check payment history before trying again.");
+      }
       load();
     } catch (e) {
       setErr(e.message || "Charge failed");
@@ -3325,12 +3338,12 @@ function AdminAutopayPanelV2({
           )}
         </div>
         {msg && (
-          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">
+          <div ref={outcomeRef} role="status" className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-14">
             {msg}
           </div>
         )}
         {err && (
-          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div ref={outcomeRef} role="alert" className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-14">
             {err}
           </div>
         )}
@@ -5226,6 +5239,7 @@ export default function Customer360ProfileV2({
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
+  const activeTabButtonRef = useRef(null);
   const [headerPast, setHeaderPast] = useState(false);
   const editModalRef = useModalFocus(editOpen, () => { if (!savingEdit) setEditOpen(false); });
   const tabsAnchorRef = useRef(null);
@@ -5244,6 +5258,9 @@ export default function Customer360ProfileV2({
   const isAdmin = getAdminRole() === "admin";
   const workspaceSections = CUSTOMER_WORKSPACE_SECTIONS.filter((section) => isAdmin || section.key !== "billing");
   const activeTab = embedded && !isAdmin && requestedTab === "billing" ? "overview" : requestedTab;
+  useEffect(() => {
+    if (!loading) activeTabButtonRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [loading, activeTab]);
   const unreadConversations = useUnreadConversations(embedded && isAdmin, customerId);
 
   // Bumped on every successful profile reload. The properties panel keys its
@@ -6547,6 +6564,7 @@ export default function Customer360ProfileV2({
             <div className="c360-conversation flex flex-col">
               {" "}
               <OwedCommitmentsSummary customerId={customerId} />
+              {!embedded && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
               <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
               <div className="flex flex-col gap-1.5 mb-3">
                 {commsLoading && (
@@ -7091,6 +7109,8 @@ export default function Customer360ProfileV2({
           {CUSTOMER_360_SECTIONS.filter((section) => section.key !== "estimates").map((t) => (
             <button
               key={t.key}
+              ref={activeTab === t.key ? activeTabButtonRef : null}
+              aria-pressed={activeTab === t.key}
               onClick={() => setActiveTab(t.key)}
               className={cn(
                 "h-11 px-4 text-12 uppercase tracking-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
@@ -7626,6 +7646,9 @@ export default function Customer360ProfileV2({
             <SheetHeader><div><strong>{c.firstName} {c.lastName}</strong><p className="text-14 text-ink-secondary">{c.phone}</p></div><Button variant="secondary" onClick={() => setMessageOpen(false)}>Back to customer</Button></SheetHeader>
             <SheetBody>{conversation}</SheetBody>
           </Sheet>) : (activeTab === "comms" && conversation)}
+
+          {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
+          {embedded && activeTab === "comms" && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
 
           {embedded && isAdmin && activeTab === "comms" && <Customer360Activity missingSources={timelineMissingSources} timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
 
