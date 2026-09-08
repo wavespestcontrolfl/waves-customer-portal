@@ -115,7 +115,7 @@ test('partly resolved compound name evidence refuses a selection and is never a 
 });
 
 test('field nouns after an action are not person names', async () => {
-  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency', 'Update customer city', 'Set waveguard tier', "Let's update this customer", 'Update customer first name', "Update this account's status", 'Update this profile', 'Send message to this customer', 'Send receipt to this customer', 'Send text to this customer']) {
+  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency', 'Update customer city', 'Set waveguard tier', "Let's update this customer", 'Update customer first name', "Update this account's status", 'Update this profile', 'Send message to this customer', 'Send receipt to this customer', 'Send text to this customer', 'Text the customer about the invoice', 'What did we say to the customer on 5551234567']) {
     const task = await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } });
     expect(task.target).toMatchObject({ customer_id: A, provenance: 'operator_selection' });
   }
