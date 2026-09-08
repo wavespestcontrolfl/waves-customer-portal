@@ -3,6 +3,7 @@ const {
   grassTypeLabel,
   normalizeGrassType,
   irrigationTypeHasSystem,
+  loadIrrigationContext,
   resolveTrackKey,
   loadCustomerGrassContext,
 } = require('../services/lawn-grass-context');
@@ -48,6 +49,15 @@ describe('lawn-grass-context', () => {
       irrigationSystem: 'in_ground',
       propertySqft: 8200,
     });
+  });
+
+  test('loadIrrigationContext: the active profile system first, else the first profile row (active or not), plus inches per week', async () => {
+    const row = (turf) => fakeKnex({ customer_turf_profiles: turf });
+    expect(await loadIrrigationContext('c', { irrigationSystem: 'in_ground' }, row({ irrigation_type: 'drip', irrigation_inches_per_week: 1.5 }))).toBe('in ground, 1.5 in/wk');
+    expect(await loadIrrigationContext('c', { irrigationSystem: null }, row({ irrigation_type: 'hose_end', irrigation_inches_per_week: null }))).toBe('hose end');
+    expect(await loadIrrigationContext('c', {}, row({ irrigation_type: null, irrigation_inches_per_week: 0.75 }))).toBe('0.75 in/wk');
+    expect(await loadIrrigationContext('c', {}, fakeKnex({}))).toBeNull();
+    expect(await loadIrrigationContext('c', null, fakeKnex({}))).toBeNull();
   });
 
   test('normalizeGrassType maps legacy free-text lawn_type to canonical keys', () => {

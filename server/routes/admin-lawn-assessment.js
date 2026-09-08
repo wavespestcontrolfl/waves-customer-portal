@@ -17,7 +17,7 @@ const LawnIntel = require('../services/lawn-intelligence');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
-const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
+const { loadCustomerGrassContext, loadIrrigationContext } = require('../services/lawn-grass-context');
 const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
 
 let PhotoService;
@@ -506,14 +506,8 @@ router.post('/assess', async (req, res, next) => {
     try { grassCtx = await loadCustomerGrassContext(customerId, db); } catch (err) { logger.warn(`[lawn-assessment] grass-context lookup failed: ${err.message}`); }
     if (grassCtx.grassTypeLabel) visionContext.grassType = grassCtx.grassTypeLabel;
     try {
-      const turf = await db('customer_turf_profiles')
-        .where({ customer_id: customerId })
-        .first('irrigation_type', 'irrigation_inches_per_week');
-      const irr = [];
-      const irrType = grassCtx.irrigationSystem || turf?.irrigation_type;
-      if (irrType) irr.push(String(irrType).replace(/_/g, ' '));
-      if (turf?.irrigation_inches_per_week != null) irr.push(`${turf.irrigation_inches_per_week} in/wk`);
-      if (irr.length) visionContext.irrigation = irr.join(', ');
+      const irrigation = await loadIrrigationContext(customerId, grassCtx, db);
+      if (irrigation) visionContext.irrigation = irrigation;
     } catch (err) { logger.warn(`[lawn-assessment] irrigation context lookup failed: ${err.message}`); }
     try {
       // The PREVIOUS visit's summary — strictly a service SCHEDULED before this one.

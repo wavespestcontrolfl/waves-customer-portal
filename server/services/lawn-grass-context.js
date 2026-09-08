@@ -113,6 +113,24 @@ async function loadCustomerGrassContext(customerId, knex = db, { strict = false 
   };
 }
 
+/**
+ * The irrigation line the lawn visit prompt receives ("drip, 1 in/wk"): the
+ * active profile's system (from grassCtx) or, failing that, the first
+ * profile row's — active or not — plus that row's inches per week. One
+ * loader for the live /assess route and the eval exporter, so a replay sees
+ * the context the assessment received. Null when nothing is on file.
+ */
+async function loadIrrigationContext(customerId, grassCtx, knex = db) {
+  const turf = await knex('customer_turf_profiles')
+    .where({ customer_id: customerId })
+    .first('irrigation_type', 'irrigation_inches_per_week');
+  const parts = [];
+  const irrigationType = grassCtx?.irrigationSystem || turf?.irrigation_type;
+  if (irrigationType) parts.push(String(irrigationType).replace(/_/g, ' '));
+  if (turf?.irrigation_inches_per_week != null) parts.push(`${turf.irrigation_inches_per_week} in/wk`);
+  return parts.length ? parts.join(', ') : null;
+}
+
 module.exports = {
   GRASS_TYPE_LABELS,
   grassTypeLabel,
@@ -120,4 +138,5 @@ module.exports = {
   irrigationTypeHasSystem,
   resolveTrackKey,
   loadCustomerGrassContext,
+  loadIrrigationContext,
 };

@@ -50,23 +50,28 @@ const path = require('path');
 const REPO = path.resolve(__dirname, '..', '..');
 const SCORE_COLUMNS = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
 
+// One row per flag: the args key, whether it takes a value, and how that
+// value is read. Boolean flags take none.
+const ARG_SPECS = {
+  '--export': { key: 'export' },
+  '--all': { key: 'all' },
+  '--json': { key: 'json' },
+  '--force-fallback': { key: 'forceFallback' },
+  '--run': { key: 'run', value: true, parse: (v) => v },
+  '--ids': { key: 'ids', value: true, parse: (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean) },
+  '--sample': { key: 'sample', value: true, parse: Number },
+  '--limit': { key: 'limit', value: true, parse: Number },
+  '--thinking': { key: 'thinking', value: true, parse: (v) => String(v || '').toUpperCase() },
+  '--repeat': { key: 'repeat', value: true, parse: (v) => Math.max(1, Number(v) || 1) },
+  '--concurrency': { key: 'concurrency', value: true, parse: (v) => Math.max(1, Number(v) || 1) },
+};
+
 function parseArgs(argv) {
   const args = { export: false, run: null, ids: [], sample: null, all: false, json: false, thinking: null, forceFallback: false, repeat: 1, concurrency: 2, limit: null };
   for (let i = 2; i < argv.length; i += 1) {
-    const a = argv[i];
-    const next = () => argv[++i];
-    if (a === '--export') args.export = true;
-    else if (a === '--run') args.run = next();
-    else if (a === '--ids') args.ids = String(next() || '').split(',').map((s) => s.trim()).filter(Boolean);
-    else if (a === '--sample') args.sample = Number(next());
-    else if (a === '--all') args.all = true;
-    else if (a === '--json') args.json = true;
-    else if (a === '--thinking') args.thinking = String(next() || '').toUpperCase();
-    else if (a === '--force-fallback') args.forceFallback = true;
-    else if (a === '--repeat') args.repeat = Math.max(1, Number(next()) || 1);
-    else if (a === '--concurrency') args.concurrency = Math.max(1, Number(next()) || 1);
-    else if (a === '--limit') args.limit = Number(next());
-    else { console.error(`unknown argument: ${a}`); process.exit(2); }
+    const spec = ARG_SPECS[argv[i]];
+    if (!spec) { console.error(`unknown argument: ${argv[i]}`); process.exit(2); }
+    args[spec.key] = spec.value ? spec.parse(argv[++i]) : true;
   }
   return args;
 }
@@ -84,7 +89,7 @@ async function exportFixture(args) {
   // context the assessment actually received: active-profile grass with the
   // legacy customers.lawn_type fallback, and the property- and reset-scoped
   // previous visit (never another lawn's summary).
-  const { loadCustomerGrassContext } = require(path.join(REPO, 'server/services/lawn-grass-context'));
+  const { loadCustomerGrassContext, loadIrrigationContext } = require(path.join(REPO, 'server/services/lawn-grass-context'));
   const history = require(path.join(REPO, 'server/services/lawn-assessment-history'));
   const knex = knexFactory({ client: 'pg', connection: { connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } }, pool: { min: 0, max: 2 } });
   try {
@@ -110,17 +115,14 @@ async function exportFixture(args) {
     for (const row of rows.filter((r) => chosen.has(r.id))) {
       const visitDate = evalLib.dateString(row.scheduled_date) || evalLib.dateString(row.service_date);
       const scheduledService = row.service_id ? await knex('scheduled_services').where({ id: row.service_id }).first() : null;
-      const [grassCtx, turf, prior] = await Promise.all([
-        loadCustomerGrassContext(row.customer_id, knex),
-        knex('customer_turf_profiles').where({ customer_id: row.customer_id, active: true }).first('irrigation_inches_per_week'),
+      const grassCtx = await loadCustomerGrassContext(row.customer_id, knex);
+      const [irrigation, prior] = await Promise.all([
+        loadIrrigationContext(row.customer_id, grassCtx, knex),
         history.historyBeforeVisit({ customerId: row.customer_id, scheduledService, throughVisitDate: visitDate }, knex).catch((err) => { console.error(`warning: prior-visit history failed for ${row.id}: ${err.message}`); return { previous: null }; }),
       ]);
-      const irrigation = [];
-      if (grassCtx.irrigationSystem) irrigation.push(String(grassCtx.irrigationSystem).replace(/_/g, ' '));
-      if (turf?.irrigation_inches_per_week != null) irrigation.push(`${turf.irrigation_inches_per_week} in/wk`);
       cases.push(evalLib.fixtureCase(row, byAssessment.get(row.id) || [], {
         grassType: grassCtx.grassTypeLabel || null,
-        irrigation: irrigation.join(', ') || null,
+        irrigation,
         priorSummary: prior?.previous?.ai_summary || null,
       }));
     }

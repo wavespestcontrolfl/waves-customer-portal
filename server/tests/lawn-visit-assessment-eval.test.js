@@ -101,8 +101,31 @@ describe('scoring', () => {
 
   test('an unavailable replay carries the reason and no scores', () => {
     const r = evalLib.scoreResult(testCase, { status: 'unavailable', reason: 'all_providers_failed', failures: [{ provider: 'gemini', reason: 'gemini_503' }], latencyMs: 900, usage: null });
-    expect(r).toMatchObject({ status: 'unavailable', unavailableReason: 'all_providers_failed', derived: null, deltas: null, costUsd: null, findings: [] });
+    expect(r).toMatchObject({ status: 'unavailable', unavailableReason: 'all_providers_failed', derived: null, deltas: null, costUsd: null, usage: null, legs: [], findings: [] });
     expect(r.undeterminable).toEqual(evalLib.SCORE_KEYS);
+  });
+
+  test('every billed leg counts: a rejected primary answer and both legs of an unavailable run add their tokens and cost', () => {
+    const rejected = { provider: 'gemini', model: 'gemini-3.8-flash', reason: 'empty_findings', validator: true, usage: { input_tokens: 9000, output_tokens: 1000, reasoning_tokens: 500 } };
+    const won = { ...analysis(), provider: 'openai', model: 'gpt-6-astra', fallbackUsed: true, failures: [rejected], usage: { input_tokens: 10000, output_tokens: 2000, reasoning_tokens: 1500 } };
+    const r = evalLib.scoreResult(testCase, won);
+    expect(r.legs).toEqual([
+      { provider: 'gemini', model: 'gemini-3.8-flash', reason: 'empty_findings', usage: rejected.usage },
+      { provider: 'openai', model: 'gpt-6-astra', reason: null, usage: won.usage },
+    ]);
+    expect(r.usage).toEqual({ input_tokens: 19000, output_tokens: 3000, reasoning_tokens: 2000 });
+    // gemini: (9000 × 0.75 + 1500 × 3.75) / 1e6 = 0.012375; astra: (10000 × 5 + 2000 × 25) / 1e6 = 0.1 → 0.1124 (4 dp)
+    expect(r.costUsd).toBe(evalLib.costUsd('gemini-3.8-flash', rejected.usage) + evalLib.costUsd('gpt-6-astra', won.usage));
+    // Both legs failed after billing: still spent.
+    const both = evalLib.scoreResult(testCase, { status: 'unavailable', reason: 'all_providers_failed', failures: [rejected, { provider: 'openai', model: 'gpt-6-astra', reason: 'openai_incomplete', usage: { input_tokens: 100, output_tokens: 50 } }], usage: null });
+    expect(both.legs).toHaveLength(2);
+    expect(both.usage).toEqual({ input_tokens: 9100, output_tokens: 1050, reasoning_tokens: 500 });
+    expect(both.costUsd).toBe(evalLib.costUsd('gemini-3.8-flash', rejected.usage) + evalLib.costUsd('gpt-6-astra', { input_tokens: 100, output_tokens: 50 }));
+    // A failure without usage (never reached the model) is not a leg; an unpriced model adds no cost but its tokens still count.
+    const mixed = evalLib.scoreResult(testCase, { ...analysis(), failures: [{ provider: 'gemini', reason: 'gemini_503' }, { provider: 'openai', model: 'mystery', reason: 'x', usage: { input_tokens: 1, output_tokens: 1 } }] });
+    expect(mixed.legs.map((leg) => leg.model)).toEqual(['mystery', 'gemini-3.8-flash']);
+    expect(mixed.costUsd).toBe(0.0255);
+    expect(mixed.usage.input_tokens).toBe(9001);
   });
 
   test('summary: MAE + bias per metric, undeterminable and unavailable rates, provider mix, percentiles, cost, repeat variance', () => {

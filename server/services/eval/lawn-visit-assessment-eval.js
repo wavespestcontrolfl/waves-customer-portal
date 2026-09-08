@@ -140,6 +140,33 @@ function costUsd(model, usage) {
   return Math.round(((input * price.input) + (output * price.output)) / 1e6 * 1e4) / 1e4;
 }
 
+// The legs that spent tokens, in call order: a failed leg carries its usage
+// on the failure entry (llm/call.js failedLeg); the winning leg is the outcome.
+function billedLegs(analysis) {
+  const failed = (analysis.failures || []).filter((leg) => leg && leg.usage)
+    .map((leg) => ({ provider: leg.provider || null, model: leg.model || null, reason: leg.reason || null, usage: leg.usage }));
+  const won = analysis.status === 'complete' && analysis.usage
+    ? [{ provider: analysis.provider || null, model: analysis.model || null, reason: null, usage: analysis.usage }]
+    : [];
+  return [...failed, ...won];
+}
+
+function sumUsage(legs) {
+  const total = { input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
+  for (const { usage } of legs) {
+    total.input_tokens += Number(usage.input_tokens) || 0;
+    total.output_tokens += Number(usage.output_tokens) || 0;
+    total.reasoning_tokens += Number(usage.reasoning_tokens) || 0;
+  }
+  return total;
+}
+
+// Null until at least one leg is priced (an unpriced model's leg adds nothing).
+function legsCostUsd(legs) {
+  const priced = legs.map((leg) => costUsd(leg.model, leg.usage)).filter((value) => value != null);
+  return priced.length ? Math.round(priced.reduce((sum, value) => sum + value, 0) * 1e4) / 1e4 : null;
+}
+
 function causeNamedBelowModerate(findings = []) {
   return findings.filter((finding) => {
     const rank = CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0;
@@ -153,6 +180,7 @@ function causeNamedBelowModerate(findings = []) {
  * replay cannot reproduce — so confirmed-score deltas carry that caveat).
  */
 function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeasonalAdjustment(scores, month) } = {}) {
+  const legs = billedLegs(analysis);
   const base = {
     assessmentId: testCase.assessmentId,
     visitDate: testCase.visitDate,
@@ -164,8 +192,12 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
     fallbackUsed: !!analysis.fallbackUsed,
     failures: analysis.failures || [],
     latencyMs: analysis.latencyMs ?? null,
-    usage: analysis.usage || null,
-    costUsd: costUsd(analysis.model, analysis.usage),
+    // Every billed leg — a primary answer the validator rejected before the
+    // fallback answered, or both legs on an unavailable run — counts toward
+    // the tokens and cost the run actually spent, not only the winning leg.
+    legs,
+    usage: legs.length ? sumUsage(legs) : null,
+    costUsd: legsCostUsd(legs),
     contextHash: analysis.contextHash || null,
   };
   if (analysis.status !== 'complete') {
@@ -339,6 +371,9 @@ module.exports = {
   selectCases,
   contextFor,
   costUsd,
+  billedLegs,
+  sumUsage,
+  legsCostUsd,
   causeNamedBelowModerate,
   scoreResult,
   summarize,

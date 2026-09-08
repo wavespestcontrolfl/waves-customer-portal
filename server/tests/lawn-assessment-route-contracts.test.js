@@ -126,6 +126,9 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/const track = visitAssessmentEnabled \? null : grassCtx\.trackKey;/);
       // The provider-miss early return is legacy-only: an unavailable run still stores the row.
       expect(assess).toMatch(/if \(!visitAssessmentEnabled && !validResults\.length\)/);
+      // Irrigation context comes from the one loader the eval exporter replays (lawn-grass-context.loadIrrigationContext).
+      expect(assess).toMatch(/const irrigation = await loadIrrigationContext\(customerId, grassCtx, db\);/);
+      expect(assess).not.toMatch(/first\('irrigation_type', 'irrigation_inches_per_week'\)/);
     });
 
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
