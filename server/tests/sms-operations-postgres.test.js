@@ -66,6 +66,7 @@ postgres('SMS operations on PostgreSQL', () => {
     NotificationService.notifyAdmin.mockResolvedValue({ id: randomUUID() });
     for (const table of TABLES) await mockPg(table).delete();
     process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
+    delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
     const customerId = randomUUID();
     const propertyId = randomUUID();
     await mockPg('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
@@ -93,7 +94,7 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test.each(['provider-first', 'queue-first', 'missing-provider'])(
     'scheduled SMS keeps one source through %s capture order', async (order) => {
-      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
         twilio_sid: null, from_phone: message.to_phone, to_phone: message.from_phone,
         message_body: 'I will call with an update.', created_at: new Date(message.created_at.getTime() - 600),
         scheduled_for: new Date(message.created_at.getTime() - 800), status: order === 'provider-first' ? 'sending' : 'sent' };
@@ -127,7 +128,7 @@ postgres('SMS operations on PostgreSQL', () => {
   );
 
   test('conversation history keeps provider evidence when scheduled send endpoints refresh', async () => {
-    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
       twilio_sid: null, from_phone: numbers.locations.bradenton.number, to_phone: '+12025550199',
       created_at: new Date(message.created_at.getTime() - 600),
       scheduled_for: new Date(message.created_at.getTime() - 800), status: 'sent' };
@@ -141,7 +142,7 @@ postgres('SMS operations on PostgreSQL', () => {
   });
 
   test('identical separate sends and orphan or mismatched provider links stay distinct', async () => {
-    const base = { ...message, direction: 'outbound', message_type: 'manual',
+    const base = { ...message, direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
       from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'I will call with an update.',
       created_at: new Date(message.created_at.getTime() - 500), status: 'sent' };
     const rows = [
@@ -190,7 +191,7 @@ postgres('SMS operations on PostgreSQL', () => {
     const args = { conn: mockPg, smsLogId: message.id, extract };
     const preview = await replaySmsProfile(args);
     expect(preview).toEqual({ dry_run: true, sms_log_id: message.id, preview_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
-      applied: 0, proposed: 1, preserved: 0, unverified_count: 0, outcomes: [{ field: 'lockbox_code', action: 'create_proposal' }] });
+      recorded: 0, applied: 0, proposed: 1, preserved: 0, unverified_count: 0, outcomes: [{ field: 'lockbox_code', action: 'create_proposal' }] });
     expect(extract).toHaveBeenCalledTimes(1);
     expect((await mockPg('sms_log').first()).operational_analysis).toEqual(original.operational_analysis);
     expect(await mockPg('audit_log')).toHaveLength(0);
@@ -199,7 +200,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
 
-    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toEqual({ applied: 0, proposed: 1, preserved: 0 });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toEqual({ recorded: 0, applied: 0, proposed: 1, preserved: 0 });
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ field: 'lockbox_code', status: 'pending' });
     const { replay, ...analysis } = (await mockPg('sms_log').first()).operational_analysis;
@@ -216,7 +217,7 @@ postgres('SMS operations on PostgreSQL', () => {
     // identical proposed value must still leave the existing review intact.
     message.message_body += '.';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
-    expect(await replaySmsProfile({ ...args, execute: true, previewHash: await replayPreviewHash(extract) })).toEqual({ applied: 0, proposed: 1, preserved: 0 });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: await replayPreviewHash(extract) })).toEqual({ recorded: 0, applied: 0, proposed: 1, preserved: 0 });
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     expect((await mockPg('data_hygiene_proposals').first()).status).toBe('pending');
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(3);
@@ -343,7 +344,7 @@ postgres('SMS operations on PostgreSQL', () => {
     const extract = jest.fn(async () => extracted);
     expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract })).toMatchObject({ preserved: 1, outcomes: [{ field: 'lockbox_code', action: 'previously_applied' }] });
     expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(extract), extract }))
-      .toEqual({ applied: 0, proposed: 0, preserved: 1 });
+      .toEqual({ recorded: 0, applied: 0, proposed: 0, preserved: 1 });
     expect((await mockPg('property_preferences').first()).lockbox_code).toBeNull();
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
     expect(await mockPg('audit_log').where({ action: 'sms.property_preference.updated' })).toHaveLength(1);
@@ -902,7 +903,7 @@ postgres('SMS operations on PostgreSQL', () => {
     delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
     await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound',
       from_phone: numbers.locations.parrish.number, to_phone: '+12025550101',
-      message_type: 'manual', status: 'delivered' });
+      message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered' });
     const extract = jest.fn();
     await runSmsOperationalActions({ conn: mockPg, extract });
     expect(extract).not.toHaveBeenCalled();
