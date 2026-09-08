@@ -327,10 +327,10 @@ function hydrate(body, c) {
     // server's own first-name substitution never runs on it, and a full name
     // would tip the one-segment ask templates into a second segment.
     .replace(/\{tech\}/g, String(c.lastTech || "Adam").trim().split(/\s+/)[0] || "Adam")
-    // Mirrors renderOutreachBody: the tech on the record, else the company.
-    .replace(/\{sender\}/g, c.lastTech
-      ? `${String(c.lastTech).trim().split(/\s+/)[0]} with Waves`
-      : "Waves Pest Control")
+    // {sender} is deliberately NOT hydrated here (codex #4139 r1): the
+    // candidates feed carries no technician, so the server renders it from
+    // the record ("<tech> with Waves", else "Waves Pest Control") — the same
+    // way it swaps {review_url} for the tokenized link.
     .replace(/\{service_type\}/g, c.lastSvc || "pest control")
     .replace(/\{review_url\}/g, c.reviewUrl)
     .replace(/\{date\}/g, c.lastDate);
@@ -379,7 +379,9 @@ function apiToCustomer(row) {
     email: "",
     lastDate: svcDate ? fmtDate(svcDate) : "—",
     lastSvc: svc,
-    lastTech: "Adam",
+    // No technician in the candidates feed: the server resolves the tech
+    // from the latest completed service when the drawer sends none.
+    lastTech: null,
     sentiment,
     stage,
     score,
@@ -631,7 +633,7 @@ export default function ReviewVelocityEngine() {
           body: JSON.stringify({
             customerId: customer.id,
             serviceType: svcType,
-            techName: customer.lastTech,
+            ...(customer.lastTech ? { techName: customer.lastTech } : {}),
             ...(opts.templateId ? { templateId: opts.templateId } : {}),
             ...(opts.body ? { body: opts.body } : {}),
           }),
