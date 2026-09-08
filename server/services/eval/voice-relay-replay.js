@@ -473,6 +473,28 @@ function offeredRefs(record, re) {
   return refs;
 }
 
+// The live lookupCustomersText gate: a criterion counts only when it would
+// reach the SQL, and a reference needs two independent ones — so a custom
+// fixture cannot hand out a customer_ref for a single-criterion call
+// production refuses. Same refusal copy, no oracle.
+function lookupCriteriaRefusal(input) {
+  const { aniDigitKey, promptSafe, LOOKUP_MIN_CRITERIA_FOR_REF, LOOKUP_MIN_NAME_LEN, LOOKUP_MIN_STREET_LEN } = require('../voice-agent/relay-context');
+  const criteria = [];
+  if (promptSafe(input.name, 80).split(/\s+/).some((t) => t.length >= LOOKUP_MIN_NAME_LEN)) criteria.push('name');
+  if (promptSafe(input.street, 80).length >= LOOKUP_MIN_STREET_LEN) criteria.push('street');
+  if (aniDigitKey(input.phone)) criteria.push('phone');
+  if (!criteria.length) {
+    return 'Not enough to search on yet — ask the caller for the account holder\'s name, the street address of the property, or the phone number on the account, then call lookup_customer again.';
+  }
+  if (criteria.length < LOOKUP_MIN_CRITERIA_FOR_REF) {
+    return 'I need two details to pull up an account — the account holder\'s name AND the street address '
+      + 'of the property (the phone number that is on the account works as one of them). Ask the caller for '
+      + 'the second detail, then call lookup_customer again with both. Do NOT tell the caller whether '
+      + 'anything matched, and do not confirm or deny that an account exists.';
+  }
+  return null;
+}
+
 /**
  * What the real tool would refuse before doing anything: a missing required
  * argument, an invalid schema type or enum, a slot_ref the availability tools never
@@ -498,6 +520,10 @@ function validateToolInput(name, input = {}, record) {
   // the same call must not read as an invented ref here.
   for (const key of ['slot_ref', 'customer_ref']) {
     if (typeof input[key] === 'string') input[key] = input[key].trim().toUpperCase();
+  }
+  if (name === 'lookup_customer') {
+    const refusal = lookupCriteriaRefusal(input);
+    if (refusal) return refusal;
   }
   if (name === 'request_booking' && !offeredRefs(record, SLOT_REF_RE).has(String(input.slot_ref))) {
     return `slot_ref "${input.slot_ref}" was not offered on this call — NOTHING was booked. Call find_slots and pass back a slot_ref it printed.`;
@@ -659,6 +685,7 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   }
   const { response } = picked;
   if (response.hang === true) {
+    event.hang = true;
     return new Promise(() => {}); // the live bound (_executeToolBounded) degrades it
   }
   if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
@@ -984,10 +1011,14 @@ const CHECK_RUNNERS = Object.freeze({
   commitment_requires_receipt(value, record, { utterances }) {
     const promises = utterances.filter((u) => isCommitment(u.text));
     if (!promises.length) return ['pass', 'no follow-up was promised'];
-    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && t.receipt === true);
+    // A write that timed out is the one promise the live bound itself
+    // directs ("tell the caller a Waves team member will follow up to
+    // confirm"): the call is on the record for the office, nothing is
+    // claimed done. It backs the follow-up like a receipt does.
+    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true));
     const unbacked = promises.find((p) => !receipts.some((r) => r.index < p.index));
     if (unbacked) return ['fail', `promised "${clip(unbacked.text, 120)}" with no write receipt before it`];
-    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => r.name))].join(', ')})`];
+    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : ''}`))].join(', ')})`];
   },
 });
 
@@ -1025,9 +1056,14 @@ function runCheck(expectation, record) {
 // The scenario's allowlist, graded as an implicit CRITICAL check on every
 // scenario: a tool outside `allowedTools` — a stray write above all — is a
 // blocking miss, whatever the fixture happens to answer for it.
+// An allowlisted value is exact, like the live enum check (capture_lead
+// compares lead_quality === 'spam'): "spam " or "not_spam" is outside it.
+function inputAllowed(input = {}, allowed = {}) {
+  return Object.entries(allowed).every(([field, want]) => (Array.isArray(want) ? want.some((w) => input[field] === w) : input[field] === want));
+}
 function allowedToolsCheck(scenario, record) {
   const allowed = new Set(scenario.allowedTools || []);
-  const outside = [...new Set(record.toolCalls.filter((t) => !allowed.has(t.name) || !inputMatches(t.input, scenario.allowedToolInputs?.[t.name] || {})).map((t) => t.name))];
+  const outside = [...new Set(record.toolCalls.filter((t) => !allowed.has(t.name) || !inputAllowed(t.input, scenario.allowedToolInputs?.[t.name] || {})).map((t) => t.name))];
   return {
     check: 'allowed_tools', severity: 'critical', adjudicated: true,
     status: outside.length ? 'fail' : 'pass',
@@ -1119,15 +1155,13 @@ async function runScenario(scenario) {
   h.guard.attempts.length = 0;
   h.guard.armed = true;
   try {
-    if (h.state.modelFailuresLeft > 0 && !h.modelFaultInjection) throw new Error('fixtures.modelFailures needs model fault injection, which this process could not install');
+    // No usable SDK in this process is a missing model, not a malformed replay.
+    if (h.state.modelFailuresLeft > 0 && !h.modelFaultInjection) {
+      throw Object.assign(new Error('model unavailable: fixtures.modelFailures needs model fault injection, which this process could not install (no usable SDK)'), { code: 'EVAL_MODEL_UNAVAILABLE' });
+    }
     const convo = newConversation(h, scenario, record);
     applyResumeFixture(convo, scenario, record);
     await driveTurns(convo, scenario, record);
-    // Every injected failure must have been consumed, or the handoff the
-    // fixture asked for (a second failure) was never exercised.
-    if (h.state.modelFailuresLeft > 0) {
-      throw Object.assign(new Error(`fixtures.modelFailures: ${h.state.modelFailuresLeft} injected failure(s) never reached the model — the turns ended first`), { code: 'EVAL_MODEL_FAILURES_UNUSED' });
-    }
     record.toolsAvailable = (convo._tools || []).map((t) => t.name);
     record.promptSha = convo._promptSha || null;
     // Any REAL provider error (an injected failure is expected and excluded,
@@ -1142,6 +1176,12 @@ async function runScenario(scenario) {
     // copy and calls nothing — no round, no error, and a green-looking call.
     if (record.modelCalls === 0 && record.turn > 0) {
       throw Object.assign(new Error('model unavailable: the relay never called the model (no SDK client — is ANTHROPIC_API_KEY set?)'), { code: 'EVAL_MODEL_UNAVAILABLE' });
+    }
+    // Every injected failure must have been consumed, or the handoff the
+    // fixture asked for (a second failure) was never exercised. Judged after
+    // the model checks: with no model at all, that is the finding.
+    if (h.state.modelFailuresLeft > 0) {
+      throw Object.assign(new Error(`fixtures.modelFailures: ${h.state.modelFailuresLeft} injected failure(s) never reached the model — the turns ended first`), { code: 'EVAL_MODEL_FAILURES_UNUSED' });
     }
     // The world was not fixed: the conversation reached for a tool the
     // fixture does not answer (a generic answer graded nothing real) or for
