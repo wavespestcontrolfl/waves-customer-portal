@@ -387,25 +387,65 @@ function shiftToWeekdayMorning(date) {
   return parseETDateTime(naive);
 }
 
+// The 3-day rule (owner ruling 2026-09-07): once a review ask has gone out,
+// no further ask to that customer for 72 hours, measured from the ask's
+// actual send — Monday 8:00 AM means nothing before Thursday 8:00 AM. It
+// is the ONLY timing rule between asks: the first ask has no gate on when
+// it goes (no spacing against other texts or calls), and the 30-day
+// cooldown between campaigns and the 3-ask/180-day cap are separate.
+const ASK_SPACING_MS = 72 * 3600000;
+
 /**
  * When the next sequence touch should fire. Base schedule is
  * started_at + step.day days; three corrections:
  *  - catch-up: a base time already in the past fires in ~60s, EXCEPT
- *  - min spacing: a later step never fires sooner than ~20h after the touch
- *    that just went out (a weekend-shifted Day-3 SMS would otherwise be
- *    chased by the already-due Day-4 email a minute later);
+ *  - the 3-day rule: a later step never fires sooner than 72h after the
+ *    touch that just went out (`now` is the send moment);
  *  - weekdaysOnly steps land Mon-Fri (ET) — Sat/Sun shifts to Monday 10 AM.
  */
-function nextTouchRunAt({ startedAt, step, now = new Date() }) {
+function nextTouchRunAt({ startedAt, step, previousStep = null, now = new Date() }) {
   const dayOffset = Number(step?.day) || 0;
   let at = new Date(new Date(startedAt).getTime() + dayOffset * 86400000);
   if (at <= now) at = new Date(now.getTime() + 60000);
-  if (dayOffset > 0) {
-    const minAt = new Date(now.getTime() + 20 * 3600000);
+  // The 3-day rule spaces ASKS from the last ASK: a private no-link check-in
+  // an admin plan places on a later day keeps its own day (codex #4141 r2),
+  // and an ask that follows a check-in is not pushed 72 h past the check-in
+  // (codex #4141 r4 P2) — the runner's delivered-ask re-check is the
+  // authority at dispatch. No previousStep = the step just sent was an ask.
+  const previousWasAsk = previousStep == null || OUTREACH.isAskTemplate(previousStep.templateKey);
+  if (dayOffset > 0 && previousWasAsk && OUTREACH.isAskTemplate(step?.templateKey)) {
+    const minAt = new Date(now.getTime() + ASK_SPACING_MS);
     if (at < minAt) at = minAt;
   }
   if (step?.weekdaysOnly) at = shiftToWeekdayMorning(at);
   return at;
+}
+
+/**
+ * When the customer last received a review ask that is not `excludeRequestId`
+ * — the 3-day rule's anchor at every dispatch boundary (sequence runner,
+ * legacy queued asks, legacy follow-ups). review_requests only; staff-sent
+ * asks with no request row are detected separately by
+ * manualReviewAskSentRecently. Throws on a lookup failure so callers fail
+ * closed (no evidence is not "no ask").
+ */
+async function lastDeliveredAskAt(customerId, { excludeRequestId = null } = {}) {
+  const q = db("review_requests")
+    .where({ customer_id: customerId })
+    .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+    .whereRaw(ASK_TOUCH_SQL)
+    // No creation-time cutoff (codex #4141 r3 P2): a row created weeks ago
+    // and delivered today is today's ask. The predicate above is already
+    // "delivered", and a customer's request rows are few (3-ask cap).
+    .select("sms_sent_at", "sent_at");
+  if (excludeRequestId) q.where("id", "!=", excludeRequestId);
+  const rows = await q;
+  return rows.reduce((max, r) => {
+    // The LATER delivered channel anchors the rule: a Both ask whose email
+    // retried after the text was last heard from at the email.
+    const t = Math.max(...[r.sms_sent_at, r.sent_at].map((v) => (v ? new Date(v).getTime() : 0)));
+    return Number.isFinite(t) && t > (max ? max.getTime() : 0) ? new Date(t) : max;
+  }, null);
 }
 
 /**
@@ -840,6 +880,13 @@ const ReviewService = {
 
     if (shouldSendImmediately) {
       const outcome = await this.sendSMS(request.id, { expectedPhone });
+      // Not delivered — held by the 3-day rule, its lookup, the send window
+      // or a provider retry. The row stays queued for the retry owner, and
+      // the caller learns that it was NOT sent (codex #4141 r3 P2: the tech
+      // app was told sent:true for a text that could be 72 h out).
+      if (outcome && outcome.deferred) {
+        request.sendOutcome = { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
+      }
       if (outcome && outcome.refused === "approved_phone_drift") {
         // Remove the row this very call created (pre-push r15 P1): left in
         // place it would later be sent by the scheduler to the unapproved
@@ -877,7 +924,7 @@ const ReviewService = {
    * bound total volume, and an sms_log blip must not silently kill every
    * post-service enrollment.
    */
-  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null } = {}) {
+  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null, failClosed = false, returnAt = false } = {}) {
     // yelp.com/writeareview and facebook.com/<page>/reviews are the Insert
     // Link sheet's seeded write-a-review destinations (link-library.js) —
     // an operator texting one is a personal ask exactly like a pasted
@@ -935,7 +982,9 @@ const ReviewService = {
         .filter((t) => Number.isFinite(t));
       const unused = sentTimes.filter((sT) =>
         candidateTimes.some((cT) => Math.abs(cT - sT) <= CORRESPONDENCE_MS));
-      return candidates.some((c) => {
+      // Newest manual ask's send time (candidates are created_at DESC).
+      let manualAt = null;
+      candidates.some((c) => {
         const t = new Date(c.created_at).getTime();
         let best = -1;
         let bestGap = Infinity;
@@ -943,15 +992,22 @@ const ReviewService = {
           const gap = Math.abs(sT - t);
           if (gap <= TEN_MIN && gap < bestGap) { best = i; bestGap = gap; }
         });
-        if (best === -1) return true; // no unconsumed pipeline send → manual ask
+        if (best === -1) { manualAt = new Date(t); return true; } // no unconsumed pipeline send → manual ask
         unused.splice(best, 1);
         return false;
       });
+      // returnAt: the 3-day rule anchors to the ask's actual send, so the
+      // dispatch guards get the Date (null = no manual ask), not a boolean.
+      return returnAt ? manualAt : manualAt != null;
     } catch (err) {
+      // failClosed: the 3-day rule treats an unavailable lookup as a hold,
+      // never as "no ask" — only the enrollment standdown fails open.
+      if (failClosed) throw err;
       logger.warn(`[review] manual-ask lookup failed (customerId=${customerId}): ${err.message} — enrolling anyway`);
       return false;
     }
   },
+
 
   /**
    * Which cadence plan this completion should enroll (owner spec 2026-08-05):
@@ -3936,7 +3992,7 @@ const ReviewService = {
         return { outcome: "deferred", nextAllowedAt: touch.nextAllowedAt, requestId: touch.requestId };
       }
       if (touch.blocked || touch.terminal) {
-        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null };
+        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null, ...(touch.nextAllowedAt ? { nextAllowedAt: touch.nextAllowedAt } : {}) };
       }
       // 'send_failed' is a QUEUED outcome to callers (the satisfaction route
       // hides its fallback link on it), so only report it when a durable
@@ -4388,7 +4444,20 @@ const ReviewService = {
   },
 
   /** Run the current step of one sequence (send + advance, or stop). */
+  // A due step runs under the same per-customer try-lock scheduled and one-off
+  // ask dispatch take (codex #4141 r4 P1): the 'review-sequences' and
+  // 'review-requests-scheduled' job locks are distinct, so two paths could read
+  // no recent delivery and both text inside 72 h. A held lock leaves the row
+  // due; the next tick re-picks it.
   async _runSequenceStep(sequenceId) {
+    const seq = await db("review_sequences").where({ id: sequenceId }).first();
+    if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
+    const result = await runExclusive(`review-send:${seq.customer_id}`, () => this._runSequenceStepUnlocked(sequenceId), { recordHealth: false });
+    if (result && result.skipped) return { ran: false, deferred: true, reason: "customer_lock_held" };
+    return result;
+  },
+
+  async _runSequenceStepUnlocked(sequenceId) {
     const seq = await db("review_sequences").where({ id: sequenceId }).first();
     if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
     let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
@@ -4564,15 +4633,19 @@ const ReviewService = {
       return stop("stale");
     }
     let recentAskRows = [];
+    let recentAskLookupFailed = false;
     try {
       recentAskRows = await db("review_requests")
         .where({ customer_id: seq.customer_id })
-        .where("created_at", ">", new Date(Date.now() - 30 * 86400000))
+        // Bounded by DELIVERY (created_at as the fallback for undelivered rows,
+        // codex #4141 r3 P2): a row created weeks ago and sent today is today's ask.
+        .whereRaw("COALESCE(sms_sent_at, sent_at, created_at) > ?", [new Date(Date.now() - 30 * 86400000)])
         .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
         .whereRaw(ASK_TOUCH_SQL)
         .select("sequence_id", "template_key", "sms_sent_at", "sent_at");
     } catch {
       recentAskRows = []; // hygiene check is best-effort; the cap/cooldown guards below still hold
+      recentAskLookupFailed = true; // …but the 3-day rule fails closed (below)
     }
     const externallyAsked = recentAskRows.some(
       (r) => (r.sms_sent_at || r.sent_at)
@@ -4582,13 +4655,65 @@ const ReviewService = {
     );
     if (externallyAsked) return stop("superseded");
 
+    // The 3-day rule, re-checked at the dispatch boundary (owner ruling
+    // 2026-09-07): the schedule computed at the last send can be overtaken —
+    // a Day-0 held by the send window and sent late, a retry, a same-series
+    // first-treatment ask — so the last DELIVERED ask decides, not the plan.
+    // A held step keeps its place: next_run_at moves to lastSent + 72h (then
+    // the weekday shift), the decision says why, and nothing is dropped.
+    // Only an ask is spaced: a private no-link check-in an admin plan names
+    // (resolution_check / satisfaction_confirm) is a support message and
+    // must not wait 72 h behind the last ask (codex #4141 r1).
+    const stepForSpacing = plan[seq.current_step] || {};
+    // By TEMPLATE regardless of the requested channel (codex #4141 r3 P2): an
+    // admin plan may label a no-link check-in "email"; sendOutreachTouch
+    // forces it to SMS anyway, and it is still a support message, not an ask.
+    // A template-less step (the default email nudge) counts as an ask.
+    const stepIsAsk = OUTREACH.isAskTemplate(stepForSpacing.templateKey);
+    if (stepIsAsk && recentAskLookupFailed) {
+      // No evidence is not "no ask": an unavailable lookup defers the step
+      // instead of sending inside the promised 72 h (codex #4141 r1 P1).
+      const nextEvalAt = new Date(Date.now() + 30 * 60 * 1000);
+      await db("review_sequences")
+        .where({ id: seq.id, status: "active" })
+        .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "spacing_lookup_unavailable", nextEvalAt }), updated_at: new Date() });
+      return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
+    }
+    const lastAskAtMs = recentAskRows.reduce((max, r) => {
+      const t = new Date(r.sms_sent_at || r.sent_at).getTime();
+      return Number.isFinite(t) && t > max ? t : max;
+    }, 0);
+    if (stepIsAsk && lastAskAtMs && Date.now() - lastAskAtMs < ASK_SPACING_MS) {
+      let spacedAt = new Date(lastAskAtMs + ASK_SPACING_MS);
+      if (stepForSpacing.weekdaysOnly) spacedAt = shiftToWeekdayMorning(spacedAt);
+      await db("review_sequences")
+        .where({ id: seq.id, status: "active" })
+        .update({ next_run_at: spacedAt, decision: sequenceDecision({ reason: "spacing", plannedAt: spacedAt, nextEvalAt: spacedAt }), updated_at: new Date() });
+      return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
+    }
+
     // Mid-cadence manual-ask standdown (codex #3235 r1 P1): the owner can
     // hand-send an ask AFTER enrollment (evening of a next-morning Day-0, or
     // between Day 0 and Day 4). Scoped to evidence since the sequence
     // started — pre-enrollment asks were already screened at enrollment, and
     // an operator-started sequence keeps its deliberate override.
-    if (seq.started_at && await this.manualReviewAskSentRecently(seq.customer_id, { since: seq.started_at })) {
-      return stop("manual_ask_recent");
+    if (seq.started_at) {
+      let manualAskRecent = false;
+      try {
+        manualAskRecent = await this.manualReviewAskSentRecently(seq.customer_id, { since: seq.started_at, failClosed: true });
+      } catch (err) {
+        // No evidence is not "no ask" (codex #4141 r4 P1): an ask step defers
+        // like the review_requests lookup above; a no-link check-in proceeds.
+        if (stepIsAsk) {
+          const nextEvalAt = new Date(Date.now() + 30 * 60 * 1000);
+          await db("review_sequences")
+            .where({ id: seq.id, status: "active" })
+            .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "spacing_lookup_unavailable", nextEvalAt }), updated_at: new Date() });
+          logger.warn(`[review] staff-ask lookup failed, deferring sequence step (sequenceId=${seq.id}): ${err.message}`);
+          return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
+        }
+      }
+      if (manualAskRecent) return stop("manual_ask_recent");
     }
 
     const step = plan[seq.current_step] || {};
@@ -4657,7 +4782,7 @@ const ReviewService = {
         });
         return { ran: true, sent: true, completed: true, step: seq.current_step };
       }
-      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep] });
+      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[seq.current_step] || null });
       await db("review_sequences").where({ id: seq.id, status: "active" }).update({
         current_step: nextStep,
         touches_sent: seq.touches_sent + 1,
@@ -5539,6 +5664,7 @@ const ReviewService = {
 };
 
 ReviewService.__private = {
+  lastDeliveredAskAt,
   retryAtForDeferredSend,
   calculateReviewSendTime,
   calculateReviewSendPlan,
