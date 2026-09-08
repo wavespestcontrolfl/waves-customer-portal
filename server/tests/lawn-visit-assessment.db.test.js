@@ -67,6 +67,26 @@ const analysis = (overrides = {}) => ({
     expect(row.raw_response).toEqual({ ok: true });
     await expect(visit.recordRun({ assessment, analysis: analysis(), photoRecords: [] }, db.knex)).rejects.toThrow(/unique|duplicate/i);
     expect(await visit.loadRun(assessment.id, db.knex)).toMatchObject({ id: row.id });
+    // The photo ids are attached after the photos are stored (the run itself is written with the assessment).
+    const attached = await visit.attachRunPhotos(row.id, [photo.id, 'second'], db.knex);
+    expect(attached.photo_ids).toEqual([photo.id, 'second']);
+  });
+
+  test('recordRun inside the assessment transaction: a failed run insert rolls the assessment back', async () => {
+    const { customerId } = await seed();
+    await expect(db.knex.transaction(async (trx) => {
+      const [row] = await trx('lawn_assessments').insert({ customer_id: customerId, service_date: '2026-09-08', turf_density: 1 }).returning('*');
+      await visit.recordRun({ assessment: row, analysis: analysis({ promptVersion: null }), photoRecords: [] }, trx); // NOT NULL violation
+    })).rejects.toThrow();
+    expect(await db.knex('lawn_assessments').where({ customer_id: customerId, turf_density: 1 }).first()).toBeUndefined();
+  });
+
+  test('loadRun reads "no run" from a database without the table (migration lag) and rethrows anything else', async () => {
+    const schemaless = { ...db.knex };
+    const missing = Object.assign(() => ({ where: () => ({ first: async () => { throw Object.assign(new Error('relation does not exist'), { code: '42P01' }); } }) }), schemaless);
+    expect(await visit.loadRun('x', missing)).toBeUndefined();
+    const broken = () => ({ where: () => ({ first: async () => { throw Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }); } }) });
+    await expect(visit.loadRun('x', broken)).rejects.toThrow(/connection refused/);
   });
 
   test('an unavailable run records the reason with NULL provider, scores and raw output', async () => {
