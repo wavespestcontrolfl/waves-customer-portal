@@ -725,6 +725,16 @@ async function legacyBaselineFields({ assessment, run, confirmed, propertyHistor
   return existing ? {} : { is_baseline: true };
 }
 
+// Narrows a lawn_assessments query to rows that count as prior assessments:
+// a run-backed row that has not confirmed yet is pending, not history —
+// the legacy baseline count (property history off) must not see it.
+function withoutPendingRuns(query) {
+  return query.whereNot(function pendingRun() {
+    this.where('lawn_assessments.confirmed_by_tech', false)
+      .whereExists(function run() { this.select(1).from('lawn_assessment_runs').whereRaw('lawn_assessment_runs.assessment_id = lawn_assessments.id'); });
+  });
+}
+
 // The run row's existence — not the gate — says how an assessment row was
 // produced, so /confirm resolves it for every row. A database without the
 // table yet (migration lag) reads as "no run": the legacy path, unchanged.
@@ -1103,6 +1113,7 @@ module.exports = {
   safeConfirmationStep,
   mergedReviewInputs,
   legacyBaselineFields,
+  withoutPendingRuns,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
   SYSTEM_PROMPT,

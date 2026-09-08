@@ -419,6 +419,14 @@ describe('legacy baseline on confirm', () => {
   });
 });
 
+describe('prior-assessment count', () => {
+  test('withoutPendingRuns drops an unconfirmed run-backed row from the legacy baseline count, keeps everything else', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const sql = visit.withoutPendingRuns(knex('lawn_assessments').where({ customer_id: 'c' })).count('id as cnt').toString();
+    expect(sql).toBe('select count("id") as "cnt" from "lawn_assessments" where "customer_id" = \'c\' and not ("lawn_assessments"."confirmed_by_tech" = false and exists (select 1 from "lawn_assessment_runs" where lawn_assessment_runs.assessment_id = lawn_assessments.id))');
+  });
+});
+
 describe('technician review on confirm', () => {
   const run = { id: 'run-1', status: 'complete', findings: JSON.stringify([
     { finding_id: 'F1', name: 'Irregular browning along the driveway edge', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: ['x'], inferred_context: [], negative_evidence: [], confirmation_step: 'float test', customer_wording: 'w', photo_refs: [1], zone: 'front', label: 'thinning turf', source: 'model' },

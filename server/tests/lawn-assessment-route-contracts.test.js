@@ -136,6 +136,8 @@ describe('lawn assessment route contracts', () => {
       // The run keeps the seasonally adjusted scores the technician was shown; a gated row is inserted without the legacy baseline flag.
       expect(assess).toMatch(/visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis, adjustedScores \}, trx\)/);
       expect(assess).toMatch(/is_baseline: propertyHistoryEnabled \|\| visitAssessmentEnabled \? false : isBaseline,/);
+      // The legacy baseline count ignores a pending run-backed row, so a legacy replacement after the kill switch still becomes the baseline.
+      expect(assess).toMatch(/const existingCount = await visitAssessment\.withoutPendingRuns\(db\('lawn_assessments'\)\.where\(\{ customer_id: customerId \}\)\)/);
     });
 
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
