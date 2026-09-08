@@ -603,3 +603,22 @@ it('changing visits after a governed draft was restored under a plan outage drop
   expect(fetch.mock.calls.filter(([url, options]) => url.includes('treatment-plans/second-visit') && options?.body)
     .map(([, options]) => JSON.parse(options.body).lawnSqft)).toEqual([]);
 });
+
+it('changing visits after a partial-zone edit gives the next visit its own full zones, saved area and defaults', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  const areas = document.getElementById('cp-areas-treated-desktop');
+  fireEvent.click(areas);
+  fireEvent.click(within(areas.parentElement).getByRole('button', { name: 'Back yard', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  expect(screen.getByLabelText('Area for this visit (sq ft)').value).toBe('');
+  view.rerender(<CompletionPanel service={{ ...service, id: 'second-visit' }} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  // The first visit's zone subset must not seed the second visit or clear its
+  // saved lawn area (Codex r10 P1).
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  expect(screen.getByLabelText('Area for this visit (sq ft)').value).toBe('5000');
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products.map(row => row.applicationArea)).toEqual(['Front yard, Back yard, Side yards', 'Front yard, Back yard, Side yards']);
+});

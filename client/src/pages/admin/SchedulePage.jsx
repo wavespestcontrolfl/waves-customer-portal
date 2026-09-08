@@ -11783,14 +11783,21 @@ export function CompletionPanel({
     // draft restored while its plan request had failed (no defaults loaded to
     // compare against) — otherwise the first visit's area and rows drive the
     // next visit's build request and quantities (pre-push audit P1).
+    // Treated zones are visit-owned too: a zone subset left from the previous
+    // visit would seed the next visit's defaults and clear its saved lawn area
+    // through the partial-zone effect (Codex r10 P1).
+    const zonesChanged = lawnAreasInitializedRef.current
+      && (areasServiced.length !== lawnDefaultAreas.length || lawnDefaultAreas.some((area) => !areasServiced.includes(area)));
     const previousVisitState = (lawnCompletionDefaults?.enabled && lawnCompletionDefaults.serviceId !== service.id)
       || lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0
-      || selectedProducts.some((product) => product.lawnPlanDefaults);
+      || selectedProducts.some((product) => product.lawnPlanDefaults) || zonesChanged;
     if (!previousVisitState) return;
     setSelectedProducts([]);
     setLawnAreaOverride(undefined);
     setLawnRemovedDefaultIds([]);
     setLawnDefaultsSeedSuppressed(false);
+    setAreasServiced([...lawnDefaultAreas]);
+    lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = false;
     lawnDefaultMixSnapshotRef.current = null;
   }, [service.id]);
