@@ -146,6 +146,16 @@ Return only JSON matching the supplied schema.
 ${stringifySmsEvidence({ current_message: sanitized[sanitized.length - 1], prior_messages: sanitized.slice(0, -1), properties: properties.map((property) => ({ id: property.id })) })}`;
 }
 
+// An hour range or alternative counts only when a side carries a clock
+// marker, so a calendar date such as 2040-09-10 is not a time range.
+const CLOCK_RANGE = /\b(\d{1,2}(?::\d{2})?)\s*([ap]\.?m?\.?)?\s*(?:-|–|to|or)\s*(\d{1,2}(?::\d{2})?)\s*([ap]\.?m?\.?)?(?=\s|[,.!?;]|$)/gi;
+function hasClockRange(body) {
+  for (const match of body.matchAll(CLOCK_RANGE)) {
+    if (match[2] || match[4] || match[1].includes(':') || match[3].includes(':')) return true;
+  }
+  return false;
+}
+
 function groundExtraction(parsed, { message, properties = [], captureCommitments = true }) {
   if (!validate(parsed)) throw new Error('sms_operations_invalid_schema');
   if (stringifySmsEvidence(parsed) !== JSON.stringify(parsed)) throw new Error('sms_operations_sensitive_output');
@@ -181,8 +191,8 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     // A shortened due_text can drop an alternative or a hedge the source
     // states ("9am or 10am", "9-10am", "3pm-ish"); substring grounding
     // cannot see what it omitted, so such timing stays a review item.
-    const timingAmbiguous = clocks.length > 1
-      || /\b\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m?\.?\s*)?(?:-|–|to|or)\s*\d{1,2}\b|\b(?:between|sometime|anytime|or so|or later|or earlier)\b|-?ish\b/i.test(body);
+    const timingAmbiguous = clocks.length > 1 || hasClockRange(body)
+      || /\b(?:between|sometime|anytime|or so|or later|or earlier)\b|(?:[ap]\.?m\.?|[ap]|o['’]?clock|noon|midnight|\d)\s*-?\s*ish\b/i.test(body);
     const resolved = timingGrounded && clockStated && !timingAmbiguous
       ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
     const proposed = item.due_at ? parseDueAt(item.due_at) : resolved;

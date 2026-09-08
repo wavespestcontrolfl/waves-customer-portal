@@ -360,6 +360,16 @@ describe('SMS operational evidence and ownership', () => {
       expect(result.dropped).toBe(1);
     });
 
+  test.each(['Please finish this and call tomorrow at 9am', 'Please call me on 2040-03-11 at 9am', 'Please call me in Parrish tomorrow at 9am'])(
+    'hedge and range detection is anchored to clock tokens, not words or calendar dates: %s', (body) => {
+      const message = source(body);
+      const result = groundExtraction(extracted([obligation(message.message_body, {
+        kind: 'callback', due_text: body.includes('2040') ? '2040-03-11 at 9am' : 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+      })]), { message, properties });
+      expect(result.obligations[0]).toMatchObject({ due_at: '2040-03-11T13:00:00.000Z', timing_unverified: false });
+      expect(result.dropped).toBe(0);
+    });
+
   test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate'], ['Please send 2 a month of the estimates', 'send_estimate']])(
     'a number that is not a clock hour stays undated without review: %s', (body, kind) => {
       const message = source(body);
