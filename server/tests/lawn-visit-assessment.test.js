@@ -391,6 +391,11 @@ describe('run row', () => {
     expect(JSON.parse(row.photo_ids)).toEqual(['p1', 'p2']);
     expect(JSON.parse(row.findings)).toEqual([{ finding_id: 'F1' }]);
     expect(JSON.parse(row.raw_response)).toEqual({ x: 1 });
+    // The scores the technician was shown ride on the run as an immutable snapshot (no text column); nothing on an unavailable run.
+    expect(row.scores_adjusted).toBeNull();
+    const shown = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis, adjustedScores: { turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50, observations: 'obs', overwatering_signal: false } });
+    expect(JSON.parse(shown.scores_adjusted)).toEqual({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 });
+    expect(visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, status: 'unavailable', reason: 'x' }, adjustedScores: null }).scores_adjusted).toBeNull();
     // A billed leg that failed before the fallback answered adds its tokens; a failure without usage adds nothing.
     const chained = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, failures: [{ provider: 'gemini', reason: 'empty_findings', validator: true, usage: { input_tokens: 10, output_tokens: 20, reasoning_tokens: 30 } }, { provider: 'x', reason: 'x_503' }] } });
     expect(chained).toMatchObject({ tokens_in: 11, tokens_out: 22, tokens_reasoning: 33 });
@@ -402,6 +407,18 @@ describe('run row', () => {
   });
 });
 
+describe('legacy baseline on confirm', () => {
+  const knexWith = (existing) => () => ({ where() { return this; }, whereNot() { return this; }, first: async () => existing });
+  const args = { assessment: { id: 'a1', customer_id: 'c1' }, run: { id: 'r1' }, confirmed: true, propertyHistoryEnabled: false };
+  test('a run-backed row becomes the customer baseline on the confirm that completes it, when none exists', async () => {
+    expect(await visit.legacyBaselineFields(args, knexWith(null))).toEqual({ is_baseline: true });
+    expect(await visit.legacyBaselineFields(args, knexWith({ id: 'older' }))).toEqual({});
+    expect(await visit.legacyBaselineFields({ ...args, confirmed: false }, knexWith(null))).toEqual({});
+    expect(await visit.legacyBaselineFields({ ...args, run: null }, knexWith(null))).toEqual({});
+    expect(await visit.legacyBaselineFields({ ...args, propertyHistoryEnabled: true }, knexWith(null))).toEqual({});
+  });
+});
+
 describe('technician review on confirm', () => {
   const run = { id: 'run-1', status: 'complete', findings: JSON.stringify([
     { finding_id: 'F1', name: 'Irregular browning along the driveway edge', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: ['x'], inferred_context: [], negative_evidence: [], confirmation_step: 'float test', customer_wording: 'w', photo_refs: [1], zone: 'front', label: 'thinning turf', source: 'model' },
@@ -409,10 +426,33 @@ describe('technician review on confirm', () => {
   ]) };
 
   test('a plain confirm is valid and is NOT a review; any review field makes it one', () => {
-    expect(visit.validateReview({ assessmentId: 'a', adjustedScores: { turf_density: 70 } }, run)).toEqual({ errors: [], review: { provided: false, reviewedFindings: [], addedDetails: [], appliedProducts: [] } });
+    expect(visit.validateReview({ assessmentId: 'a', adjustedScores: { turf_density: 70 } }, run)).toEqual({ errors: [], review: { provided: false, sent: { reviewedFindings: false, addedDetails: false, appliedProducts: false }, reviewedFindings: [], addedDetails: [], appliedProducts: [] } });
+    expect(visit.validateReview({ appliedProducts: [] }, run).review.sent).toEqual({ reviewedFindings: false, addedDetails: false, appliedProducts: true });
     expect(visit.validateReview(undefined, run).review.provided).toBe(false);
     expect(visit.validateReview({ reviewedFindings: [] }, run).review.provided).toBe(true);
     expect(visit.validateReview({ appliedProducts: [] }, run).review.provided).toBe(true);
+  });
+
+  test('a follow-up confirm keeps the stored review for every field it did not send; a field it sent — even empty — replaces the stored one', () => {
+    // First (pending) confirm: F2 rejected, one added detail, one product.
+    const first = visit.buildReview(run, visit.validateReview({ reviewedFindings: [{ finding_id: 'F2', keep: false, tech_note: 'not chinch' }], addedDetails: [{ text: 'Dog run along the back fence', zone: 'back' }], appliedProducts: [{ product_name: 'Bifen I/T', addresses_findings: ['F1'] }] }, run).review);
+    const stored = { ...run, reviewed_findings: JSON.stringify(first.reviewed_findings), added_details: JSON.stringify(first.added_details), reconciliation: JSON.stringify(first.reconciliation) };
+    // Second confirm fills a score and sends only appliedProducts.
+    const second = visit.buildReview(stored, visit.validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['F1'] }] }, stored).review);
+    expect(second.reviewed_findings.find((f) => f.finding_id === 'F2')).toMatchObject({ keep: false, tech_note: 'not chinch' });
+    expect(second.added_details).toHaveLength(1);
+    expect(second.added_details[0].name).toBe('Dog run along the back fence');
+    expect(second.reconciliation.products.map((p) => p.product_name)).toEqual(['Celsius']);
+    // A confirm that sends nothing of the review builds from the stored review unchanged.
+    const none = visit.buildReview(stored, visit.validateReview({}, stored).review);
+    expect(none.reviewed_findings.find((f) => f.finding_id === 'F2').keep).toBe(false);
+    expect(none.reconciliation.products.map((p) => p.product_name)).toEqual(['Bifen I/T']);
+    // An explicitly empty field clears it.
+    const cleared = visit.buildReview(stored, visit.validateReview({ addedDetails: [] }, stored).review);
+    expect(cleared.added_details).toEqual([]);
+    expect(cleared.reconciliation.products.map((p) => p.product_name)).toEqual(['Bifen I/T']);
+    // A first review on a run with no stored review starts from nothing.
+    expect(visit.mergedReviewInputs(run, { sent: {}, reviewedFindings: [], addedDetails: [], appliedProducts: [] })).toEqual({ reviewedFindings: [], addedDetails: [], appliedProducts: [] });
   });
 
   test('the clean-lawn sentinel stays in the review but out of the reconciliation', () => {
@@ -544,6 +584,9 @@ describe('confirm scores preserve NULLs', () => {
     expect(filled).toMatchObject({ overallScore: 77, confirmed: true, missing: [], calibrationEligible: true });
     // the AI baseline is the run's own answer in legacy units — not the assessment row
     expect(filled.aiScores).toEqual({ turf_density: 70, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 });
+    // …and the seasonally adjusted snapshot the technician was shown wins over the raw answer when the run carries one
+    const snapshot = { ...run, scores_adjusted: JSON.stringify({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 }) };
+    expect(visit.confirmScores(assessment, snapshot, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 }).aiScores).toEqual({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 });
     // the overall inputs can all be known while a sub-score is not — still pending
     const subScoreMissing = visit.confirmScores({ ...assessment, color_health: 70, thatch_level: null }, run, {}, { scoreValue, calculateOverallScore: () => 77 });
     expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], calibrationEligible: false });
