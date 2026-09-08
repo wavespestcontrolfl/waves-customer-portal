@@ -943,3 +943,24 @@ test('a guard stops at a coordinated finite predicate; "plans on" is prospective
   expect(score('E6', "Waves Pest Control's technicians control mosquitoes.").expected.mosquito).toBe(true);
   expect(score('E6', "Orkin's technicians eliminate termites.").expected.termite).toBe(false);
 });
+
+test('bare future tense is prospective, every franchise wording carries the former-status guard, and a treatment verb honors exclusions and trailing hedges (#4155 r4)', () => {
+  expect(score('E5', 'Waves will serve Manatee County.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves will continue to serve Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves will always serve Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves will offer fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves will continue to offer fumigation.').forbidden.fumigation_offered).toBe(true);
+  for (const text of ['Waves formerly operated as a franchise.', 'Waves was once part of a franchise.', 'Waves previously joined a franchise but is now independent.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(false);
+  }
+  for (const text of ['Waves operates as a franchise.', 'Waves is part of the Orkin franchise.', 'Waves formerly operated on its own and is now part of a franchise.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(true);
+  }
+  for (const text of ['Waves controls all pests besides termites.', 'Waves controls ants, with the exception of termites.', 'Waves controls every pest except termites.']) {
+    expect(score('E6', text).expected.termite).toBe(false);
+  }
+  expect(score('E6', 'Waves controls rodents other than mice.').expected.rodent).toBe(true);
+  expect(score('E6', 'Our technicians eliminate termites, allegedly.').expected.termite).toBe(false);
+  expect(score('E6', 'Our technicians eliminate termites, reportedly.').expected.termite).toBe(false);
+  expect(score('E6', 'Our technicians eliminate termites, and they say so on the site.').expected.termite).toBe(true);
+});
