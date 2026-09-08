@@ -128,6 +128,38 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     await db('customers').whereIn('id', [customerA, customerB]).update({ crm_notes: null });
   }, 30000);
 
+  test('customer matching cannot describe another account inside a customer-scoped task', async () => {
+    const other = await db('customers').where('id', customerB).first('phone');
+    mockModel.mockResolvedValueOnce(tools('match_existing_customer', { phone: other.phone }, 'match'))
+      .mockResolvedValueOnce(answer('The selected customer is already on file.'));
+    const result = await api('/query', request(`Get customer details for ${nameA}`));
+    expect(result.status).toBe(200);
+    expect(result.body.taskTarget.customer_id).toBe(customerA);
+    const round = mockModel.mock.calls[1][0].messages.at(-1).content;
+    expect(JSON.parse(round.find(block => block.tool_use_id === 'match').content)).toMatchObject({ count: 0, ambiguous: true, matches: [] });
+    expect(JSON.stringify(round)).not.toContain(customerB);
+    expect(JSON.stringify(round)).not.toContain(other.phone);
+  }, 30000);
+
+  test('tasks still open for the operator stay listed beyond the latest twenty', async () => {
+    const IbTasks = require('../services/intelligence-bar/tasks');
+    const session = crypto.randomUUID();
+    const ids = [];
+    for (let index = 0; index < 22; index += 1) {
+      const { task } = await IbTasks.begin({ actorId: actor, sessionId: session, requestKey: crypto.randomUUID(),
+        request: { prompt: `Synthetic saved request ${index}` }, pageContext: {} });
+      ids.push(task.id);
+    }
+    await db('ib_tasks').where('id', ids[0]).update({ state: 'needs_information', created_at: new Date(Date.now() - 120000) });
+    await db('ib_tasks').where('id', ids[1]).update({ state: 'responded', created_at: new Date(Date.now() - 110000) });
+    const listed = await api(`/tasks?session_id=${session}`);
+    const listedIds = listed.body.tasks.map(task => task.id);
+    expect(listedIds).toContain(ids[0]);
+    expect(listedIds).not.toContain(ids[1]);
+    expect(listed.body.tasks).toHaveLength(21);
+    expect(listed.body.tasks.find(task => task.id === ids[0]).state).toBe('needs_information');
+  }, 30000);
+
   test('retention removes expired recovery data with gates off and preserves pending-action reconciliation', async () => {
     const Tasks = require('../services/intelligence-bar/tasks');
     const Pending = require('../services/intelligence-bar/pending-actions');

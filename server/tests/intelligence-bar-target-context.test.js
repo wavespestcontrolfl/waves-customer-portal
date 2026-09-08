@@ -40,6 +40,19 @@ test.each(selectors)(
     expect((await Context.validateRecordTarget({ customer_id: A }, task, { toolName: 'send_sms' })).code).toBe('target_clarification_required');
   });
 
+test('direct read verbs resolve an exact full name without becoming refusal hints', async () => {
+  lookupRows = [rows.customers[0]];
+  for (const prompt of ['Show Synthetic Person details', 'Find Synthetic Person', 'Look up Synthetic Person', 'Show me Synthetic Person']) {
+    const task = await Context.resolve({ prompt, pageData: {} });
+    expect(task.target).toMatchObject({ customer_id: A, provenance: 'current_request_lookup' });
+  }
+  lookupRows = [];
+  // A read that names nobody keeps the viewed customer instead of refusing it.
+  const viewed = await Context.resolve({ prompt: 'Show open invoices for this customer', pageData: { customer_id: A } });
+  expect(viewed.target.customer_id).toBe(A);
+  expect(Context.namesRequested('Show open invoices for this customer')).toBe(false);
+});
+
 test.each(selectors)('a matching full name after "%s" still resolves through fresh lookup', async selector => {
   lookupRows = [rows.customers[0]];
   const task = await Context.resolve({ prompt: `${selector} Synthetic Person using this customer`, pageData: {} });

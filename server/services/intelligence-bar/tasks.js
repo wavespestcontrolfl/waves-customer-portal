@@ -128,9 +128,12 @@ async function get(id, actorId, sessionId) {
 
 async function list(actorId, sessionId) {
   if (!UUID_RE.test(sessionId || '')) return [];
-  const tasks = await db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId })
-    .where('expires_at', '>', db.fn.now()).orderBy('created_at', 'desc').limit(20)
-    .select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at');
+  const scoped = () => db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId }).where('expires_at', '>', db.fn.now());
+  // The latest twenty plus every task still open for the operator, so an
+  // older approval, interruption or unknown outcome stays reachable.
+  const latest = scoped().orderBy('created_at', 'desc').limit(20).select('id');
+  const tasks = await scoped().where(query => query.whereIn('id', latest).orWhereNotIn('state', ['responded', 'canceled']))
+    .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at');
   if (!tasks.length) return tasks;
   const actions = await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id));
   return tasks.map(task => ({ ...task, state: exposedTaskState(task,

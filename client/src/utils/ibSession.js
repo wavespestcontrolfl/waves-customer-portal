@@ -1,5 +1,7 @@
 // Identity only: transcripts, customer data and confirmation credentials stay
-// server-side. A fresh request key isolates simultaneous requests and retries.
+// server-side. A request key isolates simultaneous requests; one logical
+// request keeps its key until the server answers, so a dropped response is
+// replayed as the saved task instead of running the request a second time.
 function uuid() {
   if (globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
@@ -22,6 +24,17 @@ export function ibSessionId() {
   } catch { return uuid(); }
 }
 
-export function ibRequestIdentity(sessionId = ibSessionId()) {
-  return { session_id: sessionId, request_key: uuid() };
+// begin(request) hands out the identity for that serialized request body. The
+// key survives a transport or server error, so resubmitting the same request
+// replays the server's saved task; it changes only when the request changes
+// or settle() records a definitive answer.
+export function createRequestIdentity(sessionId = ibSessionId()) {
+  let pending = null;
+  return {
+    begin(request) {
+      if (!pending || pending.request !== request) pending = { request, request_key: uuid() };
+      return { session_id: sessionId, request_key: pending.request_key };
+    },
+    settle() { pending = null; },
+  };
 }

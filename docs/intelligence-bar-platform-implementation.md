@@ -129,6 +129,12 @@ The `bd735bc42` main integration adds the completion pricing source reader;
 its exact upstream fingerprint is recorded as unmapped. No scheduling parity is
 claimed by importing this already-merged portal action.
 
+The desktop query site's reviewed fingerprint was refreshed in place when the
+request identity became retained across a dropped response (the call now
+serializes the request once and reuses its key until the server answers).
+Same exception, same reason: transport is not a domain capability and no
+action gained coverage.
+
 The `f2e61b677` integration imports the upstream Pipeline estimate lifecycle,
 reviewed send dialog and customer SMS consolidation. Seventeen additional sites
 and one changed customer-search fingerprint were checked against that exact

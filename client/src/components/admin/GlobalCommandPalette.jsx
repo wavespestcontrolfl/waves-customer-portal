@@ -26,7 +26,7 @@ import useModalFocus from "../../hooks/useModalFocus";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
-import { ibRequestIdentity, ibSessionId } from "../../utils/ibSession";
+import { createRequestIdentity, ibSessionId } from "../../utils/ibSession";
 import { retainTaskReceipt } from "../../utils/ibTaskReceipts";
 import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
@@ -313,6 +313,8 @@ function GlobalCommandPalette({ user }, ref) {
   tasksAvailableRef.current = tasksAvailable;
   const sessionIdRef = useRef(null);
   if (!sessionIdRef.current) sessionIdRef.current = ibSessionId();
+  const identityRef = useRef(null);
+  if (!identityRef.current) identityRef.current = createRequestIdentity(sessionIdRef.current);
   const submittingRef = useRef(false);
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
@@ -552,27 +554,32 @@ function GlobalCommandPalette({ user }, ref) {
       saveRecent(q);
       setRecents(loadRecents());
 
+      const request = {
+        prompt: q,
+        conversationHistory,
+        context,
+        ...(selectedTarget ? { selected_target: selectedTarget } : {}),
+        ...(threadId
+          ? {
+              thread_id: threadId,
+              ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
+            }
+          : {}),
+        pageData: { ...ibPageData, route: location.pathname, search: location.search },
+        ...(attachments.length
+          ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
+          : {}),
+      };
+      // The request key outlives a dropped response: the same request
+      // resubmitted replays the saved task instead of running it again.
+      let answered = false;
       try {
         const data = await adminFetch("/admin/intelligence-bar/query", {
           method: "POST",
-          body: JSON.stringify({
-            prompt: q,
-            conversationHistory,
-            context,
-            ...ibRequestIdentity(sessionIdRef.current),
-            ...(selectedTarget ? { selected_target: selectedTarget } : {}),
-            ...(threadId
-              ? {
-                  thread_id: threadId,
-                  ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
-                }
-              : {}),
-            pageData: { ...ibPageData, route: location.pathname, search: location.search },
-            ...(attachments.length
-              ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
-              : {}),
-          }),
+          body: JSON.stringify({ ...request, ...identityRef.current.begin(JSON.stringify(request)) }),
         });
+        identityRef.current.settle();
+        answered = true;
         // "New chat" (or a context reset) while the query was inflight —
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
@@ -611,8 +618,12 @@ function GlobalCommandPalette({ user }, ref) {
       if (threadEpochRef.current === epoch) {
         submittingRef.current = false;
         setLoading(false);
-        setPrompt("");
-        resetAttachments();
+        // A failed request keeps its prompt and attachments so a retry is the
+        // same request; only an answered one clears the composer.
+        if (answered) {
+          setPrompt("");
+          resetAttachments();
+        }
       }
     },
     [prompt, loading, conversationHistory, context, threadId, location.pathname, location.search, attachments, resetAttachments, ibPageData],
@@ -1553,10 +1564,13 @@ function MobileSheet({
 // Attach (photo) control — square icon button sized to match DictationButton.
 function IntelligenceResponse({ response, activity, task, variant }) {
   const hasActions = task && (task.pendingActions?.length || task.receipts?.length);
-  const prose = <div style={{ fontSize: 14, lineHeight: 1.65, color: '#27272A' }}>{renderMarkdown(response)}</div>;
+  // "dark" is the Tier-2 D palette of the desktop modal; "light" is the
+  // zinc shell used by the shared bar (ToolActivityList reads it the same way).
+  const light = variant === "light";
+  const prose = <div style={{ fontSize: 14, lineHeight: 1.65, color: light ? '#27272A' : D.text }}>{renderMarkdown(response)}</div>;
   return <>
     {!hasActions && prose}
-    {(hasActions || activity.length > 0) && <details style={{ marginTop: 12, fontSize: 14, color: '#52525B' }}>
+    {(hasActions || activity.length > 0) && <details style={{ marginTop: 12, fontSize: 14, color: light ? '#52525B' : D.muted }}>
       <summary style={{ minHeight: 44, cursor: 'pointer', paddingTop: 8 }}>Execution details</summary>
       <ToolActivityList items={activity} variant={variant} />
       {hasActions && prose}

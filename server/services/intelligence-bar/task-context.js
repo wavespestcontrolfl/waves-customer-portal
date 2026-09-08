@@ -26,6 +26,9 @@ const normalizeName = value => String(value || '').toLowerCase().replace(/[’']
 // "customer Jhon" after seeing "update customer".
 const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update';
 const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named|both|these customers|all of these`;
+// Direct read verbs resolve an exact full name ("Show John Smith details")
+// without becoming refusal hints: a read that names nobody stays a read.
+const READ_SELECTOR_SOURCE = 'show|find|look\\s+up|pull\\s+up|open|view|display';
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
@@ -108,7 +111,7 @@ function namesTargetCustomer(clause, customer) {
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
-  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE})(?:\\s+both)?$`).test(before)
+  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE}|(?:${READ_SELECTOR_SOURCE})(?:\\s+me)?)(?:\\s+both)?$`).test(before)
     || /\b(?:both|these customers|all of these)$/.test(before)
     || (/\b(?:both|these customers|all of these)\b/.test(clause) && /\band$/.test(before));
 }
