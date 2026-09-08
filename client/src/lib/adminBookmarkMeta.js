@@ -26,10 +26,10 @@ export const CUSTOMER_BOOKMARK_META = {
 
 export const ADMIN_BOOKMARK_META = {
   manifest: "/admin-manifest.json",
-  appTitle: "Waves Admin",
+  appTitle: "Waves",
   description:
     "Waves Pest Control admin portal — dispatch, customers, billing, and reports.",
-  documentTitle: "Waves Admin",
+  documentTitle: "Waves",
   themeColor: "#18181B",
 };
 

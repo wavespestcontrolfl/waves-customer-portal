@@ -10,7 +10,7 @@ const customerHealth = require('../customer-health');
 // score. This module lets a single hot event rescore THAT one customer within
 // seconds. The live "🚨 Churn risk" owner alert (bell/push) that used to fire
 // on a crossing into critical was retired 2026-08-28 (owner ruling: churn is
-// reviewed in /admin/customers?view=health, not pushed).
+// reviewed through /admin/customers health filters, not pushed).
 //
 // Gated behind GATE_EVENT_RESCORE (fail-closed): when unset/!= 'true' this is a
 // no-op and behavior is exactly the nightly-only path.

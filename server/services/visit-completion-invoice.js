@@ -17,12 +17,16 @@ function office(reason, serviceId = null) {
 async function buildMemberLines(member, customer, trx) {
   const notes = member.record_notes || {};
   const price = Number.parseFloat(member.estimated_price);
-  if ([notes.backfill, notes.oneTimeRecapOnly, notes.invoiceAlreadySent].some(Boolean)) {
+  if ([notes.backfill, notes.invoiceAlreadySent].some(Boolean)) {
     return office('special_completion_billing', member.id);
   }
   if (member.record_status === 'incomplete'
       || ['inspection_only', 'customer_declined'].includes(notes.visitOutcome)) return { lineItems: [] };
   if (member.record_status !== 'completed') return office('record_not_completed', member.id);
+  if (notes.oneTimeRecapOnly) return { lineItems: [] };
+  if (['monthly_membership', 'annual_prepay'].includes(resolveBillingLane(customer).mode)) {
+    return office('covered_billing_lane');
+  }
   if (member.prepaid_method || Number(member.prepaid_amount) > 0) return office('prepaid_member', member.id);
   const payer = await require('./payer').resolveForInvoice({
     database: trx, customerId: customer.id, customer, scheduledServiceId: member.id, throwOnError: true,
@@ -71,8 +75,6 @@ async function buildMemberLines(member, customer, trx) {
 }
 
 async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
-  const lane = resolveBillingLane(customer).mode;
-  if (['monthly_membership', 'annual_prepay'].includes(lane)) return office('covered_billing_lane');
   const existing = await trx('invoices').where(function linkedMember() {
     this.whereIn('scheduled_service_id', members.map((member) => member.id))
       .orWhereIn('service_record_id', members.map((member) => member.record_id));
@@ -140,6 +142,18 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
   await trx('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('scheduled_service_id', billed.map(({ member }) => member.id))
     .update({ invoice_id: invoice.id, updated_at: trx.fn.now() });
+  // Server-owned charge ceiling survives invoice edits and closeout retries.
+  // It is recorded beside the submitted forms, never accepted from a client.
+  await trx('visit_completion_packets').where({ id: packet.id }).update({
+    payload: trx.raw('payload || ?::jsonb', [JSON.stringify({ billingSnapshot: {
+      invoiceId: invoice.id, totalCents: Math.round(Number(invoice.total) * 100),
+      netSubtotalCents: Math.round((Number(invoice.subtotal) - Number(invoice.discount_amount || 0)) * 100),
+      billedServiceIds: billed.map(({ member }) => member.id),
+      billingLane: resolveBillingLane(customer).mode,
+      memberPricing: billed.map(({ member }) => ({ id: member.id, price: Number(member.estimated_price),
+        isCallback: Boolean(member.is_callback), invoiceOnComplete: Boolean(member.create_invoice_on_complete) })),
+    } })]), updated_at: trx.fn.now(),
+  });
   return { state: 'invoice_ready', invoiceId: invoice.id, total: Number(invoice.total) };
 }
 
@@ -176,7 +190,7 @@ async function createVisitCompletionInvoice(packetId, database = db) {
       .select('s.*', 'r.id as record_id', 'r.status as record_status', 'r.structured_notes as record_notes',
         'r.customer_id as record_customer_id', 'r.scheduled_service_id as record_scheduled_service_id',
         'catalog.service_key', 'catalog.name as service_name');
-    if (members.length !== itemIds.length || members.length < 2
+    if (members.length !== itemIds.length || members.length < 1
         || members.some((member) => member.visit_id !== visit.id || member.customer_id !== customer.id
           || member.record_customer_id !== customer.id || member.record_scheduled_service_id !== member.id)) {
       throw new Error('Visit billing member identity mismatch');

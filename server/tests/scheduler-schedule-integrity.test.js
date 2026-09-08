@@ -10,7 +10,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn() }));
-jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()) }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({ flagUnplacedVisits: jest.fn() }));
 jest.mock('../services/time-tracking-crons', () => ({ initTimeTrackingCrons: jest.fn() }));
@@ -34,10 +34,11 @@ beforeEach(() => {
 test.each([
   [{ acceptedScheduleCheckFailed: true }, 'ACCEPTED-SCHEDULE-CHECK-FAILED'],
   [{ acceptedScheduleGaps: 1 }, 'acceptedScheduleGaps=1'],
-])('the existing daily tick surfaces acceptance-check status %j', async (result, message) => {
+  [{ prepayCoverageGaps: 1 }, 'prepayCoverageGaps=1'],
+])('the existing daily tick surfaces integrity-check status %j', async (result, message) => {
   runScheduleIntegrityWatchdog.mockResolvedValue({ skipped: false, stale: 0, unpricedSeries: 0,
     lawnEmailGaps: 0, lawnGapCheckFailed: false, acceptedScheduleGaps: 0,
-    acceptedScheduleCheckFailed: false, alerted: 0, ...result });
+    acceptedScheduleCheckFailed: false, prepayCoverageGaps: 0, alerted: 0, ...result });
   initScheduledJobs();
   // The earlier Google Ads upload shares 6:40; this watchdog is registered last.
   const registration = cron.schedule.mock.calls.filter(([expression]) => expression === '40 6 * * *').at(-1);

@@ -18,7 +18,7 @@
  *   - alert-fg reserved for: overdue balance, expiring card, refund/failed
  *     payments, at_risk/churned stage, health score < 40
  *   - Tier collapses to neutral Badge (no purple/gold/teal)
- *   - HealthCircle/RadarChart recolored to zinc; alert tier only when low
+ *   - Operational summary uses recorded billing and communication facts
  *
  * Audit focus:
  * - Six tabs each fetch their own data on mount/switch — confirm we
@@ -46,10 +46,13 @@
  *   Switching filter should clear stale rows / not mix categories.
  */
 
-import { useState, useEffect, useRef, useId } from "react";
+import { useState, useEffect, useRef, useId, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
+import "./customer360-workspace.css";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import {
+  ArrowUpRight,
+  ChevronDown,
   Bell,
   CheckCircle2,
   ChevronLeft,
@@ -61,13 +64,22 @@ import {
   Mail,
   MessageSquare,
   MoreHorizontal,
+  MapPin,
+  Phone,
   PenLine,
   RotateCcw,
   ShieldCheck,
   Trash2,
   XCircle,
 } from "lucide-react";
-import { CustomerActionBar } from "./StickyActionBar";
+import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
+import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
+import Customer360Activity from "./Customer360Activity";
+import Customer360Summary from "./Customer360Summary";
+import Customer360Estimates from "./Customer360Estimates";
+import useUnreadConversations from "../../hooks/useUnreadConversations";
+import { formatETDateOnly } from "../../lib/timezone";
+import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
 import { formatAddress } from "../../utils/format-address";
@@ -77,7 +89,11 @@ import {
   Badge,
   Button,
   Input,
+  Select,
   Switch,
+  Sheet,
+  SheetHeader,
+  SheetBody,
   Table,
   THead,
   TBody,
@@ -93,13 +109,16 @@ import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
-import useModalFocus from "../../hooks/useModalFocus";
-import { formatETDateOnly } from "../../lib/timezone";
 import { describeAutopaySetupLinkResult } from "../schedule/cardLinkStatus";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
 } from "../../lib/paymentMethodConsentText";
+
+// Reuse the Communications composer without loading the whole Messages page
+// until a profile opens Comms. Its send, attachment, and AI guards stay shared.
+const CustomerMessageMedia = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.MessageMediaV2 })));
+const CustomerSmsComposer = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.SmsTab })));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -177,7 +196,8 @@ function fmtDateOnly(d) {
 }
 
 function fmtCurrency(v) {
-  return "$" + parseFloat(v || 0).toFixed(2);
+  if (v == null || !Number.isFinite(Number(v))) return "—";
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(v));
 }
 function dateInputValue(value) {
   if (!value) return "";
@@ -541,82 +561,7 @@ function HealthCircle({ score }) {
   );
 }
 
-// ─── Radar Chart (monochrome) ────────────────────────────────────
-function RadarChart({ data }) {
-  if (!data || data.length < 3) return null;
-  const size = 160,
-    cx = size / 2,
-    cy = size / 2,
-    maxR = 60;
-  const n = data.length;
-  const angleStep = (2 * Math.PI) / n;
-  const pointAt = (i, pct) => {
-    const a = -Math.PI / 2 + i * angleStep;
-    return [
-      cx + maxR * (pct / 100) * Math.cos(a),
-      cy + maxR * (pct / 100) * Math.sin(a),
-    ];
-  };
-  const gridLevels = [25, 50, 75, 100];
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox={`0 0 ${size} ${size}`}
-      className="block mx-auto"
-      // Let axis labels (e.g. "Engagement") paint into the centered side
-      // margin instead of being clipped by the 160px SVG box.
-      style={{ overflow: "visible" }}
-    >
-      {gridLevels.map((lv) => (
-        <polygon
-          key={lv}
-          points={data.map((_, i) => pointAt(i, lv).join(",")).join(" ")}
-          fill="none"
-          stroke="#E4E4E7"
-          strokeWidth={0.5}
-        />
-      ))}
-      {data.map((_, i) => {
-        const [x, y] = pointAt(i, 100);
-        return (
-          <line
-            key={i}
-            x1={cx}
-            y1={cy}
-            x2={x}
-            y2={y}
-            stroke="#E4E4E7"
-            strokeWidth={0.5}
-          />
-        );
-      })}
-      <polygon
-        points={data.map((d, i) => pointAt(i, d.value).join(",")).join(" ")}
-        fill="rgba(24,24,27,0.10)"
-        stroke="#18181B"
-        strokeWidth={1.25}
-      />
-      {data.map((d, i) => {
-        const [x, y] = pointAt(i, 115);
-        return (
-          <text
-            key={i}
-            x={x}
-            y={y}
-            textAnchor="middle"
-            fill="#71717A"
-            fontSize={9}
-          >
-            {d.label}
-          </text>
-        );
-      })}
-    </svg>
-  );
-}
 
-// ─── Tier badge (color-coded per metal) ─────────────────────────
 const TIER_STYLES = {
   Platinum: { backgroundColor: "#E5E7EB", color: "#1F2937" },
   Gold: { backgroundColor: "#D4A017", color: "#FFFFFF" },
@@ -794,6 +739,16 @@ function contractDeliverySteps(contract) {
 function canDeliverDocumentContract(contract) {
   return contract?.contractType === "document_template" &&
     !["signed", "cancelled", "voided"].includes(contract.status);
+}
+
+function ContractSection({ title, description, defaultOpen = false, children }) {
+  return <details className="c360-contract-section" open={defaultOpen}>
+    <summary>
+      <span><strong>{title}</strong><span>{description}</span></span>
+      <ChevronDown size={18} aria-hidden="true" />
+    </summary>
+    <div className="c360-contract-section-body">{children}</div>
+  </details>;
 }
 
 function ElectronicAuthorizationContractV2({
@@ -1178,8 +1133,229 @@ function ElectronicAuthorizationContractV2({
   };
 
   return (
-    <div>
-      {" "}
+    <div className="c360-contracts-content">
+      <div className="c360-contracts-heading">
+        <h2 className="text-18 font-medium">Contracts &amp; authorizations</h2>
+        <p className="text-14 text-ink-secondary">Review existing records or prepare a document for signing.</p>
+      </div>
+      <ContractSection title={`Contract history (${contracts.length})`} description="Status, delivery, and actions for existing agreements." defaultOpen>
+      <div className="mt-5">
+        {" "}
+
+        {contracts.length > 0 ? (
+          <div className="overflow-x-auto mb-5">
+            {" "}
+            <div className="c360-contract-records">
+              {contracts.map((contract) => (
+                <article key={contract.id} className="c360-contract-record">
+                    <div className="c360-contract-record-document">
+                      {contract.contractType === "document_template"
+                        ? contract.title || contract.documentTemplateKey || "Document"
+                        : paymentMethodLabel(contract)}
+                    </div>
+                    <div className="c360-contract-record-status">
+                      {" "}
+                      <Badge tone={contractStatusTone(contract.status)}>
+                        {contractStatusLabel(contract.status)}
+                      </Badge>{" "}
+                    </div>
+                    <div className="c360-contract-record-created"><span className="c360-contract-field-label">Created</span>{fmtDate(contract.createdAt)}</div>
+                    <div className="c360-contract-record-signed"><span className="c360-contract-field-label">Signed</span>
+                      {contract.signedAt ? fmtDate(contract.signedAt) : "—"}
+                    </div>
+                    <div className="c360-contract-record-delivery"><span className="c360-contract-field-label">Recorded events</span>
+                      <div className="flex flex-wrap gap-1">
+                        {contractDeliverySteps(contract).filter((step) => step.done).map((step) => (
+                          <span
+                            key={step.key}
+                            className={cn(
+                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                              step.done
+                                ? "bg-zinc-50 border-zinc-200 text-zinc-900"
+                                : "bg-zinc-50 border-zinc-200 text-ink-secondary",
+                            )}
+                            title={step.at ? fmtDate(step.at) : ""}
+                          >
+                            {step.label}{step.at ? ` · ${fmtDate(step.at)}` : " · Date not recorded"}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="c360-contract-record-actions">
+                      {" "}
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => loadContractAudit(contract)}
+                          disabled={auditLoading && auditContractId === contract.id}
+                        >
+                          {" "}
+                          <FileText size={13} className="mr-1" />
+                          Audit
+                        </Button>
+                        {canDeliverDocumentContract(contract) && (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "email")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <Mail size={13} className="mr-1" />
+                              Email
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "sms")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <MessageSquare size={13} className="mr-1" />
+                              SMS
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "email", "reminder")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <Bell size={13} className="mr-1" />
+                              Remind
+                            </Button>
+                          </>
+                        )}
+                        {!["signed", "cancelled", "voided"].includes(
+                          contract.status,
+                        ) && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => regenerateLink(contract)}
+                            disabled={creatingContract}
+                          >
+                            {" "}
+                            <RotateCcw size={13} className="mr-1" />
+                            Link
+                          </Button>
+                        )}
+                        {contract.autoRenewalNoticeRequired &&
+                          !contract.autoRenewalNoticeSentAt && (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => markRenewalNoticeSent(contract)}
+                              disabled={creatingContract}
+                            >
+                              {" "}
+                              <CheckCircle2 size={13} className="mr-1" />
+                              Notice
+                            </Button>
+                          )}
+                        {contract.status !== "cancelled" && (
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            onClick={() => cancelContract(contract)}
+                            disabled={creatingContract}
+                          >
+                            {" "}
+                            <XCircle size={13} className="mr-1" />
+                            Cancel
+                          </Button>
+                        )}
+                      </div>{" "}
+                    </div>
+                </article>
+              ))}
+            </div>{" "}
+          </div>
+        ) : (
+          <div className="mb-5 text-13 text-ink-secondary">
+            No contract records created yet.
+          </div>
+        )}
+        {auditContractId && (
+          <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white p-4">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <SectionTitle>
+                  Delivery Audit
+                </SectionTitle>
+                <div className="text-12 text-ink-secondary">
+                  {auditContract?.title || "Contract"} · {auditLoading ? "Loading events" : `${auditEvents.length} event${auditEvents.length === 1 ? "" : "s"}`}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setAuditContractId("");
+                  setAuditContract(null);
+                  setAuditEvents([]);
+                  setAuditErr("");
+                }}
+              >
+                Close
+              </Button>
+            </div>
+            {auditErr && (
+              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
+                {auditErr}
+              </div>
+            )}
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {contractDeliverySteps(auditContract || contracts.find((contract) => contract.id === auditContractId)).map((step) => (
+                <span
+                  key={step.key}
+                  className={cn(
+                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                    step.done
+                      ? "bg-zinc-900 border-zinc-900 text-white"
+                      : "bg-zinc-50 border-zinc-200 text-ink-secondary",
+                  )}
+                >
+                  {step.label}
+                  {step.at ? <span className="u-nums ml-1 opacity-80">{fmtDate(step.at)}</span> : null}
+                </span>
+              ))}
+            </div>
+            <div className="divide-y divide-zinc-100 rounded-sm border-hairline border-zinc-200">
+              {auditEvents.map((event) => (
+                <div key={event.id} className="grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
+                  <div className="text-12 font-medium text-zinc-900">
+                    {contractEventLabel(event.eventType)}
+                  </div>
+                  <div className="min-w-0 text-12 text-ink-secondary">
+                    {event.actorType || "system"}
+                    {event.ip ? ` · ${event.ip}` : ""}
+                    {event.metadata?.templateKey ? ` · ${event.metadata.templateKey}` : ""}
+                    {event.metadata?.reason ? ` · ${event.metadata.reason}` : ""}
+                  </div>
+                  <div className="u-nums text-11 text-ink-secondary md:text-right">
+                    {fmtDate(event.createdAt)}
+                  </div>
+                </div>
+              ))}
+              {!auditLoading && auditEvents.length === 0 && (
+                <div className="px-3 py-4 text-12 text-ink-secondary">
+                  No audit events recorded for this contract.
+                </div>
+              )}
+              {auditLoading && (
+                <div className="px-3 py-4 text-12 text-ink-secondary">
+                  Loading audit events...
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+      </ContractSection>
+      <ContractSection title={"Auto Pay authorization"} description="Payment authorization and signing links.">
       <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
         {" "}
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
@@ -1254,27 +1430,6 @@ function ElectronicAuthorizationContractV2({
             ) : null}
           </div>
         ) : null}
-        <div className="grid grid-cols-1 md:grid-cols-3 border-b border-hairline border-zinc-200">
-          {[
-            ["Details", "Recipient, name, payment, attachments"],
-            ["Add information", "Selected clauses and custom fields"],
-            ["Review & share", "Preview, signatures, audit status"],
-          ].map(([step, sub], idx) => (
-            <div
-              key={step}
-              className={cn(
-                "px-4 py-3 border-zinc-200",
-                idx < 2 ? "md:border-r border-hairline" : "",
-              )}
-            >
-              {" "}
-              <div className="text-12 font-medium text-zinc-900">
-                {step}
-              </div>{" "}
-              <div className="text-11 text-ink-secondary mt-1">{sub}</div>{" "}
-            </div>
-          ))}
-        </div>{" "}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
           {" "}
           <ContractMeta label="Recipient" value={signerName} />{" "}
@@ -1301,7 +1456,7 @@ function ElectronicAuthorizationContractV2({
               <div className="u-label text-ink-secondary mb-1">
                 Payment method
               </div>{" "}
-              <select
+              <Select
                 value={selectedPaymentMethodId}
                 onChange={(e) =>
                   updateContractForm("paymentMethodId", e.target.value)
@@ -1316,7 +1471,7 @@ function ElectronicAuthorizationContractV2({
                     {paymentMethodLabel(card)}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </label>{" "}
             <label className="block">
               {" "}
@@ -1396,6 +1551,8 @@ function ElectronicAuthorizationContractV2({
           </div>{" "}
         </div>{" "}
       </div>{" "}
+      </ContractSection>
+      <ContractSection title={"Create a document"} description="Service agreements, notices, and reusable templates.">
       <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
@@ -1421,7 +1578,7 @@ function ElectronicAuthorizationContractV2({
               <div className="u-label text-ink-secondary mb-1">
                 Template
               </div>
-              <select
+              <Select
                 value={selectedDocumentTemplateKey}
                 onChange={(e) => setSelectedDocumentTemplateKey(e.target.value)}
                 className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
@@ -1435,7 +1592,7 @@ function ElectronicAuthorizationContractV2({
                     {template.name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label className="block">
               <div className="u-label text-ink-secondary mb-1">
@@ -1520,17 +1677,19 @@ function ElectronicAuthorizationContractV2({
           </div>
         </div>
       </div>
+      </ContractSection>
+      <ContractSection title={"Authorization preview & signature"} description="Full terms, selected clauses, and signing evidence.">
       <div className="grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
         {" "}
         <Card>
           {" "}
           <CardBody className="p-0">
             {" "}
-            <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-hairline border-zinc-200">
+            <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-4 border-b border-hairline border-zinc-200">
               {" "}
               <div className="flex items-start gap-3">
                 {" "}
-                <div className="mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-sm border-hairline border-zinc-200 bg-zinc-50 text-zinc-900">
+                <div className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border-hairline border-zinc-200 bg-zinc-50 text-zinc-900">
                   {" "}
                   <FileText size={18} strokeWidth={1.75} />{" "}
                 </div>{" "}
@@ -1565,7 +1724,7 @@ function ElectronicAuthorizationContractV2({
               <SectionTitle>Selected Clauses</SectionTitle>{" "}
               <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-4">
                 {" "}
-                <div className="flex items-start justify-between gap-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   {" "}
                   <div>
                     {" "}
@@ -1882,237 +2041,10 @@ function ElectronicAuthorizationContractV2({
           </CardBody>{" "}
         </Card>{" "}
       </div>{" "}
-      <div className="mt-5">
-        {" "}
-        <SectionTitle>Contract History ({contracts.length})</SectionTitle>
-        {contracts.length > 0 ? (
-          <div className="overflow-x-auto mb-5">
-            {" "}
-            <Table>
-              {" "}
-              <THead>
-                {" "}
-                <TR>
-                  {" "}
-                  <TH>Status</TH>
-                  <TH>Created</TH>
-                  <TH>Signed</TH>
-                  <TH>Document</TH>
-                  <TH>Delivery</TH>
-                  <TH>Actions</TH>{" "}
-                </TR>{" "}
-              </THead>{" "}
-              <TBody>
-                {contracts.map((contract) => (
-                  <TR key={contract.id}>
-                    {" "}
-                    <TD>
-                      {" "}
-                      <Badge tone={contractStatusTone(contract.status)}>
-                        {contractStatusLabel(contract.status)}
-                      </Badge>{" "}
-                    </TD>{" "}
-                    <TD className="u-nums">{fmtDate(contract.createdAt)}</TD>{" "}
-                    <TD className="u-nums">
-                      {contract.signedAt ? fmtDate(contract.signedAt) : "—"}
-                    </TD>{" "}
-                    <TD>
-                      {contract.contractType === "document_template"
-                        ? contract.title || contract.documentTemplateKey || "Document"
-                        : paymentMethodLabel(contract)}
-                    </TD>{" "}
-                    <TD>
-                      <div className="flex flex-wrap gap-1">
-                        {contractDeliverySteps(contract).map((step) => (
-                          <span
-                            key={step.key}
-                            className={cn(
-                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
-                              step.done
-                                ? "bg-zinc-900 border-zinc-900 text-white"
-                                : "bg-zinc-50 border-zinc-200 text-ink-secondary",
-                            )}
-                            title={step.at ? fmtDate(step.at) : ""}
-                          >
-                            {step.label}
-                          </span>
-                        ))}
-                      </div>
-                    </TD>{" "}
-                    <TD>
-                      {" "}
-                      <div className="flex flex-wrap gap-1.5">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => loadContractAudit(contract)}
-                          disabled={auditLoading && auditContractId === contract.id}
-                        >
-                          {" "}
-                          <FileText size={13} className="mr-1" />
-                          Audit
-                        </Button>
-                        {canDeliverDocumentContract(contract) && (
-                          <>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onClick={() => deliverDocumentContract(contract, "email")}
-                              disabled={!!contractDeliveryActionKey}
-                            >
-                              {" "}
-                              <Mail size={13} className="mr-1" />
-                              Email
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onClick={() => deliverDocumentContract(contract, "sms")}
-                              disabled={!!contractDeliveryActionKey}
-                            >
-                              {" "}
-                              <MessageSquare size={13} className="mr-1" />
-                              SMS
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onClick={() => deliverDocumentContract(contract, "email", "reminder")}
-                              disabled={!!contractDeliveryActionKey}
-                            >
-                              {" "}
-                              <Bell size={13} className="mr-1" />
-                              Remind
-                            </Button>
-                          </>
-                        )}
-                        {!["signed", "cancelled", "voided"].includes(
-                          contract.status,
-                        ) && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => regenerateLink(contract)}
-                            disabled={creatingContract}
-                          >
-                            {" "}
-                            <RotateCcw size={13} className="mr-1" />
-                            Link
-                          </Button>
-                        )}
-                        {contract.autoRenewalNoticeRequired &&
-                          !contract.autoRenewalNoticeSentAt && (
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onClick={() => markRenewalNoticeSent(contract)}
-                              disabled={creatingContract}
-                            >
-                              {" "}
-                              <CheckCircle2 size={13} className="mr-1" />
-                              Notice
-                            </Button>
-                          )}
-                        {contract.status !== "cancelled" && (
-                          <Button
-                            size="sm"
-                            variant="danger"
-                            onClick={() => cancelContract(contract)}
-                            disabled={creatingContract}
-                          >
-                            {" "}
-                            <XCircle size={13} className="mr-1" />
-                            Cancel
-                          </Button>
-                        )}
-                      </div>{" "}
-                    </TD>{" "}
-                  </TR>
-                ))}
-              </TBody>{" "}
-            </Table>{" "}
-          </div>
-        ) : (
-          <div className="mb-5 text-13 text-ink-secondary">
-            No contract records created yet.
-          </div>
-        )}
-        {auditContractId && (
-          <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white p-4">
-            <div className="flex items-start justify-between gap-3 mb-3">
-              <div>
-                <SectionTitle>
-                  Delivery Audit
-                </SectionTitle>
-                <div className="text-12 text-ink-secondary">
-                  {auditContract?.title || "Contract"} · {auditLoading ? "Loading events" : `${auditEvents.length} event${auditEvents.length === 1 ? "" : "s"}`}
-                </div>
-              </div>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => {
-                  setAuditContractId("");
-                  setAuditContract(null);
-                  setAuditEvents([]);
-                  setAuditErr("");
-                }}
-              >
-                Close
-              </Button>
-            </div>
-            {auditErr && (
-              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
-                {auditErr}
-              </div>
-            )}
-            <div className="mb-3 flex flex-wrap gap-1.5">
-              {contractDeliverySteps(auditContract || contracts.find((contract) => contract.id === auditContractId)).map((step) => (
-                <span
-                  key={step.key}
-                  className={cn(
-                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
-                    step.done
-                      ? "bg-zinc-900 border-zinc-900 text-white"
-                      : "bg-zinc-50 border-zinc-200 text-ink-secondary",
-                  )}
-                >
-                  {step.label}
-                  {step.at ? <span className="u-nums ml-1 opacity-80">{fmtDate(step.at)}</span> : null}
-                </span>
-              ))}
-            </div>
-            <div className="divide-y divide-zinc-100 rounded-sm border-hairline border-zinc-200">
-              {auditEvents.map((event) => (
-                <div key={event.id} className="grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
-                  <div className="text-12 font-medium text-zinc-900">
-                    {contractEventLabel(event.eventType)}
-                  </div>
-                  <div className="min-w-0 text-12 text-ink-secondary">
-                    {event.actorType || "system"}
-                    {event.ip ? ` · ${event.ip}` : ""}
-                    {event.metadata?.templateKey ? ` · ${event.metadata.templateKey}` : ""}
-                    {event.metadata?.reason ? ` · ${event.metadata.reason}` : ""}
-                  </div>
-                  <div className="u-nums text-11 text-ink-secondary md:text-right">
-                    {fmtDate(event.createdAt)}
-                  </div>
-                </div>
-              ))}
-              {!auditLoading && auditEvents.length === 0 && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
-                  No audit events recorded for this contract.
-                </div>
-              )}
-              {auditLoading && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
-                  Loading audit events...
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-        <SectionTitle>Authorization History ({consents.length})</SectionTitle>
+      </ContractSection>
+      <ContractSection title={`Authorization history (${consents.length})`} description="Previously recorded payment-method consents.">
+      <div>
+
         {consents.length > 0 ? (
           <div className="overflow-x-auto">
             {" "}
@@ -2150,7 +2082,8 @@ function ElectronicAuthorizationContractV2({
             No saved-payment authorizations recorded.
           </div>
         )}
-      </div>{" "}
+      </div>
+      </ContractSection>
     </div>
   );
 }
@@ -2775,6 +2708,7 @@ function PropertyZonesPanel({ customerId }) {
           {open ? "Hide" : "Mark treated areas"}
         </Button>
       </div>
+      {!open && <p className="text-14 text-ink-secondary mt-2">Open the map to review saved coverage or mark treated areas.</p>}
       {open && (
         <div className="mt-3">
           {loading && (
@@ -3695,7 +3629,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   );
 }
 
-function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
+function AnnualPrepayPanelV2({ activeTerm, onOpen, onSendInvoice }) {
   return (
     <Card className="mb-5">
       <CardBody className="p-4">
@@ -3732,7 +3666,7 @@ function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
           </div>
         </div>
         <div className="text-11 text-ink-secondary mt-2">
-          Default amount: {fmtCurrency(customer?.annualValue || (Number(customer?.monthlyRate || 0) * 12))}
+          Send an invoice to request payment, or record a payment already collected.
         </div>
       </CardBody>
     </Card>
@@ -5189,30 +5123,81 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
+function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTab, onMessage, onSendLink, menuOpen, setMenuOpen, menuRef }) {
+  const menuId = useId();
+  const name = [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || "Unnamed customer";
+  const address = c.address ? formatAddress(c.address) : "";
+  const contacts = ["", "2", "3"].map((suffix) => ({
+    name: c[`serviceContact${suffix}Name`],
+    phone: c[`serviceContact${suffix}Phone`],
+    email: c[`serviceContact${suffix}Email`],
+  })).filter((contact) => contact.phone || contact.email);
+  const actions = [
+    ...(isAdmin ? [
+      { label: "Book appointment", href: `/admin/schedule?customer=${c.id}` },
+      { label: "Invoices", href: `/admin/invoices?customer=${c.id}` },
+    ] : []),
+    { label: "Activity & notes", onClick: () => onTab("comms") },
+    ...(c.phone && isAdmin ? [{ label: "Send link", onClick: onSendLink }] : []),
+    ...(isAdmin ? [{ label: "Edit customer", onClick: onEdit }] : []),
+  ];
+  return <header className="c360-workspace-header">
+    <div className="c360-workspace-identity">
+      <div className="c360-workspace-name">
+        <div className="c360-workspace-name-row"><h1>{name}</h1><StageBadgeV2 stage={c.pipelineStage} /></div>
+        <div className="c360-workspace-meta"><TierBadgeV2 tier={c.tier} />{c.memberSince && <span>Customer since {formatETDateOnly(c.memberSince, { month: "short", year: "numeric" })}</span>}{c.profileLabel && <Badge className="normal-case tracking-normal">{c.profileLabel}</Badge>}{c.contactRole && c.contactRole !== "owner" && <Badge className="normal-case tracking-normal" title={contactRoleTitle(c.contactRole)}>{contactRoleLabel(c.contactRole)}</Badge>}</div>
+      </div>
+    </div>
+    <div className="c360-workspace-actions">
+      {c.phone && <Button className="c360-message-action" onClick={onMessage}><MessageSquare size={16} />Message{unreadConversations > 0 && <span className="c360-unread-count" aria-label={`${unreadConversations} unread conversations`}>{unreadConversations}</span>}</Button>}
+      {isAdmin && <a className="u-focus-ring" href={customerEstimateHref({ ...c, address })}><FileText size={16} />Create estimate</a>}
+      <div className="c360-more-action" ref={menuRef} onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { event.stopPropagation(); setMenuOpen(false); menuRef.current?.querySelector("button")?.focus(); } }}>
+        <Button variant="ghost" className="c360-icon-button" aria-label="More customer actions" aria-expanded={menuOpen} aria-controls={menuId} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setMenuOpen((open) => !open); }}><MoreHorizontal size={20} /></Button>
+        {menuOpen && <div id={menuId} className="c360-workspace-action-menu">{actions.map((action) => action.href ? <a key={action.label} className="u-focus-ring" href={action.href}>{action.label}</a> : <button key={action.label} type="button" className="u-focus-ring" onClick={() => { menuRef.current?.querySelector("button")?.focus(); setMenuOpen(false); action.onClick(); }}>{action.label}</button>)}</div>}
+      </div>
+    </div>
+    <div className="c360-workspace-contact" aria-label="Contact details">
+      {c.phone && <div><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><span>{c.phone}</span></div>}
+      {c.email && <div><a className="c360-outline-link u-focus-ring" href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer"><Mail size={16} />Email</a><span>{c.email}</span></div>}
+      {address && <div><a className="c360-outline-link u-focus-ring" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} />Address</a><span>{address}</span></div>}
+    </div>
+    {contacts.length > 0 && <details className="c360-additional-contacts"><summary>Service contacts ({contacts.length})</summary>{contacts.map((contact, index) => <div key={index}><span>{contact.name || `Service contact ${index + 1}`}</span>{contact.phone && <CallBridgeLink phone={contact.phone} customerName={contact.name || name}>{contact.phone}</CallBridgeLink>}{contact.email && <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}`} target="_blank" rel="noopener noreferrer">{contact.email}</a>}</div>)}</details>}
+  </header>;
+}
+
 export default function Customer360ProfileV2({
   customerId,
   onClose,
   onSelectCustomer,
   initialTab = "overview",
   initialScheduledServiceId = null,
+  embedded = false,
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [profileLoadError, setProfileLoadError] = useState("");
   const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [profileActionErr, setProfileActionErr] = useState("");
-  const [activeTab, setActiveTab] = useState(initialTab);
+  const [requestedTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
+  const [timelineSearch, setTimelineSearch] = useState("");
   const [timeline, setTimeline] = useState([]);
+  const [timelineMissingSources, setTimelineMissingSources] = useState([]);
   const [timelineError, setTimelineError] = useState(false);
   const [timelineRetrying, setTimelineRetrying] = useState(false);
   const [comms, setComms] = useState([]);
+  const [commsReadScope, setCommsReadScope] = useState(null);
   const [commsLoaded, setCommsLoaded] = useState(false);
+  const [commsComposerReady, setCommsComposerReady] = useState(false);
   const [commsLoading, setCommsLoading] = useState(false);
   const [commsErr, setCommsErr] = useState("");
   const [smsReply, setSmsReply] = useState("");
   const [sendingSms, setSendingSms] = useState(false);
   const [smsErr, setSmsErr] = useState("");
+  const [messageOpen, setMessageOpen] = useState(false);
+  const [messageOpened, setMessageOpened] = useState(false);
+  const [linkRequest, setLinkRequest] = useState(0);
+  const openMessages = () => { setCommsLoaded(false); setMessageOpened(true); setMessageOpen(true); };
   const [menuOpen, setMenuOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
@@ -5241,6 +5226,11 @@ export default function Customer360ProfileV2({
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
+  const activeTabButtonRef = useRef(null);
+  const [headerPast, setHeaderPast] = useState(false);
+  const editModalRef = useModalFocus(editOpen, () => { if (!savingEdit) setEditOpen(false); });
+  const tabsAnchorRef = useRef(null);
+  const profileContentId = useId();
   const menuRef = useRef(null);
   // The More (⋯) button outlives its menu items; modals launched from the
   // menu focus it first so useModalFocus can return focus somewhere that
@@ -5253,6 +5243,12 @@ export default function Customer360ProfileV2({
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
+  const workspaceSections = CUSTOMER_WORKSPACE_SECTIONS.filter((section) => isAdmin || section.key !== "billing");
+  const activeTab = embedded && !isAdmin && requestedTab === "billing" ? "overview" : requestedTab;
+  useEffect(() => {
+    if (!loading) activeTabButtonRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [loading, activeTab]);
+  const unreadConversations = useUnreadConversations(embedded && isAdmin, customerId);
 
   // Bumped on every successful profile reload. The properties panel keys its
   // refetch on this, NOT on the address tuple: the PUT path re-syncs the
@@ -5438,6 +5434,9 @@ export default function Customer360ProfileV2({
   };
 
   useEffect(() => {
+    setMessageOpen(false);
+    setMessageOpened(false);
+    setLinkRequest(0);
     commsSeqRef.current += 1;
     if (commsAbortRef.current) commsAbortRef.current.abort();
     const seq = profileSeqRef.current + 1;
@@ -5451,6 +5450,7 @@ export default function Customer360ProfileV2({
     setTimelineRetrying(false);
     setProfileActionErr("");
     setCommsLoading(false);
+    setCommsReadScope(null);
     setMenuOpen(false);
     setEditOpen(false);
     setEditForm({});
@@ -5475,9 +5475,11 @@ export default function Customer360ProfileV2({
         if (seq !== profileSeqRef.current) return;
         setData(detail);
         setTimeline(tl?.timeline || []);
+        setTimelineMissingSources(tl?.missingSources || []);
         setTimelineError(tl === null);
         setComms([]);
         setCommsLoaded(false);
+        setCommsComposerReady(false);
         setCommsErr("");
         setLoading(false);
       })
@@ -5497,6 +5499,7 @@ export default function Customer360ProfileV2({
       const result = await adminFetch(`/admin/customers/${customerId}/timeline`, { signal });
       if (signal.aborted || seq !== profileSeqRef.current) return;
       setTimeline(result.timeline || []);
+      setTimelineMissingSources(result.missingSources || []);
       setTimelineError(false);
     } catch {
       // Keep the loaded profile and recovery action when history is still unavailable.
@@ -5506,7 +5509,7 @@ export default function Customer360ProfileV2({
   };
 
   useEffect(() => {
-    if (activeTab !== "comms" || commsLoaded || commsLoading) return;
+    if (!isAdmin || (!embedded && activeTab !== "comms") || commsLoaded || commsLoading) return;
     const seq = commsSeqRef.current + 1;
     commsSeqRef.current = seq;
     if (commsAbortRef.current) commsAbortRef.current.abort();
@@ -5518,17 +5521,20 @@ export default function Customer360ProfileV2({
       .then((data) => {
         if (seq !== commsSeqRef.current) return;
         setComms(data.comms || []);
+        setCommsReadScope(data.readScope || null);
         setCommsLoaded(true);
+        setCommsComposerReady(true);
       })
       .catch((err) => {
         if (err.name === "AbortError" || seq !== commsSeqRef.current) return;
         setCommsErr(err.message || "Failed to load messages");
         setCommsLoaded(true);
+        setCommsComposerReady(true);
       })
       .finally(() => {
         if (seq === commsSeqRef.current) setCommsLoading(false);
       });
-  }, [activeTab, customerId, commsLoaded, commsLoading]);
+  }, [activeTab, customerId, commsLoaded, commsLoading, embedded, isAdmin]);
 
   useEffect(
     () => () => {
@@ -5549,23 +5555,15 @@ export default function Customer360ProfileV2({
     cancelSignupOpen ||
     cancelPlanOpen ||
     !!refundPayment;
-  const editDialogRef = useModalFocus(editOpen, () => !savingEdit && setEditOpen(false));
-  // The thread renders oldest → newest inside a 400px box; land on the
-  // latest message instead of the first one the customer ever sent.
-  const commsScrollRef = useRef(null);
   useEffect(() => {
-    if (activeTab !== "comms") return;
-    const el = commsScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [activeTab, comms.length]);
-  useEffect(() => {
+    if (embedded) return undefined;
     const handler = (e) => {
       if (e.key !== "Escape" || subModalOpen) return;
       onClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose, subModalOpen]);
+  }, [onClose, embedded, subModalOpen]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -5594,14 +5592,42 @@ export default function Customer360ProfileV2({
     data?.notificationPrefs?.billing_email,
   ]);
 
+  const renderProfile = (content) => embedded ? content : createPortal(content, document.body);
+  const wrapperClass = embedded ? "c360-embedded" : "admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans";
+  const changeWorkspaceTab = (next) => {
+    setActiveTab(next);
+    requestAnimationFrame(() => {
+      if (panelRef.current && tabsAnchorRef.current) {
+        panelRef.current.scrollTo({ top: tabsAnchorRef.current.offsetTop + 1, behavior: "instant" });
+      }
+    });
+  };
+
+  useEffect(() => {
+    if (!embedded || loading || typeof IntersectionObserver === "undefined") return undefined;
+    const header = panelRef.current?.querySelector(".c360-workspace-header");
+    if (!header) return undefined;
+    const observer = new IntersectionObserver(([entry]) => setHeaderPast(entry.intersectionRatio === 0), { root: panelRef.current, threshold: 0 });
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [embedded, loading, data?.customer?.id]);
+
+  const viewServiceRecords = () => {
+    setActiveTab("comms");
+    requestAnimationFrame(() => {
+      const records = panelRef.current?.querySelector(".c360-service-records");
+      if (records) { records.open = true; records.scrollIntoView({ block: "start", behavior: "instant" }); }
+    });
+  };
+
   const loadedCustomerMatches = data?.customer
     && String(data.customer.id) === String(customerId);
 
   if (loading || (data?.customer && !loadedCustomerMatches))
-    return createPortal(
+    return renderProfile(
       <div
-        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end"
-        onClick={onClose}
+        className={wrapperClass}
+        onClick={embedded ? undefined : onClose}
       >
         {" "}
         <div
@@ -5614,13 +5640,13 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>{" "}
       </div>
-    , document.body);
+    );
 
   if (!data || !data.customer)
-    return createPortal(
+    return renderProfile(
       <div
-        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end"
-        onClick={onClose}
+        className={wrapperClass}
+        onClick={embedded ? undefined : onClose}
       >
         {" "}
         <div
@@ -5646,7 +5672,7 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>{" "}
       </div>
-    , document.body);
+    );
 
   const c = data.customer;
   // Single seeding path for the edit-customer modal — the desktop pill, the
@@ -5801,13 +5827,11 @@ export default function Customer360ProfileV2({
     setActiveTab("billing");
   };
 
-  const balanceOwed = invoices
-    .filter((i) => i.status !== "paid" && i.status !== "prepaid")
-    .reduce(
-      (s, i) =>
-        s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0),
-      0,
-    );
+  const balanceOwed = data.billingSummary?.complete ? data.billingSummary.openBalance : null;
+  const overdueBalance = data.billingSummary?.complete ? data.billingSummary.overdueBalance : null;
+  const hasLawnHistory = nutrientRows.length > 0 || compliance.some((row) => /fertiliz|herbicide/.test(row.category || "")) || [...services, ...scheduled].some((service) => /lawn|fertiliz|turf|shrub/i.test(service.service_type || ""));
+  const recipientRoutesDiffer = !!c.payerId || [c.serviceContactEmail, c.serviceContact2Email, c.serviceContact3Email, notificationPrefs.billing_email].filter(Boolean).some((email) => email.toLowerCase() !== (c.email || "").toLowerCase());
+  const recipientPrefsDirty = recipientPrefsDraft.billingContactName !== (notificationPrefs.billing_contact_name || "") || recipientPrefsDraft.billingEmail !== (notificationPrefs.billing_email || "");
   const today = todayDateInput();
   const inactiveNextServiceStatuses = new Set([
     "cancelled",
@@ -5863,7 +5887,7 @@ export default function Customer360ProfileV2({
     alerts.push({
       alert: true,
       label: "$",
-      text: `Overdue balance: ${fmtCurrency(balanceOwed)}`,
+      text: `Open balance: ${fmtCurrency(balanceOwed)}`,
     });
   if (expiringCard)
     alerts.push({
@@ -5899,40 +5923,6 @@ export default function Customer360ProfileV2({
             (timelineFilter === "notes" && t.type === "interaction"),
         );
 
-  const radarData = hs.risk_factors
-    ? [
-        { label: "Payment", value: 80 },
-        { label: "Engagement", value: 60 },
-        { label: "Service", value: 70 },
-        { label: "Satisfaction", value: 75 },
-        { label: "Tenure", value: 90 },
-        { label: "Revenue", value: 65 },
-      ]
-    : [
-        { label: "Payment", value: score ? Math.min(score + 10, 100) : 50 },
-        { label: "Engagement", value: score || 50 },
-        { label: "Service", value: score ? Math.min(score + 5, 100) : 50 },
-        { label: "Satisfaction", value: score ? Math.max(score - 5, 0) : 50 },
-        {
-          label: "Tenure",
-          value: c.memberSince
-            ? Math.min(
-                Math.floor(
-                  (Date.now() - new Date(c.memberSince)) / 86400000 / 3.65,
-                ),
-                100,
-              )
-            : 50,
-        },
-        {
-          label: "Revenue",
-          value:
-            c.lifetimeRevenue > 0
-              ? Math.min(Math.floor(c.lifetimeRevenue / 50), 100)
-              : 20,
-        },
-      ];
-
   const sendSms = async () => {
     if (sendingSms || !smsReply.trim() || !c.phone) return;
     setSendingSms(true);
@@ -5956,6 +5946,7 @@ export default function Customer360ProfileV2({
       ]);
       setData(fresh);
       setComms(freshComms.comms || []);
+      setCommsReadScope(freshComms.readScope || null);
       setCommsLoaded(true);
     } catch (err) {
       setSmsErr(err.message || "SMS failed to send");
@@ -5970,29 +5961,780 @@ export default function Customer360ProfileV2({
     return mins ? `${mins}m ${secs}s` : `${secs}s`;
   };
 
-  const TABS = [
-    { key: "overview", label: "Overview" },
-    { key: "services", label: "Services" },
-    { key: "billing", label: "Billing" },
-    { key: "contracts", label: "Contracts" },
-    { key: "comms", label: "Comms" },
-    { key: "property", label: "Property" },
-    { key: "compliance", label: "Compliance" },
-  ];
 
-  return createPortal(
+
+  const billingSummary = (
+    <div className="c360-overview-billing">
+                  {" "}
+                  <SectionTitle>{embedded ? "Billing status & prepay" : "Billing Summary"}</SectionTitle>{" "}
+                  {c.servicePausedAt && (
+                    <div
+                      role="alert"
+                      className="mb-3 rounded border border-hairline p-2.5"
+                    >
+                      <div className="text-12 font-medium text-alert-fg">
+                        {/* servicePausedOn is the ET calendar date; the raw
+                            servicePausedAt timestamp would render in the
+                            browser's timezone and land on the wrong day. */}
+                        Billing paused since{" "}
+                        {fmtDate(c.servicePausedOn || c.servicePausedAt)}
+                      </div>
+                      <div className="text-12 text-ink-secondary mt-0.5">
+                        Monthly dues are not being collected
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? " — autopay failed three times"
+                          : ""}
+                        . Visits are unaffected.{" "}
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? "The pause clears on its own when a payment from this customer succeeds; clearing"
+                          : "This pause was set manually and only clears manually; clearing"}{" "}
+                        it removes this block only — other billing guards
+                        (autopay state, plan type, prepaid coverage) still
+                        apply — and the paused months are never back-billed.
+                      </div>
+                      {isAdmin && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="mt-2"
+                          onClick={resumeBilling}
+                          disabled={resumingBilling}
+                        >
+                          {resumingBilling ? "Clearing…" : "Clear billing pause"}
+                        </Button>
+                      )}
+                      {resumeBillingErr && (
+                        <div className="text-12 text-alert-fg mt-1">
+                          {resumeBillingErr}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Outside the banner: the pause is cleared by now, so the
+                      banner is gone, but dues still will not run and that is
+                      the whole reason someone clicked. */}
+                  {resumeBillingNote && (
+                    <div
+                      role="status"
+                      className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
+                    >
+                      {resumeBillingNote}
+                    </div>
+                  )}
+                  {!embedded && <>
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    {" "}
+                    <StatCardV2
+                      label="Open balance"
+                      value={fmtCurrency(balanceOwed)}
+                      alert={balanceOwed > 0}
+                    />{" "}
+                    <StatCardV2
+                      label="Lifetime Rev"
+                      value={fmtCurrency(c.lifetimeRevenue)}
+                    />{" "}
+                  </div>
+                  <div className="text-12 text-ink-secondary mb-1.5">
+                    {cards.length > 0
+                      ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
+                      : "No card on file"}
+                  </div>
+                  <div className="mb-3">
+                    <SectionTitle>
+                      Recent Transactions ({payments.length})
+                    </SectionTitle>
+                    {payments.length > 0 ? (
+                      payments.slice(0, 3).map((p, i) => {
+                        // Grey only FULLY refunded rows — a partial refund
+                        // still holds collected money (status stays 'paid') —
+                        // but flag partials with a chip so the gross amount
+                        // doesn't read as fully collected.
+                        const rowRefund = paymentRefundState(p);
+                        const isRefund = rowRefund.full;
+                        // Non-collected rows (upcoming/processing/failed) were
+                        // indistinguishable from paid ones, so the list read as
+                        // more collected revenue than Lifetime Rev counts.
+                        const isCollected = !p.status || p.status === "paid";
+                        return (
+                          <div
+                            key={i}
+                            className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
+                          >
+                            {" "}
+                            <span
+                              className={cn(
+                                "u-nums flex-shrink-0",
+                                isRefund || !isCollected
+                                  ? "text-ink-secondary"
+                                  : "text-zinc-900",
+                              )}
+                            >
+                              {fmtCurrency(p.amount)}
+                            </span>{" "}
+                            {(rowRefund.partial ||
+                              (!isCollected && !isRefund)) && (
+                              <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
+                                {rowRefund.partial
+                                  ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
+                                  : p.status}
+                              </span>
+                            )}{" "}
+                            <span className="text-ink-secondary truncate">
+                              {p.card_brand
+                                ? `${p.card_brand} …${p.last_four}`
+                                : p.method || p.processor || ""}
+                            </span>{" "}
+                            <span className="text-ink-secondary flex-shrink-0">
+                              {fmtDateOnly(p.payment_date)}
+                            </span>{" "}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="text-12 text-ink-secondary">
+                        No transactions yet
+                      </div>
+                    )}
+                  </div>
+                  </>}
+                  {displayedAnnualPrepayTerm && (
+                    <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
+                      <div className="text-12 font-medium text-zinc-900">
+                        {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
+                      </div>
+                      <div className="text-11 text-ink-secondary mt-0.5">
+                        Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
+                        {" · "}
+                        {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
+                        {displayedAnnualPrepayTerm.lastScheduledServiceDate
+                          ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
+                          : ""}
+                      </div>
+                      {displayedAnnualPrepayTerm.renewalDecision && (
+                        <div className="text-11 text-ink-secondary mt-0.5">
+                          Decision:{" "}
+                          {displayedAnnualPrepayTerm.renewalDecision.replace(
+                            "_",
+                            " ",
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {isAdmin && !embedded && (
+                    <Button
+                      size="sm"
+                      onClick={() => setAnnualPrepayOpen(true)}
+                      className="mb-3"
+                    >
+                      Record prepay already collected
+                    </Button>
+                  )}
+                  {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
+                    <div className="mb-3">
+                      <SectionTitle>Prepaid Plans</SectionTitle>
+                      {data.prepaidPlans.map((plan) => (
+                        <div
+                          key={plan.seriesParentId}
+                          className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-12 font-medium text-zinc-900 truncate">
+                              {plan.serviceType}
+                              {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
+                            </div>
+                            <span
+                              className="inline-flex items-center rounded-full text-10 font-medium uppercase tracking-label"
+                              style={{
+                                height: 18,
+                                padding: "0 8px",
+                                background: plan.remainingVisits > 0 ? "#DCFCE7" : "#F4F4F5",
+                                color: plan.remainingVisits > 0 ? "#166534" : "#52525B",
+                              }}
+                            >
+                              {plan.remainingVisits > 0 ? "Active" : "Used"}
+                            </span>
+                          </div>
+                          <div className="text-11 text-ink-secondary mt-1">
+                            {plan.usedVisits} of {plan.paidVisits} used
+                            {plan.remainingVisits > 0
+                              ? ` · ${plan.remainingVisits} remaining`
+                              : ""}
+                            {" · "}${plan.perVisitAmount.toFixed(2)}/visit
+                          </div>
+                          <div className="text-11 text-ink-secondary mt-0.5">
+                            Total ${plan.seriesTotal.toFixed(2)}
+                            {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
+                            {plan.nextVisitDate ? ` · next ${fmtDate(plan.nextVisitDate)}` : ""}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {!embedded && <>
+                  <SectionTitle>Recent Invoices</SectionTitle>
+                  {invoices.slice(0, 3).map((inv, i) => (
+                    <div
+                      key={i}
+                      className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between"
+                    >
+                      {" "}
+                      <span className="u-nums text-zinc-900">
+                        {fmtCurrency(inv.amount_due)}
+                      </span>{" "}
+                      <span
+                        className={cn(
+                          "font-medium uppercase tracking-label text-10",
+                          inv.status === "paid"
+                            ? "text-zinc-900"
+                            : "text-alert-fg",
+                        )}
+                      >
+                        {inv.status}
+                      </span>{" "}
+                      <span className="text-ink-secondary">
+                        {fmtDate(inv.created_at)}
+                      </span>{" "}
+                    </div>
+                  ))}
+                  </>}
+                </div>
+  );
+
+  const recipientDetails = (
+    <div className="mt-4">
+                {" "}
+                <SectionTitle>Contacts &amp; Recipients</SectionTitle>
+                <p className="text-14 text-ink-secondary">Account contact: {[c.firstName, c.lastName].filter(Boolean).join(" ")}{c.email ? ` · ${c.email}` : " · No email on file"}</p>
+                <details className="c360-recipient-overrides" open={recipientRoutesDiffer}><summary>View routing & override recipients</summary>
+                <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                  <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
+                    Default Bill-To (third-party payer)
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Select aria-label="Default bill-to"
+                      value={c.payerId ? String(c.payerId) : ""}
+                      disabled={payerSaving || !isAdmin}
+                      onChange={(e) => handlePayerSelect(e.target.value)}
+                      className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
+                    >
+                      <option value="">Customer pays (self)</option>
+                      {payers.map((p) => (
+                        <option key={p.id} value={String(p.id)}>
+                          {p.display_name}
+                          {p.company_name && p.company_name !== p.display_name
+                            ? ` — ${p.company_name}`
+                            : ""}
+                        </option>
+                      ))}
+                      {isAdmin && <option value="__new__">＋ New payer…</option>}
+                    </Select>
+                    {payerSaving && (
+                      <span className="text-12 text-ink-tertiary">Saving…</span>
+                    )}
+                  </div>
+                  {showNewPayer && isAdmin && (
+                    <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
+                      <div className="text-12 font-medium text-zinc-900 mb-2">
+                        New payer
+                      </div>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Payer name *
+                        </span>
+                        <input
+                          type="text"
+                          value={newPayer.displayName}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
+                          placeholder="e.g. tenant, builder, or property manager name"
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Company (optional)
+                        </span>
+                        <input
+                          type="text"
+                          value={newPayer.companyName}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <label className="block mb-1">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Invoice email (AP)
+                        </span>
+                        <input
+                          type="email"
+                          value={newPayer.apEmail}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
+                          placeholder="Where this payer's invoices are emailed"
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <div className="text-12 text-ink-secondary mb-2">
+                        Without an email, invoices to this payer can’t be
+                        delivered until one is added in Finance → Payers.
+                      </div>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Phone (optional)
+                        </span>
+                        <input
+                          type="tel"
+                          value={newPayer.apPhone}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      {newPayerError && (
+                        <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={saveNewPayer}
+                          disabled={newPayerSaving || !newPayer.displayName.trim()}
+                          className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
+                        >
+                          {newPayerSaving ? "Saving…" : "Create & select"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowNewPayer(false);
+                            setNewPayerError("");
+                          }}
+                          className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {newPayerNotice && (
+                    <div className="text-12 text-ink-secondary mt-1.5">
+                      {newPayerNotice}
+                    </div>
+                  )}
+                  <div className="text-12 text-ink-secondary mt-1.5">
+                    Routes every invoice for this account to a builder /
+                    property manager instead of the customer. A single job can
+                    override this on the appointment. Manage payers in Finance →
+                    Payers.
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      Account owner / payer
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {[c.firstName, c.lastName].filter(Boolean).join(" ") ||
+                        c.companyName ||
+                        "Customer"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {c.email || "No email"}
+                    </div>
+                  </div>
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      On-location contact
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {c.serviceContactName || "Primary customer"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {c.serviceContactEmail ||
+                        c.serviceContactPhone ||
+                        c.email ||
+                        "No contact"}
+                    </div>
+                  </div>
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      Invoice email
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {recipientPrefsDraft.billingContactName || "Billing recipient"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {recipientPrefsDraft.billingEmail || c.email || "No email"}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+                  <label className="block">
+                    <span className="u-label text-ink-tertiary block mb-1">
+                      Billing contact name
+                    </span>
+                    <input
+                      id="c360-billing-contact-name"
+                      name="billingContactName"
+                      value={recipientPrefsDraft.billingContactName}
+                      disabled={!isAdmin}
+                      onChange={(e) =>
+                        setRecipientPrefsDraft((prev) => ({
+                          ...prev,
+                          billingContactName: e.target.value,
+                        }))
+                      }
+                      placeholder="Landlord, AP contact, property manager"
+                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="u-label text-ink-tertiary block mb-1">
+                      Billing recipient email
+                    </span>
+                    <input
+                      id="c360-billing-recipient-email"
+                      name="billingEmail"
+                      value={recipientPrefsDraft.billingEmail}
+                      disabled={!isAdmin}
+                      onChange={(e) =>
+                        setRecipientPrefsDraft((prev) => ({
+                          ...prev,
+                          billingEmail: e.target.value,
+                        }))
+                      }
+                      type="email"
+                      placeholder={c.email || "billing@example.com"}
+                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+                    />
+                  </label>
+                </div>
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <div className="text-12 text-ink-secondary">
+                    Invoices and receipts use the billing email when set.
+                    Appointment reminders and service reports use the
+                    on-location contact when present.
+                  </div>
+                  <Button
+                    onClick={saveRecipientPrefs}
+                    disabled={recipientPrefsSaving || !isAdmin || !recipientPrefsDirty}
+                    className="shrink-0"
+                  >
+                    {recipientPrefsSaving ? "Saving…" : recipientPrefsDirty ? "Save recipients" : "Recipients saved"}
+                  </Button>
+                </div>
+                {recipientPrefsErr && (
+                  <div className="mb-3 text-12 text-alert-fg">
+                    {recipientPrefsErr}
+                  </div>
+                )}
+                {!embedded && <>
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-appointment-notify-primary"
+                    name="appointmentNotifyPrimary"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={notificationPrefs.appointment_notify_primary !== false}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        appointmentNotifyPrimary: e.target.checked,
+                        appointment_notify_primary: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also send appointment SMS to the account owner
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      On by default. On-location contacts receive appointment
+                      reminders too. Turn this off only if the account owner
+                      should stop receiving them.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-service-report-notify-primary"
+                    name="serviceReportNotifyPrimary"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={notificationPrefs.service_report_notify_primary !== false}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        serviceReportNotifyPrimary: e.target.checked,
+                        service_report_notify_primary: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also email service reports to the account owner
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      On by default. Turn this off only if the account owner
+                      should stop receiving reports — a distinct
+                      service-contact email then receives them instead.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-service-report-notify-billing"
+                    name="serviceReportNotifyBilling"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={notificationPrefs.service_report_notify_billing === true}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        serviceReportNotifyBilling: e.target.checked,
+                        service_report_notify_billing: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also email service reports to the billing recipient
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      Copies the billing recipient email (landlord, AP contact)
+                      on post-service reports. Requires a billing recipient
+                      email above; invoices are unaffected.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-auto-flip-en-route"
+                    name="autoFlipEnRoute"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={
+                      notificationPrefs.auto_flip_en_route !== false
+                    }
+                    onChange={(e) => {
+                      const next = e.target.checked;
+                      updateNotificationPrefs({
+                        autoFlipEnRoute: next,
+                        auto_flip_en_route: next,
+                      });
+                    }}
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Auto-flip en route SMS
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      When the tech&apos;s vehicle leaves a previous job area
+                      and the next job is this customer, fire the &quot;on the
+                      way&quot; SMS automatically. Off here = customer keeps
+                      manual en-route SMS but skips auto-flip.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                </>}
+                </details>
+              </div>
+  );
+
+  const conversation = (
+            <div className="c360-conversation flex flex-col">
+              {" "}
+              <OwedCommitmentsSummary customerId={customerId} />
+              {!embedded && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
+              <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
+              <div className="flex flex-col gap-1.5 mb-3">
+                {commsLoading && (
+                  <div className="text-ink-secondary text-13 text-center py-5">
+                    Loading messages…
+                  </div>
+                )}
+                {commsErr && (
+                  <div className="text-alert-fg text-13 text-center py-5">
+                    {commsErr}
+                  </div>
+                )}
+                {[...comms].reverse().map((m, i) => {
+                  const inbound = m.direction === "inbound";
+                  if (m.channel === "sms") {
+                    return (
+                      <div
+                        key={m.id || i}
+                        className={cn(
+                          "max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline",
+                          inbound
+                            ? "self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs"
+                            : "self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs",
+                        )}
+                      >
+                        {" "}
+                        <div>{m.body}</div>
+                        {embedded && m.media?.length > 0 && <Suspense fallback={<span>Loading attachments…</span>}><CustomerMessageMedia media={m.media} inverted={m.direction === "outbound"} /></Suspense>}{" "}
+                        <div
+                          className={cn(
+                            "text-10 mt-1 text-right",
+                            inbound ? "text-ink-secondary" : "text-zinc-300",
+                          )}
+                        >
+                          {timeAgo(m.createdAt)}
+                        </div>{" "}
+                      </div>
+                    );
+                  }
+                  // voice
+                  const rec = (m.media || []).find(
+                    (x) => x.type === "recording",
+                  );
+                  const duration = fmtDur(
+                    m.durationSeconds ?? rec?.duration_seconds,
+                  );
+                  const summary = m.aiSummary || m.body;
+                  return (
+                    <div
+                      key={m.id || i}
+                      className={cn(
+                        "max-w-[85%] px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm",
+                        inbound ? "self-start" : "self-end",
+                      )}
+                    >
+                      {" "}
+                      <div className="flex items-center gap-2 mb-1">
+                        {" "}
+                        <span className="text-10 font-medium tracking-label uppercase text-ink-secondary">
+                          {inbound ? "Call in" : "Call out"}
+                        </span>
+                        {duration && (
+                          <span className="text-11 u-nums text-zinc-900">
+                            {duration}
+                          </span>
+                        )}
+                        {m.answeredBy && (
+                          <span className="text-10 text-ink-secondary">
+                            · {m.answeredBy}
+                          </span>
+                        )}
+                      </div>
+                      {summary && (
+                        <div className="text-12 text-zinc-900 leading-relaxed">
+                          {summary}
+                        </div>
+                      )}
+                      {(rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid) && (
+                        <AuthenticatedCallAudio
+                          recordingId={rec?.sid || m.recordingSid}
+                          className="mt-1.5 w-full h-8"
+                        />
+                      )}
+                      <div className="text-10 mt-1 text-right text-ink-secondary">
+                        {timeAgo(m.createdAt)}
+                      </div>{" "}
+                    </div>
+                  );
+                })}
+                {!commsLoading &&
+                  !commsErr &&
+                  commsLoaded &&
+                  comms.length === 0 && (
+                    <div className="text-ink-secondary text-13 text-center py-5">
+                      No messages
+                    </div>
+                  )}
+              </div>
+              {embedded && c.phone && (commsComposerReady || !isAdmin) && <Suspense fallback={<p className="py-3 text-14 text-ink-secondary">Loading message tools…</p>}>
+                <CustomerSmsComposer key={`${c.id}:${c.phone}`} active={embedded ? messageOpen : activeTab === "comms"} linkRequest={linkRequest} customer={c} customerMessages={comms} customerReadScope={commsReadScope} onSent={async () => {
+                  setCommsLoaded(false);
+                  await Promise.allSettled([reloadCustomer(), ...(isAdmin ? [retryTimeline()] : [])]);
+                }} />
+              </Suspense>}
+              {!embedded && c.phone && (
+                <div className="py-3 border-t border-hairline border-zinc-200">
+                  {" "}
+                  <div className="flex gap-2">
+                    {" "}
+                    <input
+                      id="c360-sms-reply"
+                      name="smsReply"
+                      value={smsReply}
+                      onChange={(e) => {
+                        setSmsReply(e.target.value);
+                        if (smsErr) setSmsErr("");
+                      }}
+                      placeholder="Type a message…"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          sendSms();
+                        }
+                      }}
+                      className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
+                    />{" "}
+                    <Button
+                      onClick={sendSms}
+                      disabled={sendingSms || !smsReply.trim()}
+                    >
+                      {sendingSms ? "…" : "Send"}
+                    </Button>{" "}
+                  </div>
+                  {smsErr && (
+                    <div className="mt-1.5 text-12 text-alert-fg">{smsErr}</div>
+                  )}
+                </div>
+              )}
+              {!embedded && recipientDetails}
+              {!embedded && <div className="mt-4">
+                {" "}
+                <SectionTitle>
+                  Notes &amp; Interactions ({(data.interactions || []).length})
+                </SectionTitle>
+                {(data.interactions || []).slice(0, 10).map((n, i) => (
+                  <div
+                    key={i}
+                    className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-12"
+                  >
+                    {" "}
+                    <div className="flex justify-between mb-1">
+                      {" "}
+                      <span className="font-medium text-zinc-900">
+                        {n.interaction_type}: {n.subject}
+                      </span>{" "}
+                      <span className="text-ink-secondary text-10">
+                        {timeAgo(n.created_at)}
+                      </span>{" "}
+                    </div>
+                    {n.body && (
+                      <div className="text-ink-secondary">
+                        {n.body.substring(0, 200)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>}
+            </div>
+  );
+
+  return renderProfile(
     <div
       // Portaled to <body>, so the overlay leaves the admin shell's DOM
       // scope — restate .admin-shell-v2 here to keep the forced-Roboto and
       // border-box form-control rules from index.css applying inside it.
-      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
-      onClick={onClose}
+      className={wrapperClass}
+      onClick={embedded ? undefined : onClose}
     >
       {" "}
       <div
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
-        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
+        className={cn("c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900", headerPast && "c360-header-past")}
       >
         {" "}
         <style>{`
@@ -6010,6 +6752,7 @@ export default function Customer360ProfileV2({
           .c360-mobile-actionbar { display: none; }
           .c360-mobile-footer-spacer { display: none; }
         `}</style>
+        {embedded ? <CustomerWorkspaceHeader c={c} isAdmin={isAdmin} unreadConversations={unreadConversations} onEdit={openEditModal} onTab={changeWorkspaceTab} onMessage={openMessages} onSendLink={() => { setLinkRequest((value) => value + 1); openMessages(); }} menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} /> : <>
         {/* ZONE 1 — STICKY HEADER */}
         <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200">
           {/* Desktop header (>= 768px) */}
@@ -6321,9 +7064,10 @@ export default function Customer360ProfileV2({
             </div>{" "}
           </div>{" "}
         </div>
+        </>}
         {/* ZONE 2 — ALERT BANNERS */}
-        {alerts.length > 0 && (
-          <div className="flex flex-wrap gap-2 px-6 py-3 bg-zinc-50 border-b border-hairline border-zinc-200">
+        {!embedded && alerts.length > 0 && (
+          <div className="c360-alerts flex flex-wrap gap-2 px-6 py-3 bg-zinc-50 border-b border-hairline border-zinc-200">
             {alerts.map((a, i) => (
               <div
                 key={i}
@@ -6343,14 +7087,17 @@ export default function Customer360ProfileV2({
             ))}
           </div>
         )}
+        {embedded ? <><div ref={tabsAnchorRef} className="c360-tabs-anchor" /><div className="c360-sticky-identity">{c.firstName} {c.lastName}</div><Customer360Sections active={activeTab} onChange={changeWorkspaceTab} contentId={profileContentId} sections={workspaceSections} /></> : <>
         {/* ZONE 3 — TAB BAR */}
         {/* shrink-0: this is an overflow-x scroll container, so its flex
             auto-minimum-size is 0 — without it the column flex collapses the
             bar to ~0px on mobile (tall content), hiding every section tab. */}
         <div className="flex shrink-0 bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
-          {TABS.map((t) => (
+          {CUSTOMER_360_SECTIONS.filter((section) => section.key !== "estimates").map((t) => (
             <button
               key={t.key}
+              ref={activeTab === t.key ? activeTabButtonRef : null}
+              aria-pressed={activeTab === t.key}
               onClick={() => setActiveTab(t.key)}
               className={cn(
                 "h-11 px-4 text-12 uppercase tracking-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
@@ -6363,8 +7110,9 @@ export default function Customer360ProfileV2({
             </button>
           ))}
         </div>
+        </>}
         {/* TAB CONTENT */}
-        <div className="p-6 flex-1">
+        <div className="c360-tab-content p-6 flex-1" id={profileContentId} role={embedded ? "tabpanel" : undefined} aria-label={embedded ? CUSTOMER_WORKSPACE_SECTIONS.find((section) => section.key === activeTab)?.label : undefined}>
           {profileActionErr && (
             <div role="alert" className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm">
               {profileActionErr}
@@ -6372,12 +7120,14 @@ export default function Customer360ProfileV2({
           )}
           {/* OVERVIEW */}
           {activeTab === "overview" && (
-            <div>
+            <div className="c360-overview-content">
+              {embedded && <Customer360Summary isAdmin={isAdmin} customer={c} upcoming={upcomingFuture} services={services} comms={comms} commsLoading={commsLoading} commsError={isAdmin ? commsErr : "Message history requires admin access"} balance={data.billingSummary} unread={unreadConversations} preferences={prefs} alerts={alerts} onMessage={openMessages} onTab={changeWorkspaceTab} onViewServices={viewServiceRecords} discounts={discounts} referral={referral} />}
+
               <CustomerRequestsPanel customerId={customerId} />
               {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
-              {isAdmin && <PropertyZonesPanel customerId={customerId} />}
-              {isAdmin && <TermiteStationsGate customerId={customerId} />}
+              {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
+              {!embedded && isAdmin && <TermiteStationsGate customerId={customerId} />}
               {accountProperties.length > 0 && (
                 <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
                   {" "}
@@ -6556,9 +7306,10 @@ export default function Customer360ProfileV2({
                   }}
                 />{" "}
               </div>{" "}
+              {!embedded && <>
               <div className="c360-overview-grid grid grid-cols-3 gap-5">
                 {/* Col 1: Services */}
-                <div>
+                <div className="c360-overview-services">
                   {" "}
                   <SectionTitle>
                     Upcoming Appointments ({upcomingFuture.length})
@@ -6567,7 +7318,7 @@ export default function Customer360ProfileV2({
                     upcomingFuture.slice(0, 3).map((s, i) => (
                       <div
                         key={i}
-                        className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+                        className="c360-upcoming-appointment bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
                       >
                         {" "}
                         <div className="text-13 font-medium text-zinc-900">
@@ -6591,7 +7342,7 @@ export default function Customer360ProfileV2({
                     return (
                       <div
                         key={i}
-                        className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
+                        className="c360-recent-service py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
                       >
                         {" "}
                         <span className="text-zinc-900 flex items-center gap-1.5">
@@ -6613,269 +7364,9 @@ export default function Customer360ProfileV2({
                   )}
                 </div>
                 {/* Col 2: Billing snapshot */}
-                <div>
-                  {" "}
-                  <SectionTitle>Billing Summary</SectionTitle>{" "}
-                  {c.servicePausedAt && (
-                    <div
-                      role="alert"
-                      className="mb-3 rounded border border-hairline p-2.5"
-                    >
-                      <div className="text-12 font-medium text-alert-fg">
-                        {/* servicePausedOn is the ET calendar date; the raw
-                            servicePausedAt timestamp would render in the
-                            browser's timezone and land on the wrong day. */}
-                        Billing paused since{" "}
-                        {fmtDate(c.servicePausedOn || c.servicePausedAt)}
-                      </div>
-                      <div className="text-12 text-ink-secondary mt-0.5">
-                        Monthly dues are not being collected
-                        {c.servicePauseReason === "autopay_final_failure"
-                          ? " — autopay failed three times"
-                          : ""}
-                        . Visits are unaffected.{" "}
-                        {c.servicePauseReason === "autopay_final_failure"
-                          ? "The pause clears on its own when a payment from this customer succeeds; clearing"
-                          : "This pause was set manually and only clears manually; clearing"}{" "}
-                        it removes this block only — other billing guards
-                        (autopay state, plan type, prepaid coverage) still
-                        apply — and the paused months are never back-billed.
-                      </div>
-                      {isAdmin && (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          className="mt-2"
-                          onClick={resumeBilling}
-                          disabled={resumingBilling}
-                        >
-                          {resumingBilling ? "Clearing…" : "Clear billing pause"}
-                        </Button>
-                      )}
-                      {resumeBillingErr && (
-                        <div className="text-12 text-alert-fg mt-1">
-                          {resumeBillingErr}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {/* Outside the banner: the pause is cleared by now, so the
-                      banner is gone, but dues still will not run and that is
-                      the whole reason someone clicked. */}
-                  {resumeBillingNote && (
-                    <div
-                      role="status"
-                      className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
-                    >
-                      {resumeBillingNote}
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-2 mb-3">
-                    {" "}
-                    <StatCardV2
-                      label="Balance Owed"
-                      value={fmtCurrency(balanceOwed)}
-                      alert={balanceOwed > 0}
-                    />{" "}
-                    <StatCardV2
-                      label="Lifetime Rev"
-                      value={fmtCurrency(c.lifetimeRevenue)}
-                    />{" "}
-                  </div>
-                  <div className="text-12 text-ink-secondary mb-1.5">
-                    {cards.length > 0
-                      ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
-                      : "No card on file"}
-                  </div>
-                  <div className="mb-3">
-                    <SectionTitle>
-                      Recent Transactions ({payments.length})
-                    </SectionTitle>
-                    {payments.length > 0 ? (
-                      payments.slice(0, 3).map((p, i) => {
-                        // Grey only FULLY refunded rows — a partial refund
-                        // still holds collected money (status stays 'paid') —
-                        // but flag partials with a chip so the gross amount
-                        // doesn't read as fully collected.
-                        const rowRefund = paymentRefundState(p);
-                        const isRefund = rowRefund.full;
-                        // Non-collected rows (upcoming/processing/failed) were
-                        // indistinguishable from paid ones, so the list read as
-                        // more collected revenue than Lifetime Rev counts.
-                        const isCollected = !p.status || p.status === "paid";
-                        return (
-                          <div
-                            key={i}
-                            className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
-                          >
-                            {" "}
-                            <span
-                              className={cn(
-                                "u-nums flex-shrink-0",
-                                isRefund || !isCollected
-                                  ? "text-ink-secondary"
-                                  : "text-zinc-900",
-                              )}
-                            >
-                              {fmtCurrency(p.amount)}
-                            </span>{" "}
-                            {(rowRefund.partial ||
-                              (!isCollected && !isRefund)) && (
-                              <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
-                                {rowRefund.partial
-                                  ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
-                                  : p.status}
-                              </span>
-                            )}{" "}
-                            <span className="text-ink-secondary truncate">
-                              {p.card_brand
-                                ? `${p.card_brand} …${p.last_four}`
-                                : p.method || p.processor || ""}
-                            </span>{" "}
-                            <span className="text-ink-secondary flex-shrink-0">
-                              {fmtDateOnly(p.payment_date)}
-                            </span>{" "}
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div className="text-12 text-ink-secondary">
-                        No transactions yet
-                      </div>
-                    )}
-                  </div>
-                  {displayedAnnualPrepayTerm && (
-                    <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-                      <div className="text-12 font-medium text-zinc-900">
-                        {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
-                      </div>
-                      <div className="text-11 text-ink-secondary mt-0.5">
-                        Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
-                        {" · "}
-                        {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
-                        {displayedAnnualPrepayTerm.lastScheduledServiceDate
-                          ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
-                          : ""}
-                      </div>
-                      {displayedAnnualPrepayTerm.renewalDecision && (
-                        <div className="text-11 text-ink-secondary mt-0.5">
-                          Decision:{" "}
-                          {displayedAnnualPrepayTerm.renewalDecision.replace(
-                            "_",
-                            " ",
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {isAdmin && (
-                    <Button
-                      size="sm"
-                      onClick={() => setAnnualPrepayOpen(true)}
-                      className="mb-3"
-                    >
-                      Record annual prepay
-                    </Button>
-                  )}
-                  {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
-                    <div className="mb-3">
-                      <SectionTitle>Prepaid Plans</SectionTitle>
-                      {data.prepaidPlans.map((plan) => (
-                        <div
-                          key={plan.seriesParentId}
-                          className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="text-12 font-medium text-zinc-900 truncate">
-                              {plan.serviceType}
-                              {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
-                            </div>
-                            <span
-                              className="inline-flex items-center rounded-full text-10 font-medium uppercase tracking-label"
-                              style={{
-                                height: 18,
-                                padding: "0 8px",
-                                background: plan.remainingVisits > 0 ? "#DCFCE7" : "#F4F4F5",
-                                color: plan.remainingVisits > 0 ? "#166534" : "#52525B",
-                              }}
-                            >
-                              {plan.remainingVisits > 0 ? "Active" : "Used"}
-                            </span>
-                          </div>
-                          <div className="text-11 text-ink-secondary mt-1">
-                            {plan.usedVisits} of {plan.paidVisits} used
-                            {plan.remainingVisits > 0
-                              ? ` · ${plan.remainingVisits} remaining`
-                              : ""}
-                            {" · "}${plan.perVisitAmount.toFixed(2)}/visit
-                          </div>
-                          <div className="text-11 text-ink-secondary mt-0.5">
-                            Total ${plan.seriesTotal.toFixed(2)}
-                            {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
-                            {plan.nextVisitDate ? ` · next ${fmtDate(plan.nextVisitDate)}` : ""}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <SectionTitle>Recent Invoices</SectionTitle>
-                  {invoices.slice(0, 3).map((inv, i) => (
-                    <div
-                      key={i}
-                      className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between"
-                    >
-                      {" "}
-                      <span className="u-nums text-zinc-900">
-                        {fmtCurrency(inv.amount_due)}
-                      </span>{" "}
-                      <span
-                        className={cn(
-                          "font-medium uppercase tracking-label text-10",
-                          inv.status === "paid"
-                            ? "text-zinc-900"
-                            : "text-alert-fg",
-                        )}
-                      >
-                        {inv.status}
-                      </span>{" "}
-                      <span className="text-ink-secondary">
-                        {fmtDate(inv.created_at)}
-                      </span>{" "}
-                    </div>
-                  ))}
-                </div>
+                {!embedded && billingSummary}
                 {/* Col 3: Health + Referral + Discounts */}
-                <div>
-                  {" "}
-                  <SectionTitle>Health Radar</SectionTitle>{" "}
-                  <RadarChart data={radarData} />
-                  {score != null && (
-                    <div className="text-center text-12 text-ink-secondary mt-1">
-                      Score:{" "}
-                      <span
-                        className="font-medium"
-                        style={{
-                          color:
-                            score >= 70
-                              ? "#10B981"
-                              : score >= 40
-                                ? "#F59E0B"
-                                : "#C8312F",
-                        }}
-                      >
-                        {score}/100
-                      </span>
-                      {(hs.churn_risk_level || hs.churn_risk) && (
-                        <span>
-                          {" "}
-                          ·{" "}
-                          {String(hs.churn_risk_level || hs.churn_risk)
-                            .replace(/_/g, " ")
-                            .replace(/\b\w/g, (ch) => ch.toUpperCase())}
-                        </span>
-                      )}
-                    </div>
-                  )}
+                <div className="c360-overview-health">
                   {referral && (
                     <div className="mt-4">
                       {" "}
@@ -6917,118 +7408,36 @@ export default function Customer360ProfileV2({
                   )}
                 </div>{" "}
               </div>{" "}
-            </div>
-          )}
-
-          {/* SERVICES */}
-          {activeTab === "services" && (
-            <div>
-              {" "}
-              <SectionTitle>Service History ({services.length})</SectionTitle>
-              {services.length === 0 ? (
-                <div className="text-13 text-ink-secondary">
-                  No service records
-                </div>
-              ) : (
-                <div className="flex flex-col">
-                  {services.map((s, i) => (
-                    <ServiceRowV2
-                      key={i}
-                      service={s}
-                      initiallyExpanded={
-                        !!initialScheduledServiceId &&
-                        String(s.scheduled_service_id || "") ===
-                          String(initialScheduledServiceId)
-                      }
-                    />
-                  ))}
-                </div>
-              )}
-              {upcomingScheduled.length > 0 && (
-                <div className="mt-5">
-                  {" "}
-                  <SectionTitle>
-                    Scheduled Services ({upcomingScheduled.length})
-                  </SectionTitle>
-                  {upcomingScheduled.map((s, i) => (
-                    <div
-                      key={i}
-                      className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-13"
-                    >
-                      {" "}
-                      <span className="font-medium text-zinc-900">
-                        {s.service_type}
-                      </span>{" "}
-                      <span className="text-ink-secondary">
-                        {fmtDateOnly(s.scheduled_date)}
-                      </span>{" "}
-                      <span
-                        className={cn(
-                          "text-11 uppercase tracking-label font-medium",
-                          s.status === "confirmed"
-                            ? "text-zinc-900"
-                            : "text-ink-secondary",
-                        )}
-                      >
-                        {s.status}
-                      </span>{" "}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {photos.length > 0 && (
-                <div className="mt-5">
-                  {" "}
-                  <SectionTitle>
-                    Service Photos ({photos.length})
-                  </SectionTitle>{" "}
-                  <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2">
-                    {photos.map((p, i) => (
-                      <div
-                        key={i}
-                        className="rounded-sm overflow-hidden bg-zinc-50 border-hairline border-zinc-200 aspect-square"
-                      >
-                        {" "}
-                        <img
-                          src={p.url || ""}
-                          alt={p.caption || ""}
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            e.target.style.display = "none";
-                          }}
-                        />{" "}
-                      </div>
-                    ))}
-                  </div>{" "}
-                </div>
-              )}
+              </>}
             </div>
           )}
 
           {/* BILLING */}
           {activeTab === "billing" && (
-            <div>
+            <div className="c360-billing-content">
               {" "}
               <div className="c360-billing-grid grid grid-cols-4 gap-3 mb-5">
                 {" "}
                 <StatCardV2
-                  label="Balance Owed"
+                  label="Open balance"
                   value={fmtCurrency(balanceOwed)}
                   alert={balanceOwed > 0}
                 />{" "}
-                <StatCardV2
-                  label="Monthly Rate"
-                  value={fmtCurrency(c.monthlyRate)}
-                />{" "}
-                <StatCardV2
-                  label="Annual Value"
-                  value={fmtCurrency(c.annualValue)}
-                />{" "}
+                <StatCardV2 label="Overdue balance" value={fmtCurrency(overdueBalance)} alert={overdueBalance > 0} />
+                <StatCardV2 label={c.billingMode === "monthly_membership" ? "Monthly rate" : "Billing arrangement"} value={c.billingMode === "monthly_membership" ? fmtCurrency(c.monthlyRate) : ({ per_visit: "Per application", per_application: "Per application", annual_prepay: "Annual prepay", one_time: "One-time" }[c.billingMode] || "Not set")} />
                 <StatCardV2
                   label="Lifetime Revenue"
                   value={fmtCurrency(c.lifetimeRevenue)}
                 />{" "}
               </div>{" "}
+              {embedded && <>
+                <div className="c360-billing-actions">
+                  <a className="c360-outline-link u-focus-ring" href={`/admin/invoices?customer=${c.id}`}>Manage invoices<ArrowUpRight size={15} /></a>
+
+                </div>
+                {(c.servicePausedAt || displayedAnnualPrepayTerm || data.prepaidPlans?.length > 0) && billingSummary}
+                <Customer360Estimates estimates={data.estimates || []} />
+              </>}
               <BillingLanePanelV2
                 customerId={c.id}
                 billingMode={c.billingMode}
@@ -7055,7 +7464,10 @@ export default function Customer360ProfileV2({
                   onSendInvoice={() => setAnnualPrepayInvoiceOpen(true)}
                 />
               )}
-              <SectionTitle>Invoices ({invoices.length})</SectionTitle>
+              {embedded ? <div className="c360-invoices-heading">
+                <SectionTitle>Recent invoices ({invoices.length})</SectionTitle>
+                <a className="c360-outline-link u-focus-ring" href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}`}>All invoices</a>
+              </div> : <SectionTitle>Invoices ({invoices.length})</SectionTitle>}
               {invoices.length > 0 ? (
                 <Table className="mb-5">
                   {" "}
@@ -7063,6 +7475,7 @@ export default function Customer360ProfileV2({
                     {" "}
                     <TR>
                       {" "}
+                      {embedded && <TH>Invoice</TH>}
                       <TH>Date</TH>
                       <TH align="right">Amount</TH>
                       <TH align="right">Paid</TH>
@@ -7072,6 +7485,7 @@ export default function Customer360ProfileV2({
                   <TBody>
                     {invoices.map((inv, i) => (
                       <TR key={i}>
+                        {embedded && <TD><a className="c360-invoice-reference u-focus-ring" href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}&invoice=${encodeURIComponent(inv.id)}`}>#{inv.invoice_number || inv.id.slice(0, 8)}</a></TD>}
                         {" "}
                         <TD>
                           {fmtDate(inv.created_at || inv.invoice_date)}
@@ -7174,7 +7588,7 @@ export default function Customer360ProfileV2({
                           {cd.exp_month}/{cd.exp_year}
                         </span>
                       )}
-                      {cd.is_default && <Badge tone="strong">Default</Badge>}
+                      {cd.is_default && <Badge tone={embedded ? "neutral" : "strong"} className="c360-payment-method-default">Default</Badge>}
                     </div>
                   ))}
                 </div>
@@ -7215,530 +7629,107 @@ export default function Customer360ProfileV2({
             </div>
           )}
 
-          {/* CONTRACTS */}
-          {activeTab === "contracts" && (
-            <ElectronicAuthorizationContractV2
-              customer={c}
-              consents={paymentMethodConsents}
-              cards={cards}
-              contracts={contracts}
-              onRefresh={reloadCustomer}
-            />
-          )}
+          {embedded ? (messageOpened && <Sheet open={messageOpen} keepMounted onClose={() => setMessageOpen(false)} width="lg" className="admin-shell-v2 c360-message-sheet" ariaLabel={`Conversation with ${c.firstName} ${c.lastName}`}>
+            <SheetHeader><div><strong>{c.firstName} {c.lastName}</strong><p className="text-14 text-ink-secondary">{c.phone}</p></div><Button variant="secondary" onClick={() => setMessageOpen(false)}>Back to customer</Button></SheetHeader>
+            <SheetBody>{conversation}</SheetBody>
+          </Sheet>) : (activeTab === "comms" && conversation)}
 
-          {/* COMMS */}
-          {activeTab === "comms" && (
-            <div className="flex flex-col h-full">
+          {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
+          {embedded && activeTab === "comms" && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
+
+          {embedded && isAdmin && activeTab === "comms" && <Customer360Activity missingSources={timelineMissingSources} timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
+
+          {/* SERVICES */}
+          {(embedded ? activeTab === "comms" : activeTab === "services") && (
+            <details className="c360-service-records" open={embedded ? undefined : true}>
+              <summary>Service records, reports & photos</summary>
               {" "}
-              <OwedCommitmentsSummary customerId={customerId} />
-              <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
-              <div
-                ref={commsScrollRef}
-                className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]"
-              >
-                {commsLoading && (
-                  <div className="text-ink-secondary text-13 text-center py-5">
-                    Loading messages…
-                  </div>
-                )}
-                {commsErr && (
-                  <div className="text-alert-fg text-13 text-center py-5">
-                    {commsErr}
-                  </div>
-                )}
-                {[...comms].reverse().map((m, i) => {
-                  const inbound = m.direction === "inbound";
-                  if (m.channel === "sms") {
-                    return (
-                      <div
-                        key={m.id || i}
-                        className={cn(
-                          "max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline",
-                          inbound
-                            ? "self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs"
-                            : "self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs",
-                        )}
-                      >
-                        {" "}
-                        <div>{m.body}</div>{" "}
-                        <div
-                          className={cn(
-                            "text-10 mt-1 text-right",
-                            inbound ? "text-ink-secondary" : "text-zinc-300",
-                          )}
-                        >
-                          {timeAgo(m.createdAt)}
-                        </div>{" "}
-                      </div>
-                    );
-                  }
-                  // voice
-                  const rec = (m.media || []).find(
-                    (x) => x.type === "recording",
-                  );
-                  const duration = fmtDur(
-                    m.durationSeconds ?? rec?.duration_seconds,
-                  );
-                  const summary = m.aiSummary || m.body;
-                  return (
-                    <div
-                      key={m.id || i}
-                      className={cn(
-                        "max-w-[85%] px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm",
-                        inbound ? "self-start" : "self-end",
-                      )}
-                    >
-                      {" "}
-                      <div className="flex items-center gap-2 mb-1">
-                        {" "}
-                        <span className="text-10 font-medium tracking-label uppercase text-ink-secondary">
-                          {inbound ? "Call in" : "Call out"}
-                        </span>
-                        {duration && (
-                          <span className="text-11 u-nums text-zinc-900">
-                            {duration}
-                          </span>
-                        )}
-                        {m.answeredBy && (
-                          <span className="text-10 text-ink-secondary">
-                            · {m.answeredBy}
-                          </span>
-                        )}
-                      </div>
-                      {summary && (
-                        <div className="text-12 text-zinc-900 leading-relaxed">
-                          {summary}
-                        </div>
-                      )}
-                      {(rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid) && (
-                        <AuthenticatedCallAudio
-                          recordingId={rec?.sid || m.recordingSid}
-                          className="mt-1.5 w-full h-8"
-                        />
-                      )}
-                      <div className="text-10 mt-1 text-right text-ink-secondary">
-                        {timeAgo(m.createdAt)}
-                      </div>{" "}
-                    </div>
-                  );
-                })}
-                {!commsLoading &&
-                  !commsErr &&
-                  commsLoaded &&
-                  comms.length === 0 && (
-                    <div className="text-ink-secondary text-13 text-center py-5">
-                      No messages
-                    </div>
-                  )}
-              </div>
-              {c.phone && (
-                <div className="py-3 border-t border-hairline border-zinc-200">
-                  {" "}
-                  <div className="flex gap-2">
-                    {" "}
-                    <input
-                      id="c360-sms-reply"
-                      name="smsReply"
-                      value={smsReply}
-                      onChange={(e) => {
-                        setSmsReply(e.target.value);
-                        if (smsErr) setSmsErr("");
-                      }}
-                      placeholder="Type a message…"
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          sendSms();
-                        }
-                      }}
-                      className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
-                    />{" "}
-                    <Button
-                      onClick={sendSms}
-                      disabled={sendingSms || !smsReply.trim()}
-                    >
-                      {sendingSms ? "…" : "Send"}
-                    </Button>{" "}
-                  </div>
-                  {smsErr && (
-                    <div className="mt-1.5 text-12 text-alert-fg">{smsErr}</div>
-                  )}
+              <SectionTitle>Service History ({services.length})</SectionTitle>
+              {services.length === 0 ? (
+                <div className="text-13 text-ink-secondary">
+                  No service records
+                </div>
+              ) : (
+                <div className="flex flex-col">
+                  {services.map((s, i) => (
+                    <ServiceRowV2
+                      key={i}
+                      service={s}
+                      initiallyExpanded={
+                        !!initialScheduledServiceId &&
+                        String(s.scheduled_service_id || "") ===
+                          String(initialScheduledServiceId)
+                      }
+                    />
+                  ))}
                 </div>
               )}
-              {/* Notification preferences — admin override for routing fields
-                  ops needs to manage landlord / tenant / AP-contact accounts. */}
-              <div className="mt-4">
-                {" "}
-                <SectionTitle>Contacts &amp; Recipients</SectionTitle>{" "}
-                <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                  <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
-                    Default Bill-To (third-party payer)
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <select
-                      value={c.payerId ? String(c.payerId) : ""}
-                      disabled={payerSaving || !isAdmin}
-                      onChange={(e) => handlePayerSelect(e.target.value)}
-                      className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
+              {upcomingScheduled.length > 0 && (
+                <div className="mt-5">
+                  {" "}
+                  <SectionTitle>
+                    Scheduled Services ({upcomingScheduled.length})
+                  </SectionTitle>
+                  {upcomingScheduled.map((s, i) => (
+                    <div
+                      key={i}
+                      className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-13"
                     >
-                      <option value="">Customer pays (self)</option>
-                      {payers.map((p) => (
-                        <option key={p.id} value={String(p.id)}>
-                          {p.display_name}
-                          {p.company_name && p.company_name !== p.display_name
-                            ? ` — ${p.company_name}`
-                            : ""}
-                        </option>
-                      ))}
-                      {isAdmin && <option value="__new__">＋ New payer…</option>}
-                    </select>
-                    {payerSaving && (
-                      <span className="text-12 text-ink-tertiary">Saving…</span>
-                    )}
-                  </div>
-                  {showNewPayer && isAdmin && (
-                    <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
-                      <div className="text-12 font-medium text-zinc-900 mb-2">
-                        New payer
-                      </div>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Payer name *
-                        </span>
-                        <input
-                          type="text"
-                          value={newPayer.displayName}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
-                          placeholder="e.g. tenant, builder, or property manager name"
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Company (optional)
-                        </span>
-                        <input
-                          type="text"
-                          value={newPayer.companyName}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <label className="block mb-1">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Invoice email (AP)
-                        </span>
-                        <input
-                          type="email"
-                          value={newPayer.apEmail}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
-                          placeholder="Where this payer's invoices are emailed"
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <div className="text-12 text-ink-secondary mb-2">
-                        Without an email, invoices to this payer can’t be
-                        delivered until one is added in Finance → Payers.
-                      </div>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Phone (optional)
-                        </span>
-                        <input
-                          type="tel"
-                          value={newPayer.apPhone}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      {newPayerError && (
-                        <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
-                      )}
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={saveNewPayer}
-                          disabled={newPayerSaving || !newPayer.displayName.trim()}
-                          className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
-                        >
-                          {newPayerSaving ? "Saving…" : "Create & select"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setShowNewPayer(false);
-                            setNewPayerError("");
-                          }}
-                          className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {newPayerNotice && (
-                    <div className="text-12 text-ink-secondary mt-1.5">
-                      {newPayerNotice}
-                    </div>
-                  )}
-                  <div className="text-12 text-ink-secondary mt-1.5">
-                    Routes every invoice for this account to a builder /
-                    property manager instead of the customer. A single job can
-                    override this on the appointment. Manage payers in Finance →
-                    Payers.
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      Account owner / payer
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {[c.firstName, c.lastName].filter(Boolean).join(" ") ||
-                        c.companyName ||
-                        "Customer"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {c.email || "No email"}
-                    </div>
-                  </div>
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      On-location contact
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {c.serviceContactName || "Primary customer"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {c.serviceContactEmail ||
-                        c.serviceContactPhone ||
-                        c.email ||
-                        "No contact"}
-                    </div>
-                  </div>
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      Invoice email
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {recipientPrefsDraft.billingContactName || "Billing recipient"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {recipientPrefsDraft.billingEmail || c.email || "No email"}
-                    </div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
-                  <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">
-                      Billing contact name
-                    </span>
-                    <input
-                      id="c360-billing-contact-name"
-                      name="billingContactName"
-                      value={recipientPrefsDraft.billingContactName}
-                      disabled={!isAdmin}
-                      onChange={(e) =>
-                        setRecipientPrefsDraft((prev) => ({
-                          ...prev,
-                          billingContactName: e.target.value,
-                        }))
-                      }
-                      placeholder="Landlord, AP contact, property manager"
-                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">
-                      Billing recipient email
-                    </span>
-                    <input
-                      id="c360-billing-recipient-email"
-                      name="billingEmail"
-                      value={recipientPrefsDraft.billingEmail}
-                      disabled={!isAdmin}
-                      onChange={(e) =>
-                        setRecipientPrefsDraft((prev) => ({
-                          ...prev,
-                          billingEmail: e.target.value,
-                        }))
-                      }
-                      type="email"
-                      placeholder={c.email || "billing@example.com"}
-                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
-                    />
-                  </label>
-                </div>
-                <div className="flex items-center justify-between gap-3 mb-3">
-                  <div className="text-12 text-ink-secondary">
-                    Invoices and receipts use the billing email when set.
-                    Appointment reminders and service reports use the
-                    on-location contact when present.
-                  </div>
-                  <Button
-                    onClick={saveRecipientPrefs}
-                    disabled={recipientPrefsSaving || !isAdmin}
-                    className="shrink-0"
-                  >
-                    {recipientPrefsSaving ? "Saving..." : "Save Recipients"}
-                  </Button>
-                </div>
-                {recipientPrefsErr && (
-                  <div className="mb-3 text-12 text-alert-fg">
-                    {recipientPrefsErr}
-                  </div>
-                )}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-appointment-notify-primary"
-                    name="appointmentNotifyPrimary"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.appointment_notify_primary !== false}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        appointmentNotifyPrimary: e.target.checked,
-                        appointment_notify_primary: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also send appointment SMS to the account owner
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      On by default. On-location contacts receive appointment
-                      reminders too. Turn this off only if the account owner
-                      should stop receiving them.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-service-report-notify-primary"
-                    name="serviceReportNotifyPrimary"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.service_report_notify_primary !== false}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        serviceReportNotifyPrimary: e.target.checked,
-                        service_report_notify_primary: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also email service reports to the account owner
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      On by default. Turn this off only if the account owner
-                      should stop receiving reports — a distinct
-                      service-contact email then receives them instead.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-service-report-notify-billing"
-                    name="serviceReportNotifyBilling"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.service_report_notify_billing === true}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        serviceReportNotifyBilling: e.target.checked,
-                        service_report_notify_billing: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also email service reports to the billing recipient
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      Copies the billing recipient email (landlord, AP contact)
-                      on post-service reports. Requires a billing recipient
-                      email above; invoices are unaffected.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-auto-flip-en-route"
-                    name="autoFlipEnRoute"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={
-                      notificationPrefs.auto_flip_en_route !== false
-                    }
-                    onChange={(e) => {
-                      const next = e.target.checked;
-                      updateNotificationPrefs({
-                        autoFlipEnRoute: next,
-                        auto_flip_en_route: next,
-                      });
-                    }}
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Auto-flip en route SMS
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      When the tech&apos;s vehicle leaves a previous job area
-                      and the next job is this customer, fire the &quot;on the
-                      way&quot; SMS automatically. Off here = customer keeps
-                      manual en-route SMS but skips auto-flip.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-              </div>{" "}
-              <div className="mt-4">
-                {" "}
-                <SectionTitle>
-                  Notes &amp; Interactions ({(data.interactions || []).length})
-                </SectionTitle>
-                {(data.interactions || []).slice(0, 10).map((n, i) => (
-                  <div
-                    key={i}
-                    className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-12"
-                  >
-                    {" "}
-                    <div className="flex justify-between mb-1">
                       {" "}
                       <span className="font-medium text-zinc-900">
-                        {n.interaction_type}: {n.subject}
+                        {s.service_type}
                       </span>{" "}
-                      <span className="text-ink-secondary text-10">
-                        {timeAgo(n.created_at)}
+                      <span className="text-ink-secondary">
+                        {fmtDateOnly(s.scheduled_date)}
+                      </span>{" "}
+                      <span
+                        className={cn(
+                          "text-11 uppercase tracking-label font-medium",
+                          s.status === "confirmed"
+                            ? "text-zinc-900"
+                            : "text-ink-secondary",
+                        )}
+                      >
+                        {s.status}
                       </span>{" "}
                     </div>
-                    {n.body && (
-                      <div className="text-ink-secondary">
-                        {n.body.substring(0, 200)}
+                  ))}
+                </div>
+              )}
+              {photos.length > 0 && (
+                <div className="mt-5">
+                  {" "}
+                  <SectionTitle>
+                    Service Photos ({photos.length})
+                  </SectionTitle>{" "}
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2">
+                    {photos.map((p, i) => (
+                      <div
+                        key={i}
+                        className="rounded-sm overflow-hidden bg-zinc-50 border-hairline border-zinc-200 aspect-square"
+                      >
+                        {" "}
+                        <img
+                          src={p.url || ""}
+                          alt={p.caption || ""}
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            e.target.style.display = "none";
+                          }}
+                        />{" "}
                       </div>
-                    )}
-                  </div>
-                ))}
-              </div>{" "}
-            </div>
+                    ))}
+                  </div>{" "}
+                </div>
+              )}
+            </details>
           )}
 
           {/* PROPERTY */}
           {activeTab === "property" && (
-            <div>
+            <div className="c360-details-content">
+              {embedded && recipientDetails}
+              {embedded && isAdmin && <details className="c360-service-records"><summary>Property service tools & historical maps</summary><PropertyZonesPanel customerId={customerId} /><TermiteStationsGate customerId={customerId} /></details>}
               {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
                   (it lists every address on the account), so a technician
                   token would only ever see a 403 card here. */}
@@ -7746,6 +7737,7 @@ export default function Customer360ProfileV2({
                 <CustomerPropertiesPanelV2
                   key={customerId}
                   customerId={customerId}
+                  primaryAddress={c.address}
                   contactRole={c.contactRole}
                   // Every profile reload (any Edit save, address changed or
                   // not) re-syncs the primary customer_properties row server-side
@@ -7855,9 +7847,10 @@ export default function Customer360ProfileV2({
           )}
 
           {/* COMPLIANCE */}
-          {activeTab === "compliance" && (
+          {(embedded ? activeTab === "property" && (hasLawnHistory || compliance.length > 0) : activeTab === "compliance") && (
             <div>
               {" "}
+              {(!embedded || hasLawnHistory) && <>
               <SectionTitle>Nutrient Ledger YTD</SectionTitle>{" "}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
                 {" "}
@@ -7954,6 +7947,7 @@ export default function Customer360ProfileV2({
                   </TBody>{" "}
                 </Table>
               )}
+              </>}
               <SectionTitle>
                 Application History ({compliance.length})
               </SectionTitle>
@@ -7995,15 +7989,15 @@ export default function Customer360ProfileV2({
                   No application records
                 </div>
               )}
-              <Card className="mt-5">
+              {(!embedded || hasLawnHistory) && <Card className="mt-5">
                 {" "}
                 <CardBody className="p-4">
                   {" "}
-                  <SectionTitle>Product Limits</SectionTitle>{" "}
+                  <SectionTitle>Product usage</SectionTitle>{" "}
                   <div className="text-12 text-ink-secondary space-y-1">
                     {" "}
                     <div>
-                      Celsius applications this year:{" "}
+                      Celsius entries in the history shown:{" "}
                       <span className="u-nums text-zinc-900">
                         {
                           compliance.filter((r) =>
@@ -8023,12 +8017,23 @@ export default function Customer360ProfileV2({
                     </div>{" "}
                   </div>{" "}
                 </CardBody>{" "}
-              </Card>{" "}
+              </Card>}
             </div>
           )}
+          {/* CONTRACTS */}
+          {(embedded ? activeTab === "property" : activeTab === "contracts") && (
+            <ElectronicAuthorizationContractV2
+              customer={c}
+              consents={paymentMethodConsents}
+              cards={cards}
+              contracts={contracts}
+              onRefresh={reloadCustomer}
+            />
+          )}
+
         </div>
         {/* ZONE 4 — TIMELINE (admin-only endpoint) */}
-        {isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
+        {!embedded && isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
           {" "}
           <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">
             {" "}
@@ -8122,6 +8127,7 @@ export default function Customer360ProfileV2({
             )}
           </div>{" "}
         </div>}
+        {!embedded && <>
         {/* Mobile spacer for sticky action bar — tracks the same keyboard
             inset as the bar itself so content still scrolls clear of it. */}
         <div
@@ -8132,7 +8138,9 @@ export default function Customer360ProfileV2({
           }}
           aria-hidden="true"
         />{" "}
+        </>}
       </div>
+      {!embedded && <>
       {/* Mobile sticky action bar (mirrors desktop pills) */}
       {/* Mobile top action bar — rendered here as a sibling of the scrolling
           .c360-panel (NOT inside it), exactly like the fixed bottom
@@ -8278,6 +8286,7 @@ export default function Customer360ProfileV2({
         }}
         standalone
       />
+      </>}
       {annualPrepayOpen && (
         <AnnualPrepayModal
           customer={c}
@@ -8335,7 +8344,7 @@ export default function Customer360ProfileV2({
         >
           {" "}
           <div
-            ref={editDialogRef}
+            ref={editModalRef}
             role="dialog"
             aria-modal="true"
             aria-label="Edit customer"
@@ -8570,5 +8579,5 @@ export default function Customer360ProfileV2({
         </div>
       )}
     </div>
-  , document.body);
+  );
 }

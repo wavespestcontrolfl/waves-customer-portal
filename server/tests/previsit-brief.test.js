@@ -1174,10 +1174,12 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
     useDb(baseResponses());
     await PrevisitBrief.generateVisitBrief('svc-1');
     // Token budget pinned: 1000 truncated real briefs mid-JSON in prod
-    // (empty_json legs, 08-14/15) — a silent revert would re-break the lane.
-    // reasoningEffort pinned with it: 2000 crosses the OpenAI reasoning
-    // floor, and the raise must never silently enable fallback reasoning.
-    expect(global.__dispatch.mock.calls[0][1].maxTokens).toBe(2000);
+    // (empty_json legs, 08-14/15), and 2000 still cut ~1 leg in 7
+    // (anthropic_incomplete, 09-05..07) — a silent revert would re-break
+    // the lane. reasoningEffort pinned with it: the budget crosses the
+    // OpenAI reasoning floor, and the raise must never silently enable
+    // fallback reasoning.
+    expect(global.__dispatch.mock.calls[0][1].maxTokens).toBe(3000);
     expect(global.__dispatch.mock.calls[0][1].reasoningEffort).toBe('none');
     const opts = global.__dispatch.mock.calls[0][2];
     expect(typeof opts.validate).toBe('function');
@@ -1192,6 +1194,140 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
     const out = await PrevisitBrief.generateVisitBrief('svc-1');
     expect(out.via).toBe('template');
     expect(storedBrief(state).brief.generated_via).toBe('template');
+  });
+});
+
+// One repair round: a validator rejection is deterministic for the
+// grounding and the fallback leg re-fails the same way, so the exact
+// rejected terms go back to the model once (09-05..07: 56 of 63 chains
+// fell to the template for ordinary prose the facts never literally
+// contain). A transient miss never triggers it; a second rejection is
+// final and still counts as a validator miss for the attempt cap.
+describe('validator repair round', () => {
+  const CATALOG = [
+    { name: 'Termidor SC', target_pests: ['termites'] },
+    { name: 'Bifen IT', target_pests: ['ants', 'chinch bugs'] },
+  ];
+  // Mirrors the real dispatcher: run the caller's validate hook per leg
+  // and report the rejected legs with validator: true.
+  const rejectingDispatcher = (badJson) => async (_policy, _payload, opts) => {
+    const reason = opts.validate({ json: badJson });
+    return { ok: false, reason: 'all_providers_failed', failures: [
+      { provider: 'anthropic', model: 'a', reason, validator: true },
+      { provider: 'openai', model: 'o', reason, validator: true },
+    ] };
+  };
+  const BAD = { ...CLEAN_LLM_JSON, priorities: ['Apply Termidor SC to the slab edge'] };
+
+  test('a rejected first round is retried once with the rejected terms; the repaired draft is stored as llm', async () => {
+    global.__dispatch = jest.fn()
+      .mockImplementationOnce(rejectingDispatcher(BAD))
+      .mockImplementationOnce(async () => ({ ok: true, json: { ...CLEAN_LLM_JSON } }));
+    const state = useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('llm');
+    expect(global.__dispatch).toHaveBeenCalledTimes(2);
+    const [first, second] = global.__dispatch.mock.calls.map((c) => c[1]);
+    expect(first.text).not.toContain('REPAIR ROUND');
+    expect(second.text).toContain('Grounding facts:');
+    expect(second.text).toContain('REPAIR ROUND');
+    expect(second.text).toContain('"termidor sc" does not appear in the facts');
+    expect(second.system).toBe(first.system);
+    expect(storedBrief(state).brief.generated_via).toBe('llm');
+  });
+
+  test('a second rejection is final: template, validator miss, exactly two rounds', async () => {
+    global.__dispatch = jest.fn(rejectingDispatcher(BAD));
+    const state = useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+    expect(global.__dispatch).toHaveBeenCalledTimes(2);
+    expect(storedBrief(state).brief.llm_miss_kind).toBe('validator');
+  });
+
+  test('a provider outage is transient: no repair round', async () => {
+    global.__dispatch = jest.fn(async () => ({ ok: false, reason: 'all_providers_failed', failures: [
+      { provider: 'anthropic', model: 'a', reason: 'timeout' },
+      { provider: 'openai', model: 'o', reason: 'error' },
+    ] }));
+    const state = useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(storedBrief(state).brief.llm_miss_kind).toBe('transient');
+  });
+
+  test('a truncated primary leg plus a validator-rejected fallback leg still earns the repair round', async () => {
+    global.__dispatch = jest.fn()
+      .mockImplementationOnce(async (_policy, _payload, opts) => ({ ok: false, reason: 'all_providers_failed', failures: [
+        { provider: 'anthropic', model: 'a', reason: 'anthropic_incomplete' },
+        { provider: 'openai', model: 'o', reason: opts.validate({ json: BAD }), validator: true },
+      ] }))
+      .mockImplementationOnce(async () => ({ ok: true, json: { ...CLEAN_LLM_JSON } }));
+    useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('llm');
+    expect(global.__dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  test('an unvalidated ok body the caller hands back is repaired too (defense in depth)', async () => {
+    global.__dispatch = jest.fn()
+      .mockImplementationOnce(async () => ({ ok: true, json: BAD }))
+      .mockImplementationOnce(async () => ({ ok: true, json: { ...CLEAN_LLM_JSON } }));
+    useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('llm');
+    expect(global.__dispatch).toHaveBeenCalledTimes(2);
+    expect(global.__dispatch.mock.calls[1][1].text).toContain('REPAIR ROUND');
+  });
+
+  // A template capped under the previous prompt version must get its
+  // repair round: the cap is keyed on the grounding hash, and the hash
+  // embeds PROMPT_VERSION, so the v5 bump re-opens every v4-capped visit
+  // once (pre-push codex P1).
+  test('a template capped under previsit_brief_v4 is retried (and repaired) under v5', async () => {
+    const { groundingHashFor, assembleGrounding, PROMPT_VERSION } = PrevisitBrief._test;
+    expect(PROMPT_VERSION).not.toBe('previsit_brief_v4');
+    const state1 = useDb(baseResponses({ products_catalog: CATALOG }));
+    const first = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(first.via).toBe('llm');
+    const parsed = JSON.parse(storedBrief(state1).patch.pre_service_brief);
+    // The hash builder reproduces the stored key — so its v4 form is the
+    // key a pre-deploy template carries.
+    useDb(baseResponses({ products_catalog: CATALOG }));
+    const grounding = await assembleGrounding(SVC);
+    expect(groundingHashFor(grounding)).toBe(parsed.grounding_hash);
+    const v4Hash = groundingHashFor(grounding, 'previsit_brief_v4');
+    expect(v4Hash).not.toBe(parsed.grounding_hash);
+    // Park a v4-capped template: same grounding, at the attempt cap.
+    const capped = JSON.stringify({ ...parsed, generated_via: 'template', grounding_hash: v4Hash, llm_miss_kind: 'validator', llm_attempts: 5 });
+    const state2 = useDb(baseResponses({
+      products_catalog: CATALOG,
+      scheduled_services: [{ ...SVC, pre_service_brief: capped, pre_service_brief_type: storedBrief(state1).patch.pre_service_brief_type }],
+    }));
+    global.__dispatch.mockClear();
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.skipped).not.toBe(true);
+    expect(out.via).toBe('llm');
+    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(storedBrief(state2).brief.grounding_hash).toBe(parsed.grounding_hash);
+  });
+
+  test('describeRejection turns every validator code into one plain instruction (unit)', () => {
+    const { describeRejection, repairNote } = PrevisitBrief._test;
+    expect(describeRejection('ungrounded_novel_term:one-time')).toBe('"one-time" does not appear in the facts — remove it, or replace it with the exact wording the facts use.');
+    expect(describeRejection('ungrounded_novel_product:perform quarterly pest control service')).toMatch(/^"perform quarterly pest control service" does not appear/);
+    expect(describeRejection('truncated_product_term:termite')).toMatch(/shortened product name/);
+    expect(describeRejection('ungrounded_acceptance_conflict:arrival')).toMatch(/the facts say the opposite about "arrival"/);
+    expect(describeRejection('ungrounded_preference_conflict:interior')).toMatch(/opposite about "interior"/);
+    expect(describeRejection('ungrounded_appointment_state:confirmed')).toMatch(/opposite about "confirmed"/);
+    expect(describeRejection('ungrounded_instruction:correct property address')).toMatch(/not an instruction/);
+    expect(describeRejection('ungrounded_contact_request:contact')).toMatch(/no customer request by "contact"/);
+    expect(describeRejection('priorities_not_array')).toMatch(/complete JSON object/);
+    expect(describeRejection('something_new:x')).toBe('rejected as something_new (x) — remove or reword it using only the facts.');
+    const note = repairNote(['ungrounded_novel_term:one-time', 'ungrounded_novel_term:one-time', 'priorities_not_array']);
+    expect(note.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(2);
+    expect(note).toMatch(/^REPAIR ROUND/);
   });
 });
 
@@ -4382,7 +4518,7 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
     global.__dispatch.mockClear();
     const second = await PrevisitBrief.generateVisitBrief('svc-1');
     expect(second.generated).toBe(true);
-    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(global.__dispatch).toHaveBeenCalledTimes(2); // one round + its repair round
     expect(storedBrief(state2).brief.llm_attempts).toBe(2);
 
     const state3 = rerunWith(storedBrief(state2).patch);
@@ -4410,7 +4546,7 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
     global.__dispatch.mockClear();
     const out = await PrevisitBrief.generateVisitBrief('svc-1');
     expect(out.generated).toBe(true);
-    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(global.__dispatch).toHaveBeenCalledTimes(2); // one round + its repair round
     expect(storedBrief(state2).brief.llm_attempts).toBe(1);
   });
 
@@ -4515,7 +4651,7 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
       state = rerunWith(capped);
       const out = await PrevisitBrief.generateVisitBrief('svc-1');
       expect(out.generated).toBe(true);
-      expect(global.__dispatch).toHaveBeenCalledTimes(1);
+      expect(global.__dispatch).toHaveBeenCalledTimes(2); // one round + its repair round
       expect(storedBrief(state).brief.llm_attempts).toBe(1);
       expect(storedBrief(state).brief.llm_policy_fingerprint).toBe('anthropic:swapped-model|-');
     } finally {

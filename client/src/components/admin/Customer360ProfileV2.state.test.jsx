@@ -3,9 +3,13 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
 
-vi.mock('./StickyActionBar', () => ({ CustomerActionBar: () => null }));
+vi.mock('./StickyActionBar', async (importOriginal) => ({
+  ...await importOriginal(),
+  CustomerActionBar: () => null,
+}));
 vi.mock('./AuthenticatedCallAudio', () => ({ default: () => null }));
 vi.mock('./CustomerRequestsPanel', () => ({ default: () => null }));
 vi.mock('./CallBridgeLink', () => ({
@@ -67,6 +71,70 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
   });
 
+  it('preserves technician texting when admin-only conversation history is unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+19415550100';
+        return response(detail);
+      }
+      if (path.endsWith('/comms')) return response({ error: 'Admin access required' }, 403);
+      if (path.endsWith('/communications/sms')) return response({ sent: true, providerMessageId: 'SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
+      return response({});
+    }));
+    const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
+    const field = await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
+    fireEvent.change(field, { target: { value: 'Service update' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
+    await waitFor(() => expect(field).toHaveValue(''));
+    const sends = fetch.mock.calls.filter(([url]) => String(url).endsWith('/communications/sms'));
+    expect(sends).toHaveLength(1);
+    expect(JSON.parse(sends[0][1].body)).toMatchObject({ customerId: 'customer-a', to: '+19415550100', body: 'Service update' });
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/unread-count'))).toBe(false);
+  });
+
+  it('shows this customer\'s unread count beside Message and clears it after reading', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    let read = false;
+    const readScope = { conversationIds: ['conversation-a', 'older-conversation-a'], readBefore: '2024-08-01T17:00:00Z' };
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.includes('/unread-count?customerId=customer-a')) return response({ conversations: read ? 0 : 2, messages: 5 });
+      if (path.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+19415550100';
+        return response(detail);
+      }
+      if (path.endsWith('/comms')) return response({ readScope, comms: [{ id: 'message-a', conversationId: 'conversation-a', channel: 'sms', direction: 'inbound', body: 'Service update', contactPhone: '+19415550100', createdAt: '2024-08-01T16:00:00Z', isRead: read }] });
+      if (path.endsWith('/messages/read')) { read = true; return response({ success: true }); }
+      return response({});
+    }));
+    const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
+    await screen.findByLabelText('2 unread conversations');
+    expect(read).toBe(false);
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('button', { name: /Message.*2 unread conversations/ }));
+    await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
+    await waitFor(() => expect(screen.queryByLabelText('2 unread conversations')).not.toBeInTheDocument());
+    expect(read).toBe(true);
+    const readCall = fetch.mock.calls.find(([url]) => String(url).endsWith('/messages/read'));
+    expect(JSON.parse(readCall[1].body)).toEqual({ messageIds: ['message-a'], ...readScope });
+    const draft = screen.getByRole('textbox', { name: 'Text message' });
+    fireEvent.change(draft, { target: { value: 'Keep this draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
+    expect(screen.queryByRole('dialog', { name: 'Conversation with Avery Customer' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'Summary' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
+    expect(screen.getByRole('textbox', { name: 'Text message' })).toHaveValue('Keep this draft');
+    expect(screen.getByRole('heading', { name: 'Avery Customer' })).toBeInTheDocument();
+  });
+
   it('does not request or offer admin-only history to a technician', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
       ? response(customerDetail('customer-a', 'Avery'))
@@ -77,6 +145,106 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByText('Could not load customer history.')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry customer history' })).not.toBeInTheDocument();
     expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
+  });
+
+  it('uses complete server balances instead of summing recent invoices, and tracks recipient changes', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const detail = customerDetail('customer-a', 'Avery');
+    detail.customer.billingMode = 'per_application';
+    detail.customer.monthlyRate = 0;
+    detail.customer.annualValue = 1130;
+    detail.customer.email = 'account@example.invalid';
+    detail.invoices = [{ id: 'recent-invoice', status: 'sent', amount_due: 125 }];
+    detail.billingSummary = { complete: true, openBalance: 1125, overdueBalance: 0, overdueCount: 0, asOf: '2024-07-01' };
+    detail.notificationPrefs = { billing_contact_name: 'Accounts', billing_email: 'billing@example.invalid' };
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a') ? response(detail) : response({})));
+    const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    expect(screen.queryByRole('meter')).not.toBeInTheDocument();
+    expect(screen.queryByText(/overdue invoice/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Billing', exact: true }));
+    expect(screen.getByText('$1,125.00')).toBeInTheDocument();
+    expect(screen.getByText('Per application', { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText('Monthly Rate', { exact: true })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Details', exact: true }));
+    expect(screen.getByRole('button', { name: 'Recipients saved' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Billing recipient email'), { target: { value: 'new-billing@example.invalid' } });
+    expect(screen.getByRole('button', { name: 'Save recipients' })).toBeEnabled();
+  });
+
+  it('renders the workspace in its parent and keeps older activity available', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const timeline = Array.from({ length: 46 }, (_, index) => ({ type: 'interaction', title: `History entry ${index + 1}`, date: '2024-07-02T16:00:00Z' }));
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/timeline')) return response({ timeline });
+      if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    }));
+    const onClose = vi.fn();
+    const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={onClose} embedded />);
+    const name = await screen.findByRole('heading', { name: 'Avery Customer' });
+    expect(container).toContainElement(name);
+    expect(screen.queryByText('History entry 46')).not.toBeInTheDocument();
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity', exact: true }));
+    expect(screen.getByText('History entry 46')).toBeInTheDocument();
+    expect(screen.getAllByRole('region', { name: 'Customer activity history' })).toHaveLength(1);
+    const estimateLink = screen.getByRole('link', { name: 'Create estimate', exact: true });
+    const estimateParams = new URL(estimateLink.href).searchParams;
+    expect(estimateParams.get('customerId')).toBe('customer-a');
+    expect(estimateParams.get('customerName')).toBe('Avery Customer');
+    expect(estimateParams.get('address')).toContain('Unit 4');
+    fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
+    expect(screen.getByRole('link', { name: 'Book appointment', exact: true })).toHaveAttribute('href', '/admin/schedule?customer=customer-a');
+    expect(screen.getByRole('link', { name: 'Invoices', exact: true })).toHaveAttribute('href', '/admin/invoices?customer=customer-a');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
+    expect(screen.getByRole('dialog', { name: 'Edit customer' })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit customer' })).not.toBeInTheDocument());
+    expect(name).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps workspace history and admin actions unavailable to technicians', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', 'Avery'))
+      : response({})));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="billing" embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    expect(screen.queryByRole('link', { name: 'Create estimate', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText('Balance could not be verified.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Why this status?'));
+    expect(screen.queryByRole('button', { name: 'View billing', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Book appointment', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Billing', exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'Summary', exact: true })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /^(Manage invoices|All invoices)$/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
+    expect(screen.queryByRole('link', { name: 'Book appointment', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Invoices', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit customer' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Prepay invoice' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Customer activity history' })).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+  });
+
+  it('shows SMS follow-up to technicians in the workspace Activity section without the admin history', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      if (path.includes('/commitments/sms?customer_id=customer-a')) {
+        return response({ commitments: [{ id: 'sms-1', party: 'waves', description: 'Send the estimate', overdue: true }], enabled: true, has_more: false });
+      }
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    expect(await screen.findByTestId('sms-followup-summary')).toHaveTextContent('Send the estimate');
+    expect(screen.getByRole('button', { name: 'Mark done' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Customer activity history' })).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
   });
 
   it.each([{ events: [] }, { events: [{ type: 'interaction', title: 'Recovered fixture note' }] }])(

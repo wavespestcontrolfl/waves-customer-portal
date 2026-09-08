@@ -171,7 +171,7 @@ export default function CallRoutingSettingsV2() {
 
           {/* No-answer backstop */}
           <Row label="Backstop unanswered calls" hint="When no one answers in time, the AI picks up instead of dumb voicemail. (Recommended.)">
-            <Switch checked={!!config.noAnswerBackstopEnabled} onChange={(v) => setField("noAnswerBackstopEnabled", v)} />
+            <Switch aria-label="Backstop unanswered calls" checked={!!config.noAnswerBackstopEnabled} onChange={(v) => setField("noAnswerBackstopEnabled", v)} />
           </Row>
 
           {/* AI answers first */}
@@ -179,7 +179,7 @@ export default function CallRoutingSettingsV2() {
             label="AI answers first (override)"
             hint="AI picks up immediately on EVERY call — the only mode where it fronts a call humans would take. Leave off for the safe ring-first flow."
           >
-            <Switch checked={!!config.aiAnswersFirst} onChange={(v) => setField("aiAnswersFirst", v)} />
+            <Switch aria-label="AI answers first (override)" checked={!!config.aiAnswersFirst} onChange={(v) => setField("aiAnswersFirst", v)} />
           </Row>
 
           {/* Nightly answers-first schedule */}
@@ -187,7 +187,7 @@ export default function CallRoutingSettingsV2() {
             label="Nightly answers-first schedule"
             hint="Optionally have the AI answer first only inside an overnight window, so after-hours callers skip the ring. Off = pure ring-timeout."
           >
-            <Switch checked={!!sched.enabled} onChange={(v) => setSched("enabled", v)} />
+            <Switch aria-label="Nightly answers-first schedule" checked={!!sched.enabled} onChange={(v) => setSched("enabled", v)} />
           </Row>
 
           {sched.enabled && (
@@ -224,7 +224,7 @@ export default function CallRoutingSettingsV2() {
             label="Spanish menu (press 2)"
             hint="Adds “Para español, oprima dos” to the greeting. Press 2 hands the call to the same AI agent in Spanish. Needs the env gate GATE_VOICE_SPANISH_MENU and a reachable relay endpoint; off = greeting unchanged."
           >
-            <Switch checked={!!config.spanishMenuEnabled} onChange={(v) => setField("spanishMenuEnabled", v)} />
+            <Switch aria-label="Spanish menu (press 2)" checked={!!config.spanishMenuEnabled} onChange={(v) => setField("spanishMenuEnabled", v)} />
           </Row>
 
           {config.spanishMenuEnabled && (

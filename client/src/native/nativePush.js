@@ -21,6 +21,7 @@
 import api, { tokenSessionIdentity, sameRequestSession } from '../utils/api';
 import { isNativeApp, nativePlatform } from './platform';
 import { navigateToCustomerUrl } from './nativeLinks';
+import { reportError } from '../lib/reportError';
 
 export { isNativeApp };
 
@@ -119,7 +120,9 @@ async function bindPushListeners(PushNotifications) {
       finishRegistration(registered ? 'granted' : 'registration_unavailable');
     });
     await PushNotifications.addListener('registrationError', (err) => {
-      finishRegistration('registration_unavailable');
+      // Native errors carry no attempt ID and may arrive after a timeout.
+      // Keep them diagnostic: each active attempt has its own deadline,
+      // so a stale error cannot cancel a retry that is still registering.
       console.error('[nativePush] push registration error:', err?.error || err);
     });
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
@@ -160,34 +163,57 @@ export async function nativePushPermissionState() {
 }
 
 /**
- * Ask for native push from an explicit customer gesture (the notification
- * drawer's Enable button). A denied permission is reported to the caller so
- * it can direct the customer to device Settings instead of leaving a dead UI.
+ * Ask for native push once the authenticated customer app is unlocked, or
+ * from the notification drawer's retry button. The OS owns the permission
+ * popup and remembers an existing Allow/Don't Allow choice.
  */
 export async function requestNativePushPermission() {
   if (!isNativeApp()) return 'unavailable';
-  try {
+  let settled = false;
+  let failureState = 'setup_unavailable';
+  let finish;
+  // Start the existing deadline before ANY bridge work. A plugin load,
+  // listener bind, or permission call can stall before register() is reached.
+  const confirmation = new Promise((resolve) => {
+    finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      registrationWaiters.delete(finish);
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      reportError({ name: 'TimeoutError' });
+      finish(failureState);
+    }, 15000);
+  });
+  void (async () => {
     const PushNotifications = await pushPlugin();
+    if (settled) return;
+    failureState = 'permission_unavailable';
+    // requestPermissions already returns the saved OS choice when one exists.
+    // Do not put a separate permission probe in front of the system popup.
+    const state = permissionValue(await PushNotifications.requestPermissions());
+    if (settled) return;
+    if (state !== 'granted') {
+      finish(state);
+      return;
+    }
+    failureState = 'setup_unavailable';
     await bindPushListeners(PushNotifications);
-    let state = permissionValue(await PushNotifications.checkPermissions());
-    if (state === 'prompt' || state === 'prompt-with-rationale') {
-      state = permissionValue(await PushNotifications.requestPermissions());
-    }
-    if (state === 'granted') {
-      const confirmation = new Promise((resolve) => {
-        const finish = (result) => { clearTimeout(timeout); registrationWaiters.delete(finish); resolve(result); };
-        const timeout = setTimeout(() => finish('registration_unavailable'), 15000);
-        registrationWaiters.add(finish);
-      });
-      try { await PushNotifications.register(); }
-      catch { finishRegistration('registration_unavailable'); }
-      return await confirmation;
-    }
-    return state;
-  } catch (err) {
+    if (settled) return;
+    failureState = 'registration_unavailable';
+    registrationWaiters.add(finish);
+    // This task is detached: the event/deadline completes the action even if
+    // register() never resolves. A late failure belongs only to this attempt.
+    await PushNotifications.register();
+  })().catch((err) => {
+    if (settled) return;
     console.error('[nativePush] permission request failed:', err?.message || err);
-    return 'unavailable';
-  }
+    reportError(err);
+    finish(failureState);
+  });
+  return confirmation;
 }
 
 /** Confirm this device's registration, separately from its OS permission. */
@@ -212,10 +238,9 @@ export async function initNativePush() {
     const PushNotifications = await pushPlugin();
     await bindPushListeners(PushNotifications);
 
-    // Startup may silently recover an already-granted registration, but it
-    // must never surprise a newly installed customer with an OS prompt before
-    // the app has explained the value. Prompting happens only from
-    // requestNativePushPermission(), called by the bell's Enable action.
+    // Bootstrap can run before authentication or Face ID unlock. Only recover
+    // granted registrations here; the mounted customer bell requests the OS
+    // permission popup automatically after sign-in and unlock.
     const state = permissionValue(await PushNotifications.checkPermissions());
     if (state === 'granted') {
       await PushNotifications.register();

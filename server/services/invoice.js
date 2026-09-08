@@ -3606,7 +3606,15 @@ const InvoiceService = {
         "waveguard_tier",
         // Saved-card state rides along so a deep-linked invoice row keeps
         // its card badge and Charge-card action (Codex PR #3476 r20 P2).
-        "card_on_file",
+        // customers has NO card_on_file column — it is the default
+        // payment_methods row, computed exactly as the list query does
+        // (a bare column read 500'd every admin invoice detail in prod).
+        db.raw(`(
+          SELECT json_build_object('brand', card_brand, 'last_four', last_four)
+          FROM payment_methods
+          WHERE customer_id = customers.id AND is_default = true
+          LIMIT 1
+        ) AS card_on_file`),
         "address_line1",
         "city",
         "state",
@@ -5001,6 +5009,63 @@ const InvoiceService = {
       logger.warn(`[invoice] unvoid committed but setup-fee alert reconcile failed for invoice ${invoice.id}: ${err.message}`);
     }
     return invoice;
+  },
+
+  /**
+   * Close an invoice whose existing discounts/deposit/account-credit allocation
+   * leave exactly nothing due. Uses the non-cash prepaid state and keeps its
+   * existing allocations for the canonical void/reversal paths. No new credit,
+   * payment row, provider call or receipt is created by this transition.
+   */
+  async settleZeroBalance(id, database = db) {
+    const run = async (trx) => {
+      const invoice = await trx("invoices").where({ id }).forUpdate().first();
+      if (!invoice) return { settled: false, reason: "not_found", invoice: null };
+      const skip = (reason) => ({ settled: false, reason, invoice });
+      if (!require("./invoice-helpers").isInvoiceCollectibleStatus(invoice.status)) return skip("already_settled");
+      const totalCents = Math.round(Number(invoice.total) * 100);
+      const creditCents = Math.round(Number(invoice.credit_applied || 0) * 100);
+      const validAmounts = [totalCents, creditCents].every((cents) => Number.isSafeInteger(cents) && cents >= 0);
+      if (invoice.total == null || !validAmounts || creditCents > totalCents) return skip("invalid_balance");
+      if (totalCents !== creditCents) return skip("balance_due");
+      await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
+      if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
+        invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
+        return skip("existing_payment_work");
+      }
+      const payment = await trx("payments").whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id]).first("id");
+      const plan = await trx("payment_plans").where({ invoice_id: id, status: "active" }).first("id");
+      if (payment || plan) return skip("existing_payment_work");
+      const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate()
+        .first("id", "status", "touch_claimed_at");
+      if (sequence?.status === "stopped") return skip("collection_stopped");
+      // fireStep claims under this same invoice lock, then renders/sends
+      // outside its transaction. Let that existing ten-minute lease finish.
+      if (new Date(sequence?.touch_claimed_at).getTime() > Date.now() - 10 * 60 * 1000) {
+        return { ...skip("followup_in_flight"), retryable: true };
+      }
+      await trx("customers").where({ id: invoice.customer_id }).forUpdate().first("id");
+      if (await require("./invoice-helpers").visitRefusesSettlement(trx, invoice.scheduled_service_id)) {
+        return skip("visit_never_ran");
+      }
+      const [settled] = await trx("invoices").where({ id }).update({
+        status: "prepaid", prepaid_prev_status: invoice.status,
+        prepaid_at: trx.fn.now(), prepaid_by: "system:zero_balance",
+        paid_at: trx.fn.now(), updated_at: trx.fn.now(),
+      }).returning("*");
+      if (sequence) await trx("invoice_followup_sequences").where({ id: sequence.id }).update({
+        status: "completed", next_touch_at: null, touch_claimed_at: null, updated_at: trx.fn.now(),
+      });
+      await require("./audit-log").recordAuditEvent({
+        actor_type: "system", action: "invoice.zero_balance_settled",
+        resource_type: "invoice", resource_id: id,
+        metadata: { previous_status: invoice.status, total_cents: totalCents, credit_applied_cents: creditCents },
+        critical: true, trx,
+      });
+      return { settled: true, reason: null, invoice: settled };
+    };
+    return database.isTransaction ? run(database) : database.transaction(run);
   },
 
   /**

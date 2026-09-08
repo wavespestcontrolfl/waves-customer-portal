@@ -150,6 +150,7 @@ export default function TechIntelligenceBar() {
         <input
           id="tech-intelligence-prompt"
           name="tech-intelligence-prompt"
+          aria-label="Ask Waves AI"
           value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
           onFocus={() => setExpanded(true)}
           placeholder="Ask anything..."
@@ -226,7 +227,7 @@ export default function TechIntelligenceBar() {
 
       {/* Loading */}
       {loading && (
-        <div style={{ padding: '6px 12px 12px' }}>
+        <div style={{ padding: '6px 12px 12px' }} role="status" aria-live="polite" aria-label="Thinking">
           {[85, 60].map((w, i) => (
             <div key={i} style={{ height: 10, borderRadius: 4, marginBottom: 4, background: `linear-gradient(90deg, ${D.border}44, ${D.border}88, ${D.border}44)`, backgroundSize: '200% 100%', animation: 'shimmer 1.5s ease infinite', width: `${w}%` }} />
           ))}
@@ -235,13 +236,13 @@ export default function TechIntelligenceBar() {
 
       {/* Response */}
       {response && !loading && (
-        <div style={{ padding: '0 12px 12px', maxHeight: 350, overflowY: 'auto' }}>
-          <div style={{ fontSize: 13, lineHeight: 1.6, color: D.text, fontFamily: "'Nunito Sans', sans-serif" }}>
+        <div style={{ padding: '0 12px 12px', maxHeight: 350, overflowY: 'auto' }} aria-live="polite">
+          <div role={typeof response === 'string' && response.startsWith('Error:') ? 'alert' : undefined} style={{ fontSize: 13, lineHeight: 1.6, color: D.text, fontFamily: "'Nunito Sans', sans-serif" }}>
             {renderMarkdown(response)}
           </div>
           {/* Follow-up */}
           <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>
-            <input value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
+            <input aria-label="Follow-up question" value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Follow up..."
               style={{ flex: 1, padding: '7px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, fontFamily: "'Nunito Sans', sans-serif", outline: 'none' }} />
             <button onClick={() => submit()} disabled={!prompt.trim() || attachmentsLoading} style={{

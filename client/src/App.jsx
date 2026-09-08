@@ -355,6 +355,7 @@ function lazyWithRetry(factory) {
 // admin platform plus the 500KB+ PortalPage before first paint. Same
 // lazyWithRetry + per-route Suspense treatment as the rest of the pages;
 // no rendered-output change.
+const StaffDocumentLibrary = lazyWithRetry(() => import('./components/staffDocuments/Library'));
 const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
 const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
 const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));
@@ -577,6 +578,7 @@ export default function App() {
                 posted the wrong request shape, so it could show “sent” after a 400. */}
             <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
+            <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
           </Route>

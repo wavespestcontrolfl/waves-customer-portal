@@ -2,12 +2,18 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, useNavigate } from 'react-router-dom';
+import { MemoryRouter, useNavigate, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
 vi.mock('../../components/admin/Customer360ProfileV2', () => ({
-  default: ({ customerId }) => <div data-testid="customer-profile">Profile {customerId}</div>,
+  default: function Profile({ customerId, initialTab }) {
+    const [tab, setTab] = React.useState(initialTab);
+    return <div data-testid="customer-profile">Profile {customerId}
+      <span data-testid="profile-active-tab">{tab}</span>
+      <button onClick={() => setTab('overview')}>Profile overview</button>
+    </div>;
+  },
 }));
 vi.mock('../../components/admin/MobileNewCustomerSheet', () => ({ default: () => null }));
 vi.mock('../../components/AddressAutocomplete', () => ({
@@ -23,7 +29,6 @@ vi.mock('../../components/AddressAutocomplete', () => ({
     </>
   ),
 }));
-vi.mock('./CustomerHealthTabs', () => ({ CustomerHealthSection: () => null }));
 
 function response(body, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), {
@@ -53,7 +58,96 @@ function NavigateToCustomerButton() {
   );
 }
 
+function RepeatCommsNotification({ workspace = false }) {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate('/admin/customers?customerId=customer-a&tab=comms' + (workspace ? '&customer360=workspace' : ''))}>Open SMS notification</button>;
+}
+
+function RemountableDirectory() {
+  const location = useLocation();
+  const [version, setVersion] = React.useState(0);
+  return <>
+    <output data-testid="directory-url">{location.search}</output>
+    <button onClick={() => setVersion((value) => value + 1)}>Remount directory</button>
+    <CustomersPageV2 key={version} />
+  </>;
+}
+
 describe('CustomersPageV2 workflow state', () => {
+  it('opens the churn alert with the at-risk filter and preserves manual changes on profile return', async () => {
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      requests.push(parsed.searchParams);
+      return response(list);
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&healthRisk=at_risk']}><RemountableDirectory /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(requests.every((params) => params.get('healthRisk') === 'at_risk')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
+    expect(screen.getByLabelText('Health / churn risk')).toHaveValue('at_risk');
+    fireEvent.change(screen.getByLabelText('Health / churn risk'), { target: { value: 'low' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(requests.at(-1).get('healthRisk')).toBe('low'));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
+    expect(screen.getByLabelText('Health / churn risk')).toHaveValue('low');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+    await waitFor(() => expect(requests.at(-1).has('healthRisk')).toBe(false));
+    expect(screen.getByTestId('directory-url')).toHaveTextContent('?customer360=workspace');
+    expect(screen.getByTestId('directory-url')).not.toHaveTextContent('healthRisk');
+    fireEvent.click(screen.getByRole('button', { name: 'Remount directory' }));
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
+    expect(screen.getByLabelText('Health / churn risk')).toHaveValue('');
+    expect(requests.at(-1).has('healthRisk')).toBe(false);
+  });
+
+  it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname === '/api/admin/customers') {
+        requests.push(parsed.searchParams);
+        return response({ ...list, customers: [{ ...list.customers[0], healthGrade: 'A' }], total: 501, totalPages: 2 });
+      }
+      return response({});
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    const score = await screen.findByRole('img', { name: 'Health score: 90/100' });
+    expect(score.parentElement).toContainElement(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    expect(screen.queryByRole('button', { name: 'Health', exact: true })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+    await waitFor(() => expect(requests.at(-1).get('page')).toBe('2'));
+    fireEvent.change(screen.getByPlaceholderText('Search customers...'), { target: { value: 'Avery' } });
+    fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
+    const dialog = within(screen.getByRole('dialog', { name: 'Filter customers' }));
+    fireEvent.change(dialog.getByLabelText('Health grade'), { target: { value: 'A' } });
+    fireEvent.change(dialog.getByLabelText('Health / churn risk'), { target: { value: 'low' } });
+    fireEvent.change(dialog.getByLabelText('Minimum health score'), { target: { value: '0' } });
+    fireEvent.change(dialog.getByLabelText('Retention outcome'), { target: { value: 'saved' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(Object.fromEntries(requests.at(-1))).toMatchObject({ page: '1', search: 'Avery', healthGrade: 'A', healthRisk: 'low', minHealthScore: '0', retention: 'saved' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
+    fireEvent.click(screen.getAllByRole('button', { name: /^Filter/ })[0]);
+    expect(screen.getByLabelText('Health grade')).toHaveValue('A');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+    await waitFor(() => expect(requests.at(-1).has('healthGrade')).toBe(false));
+    expect(requests.at(-1).get('search')).toBe('Avery');
+    expect(requests.at(-1).has('retention')).toBe(false);
+  });
+
+  it.each([null, 0])('opens old health links in the Directory and preserves a recorded score of %s', async (healthScore) => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response({ ...list, customers: [{ ...list.customers[0], healthScore }] }) : response({})));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&view=health']}><CustomersPageV2 /></MemoryRouter>);
+    expect(await screen.findByRole('img', { name: healthScore == null ? 'Health score not recorded' : 'Health score: 0/100' })).toHaveTextContent(healthScore == null ? '—' : '0');
+    expect(screen.getByRole('button', { name: 'Open Avery Customer customer profile' })).toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/admin/health/'))).toBe(false);
+  });
+
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
@@ -64,6 +158,18 @@ describe('CustomersPageV2 workflow state', () => {
     localStorage.setItem('waves_admin_token', 'test-token');
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 });
+  });
+
+  it.each([false, true])('reopens Comms after repeat notification navigation (workspace=%s)', async (workspace) => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={['/admin/customers?customerId=customer-a&tab=comms' + (workspace ? '&customer360=workspace' : '')]}>
+      <RepeatCommsNotification workspace={workspace} /><CustomersPageV2 />
+    </MemoryRouter>);
+    expect(await screen.findByTestId('profile-active-tab')).toHaveTextContent('comms');
+    fireEvent.click(screen.getByRole('button', { name: 'Profile overview' }));
+    expect(screen.getByTestId('profile-active-tab')).toHaveTextContent('overview');
+    fireEvent.click(screen.getByRole('button', { name: 'Open SMS notification' }));
+    await waitFor(() => expect(screen.getByTestId('profile-active-tab')).toHaveTextContent('comms'));
   });
 
   it('names desktop customer inputs and selects using their visible labels', async () => {
@@ -127,6 +233,27 @@ describe('CustomersPageV2 workflow state', () => {
     await waitFor(() => {
       expect(screen.getByTestId('customer-profile')).toHaveTextContent('Profile customer-b');
     });
+  });
+
+  it('returns to the filtered directory and preserves the workspace opt-in when switching customers', async () => {
+    const workspaceList = { ...list, customers: [...list.customers, { ...list.customers[0], id: 'customer-b', firstName: 'Blake' }], total: 2 };
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.includes('/admin/customers?')) return response(workspaceList);
+      return response({});
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(screen.getAllByRole('link', { name: '10 Palm Ave, Unit 4, Naples FL 34102' })).toHaveLength(2);
+    const search = screen.getByPlaceholderText('Search customers...');
+    fireEvent.change(search, { target: { value: 'Customer' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    const workspace = within(await screen.findByRole('region', { name: 'Customer 360 workspace' }));
+    expect(workspace.getByTestId('customer-profile')).toHaveTextContent('customer-a');
+    fireEvent.click(workspace.getByRole('button', { name: 'All customers', exact: true }));
+    expect(screen.getByPlaceholderText('Search customers...')).toHaveValue('Customer');
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Blake Customer customer profile' }));
+    expect(within(screen.getByRole('region', { name: 'Customer 360 workspace' })).getByTestId('customer-profile')).toHaveTextContent('customer-b');
   });
 
   it('replaces and clears address line 2 from desktop autocomplete selections', async () => {

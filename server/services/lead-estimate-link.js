@@ -612,7 +612,9 @@ async function stampFirstResponseByContact({ database = db, phone = null, email 
     // SLA bookkeeping must never break a live send — but repair jobs (the
     // backfill) pass failSoft:false so a swallowed failure can't report a
     // clean run while eligible leads stay unstamped.
-    logger.warn(`[lead-estimate-link] first-response contact stamp failed: ${e.message}`);
+    // Code only: the query binds the caller's phone / email, and a knex
+    // message quotes its bindings (AGENTS.md PII-in-logs; codex #4072 r9 P1).
+    logger.warn(`[lead-estimate-link] first-response contact stamp failed (${String(e.code || e.name || 'error')})`);
     if (!failSoft) throw e;
   }
   return stamped;
