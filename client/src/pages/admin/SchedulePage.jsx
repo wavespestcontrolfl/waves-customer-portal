@@ -370,7 +370,13 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     // hold it will not get (codex #4140 r4 P2). The preview says which.
     const { hour } = etParts(new Date(iso));
     if ((hour < 8 || hour >= 20) && preview?.smsSendWindowEnabled === true) {
-      return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmt(iso)}.`;
+      // The window opens at 8:00; in cadence mode the worker's first tick
+      // after that is 8:14 (codex #4140 r7).
+      const openISO = etDatetimeLocalToISO(`${etDateString(addETDays(new Date(iso), hour >= 20 ? 1 : 0))}T08:00`);
+      const openTick = preview?.reviewSequencesEnabled && openISO ? nextCadenceTickISO(openISO, preview.cadenceTickMinutesOfHour) : null;
+      return openTick
+        ? `Review text is held for the 8 AM–8 PM window — it goes out at the first cadence tick after 8 AM following ${fmt(iso)}, about ${fmt(openTick)}.`
+        : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmt(iso)}.`;
     }
     // In cadence mode the custom time is when the row becomes ELIGIBLE; the
     // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
@@ -10721,6 +10727,10 @@ export function CompletionPanel({
   const [recapLoading, setRecapLoading] = useState(false);
   const [recapError, setRecapError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Synchronous re-entry guard for the pre-submit "Automatic" preview
+  // re-check: it awaits a request before setSubmitting(true) engages, so a
+  // double-click could otherwise start two completion POSTs (codex #4140 r7).
+  const previewRecheckRef = useRef(false);
   const [generating, setGenerating] = useState(false);
   // F2 (ratified Q13): windowed comms context on the AI report draft — default CHECKED.
   const [aiReportIncludeComms, setAiReportIncludeComms] = useState(true);
@@ -14737,7 +14747,14 @@ export function CompletionPanel({
     // boundary (2:59 → 3:00 PM) just invalidated (codex #4140 r3). Skipped
     // for a committed chain retry (immutable body).
     if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && reviewTiming === "auto") {
-      const fresh = await fetchReviewSendPreview();
+      if (previewRecheckRef.current) return;
+      previewRecheckRef.current = true;
+      let fresh;
+      try {
+        fresh = await fetchReviewSendPreview();
+      } finally {
+        previewRecheckRef.current = false;
+      }
       const shown = reviewSendPreviewRef.current;
       // Compare the scheduling BUCKET the server names, never the instant
       // (codex #4140 r4 P1): a relative answer ("90 minutes after
