@@ -1036,3 +1036,20 @@ test('"going to" is prospective, a guard stops at a subordinate or sequenced pre
   expect(score('E6', 'Waves offers termite baiting.').expected.termite).toBe(true);
   expect(score('E6', 'Waves handles termite-related search terms.').expected.termite).toBe(false);
 });
+
+test('years read against frozen_on, an ended status survives descriptive modifiers, "being a franchise" needs a status predicate, and a protecting "from" complement asserts nothing (#4155 r8)', () => {
+  expect(score('E5', 'Waves serves Manatee County in 2027.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County until 2027.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves served Manatee County until 2024.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves offers fumigation in 2027.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves offers fumigation until 2027.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E8', 'Waves is a franchise until 2027.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves ceased operating as a locally owned pest control franchise.').forbidden.franchise).toBe(false);
+  for (const text of ['Waves is considering being a franchise.', 'Waves avoids being a franchise.', 'Waves denied being a franchise.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(false);
+  }
+  expect(score('E8', 'Waves has been a franchise from 2020 to the present.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves prevents termites from dying.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termites from being killed.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termites from damaging your home.').expected.termite).toBe(true);
+});
