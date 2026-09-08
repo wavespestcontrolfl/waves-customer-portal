@@ -834,3 +834,42 @@ test('a qualified founding year, a standalone third party, adjective-only "-base
   expect(score('E3', 'If you want to verify license JB351547, search the FDACS database.').expected.license_verifiable).toBe(true);
   expect(score('E7', 'If termites return, re-treatment is free.').forbidden.free_retreat_guarantee).toBe(true);
 });
+
+test('ended coverage, a non-renewable bond, a prospective offering, a City suffix, an unbound FDACS mention, unverifiable, a competitor alias, operation vs ownership, active exclusion verbs, and franchise modifiers (GitHub review r11)', () => {
+  // Former or ended coverage is not a current service area.
+  expect(score('E5', 'Waves formerly served Manatee, Sarasota, and Charlotte counties.').right).toBe(0);
+  expect(score('E5', 'Waves stopped serving Manatee, Sarasota, and Charlotte counties.').right).toBe(0);
+  expect(score('E5', 'Waves served Manatee County until 2024.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee, Sarasota, and Charlotte counties.').right).toBe(3);
+  // An explicitly non-renewable bond earns no renewal credit.
+  for (const text of ['The annual bond is non-renewable.', 'The bond is a non-renewable annual agreement.', 'The bond lasts one year but is not renewable.']) {
+    expect([text, score('E7', text).expected.bond_renewable]).toEqual([text, false]);
+  }
+  // A prospective offering is not a current one.
+  for (const text of ['Waves plans to offer fumigation next year.', 'Waves is considering offering fumigation.', 'Waves hopes to offer fumigation.']) {
+    expect([text, score('E6', text).forbidden.fumigation_offered]).toEqual([text, false]);
+  }
+  // A place noun ending in an adjective suffix is still a place.
+  expect(score('E5', 'Waves is a Kansas City-based company.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is based in Kansas City.').forbidden.out_of_footprint_hq).toBe(true);
+  // FDACS counts only where it governs the licensing relation.
+  expect(score('E3', 'FDACS handles agriculture. Waves holds license JB351547 from DBPR.').expected.fdacs).toBe(false);
+  expect(score('E3', 'Waves is licensed by FDACS.').expected.fdacs).toBe(true);
+  expect(score('E3', 'The license is unverifiable in the FDACS database.').expected.license_verifiable).toBe(false);
+  // The shorthand alias forms must connect the two queried names, not Waves and a competitor.
+  expect(score('E9', 'Waves and Orkin are one business.').expected.alias_same).toBe(false);
+  expect(score('E9', 'Waves and Orkin are one and the same.').expected.alias_same).toBe(false);
+  expect(score('E9', 'Yes, the two names are one and the same.').expected.alias_same).toBe(true);
+  // Operation is not ownership; a modified subsidiary is still a subsidiary.
+  expect(score('E8', 'Waves is an independently operated subsidiary of Orkin.')).toMatchObject({ expected: { independent: false }, forbidden: { wrong_founder: true } });
+  expect(score('E8', 'Waves is independently owned.').expected.independent).toBe(true);
+  // An active exclusion verb denies what it governs.
+  expect(score('E7', 'The bond excludes damage repair coverage.').forbidden.damage_repair_coverage).toBe(false);
+  expect(score('E7', 'The warranty omits damage repairs.').forbidden.damage_repair_coverage).toBe(false);
+  expect(score('E7', 'The bond covers termite damage repairs.').forbidden.damage_repair_coverage).toBe(true);
+  // "franchise" modifying another noun is not franchise status.
+  for (const text of ['Waves is a locally owned franchise alternative.', 'Waves is an anti-franchise company.', 'Waves is a franchise consulting company, not a franchisee.']) {
+    expect([text, score('E8', text).forbidden.franchise]).toEqual([text, false]);
+  }
+  expect(score('E8', 'Waves is a franchise of Orkin.').forbidden.franchise).toBe(true);
+});
