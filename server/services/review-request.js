@@ -4632,7 +4632,9 @@ const ReviewService = {
         .where({ customer_id: seq.customer_id })
         // Bounded by DELIVERY (created_at as the fallback for undelivered rows,
         // codex #4141 r3 P2): a row created weeks ago and sent today is today's ask.
-        .whereRaw("COALESCE(sms_sent_at, sent_at, created_at) > ?", [new Date(Date.now() - 30 * 86400000)])
+        // …the LATER of the two channels: a Both ask whose email leg retried
+        // after the text was last heard from at the email (codex #4154 r2 P1).
+        .whereRaw("GREATEST(COALESCE(sms_sent_at, created_at), COALESCE(sent_at, created_at)) > ?", [new Date(Date.now() - 30 * 86400000)])
         .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
         .whereRaw(ASK_TOUCH_SQL)
         .select("sequence_id", "template_key", "sms_sent_at", "sent_at");
@@ -4672,8 +4674,9 @@ const ReviewService = {
         .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "spacing_lookup_unavailable", nextEvalAt }), updated_at: new Date() });
       return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
     }
+    // Same rule as lastDeliveredAskAt: the later delivered channel anchors.
     const lastAskAtMs = recentAskRows.reduce((max, r) => {
-      const t = new Date(r.sms_sent_at || r.sent_at).getTime();
+      const t = Math.max(...[r.sms_sent_at, r.sent_at].map((v) => (v ? new Date(v).getTime() : 0)));
       return Number.isFinite(t) && t > max ? t : max;
     }, 0);
     if (stepIsAsk && lastAskAtMs && Date.now() - lastAskAtMs < ASK_SPACING_MS) {
