@@ -30,6 +30,9 @@ import {
   cn,
 } from "../../components/ui";
 
+// Templates whose preview reports first-visit audience eligibility for an appointment.
+const AUDIENCE_PREVIEW_TEMPLATE_KEYS = ["app_intro", "welcome.new_recurring"];
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function adminFetch(path, options = {}) {
@@ -1949,7 +1952,13 @@ export default function EmailTemplatesPanelV2() {
       if (canEdit) await persistDraft();
       const d = await adminFetch(`/admin/email-templates/versions/${selectedVersionId}/preview`, {
         method: "POST",
-        body: JSON.stringify({ payload: parsedPayload(), scheduledServiceId: audienceAppointmentId.trim() || undefined }),
+        body: JSON.stringify({
+          payload: parsedPayload(),
+          // Only the two onboarding templates show the appointment field; a
+          // stale value must not ride along on every other preview (Codex
+          // #4112 r6: the server validates the ID before the template check).
+          scheduledServiceId: AUDIENCE_PREVIEW_TEMPLATE_KEYS.includes(selectedKey) ? audienceAppointmentId.trim() || undefined : undefined,
+        }),
       });
       setPreview(d);
       if (d.missingPayload?.length) {
@@ -2689,7 +2698,7 @@ export default function EmailTemplatesPanelV2() {
                   <Trash2 size={14} /> Delete
                 </Button>
               </div>
-              {["app_intro", "welcome.new_recurring"].includes(selectedKey) && (
+              {AUDIENCE_PREVIEW_TEMPLATE_KEYS.includes(selectedKey) && (
                 <div className="space-y-2">
                   <label htmlFor="email-audience-appointment" className="text-14 text-ink-secondary">Appointment ID for an audience check (optional)</label>
                   <Input
