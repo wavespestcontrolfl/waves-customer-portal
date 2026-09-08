@@ -3177,7 +3177,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // customer-report findings / Pest Pressure pipeline, and its suppression
     // posture is frozen on the record so resumed side effects and downstream
     // customer-facing gates (documents, paid-invoice review) honor it.
-    const isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
+    // let, not const: rehydrated from the record's frozen decision on resume
+    // (see the re-derivation before token mint).
+    let isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
 
     const reportServiceLine = detectServiceLine(svc.service_type);
     const reportConfig = getServiceLineConfig(reportServiceLine);
@@ -4994,6 +4996,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // history, crash-resume re-derivation) read the absent field as
             // auto_send and can mint/send anyway (codex P1 r4).
             ...((typedFindingsType || isInternalOnlyCompletion || typedDeliveryMode !== 'auto_send') ? { typedReportDelivery: typedDeliveryMode } : {}),
+            // The internal-only decision is frozen in BOTH directions (codex
+            // #4058 r4 P1): 'disabled' above is ambiguous (a consultation or a
+            // killed profile), and a routine completion persists no posture
+            // at all — so a profile that cuts over to or from
+            // completion_mode='internal_only' between a packet's records
+            // commit and its effects replay could otherwise skip the yard-sign
+            // kit deduction for a treatment or deduct it for a consultation.
+            internalOnlyCompletion: isInternalOnlyCompletion,
             // Companion delivery postures frozen alongside (same rule):
             // graduation flips on the profile never retro-publish stored
             // companion sections.
@@ -8480,7 +8490,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // consultations — both freeze typedReportDelivery; routine completions
     // never persist it, so frozenDelivery is undefined and nothing changes.
     if (record?.structured_notes) {
-      const frozenDelivery = parseJsonObject(record.structured_notes)?.typedReportDelivery;
+      const frozenNotes = parseJsonObject(record.structured_notes) || {};
+      // The internal-only decision is frozen as a boolean (codex #4058 r4
+      // P1). A stamped record without typedReportDelivery is an untyped
+      // auto_send completion — every other posture freezes above — so the
+      // stamp also restores auto_send when the live profile has since cut
+      // over to internal_only. Pre-stamp records keep the live derivation.
+      const frozenInternalOnly = typeof frozenNotes.internalOnlyCompletion === 'boolean'
+        ? frozenNotes.internalOnlyCompletion : null;
+      if (frozenInternalOnly !== null) isInternalOnlyCompletion = frozenInternalOnly;
+      const frozenDelivery = frozenNotes.typedReportDelivery
+        || (frozenInternalOnly !== null ? 'auto_send' : undefined);
       if (frozenDelivery && frozenDelivery !== typedDeliveryMode) {
         typedDeliveryMode = frozenDelivery;
         suppressTypedCustomerComms = typedDeliveryMode !== 'auto_send';

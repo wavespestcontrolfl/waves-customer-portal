@@ -414,6 +414,25 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toBe('project_required_completion');
   });
 
+  test.each([
+    ['a treatment whose profile cuts over to internal_only', false],
+    ['a consultation whose profile cuts back to a treatment', true],
+  ])('%s replays its effects from the frozen internal-only decision', async (_label, frozenInternalOnly) => {
+    const profile = { service_key: `fixture_${fixture.catalogId}`,
+      service_name_snapshot: 'Fixture General Pest Control', completion_mode: 'internal_only', active: true };
+    if (frozenInternalOnly) await mockPg('service_completion_profiles').insert(profile);
+    const saved = await saveVisitCompletionPacket(submission());
+    const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => record.structured_notes.internalOnlyCompletion === frozenInternalOnly)).toBe(true);
+    if (frozenInternalOnly) await mockPg('service_completion_profiles').where({ service_key: profile.service_key }).del();
+    else await mockPg('service_completion_profiles').insert(profile);
+    const supplies = jest.spyOn(require('../services/supplies-consumption'), 'consumeCompletionSupplies').mockResolvedValue(undefined);
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(supplies).toHaveBeenCalledTimes(2);
+    expect(supplies.mock.calls.every(([, args]) => args.isInternalOnlyCompletion === frozenInternalOnly)).toBe(true);
+  });
+
   test('a push subscription lookup outage keeps the member retryable and the push unclaimed', async () => {
     mockNotificationRecipientId = fixture.techId;
     await mockPg('notification_preferences').insert({ admin_user_id: fixture.techId, trigger_key: 'job_complete',
