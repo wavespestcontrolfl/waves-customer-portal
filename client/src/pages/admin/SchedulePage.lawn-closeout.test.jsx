@@ -577,3 +577,26 @@ it('a governed draft restored under an initial plan outage still submits its sav
   // server must plan and record against — not the full saved lawn.
   expect(submit.mock.calls[0][1].lawnProtocolCompletion).toEqual({ treatedSqft: 1000 });
 });
+
+it('changing visits after a governed draft was restored under a plan outage drops the first visit\'s area and rows', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '1000' } });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['3', '2']));
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).lawnAreaOverride).toBe('1000'));
+  view.unmount();
+  failPlan = true;
+  const second = mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  failPlan = false;
+  second.rerender(<CompletionPanel service={{ ...service, id: 'second-visit' }} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  // The second visit plans against its own saved lawn: no build request
+  // carries the first visit's 1,000 sq ft, and its rows are its own.
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  expect(screen.getByLabelText('Area for this visit (sq ft)').value).toBe('5000');
+  expect(fetch.mock.calls.filter(([url, options]) => url.includes('treatment-plans/second-visit') && options?.body)
+    .map(([, options]) => JSON.parse(options.body).lawnSqft)).toEqual([]);
+});

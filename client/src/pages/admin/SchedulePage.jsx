@@ -11746,7 +11746,15 @@ export function CompletionPanel({
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
-    if (!lawnCompletionDefaults?.enabled || lawnCompletionDefaults.serviceId === service.id) return;
+    // Visit-owned lawn state resets on a visit change whenever the previous
+    // visit carried any: loaded defaults for another visit, or a governed
+    // draft restored while its plan request had failed (no defaults loaded to
+    // compare against) — otherwise the first visit's area and rows drive the
+    // next visit's build request and quantities (pre-push audit P1).
+    const previousVisitState = (lawnCompletionDefaults?.enabled && lawnCompletionDefaults.serviceId !== service.id)
+      || lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0
+      || selectedProducts.some((product) => product.lawnPlanDefaults);
+    if (!previousVisitState) return;
     setSelectedProducts([]);
     setLawnAreaOverride(undefined);
     setLawnRemovedDefaultIds([]);
