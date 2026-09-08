@@ -15,7 +15,7 @@ const { randomUUID } = require('node:crypto');
 const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, revalidateSmsFulfillment } = require('../services/sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment } = require('../services/sms-commitment-fulfillment');
 const NotificationService = require('../services/notification-service');
 const { etDateString } = require('../utils/datetime-et');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
@@ -28,7 +28,7 @@ const schema = `sms_commitments_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
   'conversations', 'messages', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'job_status_history', 'system_settings', 'leads'];
+  'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads'];
 let mockPg;
 let admin;
 let message;
@@ -607,6 +607,97 @@ postgres('SMS commitments on PostgreSQL', () => {
     const allowed = (kind) => evidence.records.filter((r) => admissibleWitness(r, { kind, sms_context })).map((r) => r.id).sort();
     expect(allowed('schedule_visit')).toEqual([rows[1].id, rows[4].id].sort());
     expect(allowed('technician_follow_up')).toEqual([rows[3].id]);
+  });
+
+  test('a same-status date move proves a scheduling request only through a logged before/after date', async () => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const base = { customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Lawn', scheduled_date: etDateString(after), window_start: '09:00:00',
+      status: 'confirmed', created_at: before, updated_at: after };
+    const [moved, touched, sameDate, earlyMove] = await mockPg('scheduled_services').insert([base, base, base, base]).returning('id');
+    const nextWeek = etDateString(new Date(after.getTime() + 7 * 86400000));
+    await mockPg('reschedule_log').insert([
+      { scheduled_service_id: moved.id, customer_id: message.customer_id, original_date: etDateString(after),
+        new_date: nextWeek, initiated_by: 'admin', created_at: after },
+      { scheduled_service_id: sameDate.id, customer_id: message.customer_id, original_date: etDateString(after),
+        new_date: etDateString(after), initiated_by: 'admin', created_at: after },
+      { scheduled_service_id: earlyMove.id, customer_id: message.customer_id, original_date: etDateString(after),
+        new_date: nextWeek, initiated_by: 'admin', created_at: before },
+    ]);
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, now);
+    expect(evidence.failures).toEqual([]);
+    const ids = evidence.records.filter((r) => r.type === 'visit').map((r) => r.id);
+    expect(ids).toEqual([moved.id]);
+    expect(ids).not.toContain(touched.id);
+    const record = evidence.records.find((r) => r.id === moved.id);
+    expect(record.text).toContain('moved after the request');
+    const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString() };
+    expect(admissibleWitness(record, { kind: 'schedule_visit', sms_context })).toBe(true);
+    expect(admissibleWitness(record, { kind: 'technician_follow_up', sms_context })).toBe(false);
+  });
+
+  test.each([
+    ['delivery email names an admissible estimate', 'ok', true],
+    ['delivery email names an estimate handed off before the request', 'early', false],
+    ['delivery email names an estimate for another property', 'other_property', false],
+    ['a non-estimate email to the recipient', 'unrelated', false],
+    ['the estimate delivery went to a different address', 'other_recipient', false],
+  ])('recipient-specific estimate closure: %s', async (_label, variant, admissible) => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [otherProperty] = await mockPg('customer_properties').insert({ customer_id: message.customer_id,
+      address_line1: '200 Other Lane', city: 'Sarasota', zip: '34236', active: true }).returning('id');
+    const handoff = variant === 'early' ? before : after;
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id,
+      property_id: variant === 'other_property' ? otherProperty.id : context.properties[0].id, status: 'sent', service_interest: 'Lawn',
+      estimate_data: { deliveryState: { lastDeliveredAt: handoff.toISOString() } }, created_at: before }).returning('id');
+    const [email] = await mockPg('email_messages').insert({ recipient_type: 'customer', recipient_id: message.customer_id,
+      recipient_email_snapshot: variant === 'other_recipient' ? 'someone.else@example.invalid' : 'synthetic@example.invalid',
+      trigger_event_id: variant === 'unrelated' ? 'appointment_reminder:1' : `estimate_delivery:${estimate.id}`,
+      status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your lawn estimate is attached' }).returning('id');
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, now);
+    expect(evidence.failures).toEqual([]);
+    const witness = evidence.records.find((r) => r.type === 'email_delivery' && r.id === email.id);
+    const commitment = { kind: 'send_estimate', evidence: [{ quote: 'Email the lawn estimate to synthetic@example.invalid' }],
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    expect(admissibleWitness(witness, commitment, evidence.records)).toBe(admissible);
+    const verdict = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'lawn estimate' }, evidence, commitment);
+    expect(verdict.verdict).toBe(admissible ? 'fulfilled' : 'uncertain');
+    if (admissible) expect(verdict).toMatchObject({ record_type: 'email_delivery', record_id: email.id });
+  });
+
+  test.each([
+    ['witness channel truncated', 'call', 60, false],
+    ['supporting channel truncated but its window reaches the witness', 'sms', 60, true],
+    ['supporting channel truncated past the witness', 'sms', 0, false],
+  ])('evidence completeness: %s', async (_label, channel, witnessOffsetSeconds, fulfilled) => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const witnessAt = new Date(after.getTime() + witnessOffsetSeconds * 1000);
+    const now = new Date(after.getTime() + 120000);
+    const [call] = await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
+      transcription: 'Returned your call about the gate code', created_at: witnessAt }).returning('id');
+    // 51 rows of the truncated channel: the oldest is dropped. When the window
+    // must reach the witness, the second-oldest row sits exactly at the
+    // witness time; otherwise every row postdates a witness the cut hides.
+    const rows = Array.from({ length: 51 }, (_, i) => ({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'delivered',
+      created_at: new Date(after.getTime() + (channel === 'call' || witnessOffsetSeconds === 0 ? 1 : 59) * 1000 + i * 1000) }));
+    if (channel === 'call') {
+      await mockPg('call_log').insert(rows.map((r) => ({ ...r, duration_seconds: 5, transcription: 'voicemail' })));
+    } else {
+      await mockPg('sms_log').insert(rows.map((r) => ({ ...r, message_type: 'manual', message_body: 'Context message' })));
+    }
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, now);
+    expect(evidence.failures).toEqual([`${channel}_truncated`]);
+    const commitment = { kind: 'callback', evidence: [{ quote: 'Please call me back' }],
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const verdict = groundFulfillment({ verdict: 'fulfilled', record_ref: `call:${call.id}`, quote: 'Returned your call' }, evidence, commitment);
+    expect(verdict.verdict).toBe(fulfilled ? 'fulfilled' : 'uncertain');
+    if (!fulfilled) expect(verdict).toMatchObject({ reason: 'incomplete_sources', failures: [`${channel}_truncated`] });
   });
 
   test('progressed visits preserve booking proof without inventing it from progress', async () => {
