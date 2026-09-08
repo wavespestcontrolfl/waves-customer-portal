@@ -931,7 +931,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock(fixture('seq-3d5', { lastAskAgoMs: 20 * 3600000 }), {
         // The runner's own last-ask lookup: review_requests, delivered asks,
         // bounded by delivery time (the cap-stats read has no such bound).
-        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /COALESCE\(sms_sent_at, sent_at, created_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
+        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(COALESCE\(sms_sent_at, created_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
       });
       db.mockImplementation(mock);
 
@@ -1139,6 +1139,24 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(new Date(row.scheduled_for).getTime()).toBe(new Date(out.nextAllowedAt).getTime());
       expect(row.status).toBe('pending');
+    });
+
+    test('the runner anchors to the LATER delivered channel — a Both ask whose email retried after the text (codex #4154 r2 P1)', async () => {
+      const smsAt = new Date(Date.now() - 80 * 3600000); // 80 h ago: alone, the reminder would send
+      const emailAt = new Date(Date.now() - 20 * 3600000); // the email leg went out 20 h ago
+      const fx = fixture('seq-lt', { lastAskAgoMs: 80 * 3600000 });
+      fx.review_requests[0] = { ...fx.review_requests[0], channel: 'both', sms_sent_at: smsAt, sent_at: emailAt, created_at: smsAt };
+      const mock = makeMock(fx);
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(out).toMatchObject({ sent: 0, deferred: 1 });
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(parse(seq.decision)).toMatchObject({ reason: 'spacing' });
+      // weekdaysOnly is not set on the default fixture step, so the hold is exactly email + 72 h
+      expect(new Date(seq.next_run_at).getTime()).toBe(emailAt.getTime() + 72 * 3600000);
     });
 
     test('the first ask has no timing gate: a Day-0 step with no prior ask sends at its scheduled time', async () => {
