@@ -559,3 +559,17 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
     expect(db).not.toHaveBeenCalledWith('payment_methods');
   });
 });
+
+
+describe('retry settlement reporting', () => {
+  test.each(['processing', 'paid'])('%s disarms the old attempt and receipts only settlement', async status => {
+    mockFailedPayments = [monthlyFailedPayment()];
+    StripeService.charge.mockResolvedValue({ id: 'pay-state', status, amount: '33.96' });
+    const result = await BillingCron.processPaymentRetries();
+    expect(result).toMatchObject({ succeeded: status === 'paid' ? 1 : 0, processing: status === 'processing' ? 1 : 0 });
+    expect(mockPaymentUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ next_retry_at: null, superseded_by_payment_id: 'pay-state' })]));
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', status === 'paid' ? 'retry_success' : 'retry_processing', expect.objectContaining({ amountCents: 3396, paymentId: 'pay-state' }));
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(status === 'paid' ? 1 : 0);
+  });
+});

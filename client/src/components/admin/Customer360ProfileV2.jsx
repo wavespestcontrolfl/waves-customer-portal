@@ -3229,6 +3229,10 @@ function AdminAutopayPanelV2({
   const [charging, setCharging] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  const outcomeRef = useRef(null);
+  useEffect(() => {
+    if (msg || err) outcomeRef.current?.scrollIntoView?.({ block: "center" });
+  }, [msg, err]);
 
   const load = () => {
     fetch(`${API_BASE}/admin/customers/${customerId}/autopay-state`, {
@@ -3257,11 +3261,20 @@ function AdminAutopayPanelV2({
     setErr("");
     setMsg("");
     try {
-      await adminFetch(`/admin/customers/${customerId}/charge-now`, {
+      const result = await adminFetch(`/admin/customers/${customerId}/charge-now`, {
         method: "POST",
         body: JSON.stringify({}),
       });
-      setMsg(`Charged $${amt.toFixed(2)} successfully`);
+      const payment = result?.payment;
+      const collected = Number.parseFloat(payment?.amount);
+      const amountLabel = Number.isFinite(collected) ? ` $${collected.toFixed(2)}` : "";
+      if (payment?.status === "paid") {
+        setMsg(`Payment${amountLabel} completed`);
+      } else if (payment?.status === "processing") {
+        setMsg(`Payment${amountLabel} is processing. Settlement is pending.`);
+      } else {
+        setMsg("Payment status is not confirmed. Check payment history before trying again.");
+      }
       load();
     } catch (e) {
       setErr(e.message || "Charge failed");
@@ -3325,12 +3338,12 @@ function AdminAutopayPanelV2({
           )}
         </div>
         {msg && (
-          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">
+          <div ref={outcomeRef} role="status" className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-14">
             {msg}
           </div>
         )}
         {err && (
-          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div ref={outcomeRef} role="alert" className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-14">
             {err}
           </div>
         )}
