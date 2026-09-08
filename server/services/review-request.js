@@ -442,7 +442,9 @@ async function lastDeliveredAskAt(customerId, { excludeRequestId = null } = {}) 
   if (excludeRequestId) q.where("id", "!=", excludeRequestId);
   const rows = await q;
   return rows.reduce((max, r) => {
-    const t = new Date(r.sms_sent_at || r.sent_at).getTime();
+    // The LATER delivered channel anchors the rule: a Both ask whose email
+    // retried after the text was last heard from at the email.
+    const t = Math.max(...[r.sms_sent_at, r.sent_at].map((v) => (v ? new Date(v).getTime() : 0)));
     return Number.isFinite(t) && t > (max ? max.getTime() : 0) ? new Date(t) : max;
   }, null);
 }
@@ -3492,6 +3494,31 @@ const ReviewService = {
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };
+
+    // The 3-day rule for a DIRECT ask (drawer one-off, satisfaction prompt,
+    // paid-invoice legacy ask): cadence steps are guarded by the runner and
+    // no-link check-ins are not asks. A held ask is a deferred send — the
+    // caller reports it queued and the retry owner (cron / sequence) picks
+    // it up at last ask + 72 h; an unavailable lookup holds 30 min.
+    if (sequenceId == null && !noLinkSend) {
+      let hold = null;
+      try {
+        const lastAsk = await lastDeliveredAskAt(customer.id, { excludeRequestId: request.id });
+        const manualAt = await this.manualReviewAskSentRecently(customer.id, {
+          since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
+        });
+        const anchorMs = Math.max(lastAsk ? lastAsk.getTime() : 0, manualAt ? manualAt.getTime() : 0);
+        if (anchorMs && Date.now() - anchorMs < ASK_SPACING_MS) {
+          hold = { nextAllowedAt: new Date(anchorMs + ASK_SPACING_MS), code: "ASK_SPACING" };
+        }
+      } catch (err) {
+        logger.warn(`[review] 3-day rule lookup failed, holding outreach (requestId=${request.id}): ${err.message}`);
+        hold = { nextAllowedAt: new Date(Date.now() + 30 * 60 * 1000), code: "ASK_SPACING_LOOKUP_UNAVAILABLE" };
+      }
+      if (hold) {
+        return this._applyOutreachSendResult(request, { sent: false, deferred: true, retryable: true, ...hold }, manageRetryVia, actualChannel);
+      }
+    }
 
     if (actualChannel === "email") {
       return this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia, introParagraph: persistedBody });

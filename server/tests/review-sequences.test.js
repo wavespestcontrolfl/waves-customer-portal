@@ -988,6 +988,29 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(row.scheduled_for.getTime()).toBeGreaterThan(Date.now() + 25 * 60000);
     });
 
+    test('a direct (drawer) ask inside 72h of a delivered ask is queued for last ask + 72h, anchored to the later channel (codex #4141 r2, local P1)', async () => {
+      const smsAt = new Date(Date.now() - 50 * 3600000);
+      const emailAt = new Date(Date.now() - 20 * 3600000); // the Both ask's email retried later
+      const mock = makeMock({
+        customers: [{ id: 'dq-1', first_name: 'Flo', last_name: 'Q', phone: '+19410000156', nearest_location_id: 'bradenton' }],
+        review_requests: [{ id: 'rr-dq1', customer_id: 'dq-1', channel: 'both', status: 'sent', template_key: 'first_treatment_ask', sms_sent_at: smsAt, sent_at: emailAt, created_at: smsAt, token: 'tq1' }],
+      });
+      db.mockImplementation(mock);
+
+      // The gate stack (30-day cooldown) usually catches this first; the
+      // primitive itself must hold too for the paths that bypass the gate.
+      const result = await ReviewService.sendOutreachTouch({
+        customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'day0_ask', triggeredBy: 'admin', manageRetryVia: 'cron',
+      });
+
+      expect(result).toMatchObject({ ok: false, deferred: true, code: 'ASK_SPACING' });
+      expect(new Date(result.nextAllowedAt).getTime()).toBe(emailAt.getTime() + 72 * 3600000);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const queued = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-dq1');
+      expect(queued.status).toBe('pending');
+      expect(new Date(queued.scheduled_for).getTime()).toBe(emailAt.getTime() + 72 * 3600000);
+    });
+
     test('the first ask has no timing gate: a Day-0 step with no prior ask sends at its scheduled time', async () => {
       const mock = makeMock({
         customers: [{ id: 'fa-c', first_name: 'Ana', last_name: 'M', phone: '+19410000151', nearest_location_id: 'sarasota' }],
