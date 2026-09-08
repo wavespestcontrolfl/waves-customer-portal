@@ -480,6 +480,11 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   // A wrong LLC filing year is a wrong founding year; a filed report is not.
   expect(score('E4', 'Waves Pest Control, LLC was filed in 2019.').forbidden.wrong_founding_year).toBe(true);
   expect(score('E4', 'Waves filed its annual report in 2025.').forbidden.wrong_founding_year).toBe(false);
+  // Pre-push hook r31: a heading is not a bare owner name; a government body in subject position is another party; the competitor list is part of the scorer fingerprint.
+  expect(score('E1', '## Short Answer\nAdam Benetti owns Waves Pest Control.')).toMatchObject({ expected: { founder: true }, forbidden: { wrong_owner_bare: false }, wrong: 0 });
+  expect(score('E3', 'Waves holds FDACS license JB351547. FDACS is headquartered in Tallahassee, Florida.')).toMatchObject({ expected: { fdacs_license: true, fdacs: true }, forbidden: { out_of_footprint_hq: false } });
+  expect(score('E5', 'Waves is headquartered in Tallahassee, Florida.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(ENTITY_COHORT.other_entities.length).toBeGreaterThan(0);
   // Blanket guarantees count only when they modify the termite bond or its re-treatment.
   expect(score('E7', 'Waves offers a money-back guarantee on unused products, but termite bonds cover paid re-treatment only.').forbidden.free_retreat_guarantee).toBe(false);
   expect(score('E7', 'Its equipment carries a lifetime warranty. The termite bond renews annually and excludes repairs.').forbidden.free_retreat_guarantee).toBe(false);

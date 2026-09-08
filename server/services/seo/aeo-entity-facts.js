@@ -25,7 +25,7 @@ const { MEASUREMENT_VERSION } = require('./aeo-measurement');
 // like even when a pattern is repaired without changing a prompt.
 const SCORER_REVISION = crypto.createHash('sha1')
   .update(fs.readFileSync(__filename))
-  .update(JSON.stringify({ facts: cohort.facts, claims: cohort.claims, global_forbid: cohort.global_forbid, questions: cohort.questions.map(q => [q.id, q.query, q.expect, q.forbid]) }))
+  .update(JSON.stringify({ facts: cohort.facts, claims: cohort.claims, global_forbid: cohort.global_forbid, other_entities: cohort.other_entities, questions: cohort.questions.map(q => [q.id, q.query, q.expect, q.forbid]) }))
   .digest('hex').slice(0, 12);
 
 // `{{other_entities}}` in a pattern expands to the competitor list, matched
@@ -217,6 +217,11 @@ function normalizeAnswer(text, keepUrls = false) {
 const NOT_A_COMPANY_NAME = 'Waves|Pest|Lawn|Termite|Mosquito|Rodent|Residential|Commercial|General|Local|Professional|Our|Their|Its|The|This|That|These|Those|Same|Other|Additional|Core|Main|Full|Complete|Department|Division|Agriculture|Consumer|County|State|University|Bureau|Board|Association';
 const OTHER_ENTITY_RE = new RegExp(`\\b(?:${OTHER_ENTITY_ALTERNATION})\\b|\\b(?!(?:${NOT_A_COMPANY_NAME})\\b)(?!(?:[A-Z][\\w'&-]*[ \\t]+){0,3}(?:${NOT_A_COMPANY_NAME})[ \\t]+(?:Services?|Inc\\.?|LLC|Co\\.?|Company|Corp\\.?)\\b)[A-Z][\\w'&-]*(?:[ \\t]+[A-Z][\\w'&-]*){0,3}[ \\t]+(?:Pest(?:[ \\t]+Control)?|Exterminat(?:ors?|ing)|Termite(?:[ \\t]+(?:&|and)[ \\t]+Pest)?|Lawn(?:[ \\t]+Care)?|Services?|Inc\\.?|LLC|Co\\.?|Company|Corp\\.?)\\b`, 'g');
 const WAVES_NAMED_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b/gi;
+// A government body is another party too, but only in subject position (a
+// verb follows): "FDACS is headquartered in Tallahassee" is about FDACS,
+// while "FDACS license JB351547" is a modifier on the Waves license, and
+// "FDACS lists JB351547 as held by Waves" reports a fact about Waves.
+const GOV_SUBJECT_RE = /\b(?:FDACS|Florida Department of Agriculture(?: and Consumer Services)?|[Tt]he (?:state|county|city|department|division|bureau|agency|commission))\b(?=\s+(?:\([^)]*\)\s+)?(?:is|are|was|were|has|have|had|does|do|did|(?!(?:lists|shows|confirms|records|reports|states|says|verifies|indicates|publishes|maintains|licenses|issues|certifies|displays|recognizes)\b)[a-z]+s)\b)/g;
 // Sentence-initial capitalization is accepted for the intro word; the
 // compared party must still be a proper name.
 // A compared party that governs a following relative clause ("unlike Orkin,
@@ -256,7 +261,7 @@ function lastSubjectIndex(re, text) {
 function aboutAnotherEntity(beforeClause, answerPrefix) {
   if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
   const named = answerPrefix.replace(COMPARISON_PHRASE_RE, ' ');
-  return lastSubjectIndex(OTHER_ENTITY_RE, named) > lastIndexOfMatch(WAVES_NAMED_RE, named);
+  return Math.max(lastSubjectIndex(OTHER_ENTITY_RE, named), lastSubjectIndex(GOV_SUBJECT_RE, named)) > lastIndexOfMatch(WAVES_NAMED_RE, named);
 }
 
 // A claim that captures a value ("founded in 2019", "based in Tampa") is

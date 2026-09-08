@@ -100,7 +100,7 @@
     "wrong_owner_bare": {
       "label": "Names someone else as the owner outright",
       "pattern": "^\\s*(?!Waves\\b|Adam\\b|Not?\\b|Neither\\b|Never\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)(?=\\s*(?:[.,;:!(\\-\u2013\u2014]|$|\\n))",
-      "reject_pattern": "benetti|waves|family|locally|independent|owner|operator|private|unknown|unclear|none|n/?a",
+      "reject_pattern": "benetti|waves|family|locally|independent|owner|operator|private|unknown|unclear|none|n/?a|answer|summary|overview|response|conclusion|background|details?|facts?|takeaways?|bottom line|tl;?dr|quick|short|direct|verdict|notes?|ownership|company|business|founder|history|key|about|who owns",
       "flags": ""
     },
     "wrong_founder": {
