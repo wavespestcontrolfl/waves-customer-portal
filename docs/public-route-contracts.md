@@ -1461,8 +1461,9 @@ replacement committing mid-load cannot be overwritten with the retired
 id — the load follows the row to the replacement instead, adopts the
 intent when a concurrent first load stored the same one, or renders
 `unavailable` if the row moved on. Every nested read under the
-replacement lock (visit, payer, tender, customer, Auto Pay probe) rides
-the transaction handle — one pool connection per request. An unfinished or already-
+replacement lock (visit, payer, tender, customer, Auto Pay probe, and
+the Stripe-customer link-up inside the mint) rides the transaction
+handle — one pool connection per request. An unfinished or already-
 retired id has nothing to retire and returns the ordinary mint under the
 same lock. Every minted/replayed intent is re-read LIVE before it is
 judged (an idempotent replay returns the ORIGINAL create body, never a

@@ -707,8 +707,11 @@ const StripeService = {
    * Create or retrieve a Stripe customer, store stripe_customer_id on customers table.
    * Returns the Stripe customer ID.
    */
-  async ensureStripeCustomer(customerId) {
-    const customer = await db('customers').where({ id: customerId }).first();
+  // `database`: the caller's transaction handle when this runs under a
+  // held row lock (standalone Auto Pay replacement) — the customer read
+  // and the link-back write must not take a second pool connection.
+  async ensureStripeCustomer(customerId, { database = db } = {}) {
+    const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
     // Already linked
@@ -742,7 +745,7 @@ const StripeService = {
 
       const stripeCustomerId = stripeCustomer.id;
 
-      await db('customers')
+      await database('customers')
         .where({ id: customerId })
         .update({ stripe_customer_id: stripeCustomerId });
 
@@ -818,7 +821,9 @@ const StripeService = {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
-    const stripeCustomerId = await this.ensureStripeCustomer(customerId);
+    // opts.database: transaction handle for the customer link-up (see
+    // ensureStripeCustomer).
+    const stripeCustomerId = await this.ensureStripeCustomer(customerId, { database: opts.database });
 
     const paymentMethodTypes = paymentMethodType === 'us_bank_account'
       ? ['us_bank_account']

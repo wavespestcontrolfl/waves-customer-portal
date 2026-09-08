@@ -582,6 +582,7 @@ async function mintGenerationIntent(request, tender, { database }) {
       metadata: { purpose: PURPOSE, request_id: String(request.id) },
       verificationMethod: 'instant',
       idempotencyKey: `${PURPOSE}_${request.id}_${tender}${generation > 0 ? `_g${generation}` : ''}`,
+      database,
     });
     if (minted.status === 'canceled') continue;
     // The deterministic key replays the ORIGINAL create body — a capture
@@ -704,6 +705,9 @@ async function replaceAutopaySetupIntent({ request, setupIntentId }) {
         metadata: { purpose: PURPOSE, request_id: String(request.id), replaces: String(current.id) },
         verificationMethod: 'instant',
         idempotencyKey: `${PURPOSE}_${request.id}_${tender}_after_${current.id}`,
+        // The Stripe-customer link-up inside rides the held transaction
+        // (GH Codex #4163 r5 P1) — no second pool connection under the lock.
+        database: trx,
       });
       replacement = minted?.setupIntentId ? await readLive(minted.setupIntentId) : null;
     } catch (err) {

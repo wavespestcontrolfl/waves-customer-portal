@@ -999,6 +999,9 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
     expect(mockCreateSetupIntent).toHaveBeenCalledWith('cust-1', 'card_or_bank', expect.objectContaining({
       idempotencyKey: 'autopay_setup_link_req-1_card_or_bank_after_seti_old',
       metadata: expect.objectContaining({ purpose: 'autopay_setup_link', request_id: 'req-1', replaces: 'seti_old' }),
+      // The Stripe-customer link-up inside createSetupIntent rides the
+      // held transaction (GH Codex #4163 r5 P1).
+      database: expect.any(Function),
     }));
     expect(mockRetireSetupIntent).toHaveBeenCalledWith('seti_old', { replacedBy: 'seti_after' });
     const chains = touches('appointment_card_requests');
