@@ -307,6 +307,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .every((item) => item.status === 'done')).toBe(true);
     expect(await mockPg('service_photos').whereIn('service_record_id', saved.body.items.map((item) => item.serviceRecordId)))
       .toHaveLength(2);
+    // The replay never re-uploads the byte-less form; the pre-commit counts stay frozen.
+    const records = await mockPg('service_records').whereIn('id', saved.body.items.map((item) => item.serviceRecordId));
+    expect(records.map((record) => record.structured_notes.completionPhotos)).toEqual([
+      expect.objectContaining({ uploaded: 1, failed: 0 }), expect.objectContaining({ uploaded: 1, failed: 0 }),
+    ]);
   });
 
   test('an interrupted first effects claim still writes its operational activity', async () => {

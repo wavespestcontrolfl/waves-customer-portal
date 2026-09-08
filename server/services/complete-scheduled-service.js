@@ -6641,6 +6641,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
+    // A packet's records phase made every photo durable before its commit
+    // and froze the counts on the record; the saved form the effects phase
+    // replays carries no bytes, so re-uploading would fail every photo,
+    // overwrite those counts and strip the typed photo summary.
+    if (packetEffects && Array.isArray(completionPhotos) && completionPhotos.length) {
+      completionPhotosUploadedBeforeCommit = true;
+      completionPhotoUploadResult = parseJsonObject(record.structured_notes)?.completionPhotos || null;
+    }
     if (!completionPhotosUploadedBeforeCommit && Array.isArray(completionPhotos) && completionPhotos.length) {
       completionPhotoUploadResult = await uploadServicePhotoDataUrls({
         serviceRecordId: record.id,
