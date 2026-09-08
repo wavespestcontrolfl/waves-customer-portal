@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
@@ -19,10 +19,12 @@ vi.mock('../utils/api', () => ({
     getTermiteBond: vi.fn(),
     getLawnHealth: vi.fn(),
     getRequests: vi.fn(),
+    updateAccountCreditPreference: vi.fn(),
   },
 }));
 
 import api from '../utils/api';
+import CustomerDialogHost from '../components/brand/CustomerDialogHost';
 import { BillingTab, MyPlanTab, MyRequestsCard, ScheduleTab } from './PortalPage';
 
 const customer = {
@@ -46,6 +48,41 @@ afterEach(() => {
 });
 
 describe('authenticated portal partial failures', () => {
+  it.each([false, true])('restores credit preference %s after a failed save and permits a confirmed retry', async (initial) => {
+    api.getPayments.mockResolvedValue({ payments: [] });
+    api.getBalance.mockResolvedValue({ currentBalance: 0 });
+    api.getCards.mockResolvedValue({ cards: [] });
+    api.getNotificationPrefs.mockResolvedValue({});
+    api.updateAccountCreditPreference.mockReset()
+      .mockRejectedValueOnce(new Error('preference unavailable'))
+      .mockResolvedValueOnce({ success: true });
+    let finishRefresh;
+    const refreshCustomer = vi.fn(() => new Promise(resolve => { finishRefresh = resolve; }));
+
+    render(<>
+      <CustomerDialogHost />
+      <BillingTab customer={{ ...customer, accountCredit: 25, autoApplyAccountCredit: initial }} refreshCustomer={refreshCustomer} />
+    </>);
+
+    const toggle = await screen.findByRole('switch', { name: 'Apply my account credit to invoices automatically' });
+    fireEvent.click(toggle);
+    expect(await screen.findByText('Could not save your credit preference. Please try again.')).toBeInTheDocument();
+    expect(toggle).toHaveAttribute('aria-checked', String(initial));
+    expect(toggle).toBeEnabled();
+    expect(refreshCustomer).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'OK', exact: true }));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
+    expect(toggle).toBeDisabled();
+    fireEvent.click(toggle);
+    expect(api.updateAccountCreditPreference.mock.calls).toEqual([[!initial], [!initial]]);
+    await act(async () => finishRefresh());
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveAttribute('aria-checked', String(!initial));
+    expect(screen.queryByText('Could not save your credit preference. Please try again.')).not.toBeInTheDocument();
+  });
+
   it('keeps billing available when only notification preferences fail', async () => {
     api.getPayments.mockResolvedValue({ payments: [] });
     api.getBalance.mockResolvedValue({ currentBalance: 0 });
