@@ -1799,7 +1799,8 @@
             "\\b(refund(ed)?|credit(ed)?) (is|has been|will be) (on its way|processed|issued|applied|coming)\\b",
             "you'?ll (get|receive|see) (a|your|the) (refund|credit)",
             "\\b(?:refund|credit)\\s+(?:is|was|has been|will be|gets|got)\\s+(?:approved|authori[sz]ed|granted|confirmed|done)\\b",
-            "\\b(?:i|we)(?:[\\x27\\u2019]ve| have| will|[\\x27\\u2019]ll| just| already| can| am going to|[\\x27\\u2019]m going to)?\\s*(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?)\\s+(?:a|an|your|the|that|you)\\s+(?:full\\s+|partial\\s+)?(?:refund|credit|money|payment)?\\b"
+            "\\b(?:i|we)(?:[\\x27\\u2019]ve| have| will|[\\x27\\u2019]ll| just| already| can| am going to|[\\x27\\u2019]m going to)?\\s*(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|payment)\\b",
+            "\\b(?:i|we)(?:[\\x27\\u2019]ve| have| will|[\\x27\\u2019]ll| can| am going to|[\\x27\\u2019]m going to)\\s+(?:just\\s+|already\\s+|now\\s+)?(?:refund|credit)(?:ed)?\\s+you\\b"
           ],
           "severity": "critical"
         }
