@@ -3325,8 +3325,14 @@ const ReviewService = {
 
     // First name only (codex #3235 r2 P2): a full technician name blows the
     // one-segment budget on the {tech}-bearing templates, and the customer
-    // knows the tech by first name anyway.
-    const techFirst = firstNameFrom(techName) || (await technicianFirstName(technicianId)) || null;
+    // knows the tech by first name anyway. A cadence touch signs with the
+    // technician the RECORD resolves to (technician_id recovered above) ahead
+    // of the name persisted on the sequence — that name is a cache written
+    // at enrollment, and pre-deployment enrollments could cache a newer
+    // visit's technician (codex #4139 r3). A manual send keeps the
+    // operator's techName.
+    const recordTechFirst = sequenceId != null && technicianId ? await technicianFirstName(technicianId) : null;
+    const techFirst = recordTechFirst || firstNameFrom(techName) || (await technicianFirstName(technicianId)) || null;
     const vars = {
       first: firstNameFrom(contact.name) || customer.first_name || "",
       tech: techFirst || TECH_FALLBACK_SMS,

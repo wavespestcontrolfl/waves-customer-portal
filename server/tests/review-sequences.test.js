@@ -2602,6 +2602,27 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Ivy! Older with Waves.');
     });
 
+    test('a cadence touch signs with the record\'s technician even when the sequence cached another name (codex #4139 r3)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'd0-10', first_name: 'Uma', last_name: 'P', phone: '+19410000099', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d10', customer_id: 'd0-10', technician_id: 'tech-a', service_type: 'pest control', service_date: '2026-09-01' }],
+        technicians: [{ id: 'tech-a', name: 'Older Tech' }, { id: 'tech-b', name: 'Newer Tech' }],
+        review_sequences: [{
+          id: 'seq-d10', customer_id: 'd0-10', status: 'active', current_step: 0, touches_sent: 0,
+          // Enrolled before the deployment: the cache holds a newer visit's tech.
+          tech_name: 'Newer Tech', service_record_id: 'sr-d10',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Uma! Older with Waves.');
+    });
+
     test('a drawer send with no techName resolves the technician from the latest completed visit (codex #4139 r1)', async () => {
       const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
       const mock = makeMock({
