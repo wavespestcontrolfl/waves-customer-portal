@@ -220,6 +220,8 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
   }));
   test('grouped services use their own sold lines and invoice the combined net', () => rollbackTest(async (trx) => {
     const { jobId, estimateId, soldLine } = await fixture(trx);
+    // Monthly and one-time catalog rows share the Mosquito short name;
+    // this fixture sells the explicit monthly identity used by the add-on.
     const catalog = await trx('services').where({ service_key: 'mosquito_monthly' }).first();
     const addonServiceId = catalog?.id || randomUUID();
     if (!catalog) await trx('services').insert({ id: addonServiceId, service_key: 'mosquito_monthly', name: 'Mosquito Control', category: 'mosquito', frequency: 'monthly', billing_type: 'recurring', visits_per_year: 12 });
@@ -227,8 +229,9 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       service_key_snapshot: 'mosquito_monthly', service_category_snapshot: 'mosquito', recurring_pattern: 'monthly', base_price: 200, estimated_price: 200 });
     await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 300 });
     await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { services: [soldLine,
-      { service: 'mosquito', name: 'Mosquito Control', frequency: 'monthly', visitsPerYear: 12, perTreatment: 200, priceAfterDiscount: 180, discount: { effectiveDiscount: .1 } }] } } } });
+      { service: 'mosquito', serviceKey: 'mosquito_monthly', name: 'Mosquito Control', frequency: 'monthly', visitsPerYear: 12, perTreatment: 200, priceAfterDiscount: 180, discount: { effectiveDiscount: .1 } }] } } } });
     const plan = await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' });
+    expect(plan.view.lines.map((line) => line.status)).toEqual(['matched', 'matched']);
     expect(plan.view).toMatchObject({ canApply: true, proposedAmount: 265 });
     expect(plan.view.lines.map((line) => line.quote.amount)).toEqual([85, 180]);
     await pricing.commitCompletionPricingReview(trx, { ...plan, review: { witness: plan.view.witness, applyDiscounts: true } }, { role: 'admin', technicianId: 'synthetic' });
