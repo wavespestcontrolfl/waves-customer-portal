@@ -678,6 +678,99 @@ postgres('visit summary recipient recovery', () => {
       .toMatchObject({ status: 'unknown_delivery' });
   });
 
+  test('an archived summary template suppresses the email leg instead of retrying it forever', async () => {
+    await mockPg('email_templates').where({ template_key: 'service.visit_summary' }).update({ status: 'archived' });
+    try {
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } finally {
+      await mockPg('email_templates').where({ template_key: 'service.visit_summary' }).update({ status: 'active' });
+    }
+    expect(sendOne).not.toHaveBeenCalled();
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'suppressed' });
+  });
+
+  test.each(['email_enabled', 'service_completed'])('a customer who turned off %s receives no summary email', async (toggle) => {
+    await mockPg('notification_prefs').insert({ customer_id: fixture.customerId, [toggle]: false });
+    try {
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).del();
+    }
+    expect(sendOne).not.toHaveBeenCalled();
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'suppressed' });
+  });
+
+  test('an email opt-out that lands after recipient resolution is refused at the dispatch claim', async () => {
+    const execute = mockPg.client.constructor.prototype._query;
+    let optedOut = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function optOutBeforeClaim(connection, query) {
+      if (!optedOut && query.sql.includes('from "customers"') && query.sql.includes('for share')) {
+        optedOut = true;
+        await mockPg('notification_prefs').insert({ customer_id: fixture.customerId, email_enabled: false });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      // Refused at the claim: the leg retries, and the retry re-resolves the
+      // recipients with the opt-out in place.
+      expect(await deliver()).toEqual({ state: 'delivery_pending' });
+      expect(optedOut).toBe(true);
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).del();
+    }
+    expect(sendOne).not.toHaveBeenCalled();
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'suppressed' });
+  });
+
+  test.each([
+    ['a provider refusal (429) on the immediate SMS stays retryable', 429, 'failed', 'delivery_pending'],
+    ['an ambiguous provider failure on the immediate SMS stays on office review', undefined, 'unknown_delivery', 'delivery_review'],
+  ])('%s', async (_label, providerHttpStatus, effectStatus, state) => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    sendCustomerMessage.mockImplementationOnce(async ({ preDispatchCheck }) => {
+      expect((await preDispatchCheck()).ok).toBe(true);
+      return { sent: false, retryable: true, code: 'PROVIDER_UNAVAILABLE', providerHttpStatus };
+    });
+    expect(await deliver()).toEqual({ state });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: effectStatus });
+    if (effectStatus === 'failed') {
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  test('a corrected-address recovery delivery settles a hard-bounced summary', async () => {
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    for (const message of messages) {
+      await handleEmailMessageEvent({ event: 'bounce', type: 'bounce', reason: 'mailbox unavailable',
+        timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
+    }
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    // The bounce-recovery rail's resend keeps the trigger identity (unit-tested
+    // in email-bounce-recovery) and the corrected address accepts it.
+    const [recovery] = await mockPg('email_messages').insert({
+      provider: 'sendgrid', template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_type: 'customer', recipient_id: fixture.customerId, recipient_email_snapshot: 'corrected@example.invalid',
+      idempotency_key: `bounce_recovery:${messages[0].id}`, status: 'sent', sent_at: new Date(), provider_message_id: randomUUID(),
+      send_attempt_token: randomUUID(), subject_snapshot: 'S', from_email_snapshot: 'contact@wavespestcontrol.com',
+      from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com',
+      categories: JSON.stringify(['email_template', 'bounce_recovery']),
+    }).returning('*');
+    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, recovery);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+  });
+
   test('the full coordinator closes the visit and replay preserves one email per recipient', async () => {
     expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({
       status: 200, body: { state: 'done', payment: { state: 'no_charge' }, delivery: { state: 'delivered' } },

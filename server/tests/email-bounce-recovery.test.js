@@ -184,9 +184,10 @@ function orderedDb(resolvers = {}) {
   const calls = [];
   const fn = jest.fn((table) => {
     const chain = {};
-    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'select']) {
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'select']) {
       chain[m] = jest.fn(() => chain);
     }
+    chain.insert = jest.fn((data) => { calls.push({ table, op: 'insert', data }); return chain; });
     chain.first = jest.fn(() => Promise.resolve(resolvers.first ? resolvers.first(table) : null));
     chain.returning = jest.fn(() => Promise.resolve(resolvers.returning ? resolvers.returning(table) : []));
     chain.update = jest.fn((data) => { calls.push({ table, data }); return Promise.resolve(resolvers.update ? resolvers.update(table, data) : 1); });
@@ -240,6 +241,10 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(pubIdx).toBeGreaterThanOrEqual(0);
     expect(linkIdx).toBeLessThan(pubIdx);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // The recovery row keeps the original trigger identity so trigger-keyed
+    // aggregates (the visit summary effect) settle from its delivery.
+    expect(mockDb._calls.find((c) => c.op === 'insert' && c.table === 'email_messages').data)
+      .toMatchObject({ idempotency_key: 'bounce_recovery:orig1', trigger_event_id: 'estimate_delivery:est-1' });
     // P2: the send carries a custom arg so a fast webhook can resolve the row
     // before provider_message_id is committed.
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ customArgs: expect.objectContaining({ email_message_id: 'msg1' }) }));
