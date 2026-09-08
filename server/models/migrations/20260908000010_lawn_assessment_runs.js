@@ -34,10 +34,6 @@ exports.up = async function up(knex) {
     t.jsonb('findings').notNullable().defaultTo('[]'); // after the naming gate
     t.jsonb('severities').nullable();
     t.jsonb('scores_raw').nullable();
-    // The AI scores exactly as presented to the technician: legacy units,
-    // seasonally adjusted at /assess. Immutable — /confirm calibrates against
-    // this snapshot, never the assessment row a confirm rewrites.
-    t.jsonb('scores_adjusted').nullable();
     t.text('observations').nullable();
     t.jsonb('raw_response').nullable();
     t.integer('tokens_in').nullable();
