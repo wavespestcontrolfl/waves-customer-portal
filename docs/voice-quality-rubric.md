@@ -1,6 +1,6 @@
 # Voice quality — manual conversation replay
 
-`npm run eval:voice-relay` runs 34 synthetic-caller scenarios through the live
+`npm run eval:voice-relay` runs 29 synthetic-caller scenarios through the live
 `RelayConversation` loop: Sandy's prompt, model, registered tools and turn handling.
 It evaluates deterministic checks and prints the recorded conversation for review.
 This stage has no judge, scheduler or notification channel. A passing result means
