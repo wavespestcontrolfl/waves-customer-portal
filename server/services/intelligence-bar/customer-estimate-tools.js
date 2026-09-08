@@ -7,6 +7,7 @@ const { agentEngineResultDigest } = require('../agent-estimate-preview');
 const { storedManualDiscountForReplay } = require('../estimate-manual-discount-replay');
 const { perApplicationChargeAmount } = require('../billing-cadence');
 const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
+const { normalizePropertyType } = require('../pricing-engine/commercial-helpers');
 
 const uuid = { type: 'string', format: 'uuid' };
 const CUSTOMER_ESTIMATE_TOOLS = [
@@ -33,7 +34,12 @@ function failure(message, code = 'missing_information', statusCode = 409) {
   return err;
 }
 
+// PostgreSQL returns canonical lowercase UUIDs; a request may spell them in uppercase.
+const sameId = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
+
 function address(property) {
+  // A service address starts with a street; a row holding only its default state is not one.
+  if (!String(property.address_line1 || '').trim()) return '';
   return [[property.address_line1, property.address_line2].filter(Boolean).join(' '), property.city,
     [property.state, property.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
 }
@@ -46,7 +52,7 @@ async function loadContext(input, database = db, lock = false) {
   let query = database('customer_properties').where({ customer_id: customer.id, active: true }).orderBy('id');
   if (lock) query = query.forUpdate();
   const rows = await query;
-  const selected = input.property_id ? rows.find(row => row.id === input.property_id) : rows.find(row => row.is_primary);
+  const selected = input.property_id ? rows.find(row => sameId(row.id, input.property_id)) : rows.find(row => row.is_primary);
   if (input.property_id && !selected) throw failure('The property does not belong to this customer', 'target_relationship_mismatch');
   let grass = null, profileLawnSqft = null;
   if (selected?.is_primary) {
@@ -90,7 +96,7 @@ function estimateBody(input, context) {
   if (!property?.address || !(Number(property.treatable_lawn_sqft) > 0) || !property.track) {
     throw failure('A saved service address, treatable lawn area and identified grass type are required. Update the missing property facts before pricing.');
   }
-  if (property.occupancy_type === 'commercial' || /commercial|multi.?family|condo/i.test(property.property_type || '')) {
+  if (property.occupancy_type === 'commercial' || normalizePropertyType(property.property_type) === 'commercial') {
     throw failure('This property needs the commercial estimate workflow.', 'capability_unimplemented');
   }
   const applications = input.lawn_applications ?? 9;
@@ -114,7 +120,7 @@ async function estimatePreview(input, database = db, context = null) {
   let prior = null;
   if (input.estimate_id) {
     prior = await database('estimates').where({ id: input.estimate_id }).first();
-    if (!prior || prior.customer_id !== input.customer_id || prior.property_id !== input.property_id) {
+    if (!prior || !sameId(prior.customer_id, input.customer_id) || !sameId(prior.property_id, input.property_id)) {
       throw failure('The estimate does not belong to this customer and service property', 'target_relationship_mismatch');
     }
     body.expectedEditVersion = persistence.estimateEditVersion(prior);
@@ -207,7 +213,7 @@ async function saveCustomerEstimate(input, actionContext) {
       ? await persistence.reviseAdminEstimate({ ...params, estimateId: input.estimate_id })
       : await persistence.createOrReuseAdminEstimate(params);
     const saved = await trx('estimates').where({ id: result.estimate.id }).first();
-    if (!saved || saved.customer_id !== input.customer_id || saved.property_id !== input.property_id
+    if (!saved || !sameId(saved.customer_id, input.customer_id) || !sameId(saved.property_id, input.property_id)
         || agentEngineResultDigest(saved.estimate_data.engineResult) !== preview.engine_result_digest) {
       throw failure('The saved estimate did not match its approved price and property.', 'verification_failed');
     }

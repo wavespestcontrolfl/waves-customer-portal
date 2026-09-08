@@ -262,6 +262,21 @@ suite('existing-customer estimates from another workspace', () => {
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
   }, 60000);
 
+  test('a saved condo prices as residential, a street-less property refuses, and uppercase identifiers save', async () => {
+    const condo = await customerFixture({ property_type: 'condo' });
+    expect((await propose(condo)).body.pendingActions).toHaveLength(1);
+    const streetless = await customerFixture({ address_line1: '', address_line2: null, city: '' });
+    const refused = await propose(streetless);
+    expect(refused.body.pendingActions || []).toHaveLength(0);
+    const result = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+      .find(block => block.type === 'tool_result' && block.tool_use_id === 'save');
+    expect(JSON.parse(result.content)).toMatchObject({ code: 'missing_information' });
+    const upper = await customerFixture();
+    const saved = await confirm(await propose(upper, { customer_id: upper.customer.id.toUpperCase(), property_id: upper.property.id.toUpperCase() }));
+    expect(saved.body).toMatchObject({ success: true });
+    expect(await db('estimates').where({ customer_id: upper.customer.id, property_id: upper.property.id })).toHaveLength(1);
+  }, 60000);
+
   test('an oversize lawn requiring field review never produces an ordinary price confirmation', async () => {
     const fixture = await customerFixture({ property_sqft: 25000, lot_sqft: 50000 });
     await db('customer_turf_profiles').insert({ id: crypto.randomUUID(), customer_id: fixture.customer.id,
