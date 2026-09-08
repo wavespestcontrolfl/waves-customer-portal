@@ -78,19 +78,39 @@ const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?
 // promise in ITS clause ("I cannot access your schedule, so we will call you
 // back" still commits), and a trailing offer condition ("… if you would
 // like") makes the clause an offer, not a commitment.
-const COMMITMENT_CLAUSE_SPLIT_RE = /[.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b/i;
+const COMMITMENT_CLAUSE_SPLIT_RE = /([.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b)/i;
+// The subject + modal a coordinated fragment inherits: "I'll check with the
+// office and get back to you" promises the callback even though the second
+// fragment has no subject of its own.
+const SUBJECT_MODAL_RE = /\b((?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)))\b/i;
+const COORDINATOR_RE = /^(?:and|then)$/i;
 // A Spanish bare "no" negates only the verb it precedes ("No le llamaremos"),
 // so it counts at the end of the prefix alone — "No worries, we will call
 // you" keeps its promise.
 const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos|nunca|jamás|no(?=\s*$))\b/i;
 const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
 function isCommitment(text) {
-  return String(text).split(COMMITMENT_CLAUSE_SPLIT_RE).some((clause) => {
+  const parts = String(text).split(COMMITMENT_CLAUSE_SPLIT_RE); // clause, separator, clause, …
+  const commits = (clause) => {
     const match = PROMISE_RE.exec(clause);
     if (!match) return false;
     return !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index))
       && !CONDITIONAL_OFFER_SUFFIX_RE.test(clause.slice(match.index + match[0].length));
-  });
+  };
+  let carried = null; // the previous clause's affirmative subject + modal
+  for (let i = 0; i < parts.length; i += 2) {
+    const clause = parts[i];
+    const separator = i > 0 ? parts[i - 1] : '';
+    const own = SUBJECT_MODAL_RE.exec(clause);
+    const coordinated = COORDINATOR_RE.test(separator.trim());
+    if (commits(clause)) return true;
+    if (!own && carried && coordinated && commits(`${carried} ${clause.trim()}`)) return true;
+    // A fragment with its own subject resets the carry; a coordinated fragment
+    // without one ("… and then reach out") keeps it; any other break drops it.
+    if (own) carried = NON_COMMITMENT_PREFIX_RE.test(clause) ? null : own[1];
+    else if (!coordinated) carried = null;
+  }
+  return false;
 }
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
 const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. Do NOT try again and do not confirm or deny '
@@ -1089,6 +1109,11 @@ async function runScenario(scenario) {
     const convo = newConversation(h, scenario, record);
     applyResumeFixture(convo, scenario, record);
     await driveTurns(convo, scenario, record);
+    // Every injected failure must have been consumed, or the handoff the
+    // fixture asked for (a second failure) was never exercised.
+    if (h.state.modelFailuresLeft > 0) {
+      throw Object.assign(new Error(`fixtures.modelFailures: ${h.state.modelFailuresLeft} injected failure(s) never reached the model — the turns ended first`), { code: 'EVAL_MODEL_FAILURES_UNUSED' });
+    }
     record.toolsAvailable = (convo._tools || []).map((t) => t.name);
     record.promptSha = convo._promptSha || null;
     // Any REAL provider error (an injected failure is expected and excluded,

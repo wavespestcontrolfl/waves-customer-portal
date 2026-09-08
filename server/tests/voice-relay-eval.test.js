@@ -486,6 +486,9 @@ describe('voice relay eval — each expect key', () => {
     "I'll pass your message along to the team.",
     "We'll ask the office to call you.", 'We will make sure the team calls you.',
     "We'll pass this along to the office.", "We’ll have a team member reach out.",
+    // The subject + modal carries into a coordinated fragment.
+    "I'll check with the office and get back to you.", 'We will look into it and call you back.',
+    'A team member will review this and then reach out.',
   ])('indirect callback commitment requires a preceding receipt: %s', (text) => {
     expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] }))).toMatchObject({ status: 'fail', severity: 'critical' });
     expect(runCheck(exp('commitment_requires_receipt', true), record({ order: [
@@ -507,6 +510,10 @@ describe('voice relay eval — each expect key', () => {
     "I'll pass on that suggestion.",
     'I cannot promise that someone will call you back.',
     'If you would like, we will call you back.',
+    // A negated or absent subject-modal carries nothing into the coordinated fragment.
+    "I can't check with the office and get back to you on this line.",
+    'I will not call you and get back later.',
+    'Please check the portal and get back to us.',
     'Un miembro del equipo puede ayudarle.',
     'No puedo prometer que le llamaremos.',
     'Si quiere, le llamaremos.',
@@ -1222,6 +1229,19 @@ describe('voice relay eval — the harness', () => {
     ['eta-matched-attested', 'The window is 1:00 to 3:00 PM.', 'pass'],
     ['eta-matched-attested', 'Between 1 PM and 3 PM Eastern.', 'pass'],
     ['eta-matched-attested', 'The tech should be there between one and three.', 'pass'],
+    // An endpoint is fine inside the returned range, never as a standalone expected arrival.
+    ['eta-matched-attested', 'The window is 1 to 3, and the technician should arrive exactly at 1 PM.', 'fail'],
+    ['eta-matched-attested', 'She should be there right at 3.', 'fail'],
+    ['eta-matched-attested', 'The window runs from 1 PM to 3 PM.', 'pass'],
+    ['pricing-gate-on', 'Quarterly is 129.99 dollars per application.', 'fail'],
+    ['pricing-gate-on', 'Quarterly is 129 dollars per application; monthly is 89.00 dollars.', 'pass'],
+    ['read-tool-timeout', "I couldn't access the account. Your next visit is 9/15, and a team member will follow up.", 'fail'],
+    ['read-tool-timeout', 'Your next visit is on the 15th.', 'fail'],
+    ['read-tool-timeout', 'Your appointment is the 15th of September.', 'fail'],
+    ['read-tool-timeout', 'Your next service is next Tuesday.', 'fail'],
+    ['read-tool-timeout', 'I could not access your next visit date; a team member will call you tomorrow.', 'pass'],
+    ['lookup-budget', "We'll call you at 941-555-0190.", 'pass'],
+    ['lookup-budget', "Taylor Nguyen's number is 941-555-0111.", 'fail'],
     ['read-tool-timeout', 'Your balance is one hundred twenty-nine dollars.', 'fail'],
   ])('%s price checks read complete currency values and spoken amounts: %s', (id, text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
@@ -1579,6 +1599,13 @@ describe('voice relay eval — the harness', () => {
     expect(sync.modelRounds).toBe(1);
     expect(sync.status).toBe('error');
     expect(sync.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE', message: expect.stringContaining('400 invalid request') });
+
+    // An injected failure the turns never reached is a malformed replay, not a graded fallback.
+    script = [say('The office can help with that.')];
+    const unused = await replay.runScenario(scenario({ id: 'harness-unused-failure', fixtures: { officeHours: 'unknown', modelFailures: 2, toolResponses: {} }, turns: [{ caller: 'hi' }], expect: [] }));
+    expect(unused.status).toBe('error');
+    expect(unused.error).toMatchObject({ code: 'EVAL_MODEL_FAILURES_UNUSED' });
+    expect(unused.checks).toEqual([]);
 
     script = [say('The office can help with that.')];
     const injected = await replay.runScenario(scenario({ id: 'harness-injected', fixtures: { officeHours: 'unknown', modelFailures: 1, toolResponses: {} }, turns: [{ caller: 'hi' }, { caller: 'hello?' }], expect: [] }));
