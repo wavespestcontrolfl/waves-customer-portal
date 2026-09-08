@@ -12,24 +12,39 @@ const {
   withAutomatedEstimatePhoneLock,
 } = require('./estimate-automation-duplicates');
 
-async function executeLeadTool(toolName, input) {
+const { phoneMatchDigits } = require('../utils/phone');
+
+// Authority comes from the server's assigned session, never model arguments.
+async function resolveLeadSubject(input, context, conn = db, lock = false) {
+  if (!context?.leadId || !context?.customerId) return { error: 'Missing assigned lead context' };
+  if ((input.lead_id && input.lead_id !== context.leadId) ||
+      (input.customer_id && input.customer_id !== context.customerId)) {
+    return { error: 'Tool target does not match assigned lead' };
+  }
+  const query = conn('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at');
+  if (lock) query.forUpdate();
+  const lead = await query.first();
+  if (!lead) return { error: 'Assigned lead is unavailable' };
+  const customer = await conn('customers').where('id', context.customerId).whereNull('deleted_at').first();
+  if (!customer) return { error: 'Assigned customer is unavailable' };
+  if (input.phone != null) {
+    const variants = phoneMatchDigits(input.phone);
+    const matches = [lead.phone, customer.phone].some(phone => phoneMatchDigits(phone).some(value => variants.includes(value)));
+    if (!matches) return { error: 'Tool phone does not match assigned lead' };
+  }
+  return { lead, customer };
+}
+
+async function executeLeadTool(toolName, input, context) {
+  const subject = await resolveLeadSubject(input, context);
+  if (subject.error) return subject;
+  input = { ...input, lead_id: context.leadId, customer_id: context.customerId };
   switch (toolName) {
 
     // ── Lead data ───────────────────────────────────────────────
 
     case 'get_lead_details': {
-      let lead;
-      if (input.lead_id) {
-        lead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first();
-      } else if (input.phone) {
-        const clean = (input.phone || '').replace(/\D/g, '');
-        if (!clean || clean.length < 10) return { found: false };
-        lead = await db('leads').where(function () {
-          this.where('phone', clean).orWhere('phone', `+1${clean}`).orWhere('phone', `+${clean}`);
-        }).whereNull('deleted_at').orderBy('first_contact_at', 'desc').first();
-      }
-
-      if (!lead) return { found: false };
+      const { lead } = subject;
 
       // Pull AI triage if available
       const triageActivity = await db('lead_activities')
@@ -90,40 +105,11 @@ async function executeLeadTool(toolName, input) {
 
     case 'get_customer_context': {
       const ContextAggregator = require('./context-aggregator');
-      const phone = input.phone || null;
-      const customerId = input.customer_id || null;
-
-      if (phone) {
-        const ctx = await ContextAggregator.getFullCustomerContext(phone);
-        return ctx;
-      }
-
-      if (customerId) {
-        const customer = await db('customers').where('id', customerId).first();
-        if (customer?.phone) {
-          return ContextAggregator.getFullCustomerContext(customer.phone);
-        }
-      }
-
-      return { known: false };
+      return ContextAggregator.getContextForCustomer(subject.customer);
     }
 
     case 'check_existing_estimates': {
       const customerId = input.customer_id;
-      const phone = input.phone;
-
-      const clean = (phone || '').replace(/\D/g, '');
-      const baseQuery = () => {
-        if (customerId) return db('estimates').where({ customer_id: customerId });
-        if (phone) {
-          return db('estimates').where(function () {
-            this.where('customer_phone', clean)
-              .orWhere('customer_phone', `+1${clean}`)
-              .orWhere('customer_phone', `+${clean}`);
-          });
-        }
-        return null;
-      };
 
       // Only rows the customer can actually OPEN are listed (uncapped codex
       // P1 r33 on #3750): an expired, send-failed, never-published, or
@@ -156,19 +142,18 @@ async function executeLeadTool(toolName, input) {
       const PAGE = 15;
       const viewable = [];
       let hiddenCount = 0;
-      if (baseQuery()) {
-        for (let offset = 0; ; offset += PAGE) {
-          const rows = await baseQuery().orderBy('created_at', 'desc').offset(offset).limit(PAGE);
-          for (const row of rows) {
-            // Rows past the cap are neither evaluated nor counted (uncapped
-            // codex P1 r36): the hidden count reports only rows the
-            // customer cannot open, never valid estimates beyond the limit.
-            if (viewable.length >= LIMIT) break;
-            if (await customerCanOpen(row)) viewable.push(row);
-            else hiddenCount += 1;
-          }
-          if (viewable.length >= LIMIT || rows.length < PAGE) break;
+      for (let offset = 0; ; offset += PAGE) {
+        const rows = await db('estimates').where({ customer_id: customerId })
+          .orderBy('created_at', 'desc').offset(offset).limit(PAGE);
+        for (const row of rows) {
+          // Rows past the cap are neither evaluated nor counted (uncapped
+          // codex P1 r36): the hidden count reports only rows the
+          // customer cannot open, never valid estimates beyond the limit.
+          if (viewable.length >= LIMIT) break;
+          if (await customerCanOpen(row)) viewable.push(row);
+          else hiddenCount += 1;
         }
+        if (viewable.length >= LIMIT || rows.length < PAGE) break;
       }
 
       if (!viewable.length) {
@@ -418,18 +403,17 @@ async function executeLeadTool(toolName, input) {
     }
 
     case 'queue_for_adam': {
-      // Same liveness rule as send_lead_response: a removed lead must not
-      // generate an SLA ping or a queued draft.
-      if (input.lead_id) {
-        const liveLead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first('id');
-        if (!liveLead) return { error: 'Lead was removed from the pipeline — nothing to queue' };
-      }
-      const customer = await db('customers').where('id', input.customer_id).first();
-
-      // Save draft
-      if (input.lead_id) {
-        await db('lead_activities').insert({
-          lead_id: input.lead_id,
+      if (!context.sessionId || !context.toolUseId) return { error: 'Missing queue invocation identity' };
+      const queued = await db.transaction(async trx => {
+        const current = await resolveLeadSubject(input, context, trx, true);
+        if (current.error) return current;
+        const existing = await trx('lead_activities')
+          .where({ lead_id: context.leadId, activity_type: 'draft_queued' })
+          .whereRaw("metadata->>'sessionId' = ? AND metadata->>'toolUseId' = ?", [context.sessionId, context.toolUseId])
+          .first('id');
+        if (existing) return { id: existing.id, replayed: true };
+        const [activity] = await trx('lead_activities').insert({
+          lead_id: context.leadId,
           activity_type: 'draft_queued',
           description: `Queued for Adam: ${input.reason}`,
           performed_by: 'lead_agent',
@@ -437,9 +421,16 @@ async function executeLeadTool(toolName, input) {
             draftResponse: input.draft_response,
             reason: input.reason,
             urgency: input.urgency,
+            sessionId: context.sessionId,
+            toolUseId: context.toolUseId,
           }),
-        }).catch(() => {});
-      }
+        }).returning('id');
+        return { id: activity.id, customer: current.customer };
+      });
+      if (queued.error) return queued;
+      if (queued.replayed) return { queued: true, activityId: queued.id, replayed: true };
+      const customer = queued.customer;
+      let alertStatus = 'not_configured';
 
       // SMS Adam with the lead details + suggested reply
       try {
@@ -452,12 +443,16 @@ async function executeLeadTool(toolName, input) {
           `Suggested reply:\n"${(input.draft_response || '').substring(0, 200)}"`;
 
         if (process.env.ADAM_PHONE) {
-          await TwilioService.sendSMS(process.env.ADAM_PHONE, adamMsg, { messageType: 'internal_alert' });
+          const alert = await TwilioService.sendSMS(process.env.ADAM_PHONE, adamMsg, { messageType: 'internal_alert' });
+          if (!alert?.success || alert.notificationUndelivered || alert.notificationError) alertStatus = 'failed';
+          else if (alert.notificationRedirected || alert.pushRouted) alertStatus = 'notified';
+          else if (alert.suppressed || alert.gateBlocked) alertStatus = 'suppressed';
+          else alertStatus = alert.sid ? 'sent' : 'failed';
         }
-      } catch { /* best effort */ }
+      } catch { alertStatus = 'failed'; }
 
-      logger.info(`[lead-agent] Queued for Adam: ${input.reason}`);
-      return { queued: true, reason: input.reason, urgency: input.urgency || 'normal' };
+      logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
+      return { queued: true, activityId: queued.id, alertStatus, reason: input.reason, urgency: input.urgency || 'normal' };
     }
 
     // ── Pipeline & follow-up ────────────────────────────────────
@@ -467,6 +462,8 @@ async function executeLeadTool(toolName, input) {
 
       // Map stage names to pipeline events
       const eventMap = {
+        new_lead: 'lead_created',
+        estimate_viewed: 'estimate_viewed',
         contacted: 'first_contact',
         estimate_sent: 'estimate_sent',
         follow_up: 'estimate_followup_sent',
@@ -474,7 +471,8 @@ async function executeLeadTool(toolName, input) {
         lost: 'estimate_declined',
       };
 
-      const event = eventMap[input.stage] || input.stage;
+      const event = Object.hasOwn(eventMap, input.stage) ? eventMap[input.stage] : null;
+      if (!event) return { error: 'Unsupported lead pipeline stage' };
       await PipelineManager.onEvent(input.customer_id, event);
 
       if (input.lead_id && input.note) {
@@ -555,9 +553,9 @@ async function executeLeadTool(toolName, input) {
           follow_up_scheduled: input.follow_up_scheduled || false,
           created_at: new Date(),
         });
-      } catch (err) {
-        // Table may not exist
-        logger.debug(`[lead-agent] Report save failed (table may not exist): ${err.message}`);
+      } catch {
+        logger.warn('[lead-agent] Report save failed', { leadId: context.leadId });
+        return { saved: false, error: 'Lead response report could not be saved' };
       }
 
       return { saved: true };
