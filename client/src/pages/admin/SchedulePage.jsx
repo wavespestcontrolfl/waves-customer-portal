@@ -32,13 +32,13 @@ import lawnScores from '@lawn-scores';
 //   (operator double-clicks "Complete" should not double-bill).
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
-import { addETDays, etDateString, etDatetimeLocalToISO, formatETDateTime } from "../../lib/timezone";
+import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateTime } from "../../lib/timezone";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -356,7 +356,12 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     // parseETDateTime) — never `new Date(value)`, which reads it in the
     // browser's zone (codex #4140 r1).
     const iso = etDatetimeLocalToISO(reviewCustomAt);
-    return iso ? `Review text goes out separately ${fmt(iso)}.` : "Choose a time for the review text.";
+    if (!iso) return "Choose a time for the review text.";
+    // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
+    // outside it is held to the next window (codex #4140 r3).
+    const { hour } = etParts(new Date(iso));
+    if (hour < 8 || hour >= 20) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmt(iso)}.`;
+    return `Review text goes out separately ${fmt(iso)}.`;
   }
   return "";
 }
@@ -11903,24 +11908,27 @@ export function CompletionPanel({
     // Automatic: no explicit delay — the server picks the smart send window.
     return undefined;
   };
+  const reviewSendPreviewRef = useRef(null);
+  reviewSendPreviewRef.current = reviewSendPreview;
+  const fetchReviewSendPreview = useCallback(() => {
+    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
+    return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  }, [service?.serviceType]);
   useEffect(() => {
     if (!willReview || oneTimeRecapOnly) return undefined;
     let cancelled = false;
-    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
-    const load = () =>
-      fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
-      })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((data) => { if (!cancelled && data) setReviewSendPreview(data); })
-        .catch(() => {});
+    const load = () => fetchReviewSendPreview().then((data) => { if (!cancelled && data) setReviewSendPreview(data); });
     load();
     // The smart window is bucketed by time of day, so a panel left open
     // across a boundary (2:59 → 3:00 PM) must not keep showing the old
     // answer (codex #4140 r1).
     const timer = setInterval(load, 60 * 1000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [service?.id, service?.serviceType, willReview, oneTimeRecapOnly]);
+  }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly]);
   const recapStatusText = recapLoading
     ? "Drafting customer recap..."
     : recapError
@@ -14640,6 +14648,19 @@ export function CompletionPanel({
     if (!oneTimeRecapOnly && willReview && selectedReviewDelayMinutes === null) {
       alert("Choose a review request time.");
       return;
+    }
+    // "Automatic" is a server decision bucketed by time of day: re-check it
+    // at submit so the operator never submits against a preview that a
+    // boundary (2:59 → 3:00 PM) just invalidated (codex #4140 r3). Skipped
+    // for a committed chain retry (immutable body).
+    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && reviewTiming === "auto") {
+      const fresh = await fetchReviewSendPreview();
+      const shown = reviewSendPreviewRef.current;
+      if (fresh && shown?.at && fresh.at !== shown.at) {
+        setReviewSendPreview(fresh);
+        alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
+        return;
+      }
     }
     // The ONLY time-dependent pre-submit gate — skipped for a committed
     // chain retry: the replayed body is immutable and the server ignores

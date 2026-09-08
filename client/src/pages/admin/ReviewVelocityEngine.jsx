@@ -331,7 +331,10 @@ function decisionLine(seq) {
     ? new Date(when).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : null;
   const owner = d.ownerAction && d.ownerAction !== "none" ? `Owner action: ${d.ownerAction}` : "Owner action: none";
-  return [whenText ? `${d.plannedAt ? "Next" : "Re-check"} ${whenText}` : null, label, owner].filter(Boolean).join(" · ");
+  // A cadence enrolled before the decision column existed has no decision
+  // until its next runner update; its next_run_at is a planned send.
+  const planned = !!d.plannedAt || !d.reason;
+  return [whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null, label, owner].filter(Boolean).join(" · ");
 }
 
 function fmtDate(d) {

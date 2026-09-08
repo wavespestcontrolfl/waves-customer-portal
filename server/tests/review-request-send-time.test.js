@@ -42,6 +42,18 @@ describe('review request send-time calculator', () => {
     expect(etParts(sendAt)).toMatchObject({ year: 2026, month: 5, day: 27, hour: 10 });
   });
 
+  test('jitter never crosses the 9 AM / 5 PM bucket — the preview names the day enrollment picks (codex #4140 r3)', () => {
+    // WDO at 3:29 PM ET → +90 min = 4:59 PM; a +15 jitter used to spill past 5 PM
+    // and reschedule to 10 AM next day while the jitter-free preview said today.
+    const completedAt = new Date('2026-05-26T19:29:00Z'); // 3:29 PM EDT
+    const preview = calculateReviewSendTime(completedAt, 'WDO inspection', { jitter: false });
+    for (let i = 0; i < 200; i += 1) {
+      const live = calculateReviewSendTime(completedAt, 'WDO inspection');
+      expect(etParts(live).day).toBe(etParts(preview).day);
+      expect(etParts(live).hour).toBeLessThan(17);
+    }
+  });
+
   test('jitter:false gives the completion panel a stable preview of the same rule', () => {
     const a = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });
     const b = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });

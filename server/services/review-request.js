@@ -471,15 +471,21 @@ function calculateReviewSendTime(completedAt, serviceType, { jitter: withJitter 
     return atHour(addETDays(date, 1), targetHour);
   }
 
+  // Bucket on the UNJITTERED time, then jitter inside the window only —
+  // jitter must never move a send across the 9 AM / 5 PM boundary, or the
+  // jitter-free preview the completion panel shows would name a different
+  // day than enrollment picks (codex #4140 r3).
   function normalizeReviewSendWindow(sendAt) {
     const p = etParts(sendAt);
     if (p.hour < 9) return atHour(sendAt, 10);
     if (p.hour >= 17) return nextDayAtHour(sendAt, 10);
-    return sendAt;
+    const jittered = new Date(sendAt.getTime() + jitter() * 60000);
+    const j = etParts(jittered);
+    return j.hour >= 9 && j.hour < 17 ? jittered : sendAt;
   }
 
   function addMins(date, mins) {
-    return new Date(date.getTime() + (mins + jitter()) * 60000);
+    return new Date(date.getTime() + mins * 60000);
   }
 
   const LATE_AFTERNOON = 16.5; // 4:30 PM — last review-request window

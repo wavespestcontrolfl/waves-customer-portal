@@ -86,7 +86,8 @@ describe('completion draft departure', () => {
     const onSubmit = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
     const view = await mount({ onSubmit });
     fireEvent.change(notes(), { target: { value: 'In-flight visit note' } });
-    fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
+    // Submit re-checks the automatic review send time first (one awaited fetch).
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i })); });
     expect(onSubmit).toHaveBeenCalledTimes(1);
     view.unmount();
     expect(readDraft().notes).toBe('In-flight visit note');
