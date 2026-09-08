@@ -7951,7 +7951,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
                   // the in-flight handleConfirm closure carries the OLD
                   // preference — a mid-await switch would book against a
                   // billing choice the customer just changed away from.
-                  disabled={ctaPhase === 'submitting' || inlineConfirmBusy}
+                  // And during a payment-method replacement (GitHub Codex
+                  // #4144 r3 P2): the preference effect re-mints, and a late
+                  // pre-mint response could overwrite the replacement with
+                  // the intent being retired.
+                  disabled={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
                   style={{ background: 'none', border: 'none', padding: 0, fontSize: 14, color: COLORS.navy, textDecoration: 'underline', cursor: 'pointer', justifySelf: 'center' }}
                 >
                   {paymentPreference === 'prepay_annual'

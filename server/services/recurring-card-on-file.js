@@ -404,8 +404,8 @@ async function followReplacementChain(setupIntent) {
   return current;
 }
 
-async function createRecurringCardSetupIntentForEstimate(estimate) {
-  const paymentMethodType = await resolveRecurringCaptureTender(estimate);
+async function createRecurringCardSetupIntentForEstimate(estimate, database = db) {
+  const paymentMethodType = await resolveRecurringCaptureTender(estimate, database);
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
     const created = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
     if (!created) return null;
@@ -558,7 +558,7 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
       return { ok: false, reason: 'estimate_inactive' };
     }
     if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
-      const intent = await createRecurringCardSetupIntentForEstimate(estimate);
+      const intent = await createRecurringCardSetupIntentForEstimate(estimate, trx);
       return intent ? { ok: true, intent, retired: false } : { ok: false, reason: 'mint_failed' };
     }
     const paymentMethodType = await resolveRecurringCaptureTender(estimate, trx);

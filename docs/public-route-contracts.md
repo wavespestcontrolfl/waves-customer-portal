@@ -303,7 +303,10 @@ takes that lock, including a stale retry with an already-retired or
 unfinished intent, and the locked read re-judges the full accept-active
 gate (declined / expired / archived / off-surface → 409 "Estimate is no
 longer active"), so no fresh capture is minted (and no checkout step
-recorded) for an estimate that turned terminal after the route's read. A chain head is judged by what it captured, like the accept
+recorded) for an estimate that turned terminal after the route's read.
+The `setup_intent.succeeded` webhook backstop re-reads an UNSTAMPED
+(legacy / flag-off) capture live from Stripe before enrolling and never
+enrolls a retired one. A chain head is judged by what it captured, like the accept
 gate: a saved card stays valid after GATE_ACCEPT_ACH_CAPTURE closes, a
 captured bank under a card-only policy is skipped like a dead replay
 (unfinished heads must match the tender family exactly) so the
