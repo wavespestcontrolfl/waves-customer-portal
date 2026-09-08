@@ -449,6 +449,12 @@ function intentTenderMatches(setupIntent, paymentMethodType) {
   return bankCapable === (paymentMethodType === 'card_or_bank');
 }
 
+// Stripe's "No such setupintent" (HTTP 404, code resource_missing) — the
+// id was never minted, so there is nothing to retire and nothing to retry.
+function isStripeResourceMissing(err) {
+  return err?.code === 'resource_missing' || err?.statusCode === 404;
+}
+
 // Retirement stamp (replaceRecurringCardIntent): the customer replaced this
 // capture with a different payment method. Read from Stripe's own metadata
 // so the accept gate and the mint agree without a local row.
@@ -497,6 +503,10 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
   try {
     current = await readLiveSetupIntent(setupIntentId);
   } catch (err) {
+    // An id Stripe has never heard of is a client error, not an outage
+    // (GitHub Codex #4144 r1): keep the route's documented 400 for a
+    // foreign/unknown id and reserve 503 for a genuine Stripe failure.
+    if (isStripeResourceMissing(err)) return { ok: false, reason: 'intent_mismatch' };
     logger.warn('[recurring-cof] replace: live SetupIntent lookup failed', { error: err.message });
     return { ok: false, reason: 'verification_failed' };
   }

@@ -283,7 +283,8 @@ off or the customer's ACH state is unhealthy, so a previously minted
 bank-capable intent cannot outlive the kill switch. Optional body
 `replaceSetupIntentId` ("use a different payment method" after a capture
 already succeeded): the named intent must be THIS estimate's own
-`estimate_recurring_card` capture (else 400). The replacement is minted
+`estimate_recurring_card` capture (foreign or unknown id → 400; a Stripe
+read failure → 503). The replacement is minted
 FIRST (idempotency key salted by the retired id — unbounded, no
 generation consumed), then the succeeded intent is stamped
 `metadata.retired='true'` + `replaced_by=<new id>` in Stripe; a mint

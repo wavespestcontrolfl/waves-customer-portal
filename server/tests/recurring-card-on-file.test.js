@@ -624,6 +624,17 @@ describe('replaceRecurringCardIntent ("use a different payment method")', () => 
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
   });
 
+  // GitHub Codex #4144 r1: an id Stripe has never minted is the client's
+  // error (400 like any other mismatch), not a retryable Stripe failure.
+  it('classifies a Stripe resource_missing lookup as a mismatch, and any other lookup error as a verification failure', async () => {
+    mockRetrieveSetupIntent.mockRejectedValueOnce(Object.assign(new Error("No such setupintent: 'seti_nope'"), { code: 'resource_missing', statusCode: 404, type: 'StripeInvalidRequestError' }));
+    expect(await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_nope' })).toEqual({ ok: false, reason: 'intent_mismatch' });
+    mockRetrieveSetupIntent.mockRejectedValueOnce(Object.assign(new Error('Stripe is down'), { statusCode: 503, type: 'StripeAPIError' }));
+    expect(await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'verification_failed' });
+    expect(mockCreateRecurringCardSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
   it('hands back the ordinary mint for a not-yet-confirmed or already-retired intent (nothing to retire)', async () => {
     const open = { ...LIVE_GOOD, status: 'requires_payment_method', payment_method: null };
     liveById({ seti_1: open });
