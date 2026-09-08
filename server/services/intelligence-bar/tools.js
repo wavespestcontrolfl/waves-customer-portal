@@ -374,7 +374,7 @@ async function executeTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'search_field_intelligence': return await searchFieldIntelligence(input);
-      case 'query_customers': return await queryCustomers(input);
+      case 'query_customers': return await queryCustomers(input, actionContext.readCustomerIds);
       case 'find_overdue_customers': return await findOverdueCustomers(input);
       case 'get_customer_detail': return await getCustomerDetail(input.customer_id);
       case 'get_schedule_view': return await getScheduleView(input);
@@ -403,7 +403,7 @@ async function executeTool(toolName, input, actionContext = {}) {
 
 // ─── READ IMPLEMENTATIONS ───────────────────────────────────────
 
-async function queryCustomers(input) {
+async function queryCustomers(input, readCustomerIds = []) {
   const { filters = {}, search, sort_by, sort_dir, limit: rawLimit = 50 } = input;
   const limit = Math.max(1, Math.min(Math.trunc(rawLimit), 200));
   const offset = Math.max(0, Math.trunc(input.offset || 0));
@@ -463,6 +463,9 @@ async function queryCustomers(input) {
   }
 
   // Free text search
+  // A selector-style search inside a customer-scoped task may only find that
+  // customer; a genuinely unscoped list request stays broad.
+  if (search && readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
   if (search) {
     const s = `%${search}%`;
     query = query.where(function () {

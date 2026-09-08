@@ -2316,7 +2316,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const toolCalls = [];
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
-    let clarificationPending = false; // the latest tool round still needs a target choice
+    const unresolvedClarifications = new Set(); // tools whose latest result still needs a target choice
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
@@ -2362,7 +2362,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
       // Execute all tool calls using context-aware router
       const results = [];
-      const roundStart = toolResults.length;
       for (const toolUse of toolUses) {
         // PII-bearing tool inputs (name/phone/email/address/SMS search terms) — log keys only
         const loggableInput = platformEnabled || PII_TOOL_NAMES.has(toolUse.name)
@@ -2483,7 +2482,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             errorMessage = err.message;
           }
         }
-        if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && (failed || proposedCard)) writeFrontierBlocked = true;
+        // Only a card that exists blocks further writes; a proposal refused at
+        // preflight left nothing to reconcile, so a corrected call may follow.
+        if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) writeFrontierBlocked = true;
         recordToolEvent({
           source: context === 'tech' ? 'tech-intelligence-bar' : 'intelligence-bar',
           context: context || null,
@@ -2504,6 +2505,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
+        // A clarification stays open until the same operation later succeeds;
+        // an unrelated call succeeding in the same round does not answer it.
+        if (result?.code === 'target_clarification_required') unresolvedClarifications.add(toolUse.name);
+        else if (!isToolFailure(result)) unresolvedClarifications.delete(toolUse.name);
         if (toolActivityOn) {
           toolActivity.push({
             tool: toolUse.name,
@@ -2515,10 +2520,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         }
       }
 
-      // Clarification stays open only while the latest round could not
-      // proceed at all; a corrected read after a wrong one answers it.
-      const roundResults = toolResults.slice(roundStart);
-      clarificationPending = roundResults.some(r => r.result?.code === 'target_clarification_required') && roundResults.every(r => isToolFailure(r.result));
       currentMessages = [
         ...currentMessages,
         { role: 'assistant', content: response.content },
@@ -2669,7 +2670,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // failed best-effort.
       threadsEnabled: threadPersistenceActive,
       ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length ? 'awaiting_approval'
-        : clarificationPending ? 'needs_information' : 'responded',
+        : unresolvedClarifications.size ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
     if (activeTask) {

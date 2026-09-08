@@ -132,22 +132,56 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
 
   test('lead searches inside a customer-scoped task never return another customer or an unlinked lead', async () => {
     const own = crypto.randomUUID(), foreign = crypto.randomUUID(), unlinked = crypto.randomUUID();
+    const stale = new Date(Date.now() - 72 * 3600000);
     await db('leads').insert([
-      { id: own, customer_id: customerA, first_name: 'Synthetic', last_name: 'Ownlead', status: 'new', first_contact_at: new Date() },
-      { id: foreign, customer_id: customerB, first_name: 'Synthetic', last_name: 'Foreignlead', status: 'new', first_contact_at: new Date() },
-      { id: unlinked, customer_id: null, first_name: 'Synthetic', last_name: 'Unlinkedlead', status: 'new', first_contact_at: new Date() },
+      { id: own, customer_id: customerA, first_name: 'Synthetic', last_name: 'Ownlead', status: 'new', first_contact_at: stale, updated_at: stale },
+      { id: foreign, customer_id: customerB, first_name: 'Synthetic', last_name: 'Foreignlead', status: 'new', first_contact_at: stale, updated_at: stale },
+      { id: unlinked, customer_id: null, first_name: 'Synthetic', last_name: 'Unlinkedlead', status: 'new', first_contact_at: stale, updated_at: stale },
     ]);
-    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'query leads' }, 'discover'))
-      .mockResolvedValueOnce(tools('query_leads', { search: 'Synthetic' }, 'leads'))
-      .mockResolvedValueOnce(answer('The customer leads are loaded.'));
+    mockModel.mockResolvedValueOnce({ content: [
+      { type: 'tool_use', name: 'discover_capabilities', input: { query: 'query leads' }, id: 'discover-leads' },
+      { type: 'tool_use', name: 'discover_capabilities', input: { query: 'stale leads' }, id: 'discover-stale' },
+    ], usage: {} }).mockResolvedValueOnce({ content: [
+      { type: 'tool_use', name: 'query_leads', input: { search: 'Synthetic' }, id: 'leads' },
+      { type: 'tool_use', name: 'get_stale_leads', input: {}, id: 'stale' },
+      { type: 'tool_use', name: 'query_customers', input: { search: 'Fixture' }, id: 'customers' },
+    ], usage: {} }).mockResolvedValueOnce(answer('The customer leads are loaded.'));
     const result = await api('/query', request(`Show ${nameA}'s leads`));
     expect(result.status).toBe(200);
     expect(result.body.taskTarget.customer_id).toBe(customerA);
-    const round = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
-      .find(block => block.type === 'tool_result' && block.tool_use_id === 'leads').content;
-    expect(round).toContain('Ownlead');
-    expect(round).not.toContain('Foreignlead');
-    expect(round).not.toContain('Unlinkedlead');
+    const results = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : []);
+    for (const id of ['leads', 'stale']) {
+      const content = results.find(block => block.type === 'tool_result' && block.tool_use_id === id).content;
+      expect(content).toContain('Ownlead');
+      expect(content).not.toContain('Foreignlead');
+      expect(content).not.toContain('Unlinkedlead');
+    }
+    const customers = results.find(block => block.type === 'tool_result' && block.tool_use_id === 'customers').content;
+    expect(customers).toContain(customerA);
+    expect(customers).not.toContain(customerB);
+  }, 30000);
+
+  test('a clarification stays open past an unrelated successful read, and a refused preflight does not close the write frontier', async () => {
+    const unlinkedCall = crypto.randomUUID();
+    await db('call_log').insert({ id: unlinkedCall, customer_id: null, transcription: 'Foreign private parallel evidence', status: 'completed' });
+    mockModel.mockResolvedValueOnce({ content: [
+      { type: 'tool_use', name: 'get_call_log', input: { call_id: unlinkedCall }, id: 'unlinked-call' },
+      { type: 'tool_use', name: 'query_customers', input: { search: nameA }, id: 'lookup' },
+    ], usage: {} }).mockResolvedValueOnce(answer('One lookup succeeded.'));
+    const parallel = await api('/query', request(`Read the call and details for ${nameA}`));
+    expect(parallel.body.taskState).toBe('needs_information');
+    expect(JSON.stringify(mockModel.mock.calls)).not.toContain('Foreign private parallel evidence');
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
+      .mockResolvedValueOnce(tools('update_customer', { customer_id: customerA, updates: { not_a_customer_field: 'x' } }, 'bad'))
+      .mockResolvedValueOnce(tools('update_customer', { customer_id: customerA, updates: { notes: 'Corrected after preflight' } }, 'good'))
+      .mockResolvedValueOnce(answer('The corrected note awaits confirmation.'));
+    const corrected = await api('/query', request(`Add a note for ${nameA}: Corrected after preflight`));
+    const rounds = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : []);
+    expect(JSON.parse(rounds.find(block => block.type === 'tool_result' && block.tool_use_id === 'bad').content)).toMatchObject({ error: expect.any(String) });
+    expect(corrected.body.pendingActions).toHaveLength(1);
+    expect(corrected.body.taskState).toBe('awaiting_approval');
+    await api('/cancel-action', { pending_action_id: corrected.body.pendingActions[0].id });
   }, 30000);
 
   test('customer matching cannot describe another account inside a customer-scoped task', async () => {

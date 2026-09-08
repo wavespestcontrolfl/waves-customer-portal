@@ -153,7 +153,7 @@ async function executeLeadsTool(toolName, input, actionContext = {}) {
     switch (toolName) {
       case 'get_lead_overview': return await getLeadOverview(input.days || 30);
       case 'query_leads': return await queryLeads(input, actionContext.readCustomerIds);
-      case 'get_stale_leads': return await getStaleLeads(input);
+      case 'get_stale_leads': return await getStaleLeads(input, actionContext.readCustomerIds);
       case 'get_lead_funnel': return await getLeadFunnel(input.days || 30);
       case 'get_source_performance': return await getSourcePerformance(input.days || 30);
       case 'get_lost_analysis': return await getLostAnalysis(input.days || 90);
@@ -271,7 +271,7 @@ async function queryLeads(input, readCustomerIds = []) {
 }
 
 
-async function getStaleLeads(input) {
+async function getStaleLeads(input, readCustomerIds = []) {
   const { hours_threshold = 48, status } = input;
   const cutoff = new Date(Date.now() - hours_threshold * 3600000).toISOString();
 
@@ -280,6 +280,7 @@ async function getStaleLeads(input) {
     .select('leads.*', 'lead_sources.name as source_name')
     .whereNull('leads.deleted_at')
     .where('leads.updated_at', '<', cutoff);
+  if (readCustomerIds.length) query = query.whereIn('leads.customer_id', readCustomerIds);
 
   if (status) {
     query = query.where('leads.status', status);
