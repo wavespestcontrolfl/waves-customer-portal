@@ -95,10 +95,15 @@ describe('processRecording call_log writes are ownership-fenced', () => {
 
   test('commitments are recorded after finalization, fenced on the pass generation, from the V2 extraction + transcript only (no V1, no disposition)', () => {
     const zeroTriageAt = body.indexOf('await applyZeroTriageLayers({');
-    const commitmentsAt = body.indexOf("require('./call-commitments').recordCallCommitments({");
+    // The main path runs the shared step (recordCommitmentsStep — also the
+    // tech follow-up seam's) after zero-triage, i.e. after finalization.
+    const stepAt = body.indexOf('await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });');
     expect(zeroTriageAt).toBeGreaterThan(-1);
-    expect(commitmentsAt).toBeGreaterThan(zeroTriageAt);
-    const callSite = body.slice(commitmentsAt, commitmentsAt + 700);
+    expect(stepAt).toBeGreaterThan(zeroTriageAt);
+    const commitmentsAt = source.indexOf("require('./call-commitments').recordCallCommitments({");
+    expect(commitmentsAt).toBeGreaterThan(-1);
+    expect(source.indexOf("require('./call-commitments').recordCallCommitments({", commitmentsAt + 1)).toBe(-1);
+    const callSite = source.slice(commitmentsAt, commitmentsAt + 700);
     expect(callSite).not.toContain('disposition');
     expect(callSite).not.toContain('v1:');
     expect(callSite).toContain('transcript: transcription');

@@ -246,6 +246,7 @@ describe('new_job_application bell', () => {
       'service_report_delivery_failed',
       'service_report_pdf_failed',
       'service_report_token_mint_failed',
+      'sms_operational_followup',
       'sms_reply',
       'twilio_failure',
     ]);

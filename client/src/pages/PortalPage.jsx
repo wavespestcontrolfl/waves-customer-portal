@@ -4075,6 +4075,8 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
     denied: 'Enable notifications for Waves in your device Settings, then check again.',
     prompt: 'Allow notifications to connect this device.',
     'prompt-with-rationale': 'Allow notifications to connect this device.',
+    setup_unavailable: 'The Waves app did not respond to notification setup. Close and reopen the app, then try again.',
+    permission_unavailable: 'Waves did not receive a notification permission response. Check Waves in your device’s notification Settings, then try again.',
     registration_unavailable: 'This device could not connect. Check your connection and try again.',
     unavailable: 'App notification setup is unavailable on this device.',
     web: 'Open the Waves app on your phone to connect a device.',
