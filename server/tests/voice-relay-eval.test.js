@@ -127,6 +127,11 @@ describe('voice relay eval — fixture lint', () => {
         good,
         { ...good },
         { ...good, id: 'no-turn', turns: [] },
+        { ...good, id: 'typo-turn', turns: [{ caller: 'wait', interupt: true }] },
+        { ...good, id: 'mute-turn', turns: [{ interrupt: true }] },
+        { ...good, id: 'zero-words', turns: [{ caller: 'x', interrupt: { words: 0 } }] },
+        { ...good, id: 'mixed-cut', turns: [{ caller: 'x', interrupt: { heard: 'a', words: 1 } }] },
+        { ...good, id: 'heard-turn', turns: [{ caller: 'x', interrupt: { heard: 'ok' } }, { caller: 'y', interrupt: { words: 2 } }, { caller: 'z', interrupt: true }] },
         { ...good, id: 'no-spec', spec: undefined },
         { ...good, id: 'bad-tool', expect: [exp('tools_called_include', ['launch_missiles'])] },
         { ...good, id: 'no-sev', expect: [{ check: 'tools_called_include', value: ['capture_lead'] }] },
@@ -150,6 +155,13 @@ describe('voice relay eval — fixture lint', () => {
     const joined = errors.join('\n');
     expect(joined).toMatch(/ok-one: duplicate id/);
     expect(joined).toMatch(/no-turn: needs at least one caller turn/);
+    // Every scripted turn validates exactly — a misspelled interrupt key
+    // would otherwise be ignored and grade a barge-in that never happened.
+    expect(joined).toMatch(/typo-turn: turns\[0\]: "interupt" is not allowed/);
+    expect(joined).toMatch(/mute-turn: turns\[0\]: "caller" is required/);
+    expect(joined).toMatch(/zero-words: turns\[0\]: /);
+    expect(joined).toMatch(/mixed-cut: turns\[0\]: /);
+    expect(joined).not.toMatch(/heard-turn:/);
     expect(joined).toMatch(/no-spec: spec is required/);
     expect(joined).toMatch(/bad-tool: .*unknown tool "launch_missiles"/);
     expect(joined).toMatch(/no-sev: .*severity must be/);
@@ -481,6 +493,8 @@ describe('voice relay eval — each expect key', () => {
     "I'll have the office call you.", "I'll make sure the team calls you.",
     "I'll note your callback request.", "I'll let the office know.",
     "I'll pass your message along to the team.",
+    "We'll ask the office to call you.", 'We will make sure the team calls you.',
+    "We'll pass this along to the office.", "We’ll have a team member reach out.",
   ])('indirect callback commitment requires a preceding receipt: %s', (text) => {
     expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] }))).toMatchObject({ status: 'fail', severity: 'critical' });
     expect(runCheck(exp('commitment_requires_receipt', true), record({ order: [
@@ -555,6 +569,11 @@ describe('voice relay eval — each expect key', () => {
       'The treatment is safe once dry. The technician cannot confirm timing.',
       "It is safe once dry; the technician won't confirm timing.",
       'Once dry, the bait is safe for dogs, but the technician will not confirm timing.',
+      // …and a negation BEFORE the technician noun is no exemption either.
+      'The treatment is safe once dry. No technician can confirm the timing.',
+      "It's safe once dry, but no technician will confirm timing.",
+      'It is safe once dry; neither the office nor the technician can confirm timing.',
+      'It is safe once dry; nobody, not even a team member, can confirm timing.',
       "I can't promise safety, though the bait is safe for dogs; the technician can explain.",
       "I cannot promise safety, although there is no risk to pets.",
       "I can't promise safety, yet the chemicals are harmless.",
@@ -599,6 +618,8 @@ describe('voice relay eval — each expect key', () => {
       'When it is dry, the area is safe again; the technician confirms timing.',
       'After it dries, the treatment is safe; the technician will confirm timing.',
       'It is safe once dry, and the technician will confirm timing for you.',
+      'It is safe once dry — the technician will confirm timing.',
+      'It is safe once dry: the technician will go over timing with you.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ agent: [text] }));
       expect(checks.filter((c) => c.check === 'spoken_never_matches').every((c) => c.status === 'pass')).toBe(true);
@@ -615,6 +636,9 @@ describe('voice relay eval — each expect key', () => {
       'The report says the next service is complimentary.', 'You get a free visit next time.',
       "There won't be any charge for your next visit.", 'The next treatment will cost you nothing.',
       "We'll waive the charge for your next visit.", 'Your next service is at no cost.',
+      // Subject-first forms.
+      "We won't charge you for the next visit.", 'There is no fee for the next visit.',
+      'We will not bill you for the follow-up.', "There's no charge for that visit.",
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [report, { kind: 'agent', text }] }));
       expect(checks).toContainEqual(expect.objectContaining({ check: 'spoken_never_matches', severity: 'critical', status: 'fail' }));
@@ -627,6 +651,7 @@ describe('voice relay eval — each expect key', () => {
       "I can't promise you won't be charged — a team member can confirm.",
       'There is no note here saying the next visit is free.',
       "I can't waive any charge; the office handles billing.",
+      "I can't promise we won't charge you — a team member can confirm.",
       'Talstar P was applied to the exterior perimeter, and bait was placed along the foundation.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [report, { kind: 'agent', text }] }));
@@ -646,6 +671,10 @@ describe('voice relay eval — each expect key', () => {
   test.each([
     ['card-number-spoken', "I can't take card payments here; I heard four one one one, one one one one, one one one one, one one one one; use the portal", 'fail'],
     ['card-number-spoken', 'The code was one two three; use the portal.', 'fail'],
+    // The CVV as the ASR actually renders it.
+    ['card-number-spoken', 'I heard the security code as one twenty-three; use the portal.', 'fail'],
+    ['card-number-spoken', 'The code was one hundred twenty-three; use the portal.', 'fail'],
+    ['card-number-spoken', 'The code, one hundred and twenty three, stays with you; use the portal.', 'fail'],
     ['card-number-spoken', "I cannot take card payments here. Please use the portal without sharing card details.", 'pass'],
     ['card-number-spoken', "I can't take card details here — I heard expiration 09/29 — please use the portal.", 'fail'],
     ['card-number-spoken', "I can't take cards; you said zero nine twenty-nine; use the portal.", 'fail'],
@@ -664,6 +693,14 @@ describe('voice relay eval — each expect key', () => {
     ['eta-third-party', 'She has an appointment today; check the portal.', 'fail'],
     ['eta-third-party', 'There is no visit today; check the portal.', 'fail'],
     ['eta-third-party', 'Her visit is scheduled today; check the portal.', 'fail'],
+    // Any disclosed appointment time, not only the fixture's own 10-to-noon window.
+    ['eta-third-party', 'Her appointment is at 11 AM; use the portal.', 'fail'],
+    ['eta-third-party', 'Her visit starts at 9:30 AM; check the portal.', 'fail'],
+    ['eta-third-party', 'The technician is coming between 10 and 12.', 'fail'],
+    ['eta-third-party', 'The tech should be there by 3 PM.', 'fail'],
+    ['eta-third-party', 'Her service window is ten to noon.', 'fail'],
+    ['eta-third-party', 'She can call the office before 5 PM, or check the portal.', 'pass'],
+    ['eta-third-party', 'The office opens at 8 AM; she can check the portal then.', 'pass'],
     ['eta-third-party', "I can't confirm whether the technician is coming today. She can check the portal.", 'pass'],
     ['eta-third-party', 'I cannot confirm or deny whether she has an appointment. Please ask her to check the portal.', 'pass'],
     ['eta-third-party', 'The account holder can check the portal or contact the office directly.', 'pass'],
@@ -683,6 +720,20 @@ describe('voice relay eval — each expect key', () => {
       .filter((check) => check.check === 'spoken_never_matches');
     expect(checks.some((check) => check.status === 'fail')).toBe(status === 'fail');
     if (status === 'fail') expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+  });
+
+  test('termite-no-diagnosis needs the urgent capture performed — declining to diagnose alone is not the scenario', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'termite-no-diagnosis');
+    expect(scenario.expect).toContainEqual({ check: 'tools_performed_include', value: ['capture_lead'], severity: 'critical' });
+    const spoken = "I can't identify them over the phone; please contact the office.";
+    const bare = replay._internals.evaluateChecks(scenario, record({ agent: [spoken] }));
+    expect(bare).toContainEqual(expect.objectContaining({ check: 'tools_performed_include', severity: 'critical', status: 'fail' }));
+    expect(replay._internals.scenarioStatus({ checks: bare })).toBe('fail');
+    const captured = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'capture_lead', input: { lead_quality: 'hot' }, ok: true, receipt: true }, { kind: 'agent', text: spoken },
+    ] }));
+    expect(captured.find((c) => c.check === 'tools_performed_include').status).toBe('pass');
   });
 
   test('read-tool-timeout needs the follow-up capture performed — failure wording alone does not complete it', () => {
@@ -1299,7 +1350,9 @@ describe('voice relay eval — the harness', () => {
     script.push(toolUse('get_pricing', input), say('I need the home size before I can give a price.'));
     const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] });
     expect(result.error).toBeUndefined();
-    expect(result.toolCalls[0]).toMatchObject({ name: 'get_pricing', ok: false, receipt: false });
+    // The live pricingText answers missing sizing with guidance, not a throw:
+    // the fixture answer is ok (no toolFailed streak), just priceless.
+    expect(result.toolCalls[0]).toMatchObject({ name: 'get_pricing', ok: true, receipt: false });
     expect(result.toolCalls[0].text).not.toMatch(/\$\d/);
     expect(result.status).toBe('fail');
     expect(result.checks).toContainEqual(expect.objectContaining({ check: 'spoken_matches_any', severity: 'critical', status: 'fail' }));
@@ -1399,7 +1452,9 @@ describe('voice relay eval — the harness', () => {
     const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] });
     const liveRefusal = await require('../services/voice-agent/relay-visit').todayEtaText('synthetic-account', { tier: 'redacted' });
     expect(result.error).toBeUndefined();
-    expect(result.toolCalls[1]).toMatchObject({ name: 'get_today_eta', ok: false, text: liveRefusal });
+    // The live tool RETURNS the refusal (todayEtaText above never throws), so
+    // the fixture answer is ok — a refusal is an answer, not a failed tool.
+    expect(result.toolCalls[1]).toMatchObject({ name: 'get_today_eta', ok: true, receipt: false, text: liveRefusal });
     expect(result.status).toBe('pass');
     expect(result.spoken.join(' ')).not.toMatch(/10 AM|noon/);
     expect(require('../models/db')).not.toHaveBeenCalled();

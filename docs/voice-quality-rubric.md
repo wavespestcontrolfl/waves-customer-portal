@@ -35,7 +35,11 @@ An unmatched request receives no price, account or slot reference. One-shot resp
 are consumed only by matching calls. Booking and account references must first have
 appeared in a tool result on the same call. Both ordinary (`S1`, `C1`) and
 generation-scoped recovery handles (`S2-1`, `C2-1`) match as complete references.
-An `ok: false` response performs no fixture side effects and earns no receipt.
+An `ok: false` response stands in for a thrown tool failure: it performs no fixture
+side effects, earns no receipt, and counts toward the relay's provider-failure handoff.
+A refusal the live tool returns as text (a redacted schedule, missing sizing) stays `ok`.
+Every scripted turn is `{ caller }` with an optional `interrupt` (`true`, `{ words }`
+or `{ heard }`); any other key is a lint error.
 
 Scheduling fixtures match the requested next-week timeframe as well as the city.
 The stale-slot scenario exposes its replacement reference only after a fresh lookup.
