@@ -964,3 +964,29 @@ test('bare future tense is prospective, every franchise wording carries the form
   expect(score('E6', 'Our technicians eliminate termites, reportedly.').expected.termite).toBe(false);
   expect(score('E6', 'Our technicians eliminate termites, and they say so on the site.').expected.termite).toBe(true);
 });
+
+test('a continuation is current, "used to operate" is former, topic objects and competitor antecedents are not treatment, "not only" is affirmative, and every fumigation wording is guarded (#4155 r5)', () => {
+  expect(score('E5', 'Waves plans to continue serving Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves intends to keep serving Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves plans to serve Manatee County.').expected.manatee).toBe(false);
+  expect(score('E8', 'Waves used to operate as a franchise.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves used to be a franchise.').forbidden.franchise).toBe(false);
+  for (const text of ['Waves manages termite information on its website.', 'Waves controls the termite section of its website.', 'Waves handles termite questions from readers.']) {
+    expect(score('E6', text).expected.termite).toBe(false);
+  }
+  expect(score('E6', 'Waves treats termite infestations.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves controls termite problems in homes.').expected.termite).toBe(true);
+  expect(score('E6', 'According to Orkin, its technicians eliminate termites.').expected.termite).toBe(false);
+  expect(score('E6', 'According to Orkin, they eliminate termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Unlike Orkin, Waves eliminates termites.').expected.termite).toBe(true);
+  expect(score('E6', 'In Sarasota, its technicians eliminate termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves not only controls termites but also mosquitoes.')).toMatchObject({ expected: { termite: true, mosquito: true } });
+  expect(score('E6', 'Waves controls not only termites but mosquitoes.')).toMatchObject({ expected: { termite: true, mosquito: true } });
+  expect(score('E6', 'Waves controls termites but not mosquitoes.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Fumigation: coming next year').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation: yes').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves is considering providing tenting services.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves provides tenting services.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves tents homes starting next year.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves tents homes.').forbidden.fumigation_offered).toBe(true);
+});
