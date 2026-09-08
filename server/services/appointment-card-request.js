@@ -1398,7 +1398,7 @@ async function createSecureCardSetupIntent(request, { database = db } = {}) {
       const n = await database('appointment_card_requests')
         .where({ id: request.id, status: 'pending', stripe_setup_intent_id: request.stripe_setup_intent_id || null })
         .update({ stripe_setup_intent_id: setupIntent.id, updated_at: new Date() });
-      if (n !== 1) return adoptReplacedSecureCardIntent(request, setupIntent.id, { database });
+      if (n !== 1) return adoptReplacedSecureCardIntent(request, setupIntent, { database });
     }
     return shapeSecureCaptureIntent(setupIntent);
   }
@@ -1406,14 +1406,17 @@ async function createSecureCardSetupIntent(request, { database = db } = {}) {
   return null;
 }
 
-// A page load lost the pointer CAS above: re-read the row and, when a
-// replacement moved it to a different pending intent, offer THAT (read
-// live, judged the same way). Anything else — row left pending, pointer
-// unreadable, intent not usable — is null: the page renders unavailable
-// and a refresh re-derives from the row.
-async function adoptReplacedSecureCardIntent(request, observedId, { database = db } = {}) {
+// A page load lost the pointer CAS above: re-read the row. When a
+// concurrent load stored the SAME intent (two first loads share the
+// deterministic mint — GH Codex #4163 r3 P2) the observed intent is the
+// row's and is offered as-is; when a replacement moved the pointer to a
+// different pending intent, offer THAT (read live, judged the same way).
+// Anything else — row left pending, pointer unusable — is null: the page
+// renders unavailable and a refresh re-derives from the row.
+async function adoptReplacedSecureCardIntent(request, observed, { database = db } = {}) {
   const fresh = await database('appointment_card_requests').where({ id: request.id }).first('status', 'stripe_setup_intent_id');
-  if (!fresh || fresh.status !== 'pending' || !fresh.stripe_setup_intent_id || fresh.stripe_setup_intent_id === observedId) return null;
+  if (!fresh || fresh.status !== 'pending' || !fresh.stripe_setup_intent_id) return null;
+  if (fresh.stripe_setup_intent_id === observed.id) return shapeSecureCaptureIntent(observed);
   try {
     const live = await readLiveSecureCardIntent(fresh.stripe_setup_intent_id);
     if (!live || live.status === 'canceled' || isRetiredSetupIntent(live) || !secureCardIntentBelongsToRequest(live, request.id)) return null;
@@ -1705,6 +1708,7 @@ async function secureVisitStillNeedsCard(request, { database = db } = {}) {
   try {
     const PayerService = require('./payer');
     const resolved = await PayerService.resolveForInvoice({
+      database,
       customerId: String(request.customer_id),
       scheduledServiceId: String(request.scheduled_service_id),
       throwOnError: true,

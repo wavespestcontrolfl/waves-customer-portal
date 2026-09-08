@@ -148,7 +148,7 @@ async function enrollUnderCustomerLock({ customerId, paymentMethodId, details, a
 // always accepted); at COMPLETION the caller passes throwOnError so a
 // transient DB blip reads as retryable rather than a permanent policy
 // refusal (pre-push Codex P1).
-async function resolveTender(customerId, { throwOnError = false } = {}) {
+async function resolveTender(customerId, { throwOnError = false, database = db } = {}) {
   // ONE ACH-capture kill switch for every tokenized capture surface (pre-push
   // Codex P1): GATE_ACCEPT_ACH_CAPTURE off = card-only here too, at mint AND
   // at completion, so turning bank capture off cannot be bypassed by a
@@ -159,7 +159,7 @@ async function resolveTender(customerId, { throwOnError = false } = {}) {
   } catch { achCaptureOn = false; }
   if (!achCaptureOn) return 'card';
   try {
-    const row = await db('customers').where({ id: customerId }).first('ach_status');
+    const row = await database('customers').where({ id: customerId }).first('ach_status');
     if (row?.ach_status && row.ach_status !== 'active') return 'card';
     return 'card_or_bank';
   } catch (err) {
@@ -172,9 +172,12 @@ async function resolveTender(customerId, { throwOnError = false } = {}) {
 // Payer-billed accounts never set up homeowner Auto Pay (the invoices go
 // to the payer's AP inbox). Fail toward EXEMPT on a lookup error — same
 // direction as the visit lane's resolveExemption.
-async function payerExemption(customerId) {
+// `database`: the caller's transaction handle when this runs under a row
+// lock — a read through the global pool from inside a held transaction is
+// a second connection per request (GH Codex #4163 r3 P1).
+async function payerExemption(customerId, { database = db } = {}) {
   try {
-    const resolved = await require('./payer').resolveForInvoice({ customerId: String(customerId), throwOnError: true });
+    const resolved = await require('./payer').resolveForInvoice({ database, customerId: String(customerId), throwOnError: true });
     if (resolved?.payerId) return 'payer_billed';
     return null;
   } catch (err) {
@@ -496,73 +499,84 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
 // createSetupIntent carries no idempotency key, so an existing confirmable
 // intent on the row is replayed instead of minting a new one per page load.
 // `database`: the caller's transaction handle when the mint runs under the
-// request row lock (replaceAutopaySetupIntent) — the CAS below must ride
-// that connection or it deadlocks behind the lock it is inside of.
+// request row lock (replaceAutopaySetupIntent) — every read and the CAS
+// must ride that connection (a deadlock behind the held lock otherwise, and
+// a second pool connection per request either way).
 async function mintOrReplaySetupIntent(request, { database = db } = {}) {
-  const StripeService = require('./stripe');
   // Current policy FIRST (pre-push Codex P1): a replayed intent that still
   // allows bank must not expose the bank tab once the kill switch is off or
   // the customer's ACH state turned unhealthy — the tender-salted
-  // idempotency key below then mints a card-only generation instead.
-  const tender = await resolveTender(request.customer_id);
-  const readLive = (id) => StripeService.retrieveSetupIntent(id);
-  if (request.stripe_setup_intent_id) {
-    try {
-      let existing = await StripeService.retrieveSetupIntent(request.stripe_setup_intent_id);
-      // A RETIRED capture ("use a different payment method") points at its
-      // live replacement — replay THAT; a broken chain falls through to the
-      // generation mint below.
-      if (isRetiredSetupIntent(existing)) {
-        existing = await followReplacementChain(existing, readLive, (si) => intentBelongsToRequest(si, request.id));
-      }
-      const existingTypes = existing?.payment_method_types || ['card'];
-      const bankNoLongerOffered = tender === 'card' && existingTypes.includes('us_bank_account');
-      // The reverse too (GH Codex P0): a card-only intent minted while bank
-      // was off must not pin the link to card once bank becomes eligible —
-      // a still-unconfirmed one is stale and the tender-salted key mints a
-      // card_or_bank generation. A SUCCEEDED card intent is kept (a card is
-      // already captured; nothing to widen).
-      const bankNowOffered = tender === 'card_or_bank' && !existingTypes.includes('us_bank_account') && existing?.status !== 'succeeded';
-      if (existing
-        && existing.metadata?.purpose === PURPOSE
-        && String(existing.metadata?.request_id) === String(request.id)
-        && ['requires_payment_method', 'requires_confirmation', 'requires_action', 'processing', 'succeeded'].includes(existing.status)
-        // A bank-capable intent is never replayed once bank is no longer
-        // offered — a SUCCEEDED bank intent would otherwise be immutable
-        // and every refresh would loop on bank_not_allowed (GH Codex #3726
-        // r1 P0); the card-only generation below gives the customer a way
-        // to finish with a card.
-        && !bankNoLongerOffered
-        && !bankNowOffered) {
-        // A SUCCEEDED replay already holds a method the customer will not
-        // re-enter — the capture UI refuses a bank-capable succeeded replay
-        // without its tender (GH Codex #3726 P1), so resolve it here, where
-        // the secret key can (same contract as the recurring accept mint).
-        let capturedMethodType = null;
-        if (existing.status === 'succeeded' && existing.payment_method) {
-          const pm = existing.payment_method;
-          try {
-            capturedMethodType = typeof pm === 'object' && pm?.type
-              ? pm.type
-              : (await StripeService.retrievePaymentMethod(typeof pm === 'string' ? pm : pm.id))?.type || null;
-          } catch (err) {
-            logger.warn(`[autopay-setup-link] captured method type lookup failed for replayed intent ${existing.id}: ${err.message}`);
-          }
-        }
-        return {
-          clientSecret: existing.client_secret,
-          setupIntentId: existing.id,
-          paymentMethodTypes: existingTypes,
-          capturedMethodType,
-        };
-      }
-    } catch (err) {
-      logger.warn(`[autopay-setup-link] existing SetupIntent replay failed for request ${request.id} — minting fresh: ${err.message}`);
-    }
+  // idempotency key then mints a card-only generation instead.
+  const tender = await resolveTender(request.customer_id, { database });
+  const replayed = request.stripe_setup_intent_id ? await replayRowIntent(request, tender) : null;
+  return replayed || mintGenerationIntent(request, tender, { database });
+}
+
+const REPLAYABLE_STATUSES = ['requires_payment_method', 'requires_confirmation', 'requires_action', 'processing', 'succeeded'];
+
+// May the row's existing intent be replayed under the CURRENT tender?
+// A bank-capable intent is never replayed once bank is no longer offered
+// (a SUCCEEDED bank intent would otherwise be immutable and every refresh
+// would loop on bank_not_allowed — GH Codex #3726 r1 P0); the reverse too
+// (GH Codex P0): a still-unconfirmed card-only intent minted while bank
+// was off must not pin the link to card once bank is eligible. A SUCCEEDED
+// card intent is kept — a card is already captured, nothing to widen.
+function replayableUnderTender(existing, requestId, tender) {
+  if (!intentBelongsToRequest(existing, requestId) || !REPLAYABLE_STATUSES.includes(existing.status)) return false;
+  const bankCapable = (existing.payment_method_types || ['card']).includes('us_bank_account');
+  if (tender === 'card' && bankCapable) return false;
+  if (tender === 'card_or_bank' && !bankCapable && existing.status !== 'succeeded') return false;
+  return true;
+}
+
+// The tender a SUCCEEDED intent captured (null while unconfirmed or when
+// the lookup fails): the capture UI refuses a bank-capable succeeded replay
+// without it (GH Codex #3726 P1), so it is resolved here, where the secret
+// key can — same contract as the recurring accept mint.
+async function capturedMethodTypeOf(setupIntent) {
+  if (setupIntent.status !== 'succeeded' || !setupIntent.payment_method) return null;
+  const pm = setupIntent.payment_method;
+  if (typeof pm === 'object' && pm?.type) return pm.type;
+  try {
+    return (await require('./stripe').retrievePaymentMethod(typeof pm === 'string' ? pm : pm.id))?.type || null;
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] captured method type lookup failed for replayed intent ${setupIntent.id}: ${err.message}`);
+    return null;
   }
-  // Deterministic idempotency per (request, tender, generation) — same
-  // self-heal as the visit lane: concurrent page loads replay ONE intent
-  // (pre-push Codex P1), and a canceled replay walks the salt forward.
+}
+
+// Replay the intent the row points at. A RETIRED capture ("use a different
+// payment method") points at its live replacement — replay THAT. Null when
+// the row's intent is unusable under the current tender (or unreadable, or
+// a broken chain): the caller mints a generation instead.
+async function replayRowIntent(request, tender) {
+  const StripeService = require('./stripe');
+  const readLive = (id) => StripeService.retrieveSetupIntent(id);
+  try {
+    let existing = await readLive(request.stripe_setup_intent_id);
+    if (isRetiredSetupIntent(existing)) {
+      existing = await followReplacementChain(existing, readLive, (si) => intentBelongsToRequest(si, request.id));
+    }
+    if (!existing || !replayableUnderTender(existing, request.id, tender)) return null;
+    return {
+      clientSecret: existing.client_secret,
+      setupIntentId: existing.id,
+      paymentMethodTypes: existing.payment_method_types || ['card'],
+      capturedMethodType: await capturedMethodTypeOf(existing),
+    };
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] existing SetupIntent replay failed for request ${request.id} — minting fresh: ${err.message}`);
+    return null;
+  }
+}
+
+// Deterministic idempotency per (request, tender, generation) — same
+// self-heal as the visit lane: concurrent page loads replay ONE intent
+// (pre-push Codex P1), and a canceled or retired replay walks the salt
+// forward. Returns the intent, { stale: true } when the row left pending
+// under us, or null (Stripe unreadable / every generation terminal).
+async function mintGenerationIntent(request, tender, { database }) {
+  const StripeService = require('./stripe');
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
     const minted = await StripeService.createSetupIntent(request.customer_id, tender, {
       metadata: { purpose: PURPOSE, request_id: String(request.id) },
@@ -571,12 +585,10 @@ async function mintOrReplaySetupIntent(request, { database = db } = {}) {
     });
     if (minted.status === 'canceled') continue;
     // The deterministic key replays the ORIGINAL create body — a capture
-    // retired since then still reads as usable there. Judge it live; a
-    // retired replay walks the salt like a canceled one (its replacement is
-    // already the row's intent and was replayed above).
+    // retired since then still reads as usable there. Judge it live.
     let live = null;
     try {
-      live = await readLive(minted.setupIntentId);
+      live = await StripeService.retrieveSetupIntent(minted.setupIntentId);
     } catch (err) {
       logger.warn(`[autopay-setup-link] live SetupIntent read failed after mint ${minted.setupIntentId}: ${err.message}`);
       return null;
@@ -627,9 +639,14 @@ async function standaloneLinkStillOpen(request, { database = db } = {}) {
   if (isExpired(request)) return { ok: false, code: 'request_closed' };
   const customer = await database('customers').where({ id: request.customer_id }).first();
   if (!customer || customer.deleted_at) return { ok: false, code: 'not_found' };
-  if (await payerExemption(request.customer_id)) return { ok: false, code: 'no_longer_needed' };
+  if (await payerExemption(request.customer_id, { database })) return { ok: false, code: 'no_longer_needed' };
   if (!billingLaneSupported(customer)) return { ok: false, code: 'no_longer_needed' };
-  const { customerOnAutopay } = require('./autopay-eligibility');
+  const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
+  // A PAUSED enrollment is still configured — customerOnAutopay says false,
+  // but completion refuses autopay_paused (permanent) — so a paused customer
+  // must not have a saved intent retired for a method that cannot enroll
+  // (GH Codex #4163 r3 P1). Same guard as setupLinkIneligibility.
+  if (customer.autopay_enabled && isPaused(customer)) return { ok: false, code: 'no_longer_needed' };
   // failClosed (GH Codex #4163 r2 P0): by default an unreadable
   // payment_methods state reads as "not on Auto Pay", which here would mint
   // and retire for a customer who may already be enrolled. Let the read
@@ -676,7 +693,7 @@ async function replaceAutopaySetupIntent({ request, setupIntentId }) {
     }
     let tender = 'card';
     try {
-      tender = await resolveTender(request.customer_id, { throwOnError: true });
+      tender = await resolveTender(request.customer_id, { throwOnError: true, database: trx });
     } catch (err) {
       logger.warn(`[autopay-setup-link] replace: tender resolution failed for request ${request.id}: ${err.message}`);
       return { ok: false, code: 'mint_failed' };

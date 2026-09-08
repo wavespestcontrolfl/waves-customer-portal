@@ -1065,6 +1065,9 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
     ['payer-billed', () => { mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' }); }, 'no_longer_needed'],
     ['unsupported billing lane', () => { mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'monthly_membership' }) }; }, 'no_longer_needed'],
     ['Auto Pay already active elsewhere', () => { mockCustomerOnAutopay.mockResolvedValue(true); }, 'no_longer_needed'],
+    // GH Codex #4163 r3 P1: paused is "configured but off" — customerOnAutopay
+    // says false, completion refuses autopay_paused permanently.
+    ['Auto Pay paused', () => { mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, autopay_enabled: true, autopay_paused_until: new Date(Date.now() + 86400000) }) }; }, 'no_longer_needed'],
   ])('%s since page load is refused under the lock — nothing minted or retired', async (_label, arrange, code) => {
     arrange();
     expect(await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' })).toEqual({ ok: false, code });
@@ -1088,6 +1091,12 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
   it('the Auto-Pay-active probe runs FAIL-CLOSED on the locked handle (GH Codex #4163 r2 P0): a swallowed read must not read as "not enrolled"', async () => {
     await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' });
     expect(mockCustomerOnAutopay).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }), expect.objectContaining({ failClosed: true, db: expect.any(Function) }));
+  });
+
+  it('every nested eligibility/tender read rides the transaction handle — no second pool connection per request (GH Codex #4163 r3 P1)', async () => {
+    await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' });
+    // The payer resolver is handed the handle explicitly.
+    expect(mockResolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', database: expect.any(Function) }));
   });
 
   it('an unfinished or already-retired intent has nothing to retire — the ordinary mint/replay is returned', async () => {

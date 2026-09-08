@@ -2170,6 +2170,11 @@ describe('replaceSecureCardIntent — "use a different payment method"', () => {
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
   });
 
+  test('the visit-lane payer re-check under the replacement lock rides the transaction handle (GH Codex #4163 r3 P1)', async () => {
+    await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' });
+    expect(mockResolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', database: expect.any(Function) }));
+  });
+
   test('the eligibility re-check reads the visit on the LOCKED transaction handle, after the row lock', async () => {
     await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' });
     const order = mockDbTouches.map((t) => `${t.table}:${t.chain.calls.some(([op]) => op === 'forUpdate') ? 'lock' : 'read'}`);
@@ -2294,6 +2299,20 @@ describe('the page replays a SUCCEEDED capture as a saved-method panel; the mint
     expect(res).toMatchObject({ state: 'ready', setupIntentId: 'seti_after', clientSecret: 'cs_after', capturedMethodType: null });
     const cas = touches('appointment_card_requests').map((t) => t.chain).find((c) => c.calls.some(([op, patch]) => op === 'update' && patch.stripe_setup_intent_id === 'seti_1'));
     expect(cas.calls.find(([op]) => op === 'where')[1]).toEqual({ id: 'req-1', status: 'pending', stripe_setup_intent_id: null });
+  });
+
+  test('a CAS miss because a CONCURRENT load stored the SAME intent adopts it (GH Codex #4163 r3 P2) — never unavailable for a usable row', async () => {
+    mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests = {
+      first: () => (reads++ === 0 ? { ...REQUEST, stripe_setup_intent_id: null } : { ...REQUEST, stripe_setup_intent_id: 'seti_1' }),
+      update: (chain, patch) => (patch.stripe_setup_intent_id ? 0 : 1),
+    };
+    mockRetrieveSetupIntent.mockImplementation(echoMintedIntent);
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res).toMatchObject({ state: 'ready', setupIntentId: 'seti_1', clientSecret: 'cs_1' });
+    // Adopted from the observed body — no extra Stripe read for the same id.
+    expect(mockRetrieveSetupIntent).toHaveBeenCalledTimes(1);
   });
 
   test('a CAS miss whose row left pending (or whose new pointer is unusable) renders unavailable, never the stale panel', async () => {
