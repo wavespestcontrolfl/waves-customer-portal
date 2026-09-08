@@ -106,3 +106,19 @@ test('shared admin wrappers with variable endpoints stay covered outside admin d
   expect(shared.every(row => row.operation.resolution === 'unresolved')).toBe(true);
   expect(checkCoverage(shared, { actions: [] }, {})).toHaveLength(3);
 });
+
+test('React state setters and lazy module imports are not requests', () => {
+  const rows = frontendSourceCensus(`
+    function Panel() {
+      const [linkRequest, setLinkRequest] = useState(0);
+      const load = async () => {
+        setLinkRequest(0);
+        setLinkRequest((value) => value + 1);
+        const Page = lazy(() => import('../../pages/admin/CommunicationsPageV2'));
+        await adminFetch(dynamic);
+      };
+    }
+  `, 'client/src/components/admin/Fixture.jsx');
+  expect(rows).toHaveLength(1);
+  expect(rows[0].operation).toEqual({ method: 'GET', endpoint: null, resolution: 'unresolved' });
+});

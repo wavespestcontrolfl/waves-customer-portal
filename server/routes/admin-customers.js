@@ -9,6 +9,7 @@ const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
+const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
@@ -3236,14 +3237,15 @@ router.get('/:id', async (req, res, next) => {
         .orderBy('created_at', 'desc')
         .limit(25)
         .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger: ${e.message}`); return []; }),
-      db('property_nutrient_ledger')
-        .where({ customer_id: c.id, application_year: currentYear })
-        .first(
-          db.raw('COALESCE(SUM(n_applied_per_1000), 0)::float as "nApplied"'),
-          db.raw('COALESCE(SUM(p_applied_per_1000), 0)::float as "pApplied"'),
-          db.raw('COALESCE(SUM(k_applied_per_1000), 0)::float as "kApplied"'),
-          db.raw('COUNT(*)::int as entries')
-        )
+      // Summed through the shared ledger summary (nutrient-ledger.js), which
+      // weights a partial-area row by its coverage of the saved lawn — the
+      // same figure the planner's annual budget and closeout advisory use.
+      Promise.all([
+        db('property_nutrient_ledger')
+          .where({ customer_id: c.id, application_year: currentYear })
+          .select('n_applied_per_1000', 'p_applied_per_1000', 'k_applied_per_1000', 'lawn_sqft'),
+        db('customer_turf_profiles').where({ customer_id: c.id, active: true }).first('lawn_sqft'),
+      ]).then(([rows, turf]) => summarizeLedgerRows(rows, currentYear, { lawnSqft: turf?.lawn_sqft }))
         .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger_summary: ${e.message}`); return null; }),
       accountPropertySummary(c.account_id, c.id).catch(e => { logger.warn(`[customers:${c.id}] account_properties: ${e.message}`); return []; }),
       annualPrepayTermsPromise,
