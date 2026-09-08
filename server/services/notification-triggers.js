@@ -238,6 +238,19 @@ const TRIGGER_REGISTRY = {
       link: '/admin/communications#tab=calls',
     }),
   },
+  // Direct watcher bells must also join the staff visibility allowlist.
+  sms_operational_followup: {
+    techVisible: true,
+    label: 'SMS request needs follow-up',
+    category: 'alert',
+    priority: 'high',
+    group: 'Communication',
+    build: (p) => ({
+      title: 'An SMS request needs follow-up',
+      body: 'Open the customer profile to verify completion or take the next step.',
+      link: `/admin/customers?customerId=${encodeURIComponent(p.customerId)}&tab=comms`,
+    }),
+  },
   // Written directly by call-commitments-watchdog (notifyAdmin with its own
   // per-commitment per-ET-day dedupeKey and bell: true — the 'alert'
   // category is silenced under the bell policy and a pager must page);

@@ -1408,13 +1408,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Recover interrupted SMS profile capture every five minutes.
+  // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
     try {
       await runSmsRecoveryTick();
     } catch {
-      logger.error('[sms-operations] profile capture did not complete');
+      logger.error('[sms-operations] intake did not complete');
+    }
+    try {
+      const { refreshSmsCommitments } = require('./sms-operational-actions');
+      const lockRes = await runExclusive('sms-commitment-fulfillment', () => refreshSmsCommitments());
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`SMS fulfillment tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('sms-commitment-fulfillment').catch(() => {});
+        await recordJobEnd('sms-commitment-fulfillment', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch {
+      logger.error('[sms-operations] commitment watcher did not complete');
     }
   }, { timezone: 'America/New_York' });
 
