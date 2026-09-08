@@ -252,16 +252,24 @@ function lintExpectation(e, i, knownTools) {
 const SCENARIO_KEYS = new Set(['id', 'description', 'language', 'gates', 'allowedTools', 'allowedToolInputs', 'caller', 'fixtures', 'turns', 'spec', 'expect']);
 const FIXTURE_KEYS = new Set(['officeHours', 'toolResponses', 'resume', 'modelFailures']);
 
-function scenarioShapeRules(s) {
-  const turns = Array.isArray(s.turns) ? s.turns : [];
-  const spec = s.spec && typeof s.spec === 'object' ? s.spec : null;
+// The exact key sets, and the live release condition for an earlier segment:
+// recovery releases it only behind the recovery gate on a verified session, so
+// a resume outside both is a call that never happens.
+function scenarioKeyRules(s) {
   const fx = s.fixtures && typeof s.fixtures === 'object' ? s.fixtures : {};
+  const resumeAllowed = !!(s.gates && s.gates.recovery === true && s.caller && s.caller.verified === true);
   return [
     ...Object.keys(s).filter((k) => !SCENARIO_KEYS.has(k)).map((k) => [true, `unknown scenario key "${k}"`]),
     ...Object.keys(fx).filter((k) => !FIXTURE_KEYS.has(k)).map((k) => [true, `fixtures: unknown key "${k}"`]),
-    // Live recovery releases an earlier segment only behind the recovery gate
-    // and a verified session; a resume outside both is a call that never happens.
-    [fx.resume != null && !(s.gates && s.gates.recovery === true && s.caller && s.caller.verified === true), 'fixtures.resume requires gates.recovery: true and caller.verified: true'],
+    [fx.resume != null && !resumeAllowed, 'fixtures.resume requires gates.recovery: true and caller.verified: true'],
+  ];
+}
+
+function scenarioShapeRules(s) {
+  const turns = Array.isArray(s.turns) ? s.turns : [];
+  const spec = s.spec && typeof s.spec === 'object' ? s.spec : null;
+  return [
+    ...scenarioKeyRules(s),
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
     [!s.caller || typeof s.caller.from !== 'string' || !/^\+1\d{10}$/.test(s.caller.from), 'caller.from must be an E.164 US number'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
