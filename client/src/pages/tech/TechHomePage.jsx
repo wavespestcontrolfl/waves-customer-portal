@@ -40,7 +40,7 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
@@ -212,6 +212,36 @@ const QUICK_ACTIONS = [
 export default function TechHomePage() {
   const navigate = useNavigate();
   const [schedule, setSchedule] = useState([]);
+  // The tech's own Twilio line, if they hold one (GET /api/tech/line):
+  // the brief panel's Call/Text then go through the line. Null = personal
+  // phone links as before. Re-read with every schedule refresh (mount,
+  // dispatch broadcast, retry): a line cleared or reassigned — or the gate
+  // switched off — while the PWA stays open must bring the personal-phone
+  // links back instead of buttons that only 409 (codex #4072 r3 P2). A
+  // failed read keeps a KNOWN LINE (buttons that may 409 are the safe
+  // side) but never a cached { line: null }: a line assigned since that
+  // answer must not stay hidden behind the personal links, so the failure
+  // falls back to `{ unknown: true }` — "line couldn't be checked", NO
+  // contact links (never the personal phone on a lookup error, codex #4072
+  // r5 + r14 P2); only an authoritative { line: null } shows the personal
+  // links.
+  const [techLine, setTechLine] = useState({ unknown: true });
+  // Overlapping refreshes start overlapping lookups; only the NEWEST one
+  // may set state — an older `{ line: null }` landing last would expose
+  // the personal links after an assignment, an older assigned-line answer
+  // would restore the buttons after a revoke (codex #4072 r9 P2).
+  const lineLookupSeq = useRef(0);
+  const fetchTechLine = useCallback(async () => {
+    const seq = ++lineLookupSeq.current;
+    try {
+      const d = await techRequest('/tech/line');
+      if (seq !== lineLookupSeq.current) return;
+      setTechLine(d?.line ? d : null);
+    } catch {
+      if (seq !== lineLookupSeq.current) return;
+      setTechLine((prev) => (prev?.line ? prev : { unknown: true }));
+    }
+  }, []);
   const [loading, setLoading] = useState(true);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
@@ -249,6 +279,12 @@ export default function TechHomePage() {
   const currentRole = getAdminUser()?.role || null;
 
   const fetchSchedule = useCallback(async () => {
+    // Runs alongside the schedule read but never gates it: the route must
+    // render even when the line lookup hangs on a poor connection (codex
+    // #4072 r8 P2). The first render cannot show the personal-phone links
+    // while the answer is in flight — the initial `{ unknown: true }` hides
+    // every contact link until the lookup succeeds (r4 / r5 P2s).
+    fetchTechLine();
     try {
       setScheduleError('');
       const token = getAdminAuthToken();
@@ -266,7 +302,7 @@ export default function TechHomePage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchTechLine]);
 
   useEffect(() => {
     fetchSchedule();
@@ -456,7 +492,18 @@ export default function TechHomePage() {
       [key]: { status: fulfilled === 0 ? 'error' : 'ready', byService },
     }));
   }, []);
+  // Which stop's brief has an own-line text or bridge in flight. Tracked
+  // at the list level, not per row: the accordion shows ONE stop, so a
+  // sibling header would otherwise swap the expanded stop and unmount the
+  // busy panel — letting the action go out twice, and clearing the bridge
+  // lock timer before it could release (codex #4072 r19 P2). No header
+  // moves the accordion until the action settles.
+  const [busyStopId, setBusyStopId] = useState(null);
+  const onStopBusyChange = useCallback((stop, busy) => {
+    setBusyStopId((cur) => (busy ? stop.primary.id : (cur === stop.primary.id ? null : cur)));
+  }, []);
   const toggleStop = useCallback((stop) => {
+    if (busyStopId) return;
     const id = stop.primary.id;
     const expanding = expandedStopId !== id;
     setExpandedStopId(expanding ? id : null);
@@ -464,7 +511,7 @@ export default function TechHomePage() {
     // settled payment, or a billing-posture change mid-day must show on
     // reopen — the previous data stays rendered while the refresh loads.
     if (expanding) loadStopDetail(stop);
-  }, [expandedStopId, loadStopDetail]);
+  }, [busyStopId, expandedStopId, loadStopDetail]);
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -813,6 +860,7 @@ export default function TechHomePage() {
                 expanded={expandedStopId === stop.primary.id}
                 detail={stopDetail[stop.primary.id]}
                 onToggle={() => toggleStop(stop)}
+                onBusyChange={(busy) => onStopBusyChange(stop, busy)}
                 onRetryDetail={() => loadStopDetail(stop)}
                 onProject={(s) => (
                   isTypedFindingsService(s)
@@ -825,6 +873,7 @@ export default function TechHomePage() {
                 })}
                 onZone={(s) => setZoneTarget(s)}
                 onLead={(s) => setLeadTarget(s)}
+                techLine={techLine}
               />
             ))}
           </div>
@@ -1228,7 +1277,10 @@ function TimecardSignoffCard({ techName }) {
 // name, status·window, service label + short address, exception chips
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead }) {
+function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, techLine }) {
+  // The busy guard lives in the list's toggleStop (any header, not only
+  // this row's, must leave a panel with a text or bridge in flight mounted).
+  const toggle = () => onToggle();
   const service = stop.primary;
   const status = service.status || 'pending';
   // A grouped transition that only partially fanned out leaves live
@@ -1270,9 +1322,9 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
-        onClick={onToggle}
+        onClick={toggle}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); }
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
         }}
         style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', minHeight: 44 }}
       >
@@ -1321,6 +1373,9 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
           onProject={onProject}
           onZone={onZone}
           onLead={onLead}
+          techLine={techLine}
+          onBusyChange={onBusyChange}
+          request={techRequest}
         />
       )}
     </div>

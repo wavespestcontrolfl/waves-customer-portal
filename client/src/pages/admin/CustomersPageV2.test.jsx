@@ -7,7 +7,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
 vi.mock('../../components/admin/Customer360ProfileV2', () => ({
-  default: ({ customerId }) => <div data-testid="customer-profile">Profile {customerId}</div>,
+  default: function Profile({ customerId, initialTab }) {
+    const [tab, setTab] = React.useState(initialTab);
+    return <div data-testid="customer-profile">Profile {customerId}
+      <span data-testid="profile-active-tab">{tab}</span>
+      <button onClick={() => setTab('overview')}>Profile overview</button>
+    </div>;
+  },
 }));
 vi.mock('../../components/admin/MobileNewCustomerSheet', () => ({ default: () => null }));
 vi.mock('../../components/AddressAutocomplete', () => ({
@@ -50,6 +56,11 @@ function NavigateToCustomerButton() {
       Open customer B
     </button>
   );
+}
+
+function RepeatCommsNotification({ workspace = false }) {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate('/admin/customers?customerId=customer-a&tab=comms' + (workspace ? '&customer360=workspace' : ''))}>Open SMS notification</button>;
 }
 
 function RemountableDirectory() {
@@ -149,6 +160,18 @@ describe('CustomersPageV2 workflow state', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 });
   });
 
+  it.each([false, true])('reopens Comms after repeat notification navigation (workspace=%s)', async (workspace) => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={['/admin/customers?customerId=customer-a&tab=comms' + (workspace ? '&customer360=workspace' : '')]}>
+      <RepeatCommsNotification workspace={workspace} /><CustomersPageV2 />
+    </MemoryRouter>);
+    expect(await screen.findByTestId('profile-active-tab')).toHaveTextContent('comms');
+    fireEvent.click(screen.getByRole('button', { name: 'Profile overview' }));
+    expect(screen.getByTestId('profile-active-tab')).toHaveTextContent('overview');
+    fireEvent.click(screen.getByRole('button', { name: 'Open SMS notification' }));
+    await waitFor(() => expect(screen.getByTestId('profile-active-tab')).toHaveTextContent('comms'));
+  });
+
   it('names desktop customer inputs and selects using their visible labels', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => (
       String(url).includes('/admin/customers?') ? response(list) : response({})
@@ -212,14 +235,14 @@ describe('CustomersPageV2 workflow state', () => {
     });
   });
 
-  it('returns to the filtered directory and preserves the workspace opt-in when switching customers', async () => {
+  it.each(['/admin/customers', '/admin/customers?customer360=workspace'])('returns to the filtered directory when switching customers from %s', async (entry) => {
     const workspaceList = { ...list, customers: [...list.customers, { ...list.customers[0], id: 'customer-b', firstName: 'Blake' }], total: 2 };
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.includes('/admin/customers?')) return response(workspaceList);
       return response({});
     }));
-    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
     expect(screen.getAllByRole('link', { name: '10 Palm Ave, Unit 4, Naples FL 34102' })).toHaveLength(2);
     const search = screen.getByPlaceholderText('Search customers...');

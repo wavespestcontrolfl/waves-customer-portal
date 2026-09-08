@@ -75,6 +75,14 @@ describe('lineForTechnician (customer card)', () => {
     db.mockImplementation(() => chain({ first: { ...HOLDER, twilio_number: LINE, employment_status: 'inactive' } }));
     await expect(techLine.lineForTechnician('tech-1')).resolves.toBeNull();
   });
+
+  test('a DB failure fails soft to null by default; strict (the tech portal) rethrows so an outage never reads as "no line"', async () => {
+    process.env.GATE_TECH_LINES = 'true';
+    db.mockImplementation(() => ({ where: () => ({ first: async () => { throw new Error('pg down'); } }) }));
+    await expect(techLine.lineForTechnician('tech-1')).resolves.toBeNull();
+    await expect(techLine.lineForTechnician('tech-1', { strict: true })).rejects.toThrow('pg down');
+    await expect(techLine.techLineContext('tech-1', { strict: true })).rejects.toThrow('pg down');
+  });
 });
 
 describe('notifyTechLineText', () => {

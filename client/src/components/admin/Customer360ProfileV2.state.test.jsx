@@ -230,6 +230,23 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
   });
 
+  it('shows SMS follow-up to technicians in the workspace Activity section without the admin history', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      if (path.includes('/commitments/sms?customer_id=customer-a')) {
+        return response({ commitments: [{ id: 'sms-1', party: 'waves', description: 'Send the estimate', overdue: true }], enabled: true, has_more: false });
+      }
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="comms" embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    expect(await screen.findByTestId('sms-followup-summary')).toHaveTextContent('Send the estimate');
+    expect(screen.getByRole('button', { name: 'Mark done' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Customer activity history' })).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+  });
+
   it.each([{ events: [] }, { events: [{ type: 'interaction', title: 'Recovered fixture note' }] }])(
     'distinguishes unavailable history from successful empty/nonempty history after retry (%j)',
     async ({ events }) => {
