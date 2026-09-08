@@ -44,6 +44,7 @@ const {
   scrubCustomerText,
   CONDITION_LABEL_VALUES,
 } = require('./lawn-diagnostic-report');
+const { containsReportAccessCode } = require('./service-report/technician-report-copy');
 const { CURATED_REFERENCE, AUTO_RELEASE_RULE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
 const { FUNGUS_DISPLAY, THATCH_DISPLAY } = require('./lawn-assessment');
 const { normalizeGrassType } = require('./lawn-grass-context');
@@ -57,6 +58,10 @@ const MAX_VISIT_PHOTOS = 6;
 // GPT-6 reasoning tokens); a six-photo answer runs ~6k visible tokens.
 const MAX_OUTPUT_TOKENS = 16384;
 const UNAVAILABLE_OBSERVATIONS = 'Visual analysis unavailable';
+// A COMPLETE run whose observation is empty (the model wrote none, the
+// scrubber removed it all, or it carried an access code) — the analysis
+// happened, so the customer column never claims an outage.
+const NO_OBSERVATIONS = 'No additional observations from the photo review.';
 
 const PHOTO_ZONES = ['front', 'back', 'side'];
 const PHOTO_QUALITY = ['adequate', 'limited', 'poor'];
@@ -372,7 +377,7 @@ function zoneFromRefs(photoRefs, photoZones = []) {
 
 // Schema enforcement should guarantee the shape; the chain's validate hook is
 // the defensive read — a malformed answer fails the leg, so the fallback runs.
-function validateAssessmentJson(result) {
+function validateAssessmentJson(result, photoCount) {
   const json = result && result.json;
   if (!json || typeof json !== 'object' || Array.isArray(json)) return 'malformed_assessment';
   if (!Array.isArray(json.findings)) return 'malformed_assessment';
@@ -381,7 +386,21 @@ function validateAssessmentJson(result) {
   // A clean lawn is a finding too ("No major visible stress"); an empty set is
   // a skipped job, not an answer — fail the leg so the fallback runs.
   if (!json.findings.length) return 'empty_findings';
+  // Every photo of the visit gets a quality read: an answer that rates none
+  // (or not all) of them has not looked at the visit — it fails the leg
+  // rather than becoming a complete run over unrated photos.
+  if (!ratesEveryPhoto(json.photo_quality, photoCount)) return 'incomplete_photo_quality';
   return null;
+}
+
+function ratesEveryPhoto(list, photoCount) {
+  if (!Array.isArray(list)) return false;
+  const rated = new Set();
+  for (const entry of list) {
+    const photo = Number(entry?.photo);
+    if (Number.isInteger(photo) && photo >= 1 && photo <= photoCount && PHOTO_QUALITY.includes(entry?.quality)) rated.add(photo);
+  }
+  return rated.size === photoCount;
 }
 
 function normalizeAssessment(json, photoCount, photoZones = []) {
@@ -469,7 +488,7 @@ async function analyzeVisit({ photos = [], photoZones = [], visionContext = {}, 
     // The literal (not LANE_ID) is what the call-ledger coverage guard reads.
     laneId: 'lawn_visit_assessment',
     promptVersion: PROMPT_VERSION,
-  }, { validate: validateAssessmentJson });
+  }, { validate: (result) => validateAssessmentJson(result, photos.length) });
   const base = {
     promptVersion: PROMPT_VERSION,
     contextHash: contextHash({ photos, photoZones, visionContext }),
@@ -519,12 +538,23 @@ function deriveLegacyScores(analysis) {
     stress_damage: stressParts.length ? Math.min(...stressParts) : null,
     overwatering_signal: level('overwatering_signal') === 'yes',
     drought_stress: drought && drought !== 'unknown' ? drought : null,
-    // lawn_assessments.observations is read verbatim by the customer's Lawn
-    // Report V2, so the column gets the egress-scrubbed copy (brands, URLs,
-    // emails, phones, street addresses out; confirmed-disease language
-    // softened); the run row keeps the model's raw text for the technician.
-    observations: scrubCustomerText(analysis.observations || '').slice(0, 600),
+    observations: customerObservations(analysis.observations),
   };
+}
+
+// lawn_assessments.observations is read verbatim by the customer's Lawn
+// Report V2, so the column gets the egress-scrubbed copy (brands, URLs,
+// emails, phones, street addresses out; confirmed-disease language softened);
+// the run row keeps the model's raw text for the technician. The scrubber
+// does not know access codes, so an observation the report's credential
+// detector flags (a gate / garage / lockbox code the model echoed from the
+// technician's notes despite the prompt) is suppressed whole; an empty
+// result (nothing written, or nothing left) gets the neutral complete-run
+// fallback — never the outage sentinel.
+function customerObservations(text) {
+  const scrubbed = scrubCustomerText(text || '').slice(0, 600).trim();
+  if (!scrubbed || containsReportAccessCode(scrubbed)) return NO_OBSERVATIONS;
+  return scrubbed;
 }
 
 // The composite-shaped object the route's grass capture and response read
@@ -911,18 +941,34 @@ function overallScoreFor(finalScores, calculateOverallScore) {
 // coerces a NULL score to 0 or 100 — so an unavailable run or a partial
 // answer saves the technician's scores and review but stays pending, with
 // no customer output, no calibration and no baseline, until the technician
-// fills the gaps and confirms again. `missing` names the gaps for the client.
+// fills the gaps and confirms again. `missing` names the gaps for the client;
+// calibration needs a confirmed row with AI scores to compare against.
 function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
   const finalScores = resolveConfirmScores(assessment, adjustedScores, scoreValue);
   const confirmed = scoresComplete(finalScores);
+  const aiScores = runAiScores(run);
   return {
     finalScores,
     overallScore: overallScoreFor(finalScores, calculateOverallScore),
     confirmed,
     missing: missingScores(finalScores),
-    customerOutputEligible: confirmed,
-    calibrationEligible: confirmed && run.status !== 'unavailable',
+    aiScores,
+    calibrationEligible: confirmed && SCORE_KEYS.some((key) => known(aiScores[key])),
   };
+}
+
+// The AI scores a technician's confirm is calibrated against: the run's own
+// answer in the legacy units (never the assessment row, which a pending
+// confirm may already have overwritten with the technician's entries). An
+// unavailable run, or an answer that could determine nothing, has no score
+// to compare — calibration then records nothing, rather than a row of NULL
+// AI values whose avg_delta of 0 would read as perfect agreement.
+function runAiScores(run) {
+  const scores = parseJsonObject(run?.scores_raw);
+  const severities = parseJsonObject(run?.severities);
+  if (run?.status !== 'complete' || !scores) return {};
+  const { observations, overwatering_signal, drought_stress, ...legacy } = deriveLegacyScores({ status: 'complete', scores, severities: severities || {}, observations: '' });
+  return legacy;
 }
 
 // ── Response shapes ───────────────────────────────────────────────────
@@ -970,6 +1016,9 @@ module.exports = {
   MAX_VISIT_PHOTOS,
   MAX_OUTPUT_TOKENS,
   UNAVAILABLE_OBSERVATIONS,
+  NO_OBSERVATIONS,
+  customerObservations,
+  runAiScores,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
   SYSTEM_PROMPT,

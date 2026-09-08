@@ -133,6 +133,9 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(payload.laneId).toBe('lawn_visit_assessment');
     expect(payload.promptVersion).toBe(visit.PROMPT_VERSION);
     expect(typeof options.validate).toBe('function');
+    // The hook knows the visit's photo count: the two-photo answer passes, one that rated only photo 1 fails the leg.
+    expect(options.validate({ json: answer() })).toBeNull();
+    expect(options.validate({ json: answer({ photo_quality: [{ photo: 1, quality: 'adequate', issue: '' }] }) })).toBe('incomplete_photo_quality');
     expect(result.status).toBe('complete');
     expect(result.provider).toBe('gemini');
     expect(result.usage.reasoning_tokens).toBe(1500);
@@ -205,12 +208,18 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(visit.photoRowInputs(result).qualityResults.map((q) => q.passed)).toEqual([false, false]);
   });
 
-  test('the chain validator rejects a malformed or finding-less answer so the fallback leg runs', () => {
-    expect(visit.validateAssessmentJson({ json: answer() })).toBeNull();
-    expect(visit.validateAssessmentJson({ json: answer({ findings: [] }) })).toBe('empty_findings');
-    expect(visit.validateAssessmentJson({ json: { findings: 'x', severities: {}, scores: {} } })).toBe('malformed_assessment');
-    expect(visit.validateAssessmentJson({ json: { findings: [], scores: {} } })).toBe('malformed_assessment');
-    expect(visit.validateAssessmentJson({ json: null })).toBe('malformed_assessment');
+  test('the chain validator rejects a malformed, finding-less or partly-rated answer so the fallback leg runs', () => {
+    expect(visit.validateAssessmentJson({ json: answer() }, 2)).toBeNull();
+    expect(visit.validateAssessmentJson({ json: answer({ findings: [] }) }, 2)).toBe('empty_findings');
+    expect(visit.validateAssessmentJson({ json: { findings: 'x', severities: {}, scores: {} } }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: { findings: [], scores: {} } }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: null }, 2)).toBe('malformed_assessment');
+    // Every photo needs a valid quality read: none, a missing photo, an out-of-range or invalid entry all fail.
+    expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [] }) }, 2)).toBe('incomplete_photo_quality');
+    expect(visit.validateAssessmentJson({ json: answer() }, 3)).toBe('incomplete_photo_quality'); // photo 3 unrated (7 is out of range)
+    expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [{ photo: 1, quality: 'adequate' }, { photo: 2, quality: 'great' }] }) }, 2)).toBe('incomplete_photo_quality');
+    expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [{ photo: 1, quality: 'adequate' }, { photo: 1, quality: 'poor' }] }) }, 2)).toBe('incomplete_photo_quality');
+    expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [{ photo: 2, quality: 'limited' }, { photo: 1, quality: 'poor' }] }) }, 2)).toBeNull();
   });
 
   test('the context hash changes with the photos, their media types, their zones, and the visit context — not with unrelated fields', () => {
@@ -232,6 +241,19 @@ describe('legacy column derivation — missing is not healthy', () => {
     const scores = visit.deriveLegacyScores({ status: 'complete', observations: 'Dense turf; call 941-555-0100 or see https://x.test — Celsius applied at 123 Main Street.', severities: sev({}), scores: {} });
     expect(scores.observations).not.toMatch(/941|https|123 Main/);
     expect(scores.observations).toMatch(/Dense turf/);
+  });
+
+  test('a complete run with an empty, fully-scrubbed or access-code observation gets the neutral fallback — never the outage sentinel', () => {
+    const derive = (observations) => visit.deriveLegacyScores({ status: 'complete', observations, severities: sev({}), scores: {} }).observations;
+    expect(derive('')).toBe(visit.NO_OBSERVATIONS);
+    expect(derive('   ')).toBe(visit.NO_OBSERVATIONS);
+    expect(derive(undefined)).toBe(visit.NO_OBSERVATIONS);
+    // The model echoed the technician's gate code despite the prompt: the whole observation is suppressed.
+    expect(derive('Turf is dense. Use gate code 4471 for the side entrance.')).toBe(visit.NO_OBSERVATIONS);
+    expect(derive('The lockbox is 2288; lawn looks fine.')).toBe(visit.NO_OBSERVATIONS);
+    // Ordinary counts and measurements are not codes.
+    expect(derive('About 120 linear feet along the garage edge is thinning.')).toMatch(/120 linear feet/);
+    expect(visit.NO_OBSERVATIONS).not.toBe(visit.UNAVAILABLE_OBSERVATIONS);
   });
 
   test('stress is the worst KNOWN stressor; an unknown signal is left out, never 95', () => {
@@ -442,24 +464,34 @@ describe('confirm scores preserve NULLs', () => {
     expect(visit.scoresComplete(nothing)).toBe(false);
   });
 
-  test('confirmScores decides scores, overall and whether the row confirms for a run-backed row in one call', () => {
+  test('confirmScores decides scores, overall, whether the row confirms and what calibration compares against, in one call', () => {
     const assessment = { turf_density: 72, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 };
-    const partial = visit.confirmScores(assessment, { status: 'complete' }, {}, { scoreValue, calculateOverallScore: () => 77 });
+    const scoresRaw = JSON.stringify({ turf_density: 70, weed_coverage: 20, color_health: null });
+    const severities = JSON.stringify({ fungal_activity: sig('minor'), thatch_visibility: sig('moderate'), drought_stress: sig('unknown', 'unknown', '') });
+    const run = { status: 'complete', scores_raw: scoresRaw, severities };
+    const partial = visit.confirmScores(assessment, run, {}, { scoreValue, calculateOverallScore: () => 77 });
     expect(partial.finalScores.color_health).toBeNull();
     expect(partial.overallScore).toBeNull();
     // one score missing → the row stays pending: nothing customer-facing, no calibration
-    expect(partial).toMatchObject({ confirmed: false, missing: ['color_health'], customerOutputEligible: false, calibrationEligible: false });
-    const filled = visit.confirmScores(assessment, { status: 'complete' }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
-    expect(filled).toMatchObject({ overallScore: 77, confirmed: true, missing: [], customerOutputEligible: true, calibrationEligible: true });
+    expect(partial).toMatchObject({ confirmed: false, missing: ['color_health'], calibrationEligible: false });
+    const filled = visit.confirmScores(assessment, run, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
+    expect(filled).toMatchObject({ overallScore: 77, confirmed: true, missing: [], calibrationEligible: true });
+    // the AI baseline is the run's own answer in legacy units — not the assessment row
+    expect(filled.aiScores).toEqual({ turf_density: 70, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 });
     // the overall inputs can all be known while a sub-score is not — still pending
-    const subScoreMissing = visit.confirmScores({ ...assessment, color_health: 70, thatch_level: null }, { status: 'complete' }, {}, { scoreValue, calculateOverallScore: () => 77 });
-    expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], customerOutputEligible: false });
-    const unavailable = visit.confirmScores({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }, { status: 'unavailable' }, {}, { scoreValue, calculateOverallScore: () => 77 });
-    expect(unavailable).toMatchObject({ overallScore: null, confirmed: false, customerOutputEligible: false, calibrationEligible: false });
+    const subScoreMissing = visit.confirmScores({ ...assessment, color_health: 70, thatch_level: null }, run, {}, { scoreValue, calculateOverallScore: () => 77 });
+    expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], calibrationEligible: false });
+    const unavailable = visit.confirmScores({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }, { status: 'unavailable', scores_raw: null, severities: null }, {}, { scoreValue, calculateOverallScore: () => 77 });
+    expect(unavailable).toMatchObject({ overallScore: null, confirmed: false, calibrationEligible: false, aiScores: {} });
     expect(unavailable.missing).toEqual(visit.SCORE_KEYS);
     // an unavailable run the technician scored by hand confirms, but has no AI scores to calibrate against
-    const handScored = visit.confirmScores(assessment, { status: 'unavailable' }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
-    expect(handScored).toMatchObject({ confirmed: true, customerOutputEligible: true, calibrationEligible: false });
+    const handScored = visit.confirmScores(assessment, { status: 'unavailable', scores_raw: null, severities: null }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
+    expect(handScored).toMatchObject({ confirmed: true, calibrationEligible: false });
+    // a complete run that could determine nothing (every score undeterminable, every severity unknown) is not comparable either
+    const blank = { status: 'complete', scores_raw: JSON.stringify({ turf_density: null, weed_coverage: null, color_health: null }), severities: JSON.stringify({ fungal_activity: sig('unknown', 'unknown', ''), thatch_visibility: sig('unknown', 'unknown', '') }) };
+    const noBaseline = visit.confirmScores(assessment, blank, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
+    expect(noBaseline).toMatchObject({ confirmed: true, calibrationEligible: false });
+    expect(Object.values(noBaseline.aiScores).every((value) => value == null)).toBe(true);
   });
 
   test('the AI stress floor still bounds the derivation when it exists', () => {
