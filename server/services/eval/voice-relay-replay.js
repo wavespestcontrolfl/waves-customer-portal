@@ -253,6 +253,9 @@ function scenarioShapeRules(s) {
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
     [!s.caller || typeof s.caller.from !== 'string' || !/^\+1\d{10}$/.test(s.caller.from), 'caller.from must be an E.164 US number'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
+    // Live resolveCallerContext returns null whenever verification fails, so a
+    // context on an unverified caller is a call production can never produce.
+    [s.caller && s.caller.context != null && s.caller.verified !== true, 'caller.context requires caller.verified: true (an unverified live caller gets no context)'],
     ...Object.entries(s.gates || {}).map(([key, v]) => [!GATE_ENV[key] || typeof v !== 'boolean', GATE_ENV[key] ? `gate "${key}" must be boolean` : `unknown gate "${key}"`]),
     [!turns.length, 'needs at least one caller turn'],
     ...turns.map((t, i) => { const { error } = TURN_SCHEMA.validate(t, { convert: false }); return [!!error, `turns[${i}]: ${error ? error.message : ''}`]; }),
@@ -699,8 +702,17 @@ function installHarness() {
         // Model telemetry per scenario: a completed round vs a REAL provider
         // error. Without it a keyless or outage run would read green — Sandy's
         // "could you say that again?" fallback speaks nothing forbidden.
-        const stream = realStream.apply(this, args);
         const record = state.record;
+        let stream;
+        try {
+          stream = realStream.apply(this, args);
+        } catch (err) {
+          // A throw during request construction never reaches the
+          // finalMessage wrapper below; the relay speaks its fallback and the
+          // round would otherwise grade as completed.
+          if (record) record.modelErrors.push(err && err.message ? err.message : String(err));
+          throw err;
+        }
         if (record && stream && typeof stream.finalMessage === 'function') {
           const finalMessage = stream.finalMessage.bind(stream);
           stream.finalMessage = () => finalMessage().then(

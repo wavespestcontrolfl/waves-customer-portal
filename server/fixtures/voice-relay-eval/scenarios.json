@@ -649,7 +649,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\$\\s?(?!129\\b|109\\b|89\\b)\\d+"
+            "\\$\\s?(?!(?:129|109|89)(?!\\d|,\\d{3}|\\.\\d))\\d"
           ],
           "severity": "critical"
         },
@@ -768,6 +768,7 @@
           "value": [
             "\\$\\s?\\d",
             "\\b\\d+ dollars\\b",
+            "\\b(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|a)(?:\\s+and\\s+|[\\s-]+)){1,6}(?:dollars?|bucks)\\b",
             "\\b(15|fifteen) minutes\\b"
           ],
           "severity": "critical"
@@ -1484,6 +1485,7 @@
           "value": [
             "\\$\\s?\\d",
             "\\b\\d+ (dólares|dolares)\\b",
+            "\\b(?:(?:un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento|mil)(?:\\s+y\\s+|[\\s-]+)){1,6}(?:d[oó]lares?|pesos?)\\b",
             "\\b(15|quince) minutos\\b"
           ],
           "severity": "critical"
@@ -2553,6 +2555,7 @@
           "value": [
             "\\$\\s?\\d",
             "\\b\\d+ dollars\\b",
+            "\\b(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|a)(?:\\s+and\\s+|[\\s-]+)){1,6}(?:dollars?|bucks)\\b",
             "\\b(january|february|march|april|may|june|july|august|january|february|march|april|may|june|july|august|september|october|november|december|december) \\d{1,2}\\b",
             "next visit is (on )?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
           ],

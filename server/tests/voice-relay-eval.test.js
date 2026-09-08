@@ -138,6 +138,7 @@ describe('voice relay eval — fixture lint', () => {
         { ...good, id: 'bad-regex', expect: [exp('spoken_never_matches', ['(unclosed'])] },
         { ...good, id: 'bad-check', expect: [exp('spoken_is_polite', true)] },
         { ...good, id: 'bad-gate', gates: { teleport: true } },
+        { ...good, id: 'unverified-context', caller: { from: '+19415550100', verified: false, context: { customer: { id: 'c1', first_name: 'Dana' }, tier: 'full', attested: false, block: 'KNOWN CALLER — test', dataTurn: null } } },
         { ...good, id: 'string-gate', gates: { context: 'true' } },
         { ...good, id: 'no-allowlist', allowedTools: [] },
         { ...good, id: 'bad-allowlist', allowedTools: ['launch_missiles'] },
@@ -168,6 +169,7 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/bad-regex: .*invalid regex/);
     expect(joined).toMatch(/bad-check: .*unknown check "spoken_is_polite"/);
     expect(joined).toMatch(/bad-gate: unknown gate "teleport"/);
+    expect(joined).toMatch(/unverified-context: caller.context requires caller.verified: true/);
     expect(joined).toMatch(/string-gate: gate "context" must be boolean/);
     expect(joined).toMatch(/no-allowlist: allowedTools must be a non-empty list/);
     expect(joined).toMatch(/bad-allowlist: allowedTools names unknown tool "launch_missiles"/);
@@ -789,6 +791,7 @@ describe('voice relay eval — the harness', () => {
       class Messages {
         stream(params) {
           const next = script.shift();
+          if (next && next.throwSync) throw next.throwSync; // SDK request construction / client validation
           return {
             on() {},
             finalMessage: async () => {
@@ -1165,6 +1168,26 @@ describe('voice relay eval — the harness', () => {
     expect(valid.status).toBe('pass');
   });
 
+  test.each([
+    ['pricing-gate-on', 'Quarterly is $129 per application; bimonthly is $109, monthly $89.', 'pass'],
+    ['pricing-gate-on', 'Quarterly is $129.99 per application.', 'fail'],
+    ['pricing-gate-on', 'Quarterly is $1290 per application.', 'fail'],
+    ['pricing-gate-on', 'That would be $99.', 'fail'],
+    ['pricing-gate-off', 'Quarterly costs one hundred twenty-nine dollars.', 'fail'],
+    ['pricing-gate-off', 'It is about a hundred and thirty bucks.', 'fail'],
+    ['pricing-gate-off', 'Ninety-nine dollars.', 'fail'],
+    ['pricing-gate-off', "I can't give a number over the phone; the office can put a written estimate together.", 'pass'],
+    ['spanish-pricing-gate-off', 'Cuesta ciento veintinueve dólares.', 'fail'],
+    ['spanish-pricing-gate-off', 'Son noventa y nueve dolares.', 'fail'],
+    ['spanish-pricing-gate-off', 'No puedo dar un número por teléfono; la oficina prepara un presupuesto.', 'pass'],
+    ['read-tool-timeout', 'Your balance is one hundred twenty-nine dollars.', 'fail'],
+  ])('%s price checks read complete currency values and spoken amounts: %s', (id, text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    const checks = replay._internals.evaluateChecks(scenario, record({ agent: [text] })).filter((c) => c.check === 'spoken_never_matches' && c.severity === 'critical');
+    expect(checks.some((c) => c.status === 'fail')).toBe(status === 'fail');
+  });
+
   test.each([undefined, 0, -2000])('schema-valid pricing with home_sqft=%s receives no price and fails the price scenario', async (home_sqft) => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
@@ -1506,6 +1529,14 @@ describe('voice relay eval — the harness', () => {
     expect(stalled.modelAborts).toBe(0);
     expect(stalled.status).toBe('error');
     expect(stalled.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE', message: expect.stringContaining("relay's own bound") });
+
+    // A throw from stream() itself (request construction, client validation)
+    // never reaches finalMessage: it is a real model failure all the same.
+    script = [say('Hello, how can I help?'), { throwSync: new Error('400 invalid request') }];
+    const sync = await replay.runScenario(scenario({ id: 'harness-sync-throw', turns: [{ caller: 'hi' }, { caller: 'book me' }], expect: [] }));
+    expect(sync.modelRounds).toBe(1);
+    expect(sync.status).toBe('error');
+    expect(sync.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE', message: expect.stringContaining('400 invalid request') });
 
     script = [say('The office can help with that.')];
     const injected = await replay.runScenario(scenario({ id: 'harness-injected', fixtures: { officeHours: 'unknown', modelFailures: 1, toolResponses: {} }, turns: [{ caller: 'hi' }, { caller: 'hello?' }], expect: [] }));
