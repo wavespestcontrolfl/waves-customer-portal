@@ -258,6 +258,34 @@ describe('legacy column derivation — missing is not healthy', () => {
     expect(visit.NO_OBSERVATIONS).not.toBe(visit.UNAVAILABLE_OBSERVATIONS);
   });
 
+  test('a determinable finding that cites no photo of this visit is undeterminable; the clean-lawn finding is exempt', () => {
+    const json = answer({ findings: [
+      finding({ name: 'Chinch bug damage', confidence: 'high', photo_refs: [] }),
+      finding({ finding_id: 'F2', name: 'Gray leaf spot', confidence: 'high', photo_refs: [7, 0, -1] }),
+      finding({ finding_id: 'F3', name: 'No major visible stress', confidence: 'moderate', photo_refs: [] }),
+      finding({ finding_id: 'F4', name: 'Dollar spot', confidence: 'high', photo_refs: [2] }),
+    ] });
+    const [none, outOfRange, clean, cited] = visit.normalizeAssessment(json, 2, [null, null]).findings;
+    expect(none).toMatchObject({ can_determine: false, confidence: 'unknown', label: 'general lawn stress', cannot_determine_reason: 'no photo of this visit cited', photo_refs: [] });
+    expect(outOfRange).toMatchObject({ can_determine: false, confidence: 'unknown', photo_refs: [] });
+    expect(clean).toMatchObject({ can_determine: true, confidence: 'moderate', label: 'no major visible stress' });
+    expect(cited).toMatchObject({ can_determine: true, confidence: 'high', label: 'dollar spot', photo_refs: [2] });
+    // The model's own reason wins when it gave one.
+    const own = visit.normalizeAssessment(answer({ findings: [finding({ photo_refs: [], can_determine: false, cannot_determine_reason: 'too far' })] }), 2).findings[0];
+    expect(own.cannot_determine_reason).toBe('too far');
+  });
+
+  test('a signal at unknown confidence is an unknown signal — its level never becomes a score', () => {
+    const json = answer({ severities: { ...answer().severities, fungal_activity: { level: 'severe', evidence: 'maybe', confidence: 'unknown' }, thatch_visibility: { level: 'high', evidence: '', confidence: 'bogus' } } });
+    const normalized = visit.normalizeAssessment(json, 2, [null, null]);
+    expect(normalized.severities.fungal_activity).toEqual({ level: 'unknown', evidence: 'maybe', confidence: 'unknown' });
+    expect(normalized.severities.thatch_visibility.level).toBe('unknown');
+    expect(normalized.severities.drought_stress).toMatchObject({ level: 'moderate', confidence: 'moderate' });
+    const scores = visit.deriveLegacyScores({ status: 'complete', severities: normalized.severities, scores: {}, observations: '' });
+    expect(scores.fungus_control).toBeNull();
+    expect(scores.thatch_level).toBeNull();
+  });
+
   test('stress is the worst KNOWN stressor; an unknown signal is left out, never 95', () => {
     const scores = visit.deriveLegacyScores(complete(
       sev({ fungal_activity: 'minor', insect_damage: 'unknown', drought_stress: 'moderate', mechanical_damage: 'none', thatch_visibility: 'moderate', overwatering_signal: 'yes' }),
@@ -363,9 +391,31 @@ describe('run row', () => {
     expect(JSON.parse(row.photo_ids)).toEqual(['p1', 'p2']);
     expect(JSON.parse(row.findings)).toEqual([{ finding_id: 'F1' }]);
     expect(JSON.parse(row.raw_response)).toEqual({ x: 1 });
+    // The scores the technician was shown ride on the run as an immutable snapshot (no text column); nothing on an unavailable run.
+    expect(row.scores_adjusted).toBeNull();
+    const shown = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis, adjustedScores: { turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50, observations: 'obs', overwatering_signal: false } });
+    expect(JSON.parse(shown.scores_adjusted)).toEqual({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 });
+    expect(visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, status: 'unavailable', reason: 'x' }, adjustedScores: null }).scores_adjusted).toBeNull();
+    // A billed leg that failed before the fallback answered adds its tokens; a failure without usage adds nothing.
+    const chained = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, failures: [{ provider: 'gemini', reason: 'empty_findings', validator: true, usage: { input_tokens: 10, output_tokens: 20, reasoning_tokens: 30 } }, { provider: 'x', reason: 'x_503' }] } });
+    expect(chained).toMatchObject({ tokens_in: 11, tokens_out: 22, tokens_reasoning: 33 });
+    expect(visit.billedUsage({ failures: [{ usage: { input_tokens: 5, output_tokens: 1 } }], usage: null })).toEqual({ input_tokens: 5, output_tokens: 1, reasoning_tokens: 0 });
+    expect(visit.billedUsage({ failures: [], usage: null })).toEqual({ input_tokens: null, output_tokens: null, reasoning_tokens: null });
     // An unavailable run stores SQL NULL for scores and severities even though the analysis object carries null-valued placeholders.
     const unavailable = visit.runRowFor({ assessment: { id: 'a1', customer_id: 'c1' }, analysis: { ...analysis, status: 'unavailable', reason: 'all_providers_failed', provider: null, model: null, raw: null, severities: null, scores: { turf_density: null, weed_coverage: null, color_health: null }, usage: null } });
     expect(unavailable).toMatchObject({ status: 'unavailable', unavailable_reason: 'all_providers_failed', service_id: null, provider: null, raw_response: null, severities: null, scores_raw: null, tokens_in: null });
+  });
+});
+
+describe('legacy baseline on confirm', () => {
+  const knexWith = (existing) => () => ({ where() { return this; }, whereNot() { return this; }, first: async () => existing });
+  const args = { assessment: { id: 'a1', customer_id: 'c1' }, run: { id: 'r1' }, confirmed: true, propertyHistoryEnabled: false };
+  test('a run-backed row becomes the customer baseline on the confirm that completes it, when none exists', async () => {
+    expect(await visit.legacyBaselineFields(args, knexWith(null))).toEqual({ is_baseline: true });
+    expect(await visit.legacyBaselineFields(args, knexWith({ id: 'older' }))).toEqual({});
+    expect(await visit.legacyBaselineFields({ ...args, confirmed: false }, knexWith(null))).toEqual({});
+    expect(await visit.legacyBaselineFields({ ...args, run: null }, knexWith(null))).toEqual({});
+    expect(await visit.legacyBaselineFields({ ...args, propertyHistoryEnabled: true }, knexWith(null))).toEqual({});
   });
 });
 
@@ -376,10 +426,33 @@ describe('technician review on confirm', () => {
   ]) };
 
   test('a plain confirm is valid and is NOT a review; any review field makes it one', () => {
-    expect(visit.validateReview({ assessmentId: 'a', adjustedScores: { turf_density: 70 } }, run)).toEqual({ errors: [], review: { provided: false, reviewedFindings: [], addedDetails: [], appliedProducts: [] } });
+    expect(visit.validateReview({ assessmentId: 'a', adjustedScores: { turf_density: 70 } }, run)).toEqual({ errors: [], review: { provided: false, sent: { reviewedFindings: false, addedDetails: false, appliedProducts: false }, reviewedFindings: [], addedDetails: [], appliedProducts: [] } });
+    expect(visit.validateReview({ appliedProducts: [] }, run).review.sent).toEqual({ reviewedFindings: false, addedDetails: false, appliedProducts: true });
     expect(visit.validateReview(undefined, run).review.provided).toBe(false);
     expect(visit.validateReview({ reviewedFindings: [] }, run).review.provided).toBe(true);
     expect(visit.validateReview({ appliedProducts: [] }, run).review.provided).toBe(true);
+  });
+
+  test('a follow-up confirm keeps the stored review for every field it did not send; a field it sent — even empty — replaces the stored one', () => {
+    // First (pending) confirm: F2 rejected, one added detail, one product.
+    const first = visit.buildReview(run, visit.validateReview({ reviewedFindings: [{ finding_id: 'F2', keep: false, tech_note: 'not chinch' }], addedDetails: [{ text: 'Dog run along the back fence', zone: 'back' }], appliedProducts: [{ product_name: 'Bifen I/T', addresses_findings: ['F1'] }] }, run).review);
+    const stored = { ...run, reviewed_findings: JSON.stringify(first.reviewed_findings), added_details: JSON.stringify(first.added_details), reconciliation: JSON.stringify(first.reconciliation) };
+    // Second confirm fills a score and sends only appliedProducts.
+    const second = visit.buildReview(stored, visit.validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['F1'] }] }, stored).review);
+    expect(second.reviewed_findings.find((f) => f.finding_id === 'F2')).toMatchObject({ keep: false, tech_note: 'not chinch' });
+    expect(second.added_details).toHaveLength(1);
+    expect(second.added_details[0].name).toBe('Dog run along the back fence');
+    expect(second.reconciliation.products.map((p) => p.product_name)).toEqual(['Celsius']);
+    // A confirm that sends nothing of the review builds from the stored review unchanged.
+    const none = visit.buildReview(stored, visit.validateReview({}, stored).review);
+    expect(none.reviewed_findings.find((f) => f.finding_id === 'F2').keep).toBe(false);
+    expect(none.reconciliation.products.map((p) => p.product_name)).toEqual(['Bifen I/T']);
+    // An explicitly empty field clears it.
+    const cleared = visit.buildReview(stored, visit.validateReview({ addedDetails: [] }, stored).review);
+    expect(cleared.added_details).toEqual([]);
+    expect(cleared.reconciliation.products.map((p) => p.product_name)).toEqual(['Bifen I/T']);
+    // A first review on a run with no stored review starts from nothing.
+    expect(visit.mergedReviewInputs(run, { sent: {}, reviewedFindings: [], addedDetails: [], appliedProducts: [] })).toEqual({ reviewedFindings: [], addedDetails: [], appliedProducts: [] });
   });
 
   test('the clean-lawn sentinel stays in the review but out of the reconciliation', () => {
@@ -428,6 +501,29 @@ describe('technician review on confirm', () => {
     expect(rec).not.toMatch(/4471|Smith|dog/);
     expect(built.reconciliation.treatment_rationale[0].customer_explanation).toContain('chinch bug activity');
     expect(built.reviewed_findings[0].name).toContain('Mrs. Smith'); // the review keeps the raw internal text
+  });
+
+  test('the confirmation step reaches the watch items egress-scrubbed; one carrying an access code is dropped', () => {
+    const step = (text) => ({ ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch bug damage', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: text, customer_wording: null, photo_refs: [1], zone: 'front', label: 'chinch bug activity', source: 'model' }]) });
+    const watch = (text) => visit.buildReview(step(text), { reviewedFindings: [] }).reconciliation.watch_items[0];
+    expect(watch('Float test near the driveway; call 941-555-0100 if it fails')).toMatch(/^chinch bug activity: Float test near the driveway/);
+    expect(watch('Float test near the driveway; call 941-555-0100 if it fails')).not.toMatch(/941/);
+    expect(watch('Float test by the side gate, code 4471')).toBe('chinch bug activity: monitor response');
+    expect(watch('')).toBe('chinch bug activity: monitor response');
+    expect(visit.safeConfirmationStep('The lockbox is 2288')).toBe('');
+    // The review keeps the raw step; only the reconciliation copy is scrubbed.
+    expect(visit.buildReview(step('Float test by the side gate, code 4471'), {}).reviewed_findings[0].confirmation_step).toBe('Float test by the side gate, code 4471');
+  });
+
+  test('an unrenamed finding keeps the label the run stored — never re-mapped at confirmation', () => {
+    const stored = { ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch bug damage', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: '', customer_wording: null, photo_refs: [1], zone: 'front', label: 'a label the mapper no longer produces', source: 'model' }]) };
+    const built = visit.buildReview(stored, { reviewedFindings: [{ finding_id: 'F1', keep: true }] });
+    expect(built.reviewed_findings[0].label).toBe('a label the mapper no longer produces');
+    expect(built.reconciliation.watch_items[0]).toMatch(/^a label the mapper no longer produces:/);
+    // A rename still wins; a stored finding without a label is mapped once.
+    expect(visit.buildReview(stored, { reviewedFindings: [{ finding_id: 'F1', name: 'general lawn stress' }] }).reviewed_findings[0].label).toBe('general lawn stress');
+    const unlabeled = { ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch bug damage', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', photo_refs: [1], source: 'model' }]) };
+    expect(visit.buildReview(unlabeled, {}).reviewed_findings[0].label).toBe('chinch bug activity');
   });
 
   test('a dropped finding leaves the reconciliation; a technician detail joins it at moderate; products reconcile deterministically', () => {
@@ -488,6 +584,9 @@ describe('confirm scores preserve NULLs', () => {
     expect(filled).toMatchObject({ overallScore: 77, confirmed: true, missing: [], calibrationEligible: true });
     // the AI baseline is the run's own answer in legacy units — not the assessment row
     expect(filled.aiScores).toEqual({ turf_density: 70, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 });
+    // …and the seasonally adjusted snapshot the technician was shown wins over the raw answer when the run carries one
+    const snapshot = { ...run, scores_adjusted: JSON.stringify({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 }) };
+    expect(visit.confirmScores(assessment, snapshot, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 }).aiScores).toEqual({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 });
     // the overall inputs can all be known while a sub-score is not — still pending
     const subScoreMissing = visit.confirmScores({ ...assessment, color_health: 70, thatch_level: null }, run, {}, { scoreValue, calculateOverallScore: () => 77 });
     expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], calibrationEligible: false });

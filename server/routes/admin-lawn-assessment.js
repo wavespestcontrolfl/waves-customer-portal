@@ -746,7 +746,9 @@ router.post('/assess', async (req, res, next) => {
       season,
       photos: JSON.stringify(photoMeta),
       ...scoreFields,
-      is_baseline: propertyHistoryEnabled ? false : isBaseline,
+      // Gate on: a run-backed row is inserted pending and takes the legacy
+      // baseline on the confirm that completes it (legacyBaselineFields).
+      is_baseline: propertyHistoryEnabled || visitAssessmentEnabled ? false : isBaseline,
     };
     // Gate on: the run row is the provenance and the review target, so it is
     // written in the SAME transaction as the assessment — both or neither, a
@@ -756,7 +758,7 @@ router.post('/assess', async (req, res, next) => {
     const [assessment] = visitAssessmentEnabled
       ? await db.transaction(async (trx) => {
         const rows = await trx('lawn_assessments').insert(assessmentRow).returning('*');
-        visitRun = await visitAssessment.recordRun({ assessment: rows[0], analysis: visitAnalysis }, trx);
+        visitRun = await visitAssessment.recordRun({ assessment: rows[0], analysis: visitAnalysis, adjustedScores }, trx);
         return rows;
       })
       : await db('lawn_assessments').insert(assessmentRow).returning('*');
@@ -1094,6 +1096,7 @@ router.post('/confirm', async (req, res, next) => {
 
     const updateData = {
       ...(confirmed ? { confirmed_by_tech: true, confirmed_at: new Date() } : {}),
+      ...(await visitAssessment.legacyBaselineFields({ assessment, run: visitRun, confirmed, propertyHistoryEnabled }, db)),
       updated_at: new Date(),
       ...finalScores,
       overall_score: overallScore,

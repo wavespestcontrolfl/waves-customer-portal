@@ -120,7 +120,7 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/visitAssessment\.scoreVisit\(visitAnalysis, \{ seasonAdjust, calculateOverallScore \}\)/);
       expect(assess).toMatch(/\? \(i\) => visitAssessment\.photoFieldsFor\(visitPhotos\.zones\[i\]\)/);
       // The run is written in the assessment's transaction — both or neither.
-      expect(assess).toMatch(/db\.transaction\(async \(trx\) => \{[\s\S]{0,400}visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis \}, trx\)/);
+      expect(assess).toMatch(/db\.transaction\(async \(trx\) => \{[\s\S]{0,400}visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis, adjustedScores \}, trx\)/);
       expect(assess).toMatch(/visitAssessment\.attachRunPhotos\(/);
       // Perception never sees the planned products under the gate.
       expect(assess).toMatch(/const track = visitAssessmentEnabled \? null : grassCtx\.trackKey;/);
@@ -133,6 +133,9 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/\(\{ qualityResults, resultByPhotoIndex, allPoor \} = visitAssessment\.photoRowInputs\(visitAnalysis\)\);\s*(?:\/\/[^\n]*\n\s*)*if \(allPoor\) return allPhotosFailed\(qualityResults\);/);
       expect(assess.indexOf('if (allPoor) return allPhotosFailed(')).toBeLessThan(assess.indexOf('visitAssessment.recordRun('));
       expect(assess.match(/All photos failed quality check/g)).toHaveLength(1);
+      // The run keeps the seasonally adjusted scores the technician was shown; a gated row is inserted without the legacy baseline flag.
+      expect(assess).toMatch(/visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis, adjustedScores \}, trx\)/);
+      expect(assess).toMatch(/is_baseline: propertyHistoryEnabled \|\| visitAssessmentEnabled \? false : isBaseline,/);
     });
 
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
@@ -143,7 +146,7 @@ describe('lawn assessment route contracts', () => {
       expect(confirm).toMatch(/const calibrationBaseline = runAiScores \|\| assessment\.adjusted_scores \|\| assessment\.composite_scores;/);
       expect(confirm).toMatch(/overall_score: overallScore,/);
       // confirmed_by_tech / confirmed_at are stamped only on a confirmed row; a pending row never becomes the property baseline.
-      expect(confirm).toMatch(/\.\.\.\(confirmed \? \{ confirmed_by_tech: true, confirmed_at: new Date\(\) \} : \{\}\),/);
+      expect(confirm).toMatch(/\.\.\.\(confirmed \? \{ confirmed_by_tech: true, confirmed_at: new Date\(\) \} : \{\}\),\s*\.\.\.\(await visitAssessment\.legacyBaselineFields\(\{ assessment, run: visitRun, confirmed, propertyHistoryEnabled \}, db\)\),/);
       expect(confirm.match(/confirmed_by_tech: true/g)).toHaveLength(1);
       expect(confirm.match(/installConfirmedBaseline\(/g)).toHaveLength(2);
       expect(confirm).toMatch(/const installBaseline = propertyHistoryEnabled && confirmed;/);
