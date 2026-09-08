@@ -4091,18 +4091,30 @@ const ReviewService = {
       // technician row the visit points at (the old read always fell through
       // to a hardcoded owner name). When the caller names the visit
       // (scheduledServiceId — the record-less completion path), THAT row is
-      // the source; the customer-wide latest completed visit is only for an
-      // unscoped manual enrollment, so a same-day sibling or a later visit can
-      // never lend its technician to this ask.
-      const lastSvc = await db("scheduled_services")
-        .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
-        .where(scheduledServiceId
-          ? { "scheduled_services.id": scheduledServiceId }
-          : { "scheduled_services.customer_id": customerId, "scheduled_services.status": "completed" })
-        .orderBy("scheduled_services.scheduled_date", "desc")
-        .select("scheduled_services.service_type", "technicians.name as tech_name")
-        .first()
-        .catch(() => null);
+      // the source; a record-scoped enrollment (serviceRecordId, e.g. a paid
+      // invoice on an older visit) resolves through the record's own linked
+      // visit (codex #4139 r2); the customer-wide latest completed visit is
+      // only for an unscoped manual enrollment, so a same-day sibling or a
+      // later visit can never lend its technician to this ask.
+      let visitId = scheduledServiceId || null;
+      if (!visitId && serviceRecordId) {
+        const rec = await db("service_records")
+          .where({ id: serviceRecordId })
+          .first("scheduled_service_id")
+          .catch(() => null);
+        visitId = rec?.scheduled_service_id || null;
+      }
+      const lastSvc = visitId || !serviceRecordId
+        ? await db("scheduled_services")
+          .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+          .where(visitId
+            ? { "scheduled_services.id": visitId }
+            : { "scheduled_services.customer_id": customerId, "scheduled_services.status": "completed" })
+          .orderBy("scheduled_services.scheduled_date", "desc")
+          .select("scheduled_services.service_type", "technicians.name as tech_name")
+          .first()
+          .catch(() => null)
+        : null;
       svcType = svcType || lastSvc?.service_type || null;
       tName = tName || lastSvc?.tech_name || null;
     }

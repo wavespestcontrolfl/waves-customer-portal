@@ -124,6 +124,11 @@ describe('review outreach templates', () => {
     expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'first_treatment_ask' })).toBe(false);
     expect(isDay0ControlledAsk({ sequenceStep: 1, channel: 'sms', templateId: 'friendly_ask' })).toBe(false);
     expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'email', templateId: 'friendly_ask' })).toBe(false);
+    // Any other link-bearing ask an admin's custom plan names at step 0 is
+    // controlled too (codex #4139 r2) — no-link check-ins are not asks.
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'post_service_hot' })).toBe(true);
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'service_specific_pest' })).toBe(true);
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'resolution_check' })).toBe(false);
   });
 
   test('requireLink appends the review URL when an edited body dropped it', () => {

@@ -2581,6 +2581,27 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(bodies[1]).not.toContain('Our team');
     });
 
+    test('a record-scoped enrollment signs with the linked visit\'s technician, never a newer visit\'s (codex #4139 r2)', async () => {
+      const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+      const mock = makeMock({
+        customers: [{ id: 'd0-9', first_name: 'Ivy', last_name: 'P', phone: '+19410000098', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d09', customer_id: 'd0-9', scheduled_service_id: 'ss-d09-old' }],
+        // tech_name rides the visit rows (the mock's leftJoin is a no-op).
+        scheduled_services: [
+          { id: 'ss-d09-old', customer_id: 'd0-9', status: 'completed', scheduled_date: d(30), service_type: 'pest control', technician_id: 'tech-a', tech_name: 'Older Tech' },
+          { id: 'ss-d09-new', customer_id: 'd0-9', status: 'completed', scheduled_date: d(1), service_type: 'pest control', technician_id: 'tech-b', tech_name: 'Newer Tech' },
+        ],
+        technicians: [{ id: 'tech-a', name: 'Older Tech' }, { id: 'tech-b', name: 'Newer Tech' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'd0-9', serviceRecordId: 'sr-d09', startedBy: 'invoice' });
+
+      expect(result.started).toBe(true);
+      expect(mock.__state.rows.review_sequences[0].tech_name).toBe('Older Tech');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Ivy! Older with Waves.');
+    });
+
     test('a drawer send with no techName resolves the technician from the latest completed visit (codex #4139 r1)', async () => {
       const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
       const mock = makeMock({

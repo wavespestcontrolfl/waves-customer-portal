@@ -196,14 +196,16 @@ const CAP_TOUCH_SQL = `(template_key IS NULL OR template_key NOT IN (${CAP_EXEMP
  * (review-request.js).
  */
 const DAY0_ASK_TEMPLATE_KEY = 'day0_ask';
-// Step-0 SMS keys the controlled Day-0 body replaces: the new key itself, the
-// pre-2026-09-07 plan key still persisted on in-flight sequences (plans are
-// stored per row), and a key-less step.
-const DAY0_CONTROLLED_TEMPLATE_KEYS = [DAY0_ASK_TEMPLATE_KEY, 'friendly_ask'];
+// Step-0 SMS asks the controlled Day-0 body replaces: a key-less step and
+// every link-bearing ask template — the new key, the pre-2026-09-07 plan key
+// still persisted on in-flight sequences (plans are stored per row), and any
+// other ask an admin's custom plan names at step 0 (codex #4139 r2: those
+// would otherwise reach the LLM drafter). Only the multi-treatment
+// first-visit ask keeps its own copy; no-link check-ins are not asks.
 function isDay0ControlledAsk({ sequenceStep, channel, templateId }) {
   return sequenceStep === 0
     && (channel || 'sms') === 'sms'
-    && (templateId == null || DAY0_CONTROLLED_TEMPLATE_KEYS.includes(templateId));
+    && (templateId == null || (templateId !== 'first_treatment_ask' && isAskTemplate(templateId)));
 }
 
 const DEFAULT_SEQUENCE_PLAN = [
