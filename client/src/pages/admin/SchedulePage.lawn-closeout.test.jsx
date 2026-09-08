@@ -508,3 +508,22 @@ it('a tierless visit with governed defaults still requires every product\'s actu
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].products.map(product => product.totalAmount)).toEqual([15, '6']);
 });
+
+it('a governed draft restored on a tierless visit whose plan failed at open still requires every actual amount', async () => {
+  enableDefaults();
+  const tierless = { ...service, waveguardTier: null };
+  const view = render(<CompletionPanel service={tierless} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[0], { target: { value: '9' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts[0].totalAmount).toBe('9'));
+  view.unmount();
+  failPlan = true;
+  render(<CompletionPanel service={tierless} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
+  // No tier and no loaded defaults, yet the restored row carries a withdrawn
+  // suggestion: it cannot close out without its actual (pre-push audit P1).
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: /complete & send recap/i })).toBeNull();
+});

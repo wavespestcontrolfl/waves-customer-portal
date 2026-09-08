@@ -12043,9 +12043,13 @@ export function CompletionPanel({
   // WaveGuard closeout AND on any governed-defaults closeout: the server
   // enables completion defaults for a tierless visit with an explicit
   // assignment too, and a governed row left without an amount would persist
-  // with no actual and no inventory deduction (Codex r8 P1). The empty-list
-  // and inventory gates stay tier-scoped.
-  const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled) && !isIncompleteVisit;
+  // with no actual and no inventory deduction (Codex r8 P1). A governed row
+  // restored while the initial plan request failed counts as well — the
+  // defaults never loaded, but the row's withdrawn suggestion still needs an
+  // actual (pre-push audit P1). The empty-list and inventory gates stay
+  // tier-scoped.
+  const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
+    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
     (calibrationRequired &&
       !isIncompleteVisit &&
