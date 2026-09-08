@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const lawnHealthRouter = require('../routes/lawn-health');
 const adminLawnAssessmentRouter = require('../routes/admin-lawn-assessment');
 
@@ -90,5 +92,45 @@ describe('lawn assessment route contracts', () => {
       ['created_at', 'desc'],
       ['updated_at', 'desc'],
     ]);
+  });
+
+  // GATE_LAWN_VISIT_ASSESSMENT (services/lawn-visit-assessment.js): the gate is
+  // read once per handler and every legacy statement it bypasses is still in
+  // place — gate off is the byte-identical per-photo quality gate + parallel
+  // scorer, gate on is the one call, NULL-preserving scores and the run row.
+  describe('visit assessment gate wiring', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-lawn-assessment.js'), 'utf8');
+    const assess = source.slice(source.indexOf("router.post('/assess'"), source.indexOf("router.post('/confirm'"));
+    const confirm = source.slice(source.indexOf("router.post('/confirm'"), source.indexOf("router.get('/service/:serviceId'"));
+
+    test('both handlers read the gate once and pass the decision down', () => {
+      for (const handler of [assess, confirm]) {
+        expect(handler.match(/gateEnvValue\('GATE_LAWN_VISIT_ASSESSMENT'\)/g)).toHaveLength(1);
+      }
+    });
+
+    test('/assess keeps the legacy scorer and adds the one call behind the gate', () => {
+      expect(assess).toMatch(/visitAssessmentEnabled\s*\?\s*visitAssessment\.validateVisitPhotos\(photos\)/);
+      expect(assess).toMatch(/LawnIntel\.assessPhotoQuality\(/);
+      expect(assess).toMatch(/lawnAssessment\.analyzePhoto\(/);
+      expect(assess).toMatch(/mergePhotoComposites\(validResults\)/);
+      expect(assess).toMatch(/lawnAssessment\.mapToDisplayScores\(mergedComposite\)/);
+      expect(assess).toMatch(/visitAssessment\.analyzeVisit\(\{ photos, photoZones: visitPhotos\.zones, visionContext \}\)/);
+      expect(assess).toMatch(/visitAssessment\.deriveLegacyScores\(visitAnalysis\)/);
+      expect(assess).toMatch(/visitAssessment\.adjustAvailableScores\(displayScores, seasonAdjust\)/);
+      expect(assess).toMatch(/visitAssessment\.recordRun\(/);
+      // Perception never sees the planned products under the gate.
+      expect(assess).toMatch(/const track = visitAssessmentEnabled \? null : grassCtx\.trackKey;/);
+      // The provider-miss early return is legacy-only: an unavailable run still stores the row.
+      expect(assess).toMatch(/if \(!visitAssessmentEnabled && !validResults\.length\)/);
+    });
+
+    test('/confirm validates the review before any write and preserves NULL scores for a run-backed row', () => {
+      expect(confirm.indexOf('visitAssessment.validateReview(')).toBeLessThan(confirm.indexOf('installConfirmedBaseline('));
+      expect(confirm).toMatch(/reviewedRun \? visitAssessment\.resolveConfirmScores\(assessment, adjustedScores, scoreValue\)/);
+      expect(confirm).toMatch(/reviewedRun && !visitAssessment\.scoresComplete\(finalScores\) \? null : calculateOverallScore\(finalScores\)/);
+      expect(confirm).toMatch(/if \(adjustedScores && calibrationEligible\)/);
+      expect(confirm).toMatch(/visitAssessment\.reviewRun\(/);
+    });
   });
 });
