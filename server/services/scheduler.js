@@ -6027,7 +6027,7 @@ function initScheduledJobs() {
       await runExclusive('billing-monthly', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processMonthlyBilling();
-        logger.info(`Monthly billing done: ${result.charged} charged, ${result.failed} failed, ${result.skipped} skipped`);
+        logger.info(`Monthly billing done: ${result.charged} charged, ${result.processing} processing, ${result.failed} failed, ${result.skipped} skipped`);
       });
     } catch (err) {
       logger.error(`Monthly billing failed: ${err.message}`);
@@ -6039,7 +6039,7 @@ function initScheduledJobs() {
       await runExclusive('billing-retries', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processPaymentRetries();
-        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded`);
+        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded, ${result.processing} processing`);
       });
     } catch (err) {
       logger.error(`Payment retry failed: ${err.message}`);

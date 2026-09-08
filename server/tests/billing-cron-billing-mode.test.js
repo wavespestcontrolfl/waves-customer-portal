@@ -176,3 +176,16 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     expect(chargeMonthly).toHaveBeenCalledWith('cust-EM');
   });
 });
+
+
+describe('monthly payment settlement reporting', () => {
+  test.each(['processing', 'paid'])('%s preserves returned amount and sends receipts only after settlement', async status => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-state', billing_mode: 'monthly_membership' }];
+    StripeService.chargeMonthly.mockResolvedValue({ id: 'pay-state', status, amount: '102.90' });
+    const result = await BillingCron.processMonthlyBilling();
+    expect(result).toMatchObject({ charged: status === 'paid' ? 1 : 0, processing: status === 'processing' ? 1 : 0 });
+    expect(logAutopay).toHaveBeenCalledWith('cust-state', status === 'paid' ? 'charge_success' : 'charge_processing', expect.objectContaining({ amountCents: 10290, paymentId: 'pay-state' }));
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(status === 'paid' ? 1 : 0);
+  });
+});
