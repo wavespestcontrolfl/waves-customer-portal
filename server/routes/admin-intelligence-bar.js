@@ -2329,13 +2329,23 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const toolCalls = [];
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
-    // Operations whose latest result still needs a target choice. An operation
-    // is the tool plus its own arguments minus the target selectors, so two
-    // same-tool calls in one round (two call ids) never share a marker, while
-    // a corrected retry of the same record does answer it.
-    const unresolvedClarifications = new Set();
-    const clarificationKey = toolUse => `${toolUse.name}:${JSON.stringify(Object.entries(toolUse.input || {})
+    // Operations whose latest result still needs a target choice, keyed by
+    // the exact call (tool + every argument) and stamped with the round that
+    // raised them. Parallel same-tool calls in one round that differ by call
+    // id OR by target never share a marker; a LATER-round success for the
+    // same operation (tool + arguments minus the target selectors) is the
+    // corrected retry and answers the earlier marker. A sibling call in the
+    // same round never answers another call's clarification.
+    const unresolvedClarifications = new Map();
+    const operationKey = toolUse => `${toolUse.name}:${JSON.stringify(Object.entries(toolUse.input || {})
       .filter(([key]) => !CLARIFICATION_TARGET_FIELDS.has(key)).sort(([a], [b]) => a.localeCompare(b)))}`;
+    const callKey = toolUse => `${toolUse.name}:${JSON.stringify(Object.entries(toolUse.input || {}).sort(([a], [b]) => a.localeCompare(b)))}`;
+    const settleClarification = (toolUse, round) => {
+      const operation = operationKey(toolUse);
+      for (const [key, marker] of unresolvedClarifications) {
+        if (marker.operation === operation && (marker.round < round || key === callKey(toolUse))) unresolvedClarifications.delete(key);
+      }
+    };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
@@ -2524,10 +2534,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
-        // A clarification stays open until the same operation later succeeds;
-        // an unrelated call succeeding in the same round does not answer it.
-        if (result?.code === 'target_clarification_required') unresolvedClarifications.add(clarificationKey(toolUse));
-        else if (!isToolFailure(result)) unresolvedClarifications.delete(clarificationKey(toolUse));
+        // A clarification stays open until the same operation succeeds in a
+        // later round; an unrelated or sibling call succeeding does not answer it.
+        if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
+        else if (!isToolFailure(result)) settleClarification(toolUse, round);
         if (toolActivityOn) {
           toolActivity.push({
             tool: toolUse.name,

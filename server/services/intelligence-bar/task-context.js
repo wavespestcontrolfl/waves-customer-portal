@@ -28,7 +28,7 @@ const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|conta
 const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named|both|these customers|all of these`;
 // Direct read verbs resolve an exact full name ("Show John Smith details")
 // without becoming refusal hints: a read that names nobody stays a read.
-const READ_SELECTOR_SOURCE = 'show|find|get|look\\s+up|pull\\s+up|open|view|display';
+const READ_SELECTOR_SOURCE = 'show|find|get|look\\s+up|pull\\s+up|open|view|display|check|summarize';
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
@@ -435,10 +435,11 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_outreach_candidates', 'get_unresponded_reviews', 'search_reviews',
   'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
-  'get_email_suppressions', 'get_twilio_failed_messages',
+  'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents',
 ]);
 
 const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
+const EMAIL_KEYED_READERS = new Set(['check_email_suppression']);
 
 async function prepareReadInput(params, context, { toolName, schema }) {
   const input = { ...params };
@@ -452,6 +453,13 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('phone');
     if (!digits || !owners.some(owner => String(owner.phone || '').replace(/\D/g, '').slice(-10) === digits)) {
       return { error: 'Use the task customer\'s own phone number for this call history', code: 'target_clarification_required' };
+    }
+  }
+  if (context.targets?.length && EMAIL_KEYED_READERS.has(toolName)) {
+    const email = String(params.email || '').trim().toLowerCase();
+    const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('email');
+    if (!email || !owners.some(owner => String(owner.email || '').trim().toLowerCase() === email)) {
+      return { error: 'Use the task customer\'s own email address for this suppression check', code: 'target_clarification_required' };
     }
   }
   let readContext = context;

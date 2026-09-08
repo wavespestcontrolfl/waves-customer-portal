@@ -390,6 +390,14 @@ test('"this stop" and "this visit" on a schedule panel resolve the appointment a
   }
 });
 
+test('check and summarize are direct-read verbs that select an exact full name', async () => {
+  lookupRows = [rows.customers[0]];
+  for (const prompt of ['Check Synthetic Person details', 'Summarize Synthetic Person']) {
+    const task = await Context.resolve({ prompt, pageData: {} });
+    expect(task.target?.customer_id).toBe(A);
+  }
+});
+
 test('route-wide writers are refused inside a customer-scoped task', async () => {
   for (const [toolName, params] of [['optimize_all_routes', { date: '2026-09-09' }], ['optimize_tech_route', { date: '2026-09-09', technician_name: 'Synthetic Tech' }],
     ['swap_tech_assignments', { date: '2026-09-09', tech_a_name: 'A', tech_b_name: 'B' }]]) {

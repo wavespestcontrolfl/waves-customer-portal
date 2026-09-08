@@ -292,7 +292,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             </div>
 
             {settled || expired ? <details style={{ marginBottom: 8, fontSize: 14 }}>
-              <summary style={{ cursor: 'pointer', minHeight: 44, paddingTop: 8 }}>Action details</summary>
+              <summary style={{ cursor: 'pointer', minHeight: 44, paddingTop: 8, ...(dark ? { color: D.text } : {}) }}>Action details</summary>
               <ContractView contract={action.contract} dark={dark} showApproval={false} />
             </details> : <ContractView contract={action.contract} dark={dark} />}
 

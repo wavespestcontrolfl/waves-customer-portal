@@ -120,8 +120,9 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const result = await api('/query', request(`Get customer details for ${nameA}`));
     expect(result.status).toBe(200);
     expect(result.body.taskTarget.customer_id).toBe(customerA);
-    // The corrected read answered the request: an earlier wrong read is not an open clarification.
-    expect(result.body.taskState).toBe('responded');
+    // A sibling read in the same round never answers another call's clarification
+    // (r14): the wrong read stays open until a later-round corrected retry succeeds.
+    expect(result.body.taskState).toBe('needs_information');
     const round = mockModel.mock.calls[1][0].messages.at(-1).content;
     expect(round.find(block => block.tool_use_id === 'wrong-read').content).toContain('target_clarification_required');
     expect(round.find(block => block.tool_use_id === 'correct-read').content).toContain('Synthetic A read fact');
@@ -227,6 +228,19 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(broad.body.taskTarget).toBeFalsy();
     const listed = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'threads').content;
     expect(JSON.parse(listed).code).toBeUndefined();
+  }, 30000);
+
+  test('a later-round corrected retry answers the earlier clarification for the same operation', async () => {
+    mockModel.mockResolvedValueOnce(tools('get_customer_detail', { customer_id: customerB }, 'wrong-read'))
+      .mockResolvedValueOnce(tools('get_customer_detail', { customer_id: customerA }, 'corrected-read'))
+      .mockResolvedValueOnce(answer('The corrected customer details are loaded.'));
+    const result = await api('/query', request(`Get customer details for ${nameA}`));
+    expect(result.status).toBe(200);
+    expect(result.body.taskTarget.customer_id).toBe(customerA);
+    const rounds = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : []);
+    expect(rounds.find(block => block.tool_use_id === 'wrong-read').content).toContain('target_clarification_required');
+    expect(rounds.find(block => block.tool_use_id === 'corrected-read').content).toContain(customerA);
+    expect(result.body.taskState).toBe('responded');
   }, 30000);
 
   test('two same-tool calls in one round keep their own clarification markers', async () => {
@@ -527,6 +541,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       ['match_existing_customer', { phone: a.phone }, customerA],
       ['get_partner_call_history', { phone: a.phone }, 'calls'],
       ['get_partner_call_history', { phone: b.phone }, false],
+      ['check_email_suppression', { email: 'fixture-b@example.test' }, false],
       ['query_customers', {}, customerA],
       ['query_customers', { sort_by: 'name', limit: 50 }, customerA],
       ['search_emails', { from: nameA }, 'Correct unlinked thread reply'],
