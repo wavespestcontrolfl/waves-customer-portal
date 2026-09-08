@@ -112,14 +112,14 @@ export default function NewsletterArchivePage() {
   if (status === 'loading') {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }} />
+        <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1 }} />
       </WavesShell>
     );
   }
   if (status === 'error') {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh', padding: '48px 20px' }}>
+        <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1, padding: '48px 20px' }}>
           <PublicLoadError resource="newsletter issue" onRetry={() => setLoadAttempt(a => a + 1)} />
         </div>
       </WavesShell>
@@ -128,7 +128,7 @@ export default function NewsletterArchivePage() {
   if (status === 'notfound') {
     return (
       <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh', padding: '56px 24px', textAlign: 'center' }}>
+      <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1, padding: '56px 24px', textAlign: 'center' }}>
         <h1 style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, letterSpacing: 0, color: TEXT, margin: '0 0 8px' }}>
           We couldn't find that issue.
         </h1>

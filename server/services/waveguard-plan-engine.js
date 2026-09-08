@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { savepointRead } = require('../utils/savepoint-read');
 const protocols = require('../config/protocols.json');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -852,57 +853,54 @@ function summarizeOrdinanceStatus({ date, ordinances, candidateItems }) {
   return { activeWindows, blocks, warnings };
 }
 
-function summarizeCalibration({ calibration, calibrations }) {
+// The rig is a convenience for tank-fill math, never a gate (owner ruling
+// 2026-09-07: the "select a rig" block had produced zero assignments in
+// prod and held every lawn visit). The assigned rig wins, a lone active rig
+// is used, and among several the tank rigs decide: one tank rig, or every
+// tank rig on the same carrier (both 110-gal rigs run the same gun and
+// pace), resolves; tank rigs that disagree resolve nothing and the protocol
+// window's default carrier applies downstream. Backpacks never decide a
+// tank mix.
+function resolveAmongActive(activeCalibrations) {
+  const tanks = activeCalibrations.filter((row) => row.system_type === 'tank');
+  if (!tanks.length) return null;
+  const carriers = new Set(tanks.map((row) => Number(row.carrier_gal_per_1000 || 0)));
+  if (carriers.size !== 1) return null;
+  return tanks.find((row) => row.calibration_status === 'field_verified') || tanks[0];
+}
+
+function summarizeCalibration({ calibration, calibrations, assigned = false }) {
   const activeCalibrations = Array.isArray(calibrations)
     ? calibrations
     : (calibration ? [calibration] : []);
-
-  if (!activeCalibrations.length) {
-    return {
-      selected: null,
-      blocks: [{
-        code: 'missing_calibration',
-        severity: 'block',
-        message: 'No active equipment calibration is available for mix math.',
-      }],
-      warnings: [],
-    };
-  }
-
-  if (activeCalibrations.length > 1 && !calibration) {
-    return {
-      selected: null,
-      blocks: [{
-        code: 'equipment_selection_required',
-        severity: 'block',
-        message: 'Multiple active equipment calibrations exist. Select the intended equipment system before mix math can be trusted.',
-      }],
-      warnings: [],
-      options: activeCalibrations.map((row) => ({
-        equipmentSystemId: row.equipment_system_id,
-        calibrationId: row.id,
-        systemName: row.system_name,
-        systemType: row.system_type,
-        carrierGalPer1000: row.carrier_gal_per_1000 ? Number(row.carrier_gal_per_1000) : null,
-        tankCapacityGal: row.tank_capacity_gal ? Number(row.tank_capacity_gal) : null,
-        expiresAt: row.expires_at || null,
-        calibrationStatus: row.calibration_status || null,
-      })),
-    };
-  }
-
-  const selected = calibration || activeCalibrations[0];
+  const selected = calibration
+    || (activeCalibrations.length === 1 ? activeCalibrations[0] : null)
+    || (activeCalibrations.length > 1 ? resolveAmongActive(activeCalibrations) : null);
+  // inferred = the engine picked the rig, the visit did not name it. Mix
+  // math may use it; completion must not record it as equipment used
+  // (Codex #4124 r2 P1).
+  const inferred = !calibration && Boolean(selected);
+  // unresolved = the visit names a rig whose calibration is no longer
+  // active (deactivated / deleted since). Not a block — the protocol
+  // carrier applies — but the closeout must clear the stale assignment
+  // rather than persist it as equipment used (Codex #4124 r3 P1).
+  const unresolved = Boolean(assigned) && !activeCalibrations.length;
   const warnings = [];
-  const blocks = [];
-  if (!selected.tank_capacity_gal) {
+  if (unresolved) {
+    warnings.push({
+      code: 'assigned_rig_unresolved',
+      severity: 'warning',
+      message: 'The rig assigned to this visit has no active calibration; the protocol carrier is used and the assignment is not recorded as used.',
+    });
+  }
+  if (selected && !selected.tank_capacity_gal) {
     warnings.push({
       code: 'missing_tank_capacity',
       severity: 'warning',
       message: 'Equipment tank capacity is missing; tank-fill checks are limited.',
     });
   }
-
-  return { selected, blocks, warnings };
+  return { selected, inferred, unresolved, blocks: [], warnings };
 }
 
 function calculateNutrients(items, lawnSqft) {
@@ -1007,11 +1005,11 @@ async function getApplicableOrdinances(knex, profile, cities = {}) {
 }
 
 async function getLatestAssessment(knex, customerId, { strict = false } = {}) {
-  const row = await knex('lawn_assessments')
+  const row = await savepointRead(knex, (k) => k('lawn_assessments')
     .where({ customer_id: customerId })
     .orderBy('service_date', 'desc')
     .orderBy('created_at', 'desc')
-    .first()
+    .first())
     .catch((err) => { if (strict) throw err; return null; });
   if (!row) return null;
   return {
@@ -1046,14 +1044,14 @@ async function getActiveCalibrations(knex, filters = {}, { strict = false } = {}
     query.where('ec.id', filters.calibrationId);
   }
 
-  return query.catch((err) => { if (strict) throw err; return []; });
+  return savepointRead(knex, () => query).catch((err) => { if (strict) throw err; return []; });
 }
 
 // strict: a failed catalog read throws instead of reading as an empty
 // catalog (the job card treats that plan as unavailable; the Lawn plan and
 // closeout keep the lenient default).
 async function getProducts(knex, { strict = false } = {}) {
-  const products = await knex('products_catalog')
+  const products = await savepointRead(knex, (k) => k('products_catalog')
     .where(function () {
       this.where({ active: true }).orWhereNull('active');
     })
@@ -1066,16 +1064,16 @@ async function getProducts(knex, { strict = false } = {}) {
       'mixing_order_category', 'mixing_instructions',
       'label_verified_at',
       'active', 'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
-    )
+    ))
     .catch((err) => { if (strict) throw err; return []; });
 
   if (!products.length) return products;
 
   const productIds = products.map((product) => product.id).filter(Boolean);
   const aliases = productIds.length
-    ? await knex('product_aliases')
+    ? await savepointRead(knex, (k) => k('product_aliases')
       .whereIn('product_id', productIds)
-      .select('product_id', 'alias_name')
+      .select('product_id', 'alias_name'))
       // strict: aliases are how de-branded protocol lines find their
       // product — a failed read would silently drop them, so it throws too.
       .catch((err) => { if (strict) throw err; return []; })
@@ -1094,7 +1092,7 @@ async function getProducts(knex, { strict = false } = {}) {
 
 async function getAppointmentSubstitutions(knex, serviceId, products, { strict = false } = {}) {
   if (!(await knex.schema.hasTable('lawn_protocol_product_substitutions'))) return new Map();
-  const rows = await knex('lawn_protocol_product_substitutions as lpps')
+  const rows = await savepointRead(knex, (k) => k('lawn_protocol_product_substitutions as lpps')
     .leftJoin('products_catalog as op', 'lpps.original_product_id', 'op.id')
     .leftJoin('products_catalog as sp', 'lpps.substitute_product_id', 'sp.id')
     .where('lpps.scheduled_service_id', serviceId)
@@ -1103,7 +1101,7 @@ async function getAppointmentSubstitutions(knex, serviceId, products, { strict =
       'lpps.*',
       'op.name as original_product_name',
       'sp.name as substitute_product_name',
-    )
+    ))
     .catch((err) => { if (strict) throw err; return []; });
   const productById = new Map((products || []).map((product) => [String(product.id), product]));
   const map = new Map();
@@ -1147,7 +1145,7 @@ function calculateNutrientLedgerFromRows(rows, products, lawnSqft, year) {
 // as "nothing applied this year" (an annual-N block must not vanish).
 async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date(), { strict = false } = {}) {
   const year = etParts(serviceDate).year;
-  const ledgerRows = await knex('property_nutrient_ledger')
+  const ledgerRows = await savepointRead(knex, (k) => k('property_nutrient_ledger')
     .where({ customer_id: customerId, application_year: year })
     .select(
       'application_date',
@@ -1164,7 +1162,7 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
       'blackout_status',
       'service_product_id',
     )
-    .orderBy('application_date', 'asc')
+    .orderBy('application_date', 'asc'))
     .catch((err) => { if (strict) throw err; return null; });
 
   const ledgerSummary = Array.isArray(ledgerRows) && ledgerRows.length
@@ -1184,7 +1182,7 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
     serviceProductQuery.whereNotIn('sp.id', ledgerServiceProductIds);
   }
 
-  const rows = await serviceProductQuery.catch((err) => { if (strict) throw err; return []; });
+  const rows = await savepointRead(knex, () => serviceProductQuery).catch((err) => { if (strict) throw err; return []; });
   const fallbackSummary = calculateNutrientLedgerFromRows(rows, products, lawnSqft, year);
   if (ledgerSummary) {
     return {
@@ -1350,9 +1348,21 @@ async function buildPlanForService(serviceId, options = {}) {
   });
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
-  const calibrationSummary = summarizeCalibration({ calibrations: activeCalibrations, date: serviceDate });
+  // A rig the visit names (assignment or explicit request) is the visit's;
+  // anything else the summary picks is inferred.
+  const assignedRig = Boolean(options.equipmentSystemId || options.calibrationId || service.assigned_equipment_system_id || service.assigned_calibration_id);
+  const calibrationSummary = summarizeCalibration({
+    calibration: assignedRig && activeCalibrations.length === 1 ? activeCalibrations[0] : null,
+    calibrations: activeCalibrations,
+    assigned: assignedRig,
+    date: serviceDate,
+  });
   const calibration = calibrationSummary.selected;
-  const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
+  // Rig carrier when one resolved, else the protocol window's default (the
+  // same fallback the completed-service report already reads).
+  const rigCarrier = Number(calibration?.carrier_gal_per_1000 || 0);
+  const carrier = rigCarrier > 0 ? rigCarrier : Number(structuredProtocol?.window?.defaultCarrierGalPer1000 || 0);
+  const carrierSource = rigCarrier > 0 ? 'rig' : (carrier > 0 ? 'protocol_default' : null);
   const lawnSqft = Number(profile?.lawn_sqft || 0);
   const planItems = candidateItems.map((item) => {
     const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
@@ -1619,7 +1629,8 @@ async function buildPlanForService(serviceId, options = {}) {
     },
     mixCalculator: {
       equipmentSystemId: calibration?.equipment_system_id || null,
-      carrierGalPer1000: calibration?.carrier_gal_per_1000 ? Number(calibration.carrier_gal_per_1000) : null,
+      carrierGalPer1000: carrier > 0 ? carrier : null,
+      carrierSource,
       tankCapacityGal: calibration?.tank_capacity_gal ? Number(calibration.tank_capacity_gal) : null,
       lawnSqft: profile?.lawn_sqft || null,
       nutrientProjection,

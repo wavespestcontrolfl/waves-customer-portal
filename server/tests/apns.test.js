@@ -42,7 +42,7 @@ describe('buildApnsPayload', () => {
 
   test('defaults the title, omits url + badge when absent', () => {
     const p = buildApnsPayload({ body: 'hi' });
-    expect(p.aps.alert.title).toBe('Waves Pest Control');
+    expect(p.aps.alert.title).toBe('Waves');
     expect(p.url).toBeUndefined();
     expect(p.aps.badge).toBeUndefined();
   });

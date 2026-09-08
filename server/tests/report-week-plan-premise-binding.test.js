@@ -13,7 +13,7 @@ describe('week-plan premise binding', () => {
     expect(src).toMatch(/const servicedElsewhere = !!snapshot && !planBindsToService\(snapshot, service\);/);
     expect(src).toMatch(/if \(snapshot\?\.plan && !servicedElsewhere\) \{/);
     // …and the cache signature applies the same binding, so an address change re-keys cached PDFs.
-    expect(src).toMatch(/weekPlanSentAt = snapshot\?\.sentAt && planBindsToService\(snapshot, premise\) \? new Date\(snapshot\.sentAt\)\.toISOString\(\) : null;/);
+    expect(src).toMatch(/weekPlanAvailableAt = snapshot\?\.availableAt && planBindsToService\(snapshot, premise\) \? new Date\(snapshot\.availableAt\)\.toISOString\(\) : null;/);
     // The canonical lookup is STRICT and outside the fail-open prefs catch: a failure propagates (render refused), never plan=none.
     expect(src).toMatch(/const snapshot = await loadCurrentWeekPlan\(service\.customer_id, \{ strict: true \}\);/);
     // The report renderer receives the snapshot's restriction (hour constraints).
@@ -118,7 +118,7 @@ describe('strict plan pin outranks the live gate/premise visibility checks (code
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
   test('a string pin refuses when the gate is off, BEFORE the visibility gate; premise divergence is decided by planBindsToService alone (gh-r42)', () => {
-    const pin = src.indexOf("if (typeof pinnedWeekPlanSentAt === 'string') {");
+    const pin = src.indexOf("if (typeof pinnedWeekPlanAvailableAt === 'string') {");
     const gate = src.indexOf("if (featureGates.isEnabled('irrigationWeekPlan')) {", pin);
     expect(pin).toBeGreaterThan(0);
     expect(gate).toBeGreaterThan(pin);
@@ -129,7 +129,7 @@ describe('strict plan pin outranks the live gate/premise visibility checks (code
     expect(block).not.toMatch(/stamped_address_diverges === true\) throw/);
   });
   test('a string pin whose snapshot no longer binds to this premise (mirror moved, no stamp) refuses too (codex gh-r18)', () => {
-    expect(src).toMatch(/if \(servicedElsewhere && typeof pinnedWeekPlanSentAt === 'string'\) throw new PinnedWeekPlanUnavailable\('premise_diverged'\);/);
+    expect(src).toMatch(/if \(servicedElsewhere && typeof pinnedWeekPlanAvailableAt === 'string'\) throw new PinnedWeekPlanUnavailable\('premise_diverged'\);/);
   });
 });
 

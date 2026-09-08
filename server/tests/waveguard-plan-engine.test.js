@@ -151,11 +151,18 @@ describe('waveguard-plan-engine helpers', () => {
     expect(result.blocks.map((b) => b.code)).toContain('nitrogen_blackout');
   });
 
-  test('mix inputs remain required but calibration expiry and verification are not approvals', () => {
+  test('no calibration is not a block — the plan falls back to the protocol carrier (owner ruling 2026-09-07)', () => {
     expect(summarizeCalibration({
       calibration: null,
       date: new Date('2026-05-01T12:00:00'),
-    }).blocks[0].code).toBe('missing_calibration');
+    })).toEqual({ selected: null, inferred: false, unresolved: false, blocks: [], warnings: [] });
+  });
+
+  test('an assigned rig with no active calibration is unresolved — a warning, never a block (Codex #4124 r3 P1)', () => {
+    const result = summarizeCalibration({ calibration: null, calibrations: [], assigned: true, date: new Date('2026-05-01T12:00:00') });
+    expect(result).toMatchObject({ selected: null, inferred: false, unresolved: true, blocks: [] });
+    expect(result.warnings.map((w) => w.code)).toEqual(['assigned_rig_unresolved']);
+    expect(summarizeCalibration({ calibration: null, calibrations: [], assigned: false }).unresolved).toBe(false);
 
     const expired = summarizeCalibration({
       calibration: {
@@ -171,18 +178,20 @@ describe('waveguard-plan-engine helpers', () => {
     expect(expired.selected.carrier_gal_per_1000).toBe(2);
   });
 
-  test('summarizeCalibration blocks ambiguous active equipment calibrations', () => {
-    const result = summarizeCalibration({
-      calibrations: [
-        { equipment_system_id: 'tank', system_name: '110-Gallon Spray Tank #1', carrier_gal_per_1000: 2 },
-        { equipment_system_id: 'backpack', system_name: 'FlowZone Typhoon 2.5 #1', carrier_gal_per_1000: 0.5 },
-      ],
-      date: new Date('2026-05-01T12:00:00'),
-    });
-
+  test('several active rigs: the tank rig decides, a backpack never does, and disagreeing tanks select nothing — never a block', () => {
+    const tank1 = { equipment_system_id: 'tank1', system_type: 'tank', system_name: '110-Gallon Spray Tank #1', carrier_gal_per_1000: 2, calibration_status: 'estimated_not_field_verified' };
+    const tank2 = { equipment_system_id: 'tank2', system_type: 'tank', system_name: '110-gal tank #2', carrier_gal_per_1000: '2.000', calibration_status: 'field_verified' };
+    const backpack = { equipment_system_id: 'backpack', system_type: 'backpack', system_name: 'FlowZone Typhoon 3.0 #1', carrier_gal_per_1000: 1.33 };
+    const date = new Date('2026-05-01T12:00:00');
+    expect(summarizeCalibration({ calibrations: [tank1, backpack], date })).toMatchObject({ selected: tank1, inferred: true });
+    expect(summarizeCalibration({ calibration: tank1, calibrations: [tank1], date })).toMatchObject({ selected: tank1, inferred: false });
+    // Two tanks on the same carrier resolve (the field-verified one is named).
+    expect(summarizeCalibration({ calibrations: [tank1, tank2, backpack], date }).selected).toBe(tank2);
+    const result = summarizeCalibration({ calibrations: [tank1, { ...tank2, carrier_gal_per_1000: 3 }, backpack], date });
     expect(result.selected).toBeNull();
-    expect(result.blocks[0].code).toBe('equipment_selection_required');
-    expect(result.options).toHaveLength(2);
+    expect(result.blocks).toEqual([]);
+    expect(result).not.toHaveProperty('options');
+    expect(summarizeCalibration({ calibrations: [backpack, { ...backpack, equipment_system_id: 'backpack2' }], date }).selected).toBeNull();
   });
 
   test('isConditionalSelected includes base products and excludes unselected optional products', () => {
@@ -954,10 +963,11 @@ describe('buildPlanForService strict mode (job-card hook P1)', () => {
     const aliasesDown = (table) => {
       const chain = {};
       for (const m of ['leftJoin', 'where', 'whereIn', 'select', 'orderBy']) chain[m] = () => chain;
-      chain.first = () => (table === 'scheduled_services as ss' ? Promise.resolve(service) : { catch: () => Promise.resolve(null) });
-      chain.catch = (fn) => (table === 'product_aliases'
-        ? Promise.resolve().then(() => fn(new Error('aliases down')))
-        : Promise.resolve(table === 'products_catalog' ? [{ id: 'p', name: 'Celsius WG' }] : []));
+      chain.first = () => Promise.resolve(table === 'scheduled_services as ss' ? service : null);
+      chain.then = (resolve, reject) => (table === 'product_aliases'
+        ? Promise.reject(new Error('aliases down'))
+        : Promise.resolve(table === 'products_catalog' ? [{ id: 'p', name: 'Celsius WG' }] : [])).then(resolve, reject);
+      chain.catch = (reject) => chain.then(undefined, reject);
       return chain;
     };
     aliasesDown.schema = { hasTable: async () => false };

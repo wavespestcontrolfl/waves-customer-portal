@@ -143,8 +143,21 @@ describe('sendCustomerMessage GSM normalization wiring', () => {
     expect(auditInput.segmentMeta.encoding).toBe('GSM_7');
   });
 
+  test('SMS link removal happens before provider delivery and segment audit', async () => {
+    const link = 'https://g.page/r/demo';
+    const body = `${'a'.repeat(161 - link.length - 1)} ${link}`;
+    const result = await sendCustomerMessage({ ...BASE_INPUT, body });
+    expect(result.sent).toBe(true);
+    expect(result.segmentCount).toBe(1);
+    const sent = sendViaTwilio.mock.calls[0][0].body;
+    expect(sent).toBe(body.replace('https://', ''));
+    const audit = persistAudit.mock.calls[0][0];
+    expect(audit.input.body).toBe(sent);
+    expect(audit.segmentMeta.segmentCount).toBe(1);
+  });
+
   test('MMS caption passes through unnormalized (media sends are not segment-encoded)', async () => {
-    const caption = 'Front bed — 12″ clearance • before photo';
+    const caption = 'Front bed — 12″ clearance • https://example.com/photo';
     const result = await sendCustomerMessage({
       ...BASE_INPUT,
       body: caption,
@@ -165,7 +178,7 @@ describe('sendCustomerMessage GSM normalization wiring', () => {
   });
 
   test('internal audience body passes through unnormalized (bell/push keeps bullets)', async () => {
-    const briefing = '• Revenue — up\n• Leads — “strong”';
+    const briefing = '• Revenue — up\n• Leads — “strong” https://example.com/details';
     const result = await sendCustomerMessage({
       to: '+19415550142',
       channel: 'sms',

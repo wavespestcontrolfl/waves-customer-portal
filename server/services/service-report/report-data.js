@@ -2192,7 +2192,7 @@ class PinnedAssessmentUnavailable extends Error {
 // wording. Regenerate older lawn PDFs so they agree with the current report.
 const LAWN_RENDER_STRATEGY = 'p4';
 
-async function resolveCanonicalLawnRender(service, knex = db) {
+async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
 
@@ -2203,10 +2203,10 @@ async function resolveCanonicalLawnRender(service, knex = db) {
   // failed prefs read stamps random so the cache re-renders instead of
   // serving stale (same fail-open-to-rerender posture as the outer catch).
   let irrigationStamp;
-  // The week-plan snapshot this signature describes (ISO sent_at, or null);
-  // callers pass it back as pinnedWeekPlanSentAt so the render uses exactly
+  // The week-plan snapshot this signature describes (ISO availability time, or null);
+  // callers pass it back as pinnedWeekPlanAvailableAt so the render uses exactly
   // the plan the cache key was computed from.
-  let weekPlanSentAt = null;
+  let weekPlanAvailableAt = null;
   try {
     const prefs = await knex('property_preferences')
       .where({ customer_id: service.customer_id })
@@ -2240,24 +2240,28 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     // a same-home postal-city correction — codex gh-r42): an address change
     // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
     const snapshot = await loadCurrentWeekPlan(service.customer_id, { strict: true });
-    weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, premise) ? new Date(snapshot.sentAt).toISOString() : null;
-    irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
+    weekPlanAvailableAt = snapshot?.availableAt && planBindsToService(snapshot, premise) ? new Date(snapshot.availableAt).toISOString() : null;
+    irrigationStamp += `:plan=${weekPlanAvailableAt || 'none'}`;
   }
 
-  const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
+  const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
+  const lawnHistory = propertyHistoryEnabled
+    ? await require('../lawn-assessment-history').historyForReport(service, { assessment }, knex)
+    : null;
+  const historyStamp = lawnHistory ? `|hist=${lawnHistory.identity}` : '';
   if (!assessment?.id) {
-    const bare = crypto.createHash('sha1').update(`none|${irrigationStamp}`).digest('hex').slice(0, 12);
-    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}`, weekPlanSentAt };
+    const bare = crypto.createHash('sha1').update(`none|${irrigationStamp}${historyStamp}`).digest('hex').slice(0, 12);
+    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}`, weekPlanAvailableAt, ...(propertyHistoryEnabled ? { lawnHistory, propertyHistoryEnabled } : {}) };
   }
 
   const recs = typeof assessment.recommendations === 'string'
     ? assessment.recommendations
     : JSON.stringify(assessment.recommendations || '');
   const stamp = crypto.createHash('sha1')
-    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}`)
+    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}${historyStamp}`)
     .digest('hex')
     .slice(0, 12);
-  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanSentAt };
+  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanAvailableAt, ...(propertyHistoryEnabled ? { lawnHistory, propertyHistoryEnabled } : {}) };
 }
 
 // Signature-only entry point for CACHE-LOOKUP sites, which must never throw —
@@ -2295,9 +2299,9 @@ async function loadServicePremise(service, knex = db) {
   return applyReportIdentitySnapshot({ ...service, ...row });
 }
 
-async function lawnAssessmentPdfSignature(service, knex = db) {
+async function lawnAssessmentPdfSignature(service, knex = db, options = {}) {
   try {
-    return (await resolveCanonicalLawnRender(service, knex)).signature;
+    return (await resolveCanonicalLawnRender(service, knex, options)).signature;
   } catch {
     return `-laerr${crypto.randomBytes(6).toString('hex')}`;
   }
@@ -2339,13 +2343,19 @@ async function loadPinnedLawnAssessment(service, assessmentId, knex = db) {
 // that fences a SEND cannot do that — swallowing a transient error there would
 // dispatch an unfenced attachment, indistinguishable from a genuine non-lawn
 // record. Those callers opt in and get the error propagated instead.
-async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false } = {}) {
+async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   if (!service?.customer_id) return null;
   const swallow = (err) => {
     if (failClosed) throw err;
     return null;
   };
 
+  if (propertyHistoryEnabled) {
+    return require('../lawn-assessment-history').installedForVisit({
+      customerId: service.customer_id, serviceRecordId: service.id,
+      serviceId: service.scheduled_service_id || service.service_id,
+    }, knex).catch(swallow);
+  }
   const baseCriteria = { customer_id: service.customer_id, confirmed_by_tech: true };
   const byRecord = service.id
     ? await knex('lawn_assessments')
@@ -2479,23 +2489,33 @@ async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
   }
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanSentAt } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
   if (serviceLine !== 'lawn') return null;
   // Pinned-empty is unconditional: the attachment provably carries no lawn
   // section, which is exactly what the fence sealed.
   if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return null;
-  const assessment = pinnedAssessmentId
+  let assessment = pinnedAssessmentId
     ? await loadPinnedLawnAssessment(service, pinnedAssessmentId, knex)
-    : await loadLinkedLawnAssessment(service, knex);
+    : await loadLinkedLawnAssessment(service, knex, { propertyHistoryEnabled });
   if (!assessment) return null;
 
-  const allAssessments = await knex('lawn_assessments')
-    .where({ customer_id: service.customer_id, confirmed_by_tech: true })
-    .orderBy('service_date', 'asc')
-    .orderBy('created_at', 'asc')
-    .catch(() => []);
-  const assessmentIndex = allAssessments.findIndex((row) => String(row.id) === String(assessment.id));
-  const historyRows = assessmentIndex >= 0 ? allAssessments.slice(0, assessmentIndex + 1) : allAssessments;
+  let historyRows;
+  if (propertyHistoryEnabled) {
+    const resolved = lawnHistory || await require('../lawn-assessment-history').historyForAssessment(assessment, { pinned: !!pinnedAssessmentId, knex });
+    if (!resolved.current || resolved.current.id !== assessment.id) throw new PinnedAssessmentUnavailable(assessment.id);
+    // History displays appointment dates; the assessment's run date still keys
+    // its existing frozen weather snapshot and water-plan evidence.
+    assessment = { ...resolved.current, is_baseline: resolved.isBaseline };
+    historyRows = resolved.rows.map((row) => ({ ...row, service_date: row.visit_date }));
+  } else {
+    const allAssessments = await knex('lawn_assessments')
+      .where({ customer_id: service.customer_id, confirmed_by_tech: true })
+      .orderBy('service_date', 'asc')
+      .orderBy('created_at', 'asc')
+      .catch(() => []);
+    const assessmentIndex = allAssessments.findIndex((row) => String(row.id) === String(assessment.id));
+    historyRows = assessmentIndex >= 0 ? allAssessments.slice(0, assessmentIndex + 1) : allAssessments;
+  }
   const initialRow = historyRows[0] || assessment;
   const currentScore = formatLawnAssessmentScore(assessment);
   const initialScore = formatLawnAssessmentScore(initialRow);
@@ -2581,7 +2601,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         notes: initialRow.observations || '',
       },
       after: {
-        date: assessment.service_date,
+        date: propertyHistoryEnabled ? assessment.visit_date : assessment.service_date,
         photoUrl: afterPhoto ? await lawnPhotoUrl(afterPhoto) : null,
         overallScore: calculateLawnOverallScore(assessment),
         notes: assessment.observations || '',
@@ -2824,7 +2844,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // signature pod and the /data pod (rollout, kill switch), or a stamp that
   // now diverges, would otherwise answer a plan-less page under the
   // plan-present key (codex gh-r17).
-  if (typeof pinnedWeekPlanSentAt === 'string') {
+  if (typeof pinnedWeekPlanAvailableAt === 'string') {
     if (!featureGates.isEnabled('irrigationWeekPlan')) throw new PinnedWeekPlanUnavailable('gate_off');
   }
   // Plan visibility is decided by planBindsToService (the shared homesDiffer
@@ -2836,7 +2856,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   if (featureGates.isEnabled('irrigationWeekPlan')) {
     // Pinned renders are STRICT: a failed lookup must refuse the render
     // rather than cache a plan-less page under a plan-present key.
-    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedSentAt: pinnedWeekPlanSentAt, strict: typeof pinnedWeekPlanSentAt === 'string' });
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedAvailableAt: pinnedWeekPlanAvailableAt, strict: typeof pinnedWeekPlanAvailableAt === 'string' });
     // The plan binds to the HOME the sweep decided it for: the serviced
     // address (stamped, else the customer's current mirror) must be that
     // home — a mid-week move makes the stamp match the NEW address while
@@ -2848,7 +2868,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // customer mirror moved between the signature and this lookup, with no
     // stamp to flag it) is a refusal, never a plan-less payload under the
     // plan-present key (codex gh-r18).
-    if (servicedElsewhere && typeof pinnedWeekPlanSentAt === 'string') throw new PinnedWeekPlanUnavailable('premise_diverged');
+    if (servicedElsewhere && typeof pinnedWeekPlanAvailableAt === 'string') throw new PinnedWeekPlanUnavailable('premise_diverged');
     if (snapshot?.plan && !servicedElsewhere) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
       const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
@@ -2870,7 +2890,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     assessmentId: assessment.id,
     serviceRecordId: assessment.service_record_id || null,
     serviceId: assessment.service_id || null,
-    assessmentDate: assessment.service_date,
+    assessmentDate: propertyHistoryEnabled ? assessment.visit_date : assessment.service_date,
     scores: currentScore,
     initialScores: initialScore,
     trend,
@@ -2949,6 +2969,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const service = applyReportIdentitySnapshot(joinedService);
   const frozenIdentity = service.report_identity_snapshot || null;
   const opts = options && typeof options === 'object' ? options : {};
+  const propertyHistoryEnabled = opts.propertyHistoryEnabled ?? featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
   const preloadedPestPressureConfig = Object.prototype.hasOwnProperty.call(opts, 'pestPressureConfig')
     ? opts.pestPressureConfig
     : undefined;
@@ -3288,10 +3309,22 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     });
   }
 
+  let lawnHistory = opts.lawnHistory || null;
+  if (propertyHistoryEnabled && serviceLine === 'lawn' && !lawnHistory) {
+    const selected = opts.pinnedLawnAssessmentId === PIN_NO_ASSESSMENT ? null
+      : opts.pinnedLawnAssessmentId ? await loadPinnedLawnAssessment(service, opts.pinnedLawnAssessmentId, knex)
+        : await loadLinkedLawnAssessment(service, knex, { propertyHistoryEnabled });
+    lawnHistory = await require('../lawn-assessment-history').historyForReport(service, { assessment: selected, pinned: !!opts.pinnedLawnAssessmentId }, knex);
+  }
+  if (opts.pinnedLawnHistoryIdentity && (!propertyHistoryEnabled || lawnHistory?.identity !== opts.pinnedLawnHistoryIdentity)) {
+    throw new PinnedAssessmentUnavailable(opts.pinnedLawnAssessmentId);
+  }
+  const lawnEligibleVisitIds = lawnHistory?.eligibleVisitIds;
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
+    propertyHistoryEnabled, lawnHistory,
     pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
     // undefined = unpinned (live snapshot); null = the signature saw none.
-    pinnedWeekPlanSentAt: opts.pinnedWeekPlanSentAt,
+    pinnedWeekPlanAvailableAt: opts.pinnedWeekPlanAvailableAt,
   });
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
@@ -3412,7 +3445,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   if (serviceLine === 'lawn') {
     const turfReading = await getTurfHeightForVisit(service.id, knex);
     const turfTrend = turfReading
-      ? await getTurfHeightTrend(service.customer_id, 12, knex, turfReading.measured_at)
+      ? await getTurfHeightTrend(service.customer_id, 12, knex, turfReading.measured_at, { eligibleVisitIds: lawnEligibleVisitIds })
       : [];
     mowingHeight = buildMowingHeightContext(turfReading, turfTrend);
     // No gauge reading THIS visit → the trends grid can still show the mowing
@@ -3420,7 +3453,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (!mowingHeight) {
       const historyCap = validTimestamp(service.completed_at) || validTimestamp(service.updated_at) || null;
       const priorTrend = historyCap
-        ? await getTurfHeightTrend(service.customer_id, 12, knex, historyCap)
+        ? await getTurfHeightTrend(service.customer_id, 12, knex, historyCap, { eligibleVisitIds: lawnEligibleVisitIds })
         : [];
       const withHeights = priorTrend.filter((r) => r && r.manual_height_in != null
         && Number.isFinite(Number(r.manual_height_in)));
@@ -4034,7 +4067,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       ? null
       : (lawnAssessment?.assessmentId
         ? { id: lawnAssessment.assessmentId }
-        : await loadLinkedLawnAssessment(service, knex));
+        : await loadLinkedLawnAssessment(service, knex, { propertyHistoryEnabled }));
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must
@@ -4335,6 +4368,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         if (gapCap) {
           const gapRows = await knex('lawn_water_intake_snapshots')
             .where({ customer_id: service.customer_id })
+            .modify((q) => {
+              if (lawnEligibleVisitIds !== undefined) {
+                require('../lawn-assessment-history').restrictVisitHistory(q, 'lawn_water_intake_snapshots', lawnEligibleVisitIds, knex);
+              }
+            })
             .whereNotNull('water_gap_inches')
             .whereNotNull('service_date')
             .where('service_date', '<=', gapCap)

@@ -68,3 +68,9 @@ describe('buildFcmMessage — tag', () => {
     expect(m.message.android.notification.tag).toBeUndefined();
   });
 });
+
+
+test('perishable advisories cannot queue for an offline Android device', () => {
+  expect(buildFcmMessage('synthetic-device', { title: 'Plan', ephemeral: true }).message.android.ttl).toBe('0s');
+  expect(buildFcmMessage('synthetic-device', { title: 'Appointment' }).message.android).not.toHaveProperty('ttl');
+});

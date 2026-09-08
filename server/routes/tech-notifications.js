@@ -40,9 +40,11 @@ router.get('/', async (req, res, next) => {
     // as they clear. They share the LAST bucket with stale rows and compete
     // there on recency: a backlog of ≥20 stale legacy rows (e.g. the old
     // `new_appointment` type the client never rendered) must not starve
-    // every schedule-change card out of the window either.
+    // every schedule-change card out of the window either. Texts on a tech's
+    // own line (tech_line_sms — tech-line.js) are kept the same way and sit
+    // in the same bucket.
     const rows = await q
-      .orderByRaw("CASE WHEN type LIKE 'visit\\_%' THEN 2 WHEN type = 'storm_watch_alert' THEN 1 WHEN created_at >= now() - interval '6 hours' THEN 0 ELSE 2 END")
+      .orderByRaw("CASE WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 2 WHEN type = 'storm_watch_alert' THEN 1 WHEN created_at >= now() - interval '6 hours' THEN 0 ELSE 2 END")
       .orderBy('created_at', 'desc')
       .limit(20);
     res.json({ notifications: rows.map(parseRow) });

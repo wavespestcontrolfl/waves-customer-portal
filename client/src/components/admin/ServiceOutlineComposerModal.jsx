@@ -306,8 +306,8 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
   const staleReasons = activeOutline?.staleReasons || estimate?.lawnServiceOutline?.staleReasons || [];
 
   return createPortal(
-    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-zinc-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true">
-      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-t-md border border-zinc-200 bg-white shadow-xl sm:rounded-md">
+    <div className="fixed inset-0 z-[120] flex items-end justify-center bg-zinc-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true">
+      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-t-md border border-zinc-200 bg-white shadow-xl max-sm:pb-[env(safe-area-inset-bottom)] sm:rounded-md">
         <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
           <div>
             <div className="flex items-center gap-2">
@@ -397,7 +397,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
             </div>
           </aside>
 
-          <main className="min-h-0 overflow-y-auto px-5 py-4">
+          <div className="min-h-0 overflow-y-auto px-5 py-4">
             {loading && <div className="text-sm text-zinc-500">Building outline preview...</div>}
             {!loading && outline?.title && (
               <article>
@@ -425,7 +425,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
                 )}
               </article>
             )}
-          </main>
+          </div>
 
           <aside className="border-t border-zinc-200 bg-zinc-50 p-4 lg:border-l lg:border-t-0">
             <div className="rounded-md border border-zinc-200 bg-white p-3">

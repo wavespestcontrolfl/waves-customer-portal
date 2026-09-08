@@ -434,6 +434,7 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
             ) : null}
             <Button variant="secondary" onClick={() => setShowLink(true)}>Link…</Button>
             {canRelease ? <Button onClick={() => setShowSend(true)}>Send report</Button> : null}
+            <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">Close</Button>
           </div>
         </div>
       </SheetHeader>

@@ -24,7 +24,8 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (key, vars) => `Hello ${vars.first_name} — reply with your address${vars.callback_clause}.`),
 }));
 jest.mock('../config/twilio-numbers', () => ({
-  findByNumber: jest.fn((n) => (n === '+19412166229' ? { id: 'bradenton' } : null)),
+  findByNumber: jest.fn((n) => (n === '+19412166229' || n === '+19413529161' ? { id: 'bradenton' } : null)),
+  isTechLine: jest.fn((n) => n === '+19413529161'),
 }));
 jest.mock('../services/messaging/validators/suppression', () => ({
   recordSuppression: jest.fn(async () => ({ ok: true })),
@@ -336,6 +337,13 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     TN.findByNumber.mockReturnValueOnce({ id: 'bradenton', type: 'location' });
     state.firstResults.leads = [{ customer_id: null, address: null }];
     await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, to_phone: '+18559260203' } });
+    const sent = sendCustomerMessage.mock.calls.pop()[0];
+    expect(sent.metadata.fromNumber).toBeUndefined();
+  });
+
+  it('never sends from a per-tech line even though findByNumber matches it (automated texts stay on location lines)', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, to_phone: '+19413529161' } });
     const sent = sendCustomerMessage.mock.calls.pop()[0];
     expect(sent.metadata.fromNumber).toBeUndefined();
   });

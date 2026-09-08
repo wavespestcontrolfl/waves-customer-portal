@@ -65,8 +65,10 @@ const { technicianReportCustomerCopy, containsReportAccessCode } = require('../s
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
-  resolveSeriesParentId,
+  clearSeriesPrepaid,
   buildPrepaidSeriesContext,
+  hasAnnualCoverage,
+  withoutAnnualCoverage,
 } = require('../services/prepaid-series');
 // Single-visit prepaid stamp: refuse only rows that are genuinely over.
 // NOT the series helper's TERMINAL_STATUSES — that set also skips
@@ -75,6 +77,26 @@ const {
 // without a replacement (routes/schedule.js), and staff must still be able
 // to record its payment (pre-push hook on #3878).
 const PREPAID_STAMP_REFUSED_STATUSES = ['completed', 'cancelled', 'no_show', 'skipped'];
+// Why a single-visit stamp UPDATE matched no row, in the order the route
+// reports it: a terminal status, then annual coverage (Codex #4030 r7 P1).
+// Both predicates are embedded in the UPDATE itself; this only names the
+// refusal for the operator.
+const PREPAID_STAMP_REFUSALS = [
+  {
+    refused: (row) => PREPAID_STAMP_REFUSED_STATUSES.includes(String(row.status || '').toLowerCase()),
+    body: (row) => ({
+      error: `This visit is already ${row.status} — it can't be marked prepaid. Refresh and try again.`,
+      code: 'visit_terminal',
+    }),
+  },
+  {
+    refused: hasAnnualCoverage,
+    body: () => ({
+      error: 'This visit has annual prepay coverage — reconcile that term before recording a manual prepayment.',
+      code: 'annual_prepay_coverage',
+    }),
+  },
+];
 const {
   auditRecurringScheduleAnomalies,
 } = require('../services/recurring-schedule-audit');
@@ -5812,7 +5834,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (totalAmount > 0) {
           await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
-            totalAmount: Number(totalAmount),
+            totalAmount,
             method: method || 'cash',
             note: note || null,
             useExistingTransaction: true,
@@ -7271,12 +7293,22 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'mark_prepaid': {
             const amt = Number(payload?.totalAmount);
             if (!Number.isFinite(amt) || amt <= 0) throw Object.assign(new Error('totalAmount must be a positive number'), { isValidation: true });
-            await db('scheduled_services').where({ id }).update({
-              prepaid_amount: amt,
-              prepaid_method: payload?.method || 'cash',
-              prepaid_note: payload?.note || null,
-              prepaid_at: new Date(),
-            });
+            // Annual coverage is refused IN the UPDATE, not by a pre-read: an
+            // annual-prepay activation stamping the row between a SELECT and
+            // an unconditional UPDATE would be overwritten with a manual
+            // method, and completion would skip the annual coverage
+            // validator for an already-paid visit (Codex #4030 r7 P1).
+            const stamped = await withoutAnnualCoverage(db('scheduled_services').where({ id }))
+              .update({
+                prepaid_amount: amt,
+                prepaid_method: payload?.method || 'cash',
+                prepaid_note: payload?.note || null,
+                prepaid_at: new Date(),
+              })
+              .returning(['id']);
+            const unstamped = stamped.length ? null : await db('scheduled_services').where({ id }).first('id');
+            if (!stamped.length && !unstamped) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
+            if (!stamped.length) throw Object.assign(new Error('Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
             break;
           }
         }
@@ -11246,7 +11278,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (applyToSeries) {
       const result = await stampSeriesPrepaid(db, {
         anchorServiceId: req.params.id,
-        totalAmount: amt,
+        totalAmount: amount,
         method,
         note,
       });
@@ -11259,9 +11291,14 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // skips): a visit cancelled between the ownership read and this write
     // — including by a concurrent series cancel — must not end up holding
     // money for a visit that never runs (Codex #3878 r1 P1 / hook r2).
+    // Annual coverage is refused by the same UPDATE: this is the third
+    // manual writer next to the series fan-out and the bulk action, and a
+    // manual method replacing the annual one would hide paid coverage from
+    // the completion billing gate (Codex #4030 r7 P1).
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
       .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
+      .modify(withoutAnnualCoverage)
       .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: amt,
@@ -11271,13 +11308,10 @@ router.post('/:id/prepaid', async (req, res, next) => {
       })
       .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
     if (!updated.length) {
-      const current = await db('scheduled_services').where({ id: req.params.id }).first('status');
-      if (current && PREPAID_STAMP_REFUSED_STATUSES.includes(String(current.status || '').toLowerCase())) {
-        return res.status(409).json({
-          error: `This visit is already ${current.status} — it can't be marked prepaid. Refresh and try again.`,
-          code: 'visit_terminal',
-        });
-      }
+      const current = await db('scheduled_services').where({ id: req.params.id })
+        .first('status', 'annual_prepay_term_id', 'prepaid_method');
+      const refusal = current && PREPAID_STAMP_REFUSALS.find(({ refused }) => refused(current));
+      if (refusal) return res.status(409).json(refusal.body(current));
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
     logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);
@@ -11328,20 +11362,7 @@ router.delete('/:id/prepaid', async (req, res, next) => {
       }
       const anchor = await db('scheduled_services').where({ id: req.params.id }).first();
       if (!anchor) return res.status(404).json({ error: 'Scheduled service not found' });
-      const parentId = resolveSeriesParentId(anchor);
-      const cleared = await db('scheduled_services')
-        .where(function () {
-          this.where('recurring_parent_id', parentId).orWhere('id', parentId);
-        })
-        .whereNotNull('prepaid_amount')
-        .update({
-          prepaid_amount: null,
-          prepaid_method: null,
-          prepaid_note: null,
-          prepaid_at: null,
-        })
-        .returning(['id']);
-      return res.json({ success: true, clearedCount: cleared.length, seriesParentId: parentId });
+      return res.json(await clearSeriesPrepaid(db, anchor));
     }
     const cleared = await db('scheduled_services').where({ id: req.params.id })
       .modify((q) => technicianLiveVisitFilter(req, q))
@@ -12911,13 +12932,14 @@ router.put('/:id/status', async (req, res, next) => {
       // the visit notice (covered / claim in flight / claim error / lease
       // expired) does not push at all.
       const nonOwner = enRouteResult && ['covered', 'claim_in_flight', 'claim_error', 'lease_expired'].includes(String(enRouteResult.smsOutcome || ''));
-      if (!nonOwner) {
+      if (!nonOwner && enRouteResult?.enRouteAt) {
         try {
           const NotificationService = require('../services/notification-service');
           await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
             icon: '\u{1F697}',
             preferenceKey: 'tech_en_route',
-            dedupeKey: svc.visit_id ? `visit:${svc.visit_id}:en-route` : `scheduled-service:${svc.id}:en-route`,
+            push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'tech_en_route'),
+            dedupeKey: trackTransitions.enRouteNotificationKey(svc, enRouteResult.enRouteAt),
             metadata: { scheduledServiceId: svc.id, ...(svc.visit_id ? { visitId: svc.visit_id } : {}) },
           });
         } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
@@ -13018,6 +13040,7 @@ router.put('/:id/status', async (req, res, next) => {
           icon: '\u{1F3E0}',
           link: '/?tab=documents',
           preferenceKey: 'service_completed',
+          push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'service_complete'),
           dedupeKey: `scheduled-service:${svc.id}:completed`,
           metadata: { scheduledServiceId: svc.id },
         });

@@ -1,3 +1,5 @@
+const { savepointRead } = require('../utils/savepoint-read');
+
 function normalizeText(value) {
   return String(value || '')
     .toLowerCase()
@@ -54,7 +56,7 @@ function productGroups(product) {
 // closeout and plan engine keep their lenient default).
 async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict = false } = {}) {
   const groupColumn = `${groupType}_group`;
-  const rows = await knex('service_products as sp')
+  const rows = await savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('products_catalog as pc', function () {
       this.on('sp.product_name', '=', 'pc.name');
@@ -72,7 +74,7 @@ async function latestComparableGroupApplication(knex, customerId, product, group
     })
     .orderBy('sr.service_date', 'desc')
     .select('sr.service_date', 'sp.product_name', `pc.${groupColumn} as catalog_group`, 'pc.hrac_group_secondary as catalog_group_secondary', 'sp.moa_group')
-    .limit(1)
+    .limit(1))
     .catch((err) => { if (strict) throw err; return []; });
   return rows[0] || null;
 }
@@ -115,7 +117,8 @@ async function evaluateWaveGuardManagerApprovals(knex, {
   const plannedIds = collectProductIds([plan?.protocol?.base, plan?.mixCalculator?.items]);
   const conditionalIds = collectProductIds([plan?.protocol?.conditional]);
   const catalogRows = submittedProductIds.length
-    ? await knex('products_catalog').whereIn('id', submittedProductIds).catch((err) => { if (strict) throw err; return []; })
+    ? await savepointRead(knex, (k) => k('products_catalog').whereIn('id', submittedProductIds))
+      .catch((err) => { if (strict) throw err; return []; })
     : [];
   const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
 
@@ -201,9 +204,9 @@ async function evaluateWaveGuardManagerApprovals(knex, {
     }
   }
 
-  const turfProfile = await knex('customer_turf_profiles')
+  const turfProfile = await savepointRead(knex, (k) => k('customer_turf_profiles')
     .where({ customer_id: customerId, active: true })
-    .first()
+    .first())
     .catch((err) => { if (strict) throw err; return null; });
   const grassType = normalizeText(turfProfile?.grass_type || plan?.propertyGate?.trackName || plan?.propertyGate?.trackKey);
   const cultivar = normalizeText(turfProfile?.cultivar);

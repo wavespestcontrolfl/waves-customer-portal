@@ -187,6 +187,20 @@ describe('siteone internals', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
+  test("the locked context identifies as the Chrome build it runs — SiteOne's edge resets HTTP/2 for a 'HeadlessChrome' user agent (2026-09-07 outage)", async () => {
+    const newContext = jest.fn(async () => { throw new Error('stop here'); });
+    const browser = { newContext, version: () => '141.0.7390.37', close: jest.fn(async () => {}) };
+    const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'] };
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' }, approvedShipTo: '1 x' }, deps)).rejects.toMatchObject({ runLevel: true });
+    const { userAgent, serviceWorkers } = newContext.mock.calls[0][0];
+    expect(serviceWorkers).toBe('block');
+    expect(userAgent).toMatch(/^Mozilla\/5\.0 \(.+\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/141\.0\.0\.0 Safari\/537\.36$/);
+    expect(userAgent).not.toMatch(/headless/i);
+    // A browser that cannot report its version still never says Headless.
+    expect(s1._internals.browserUserAgent({})).toMatch(/Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/);
+    expect(s1._internals.browserUserAgent({})).not.toMatch(/headless/i);
+  });
+
   test('egress permits https on a pinned host only — http to the pinned host is denied before credentials could travel (PR3 r1 P1)', () => {
     const pinned = new Set(['www.siteone.com', 'siteone.com']);
     expect(s1._internals.requestPermitted('https://www.siteone.com/en/login', pinned)).toBe(true);

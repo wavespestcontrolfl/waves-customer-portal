@@ -25,11 +25,13 @@
  */
 
 const crypto = require('crypto');
+const { isDeepStrictEqual } = require('node:util');
+const { dateOnlyString } = require('../utils/date-only');
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaimWithRetry, loadPriorWeekPlan } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaimWithRetry, loadPriorWeekPlan, loadCurrentWeekPlan, planBindsToService, samePolicy } = require('./irrigation-week-plan');
 
 // Mirrors IRRIGATION_SIZING_FIELDS in routes/property.js: the settings the
 // plan sizes controller instructions from. A field that is empty on the row
@@ -40,10 +42,10 @@ const IN_PROGRESS_RETRIES = 3;
 const IN_PROGRESS_RETRY_MS = 2000;
 // Sprinkler settings follow the home — one resolver shared with the report.
 const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
-const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
+const { resolveRestrictionCounty, currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etDateString, addETDays, etParts, lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
@@ -978,10 +980,10 @@ async function hasLawnServiceEvidence(customerId, { now = new Date() } = {}) {
   return !!row;
 }
 
-async function findEligibleCustomers({ now = new Date(), customerId = null } = {}) {
+async function findEligibleCustomers({ now = new Date(), customerId = null, includeApp = false, conn = db } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
   const todayET = etDateString(now);
-  return db('customers as c')
+  return conn('customers as c')
     // LEFT so a recurring-lawn customer who never opened Property Preferences
     // is still reachable — under the old INNER JOIN a missing prefs row made
     // them invisible to the sweep entirely (1 live customer, verified
@@ -992,7 +994,9 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
       this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
     })
     .leftJoin('notification_prefs as np', 'np.customer_id', 'c.id')
-    .whereRaw('np.email_enabled IS DISTINCT FROM false')
+    .where((q) => {
+      if (!includeApp) q.whereRaw('np.email_enabled IS DISTINCT FROM false').whereNotNull('c.email');
+    })
     // This email IS a seasonal lawn tip — the portal labels seasonal_tips
     // "Watering, mowing height, and care tips for SW Florida" — so the
     // dedicated opt-out is honored too (the SMS tip path gates on the same
@@ -1005,7 +1009,6 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
     // the tp join): customers.active defaults TRUE for lead rows, so
     // pipeline_stage is what separates a customer from a lead.
     .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
-    .whereNotNull('c.email')
     .whereNotNull('c.latitude')
     .whereNotNull('c.longitude')
     // NOTE: irrigation_system / irrigation_inches_per_week are deliberately
@@ -1023,6 +1026,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
       'c.id',
       'c.first_name',
       'c.email',
+      'np.email_enabled',
       'c.latitude',
       'c.longitude',
       'pp.irrigation_inches_per_week',
@@ -1068,7 +1072,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
       // (routes/lawn-health.js:191,358). This is a VALIDITY filter, not a value
       // filter — unconfirmed rows are not readings yet, so removing them before
       // ORDER BY is correct and does not reintroduce the skipped-newer-zero bug.
-      db.raw(`(
+      conn.raw(`(
         SELECT la.irrigation_inches_per_week
           FROM lawn_assessments la
          WHERE la.customer_id = c.id
@@ -1081,6 +1085,88 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
       'c.lawn_type',
     )
     .orderBy('c.id');
+}
+
+// Shared customer/home normalization for the sender and saved-plan validation.
+function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now }) {
+  // After a move, every NON-NULL sizing field must have been re-saved
+  // (irrigation_confirmed_fields, reset by the move, accrues one field
+  // per portal autosave) before any of them sizes an instruction — a
+  // single re-saved field, a non-sizing irrigation edit, or the row-wide
+  // updated_at never re-confirms the rest (codex gh-r20/r21).
+  const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
+  const priorWeekEvents = priorWeek ? priorWeek.events : null;
+  const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
+  return {
+    firstName: customer.first_name,
+    // Grass type is a property of the LAWN: after a move the profile
+    // describes the former yard (Bahia Kc 0.45 vs St. Augustine 0.8
+    // changes the target and the hold/run call). Its OWN ledger entry
+    // gates it — re-saving the four sizing fields says nothing about
+    // the grass, so `scheduleUnconfirmed` clearing must not re-enable
+    // the old coefficient (codex gh-r40/r41). Until a turf writer
+    // re-establishes it (grass edit, or auto-capture filling a blank
+    // profile) the plan sizes from the unknown-grass fallback and the
+    // copy says "your lawn".
+    grassType: grassConfirmedAfterMove(customer) ? resolveGrassType(customer) : null,
+    weekEnding,
+    irrigationInchesPerWeek: customer.irrigation_inches_per_week,
+    turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
+    assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
+    turfIrrigationType: customer.turf_irrigation_type,
+    irrigationSystem: customer.irrigation_system,
+    irrigationRunMinutes: customer.irrigation_run_minutes,
+    wateringDays: customer.watering_days,
+    irrigationSystemType: customer.irrigation_system_type,
+    // Settings saved BEFORE the home moved describe the former property's
+    // sprinkler system. The inputs still ride (so the decision routes to
+    // the plan renderer, not the "missing schedule" setup copy — codex
+    // gh-r22); the PLAN drops the sizing fields and says why.
+    scheduleUnconfirmed,
+    priorWeekEvents,
+    priorWeekPrescribedInches,
+    // The rain-sensor flag describes the former home's controller after a
+    // move — trusted again only when the customer re-saves THAT field
+    // (its own ledger entry; the sizing fields clearing
+    // scheduleUnconfirmed say nothing about the sensor — codex
+    // gh-r40/r41).
+    rainSensor: rainSensorConfirmedAfterMove(customer) && (customer.rain_sensor === true || customer.rain_sensor === 't'),
+    rainfallInches7d: weekWeather.rainInches,
+    et0Inches: weekWeather.et0Inches,
+    rainSource: weekWeather.rainSource,
+    weekPlanEnabled,
+    county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at, movedAt: customer.irrigation_home_changed_at || null, countyConfirmed: countyConfirmedAfterMove(customer) }),
+    home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
+    // The restriction must cover the WHOLE plan week (through this Sunday).
+    planWeekEnd,
+    now,
+  };
+}
+
+// Rebuild from frozen weather, then require current settings to yield the
+// identical decision. Neither a retry nor a reader may invent a second plan.
+function replayWeekPlanForCustomer(snapshot, current) {
+  if (!snapshot?.decisionInputs?.home?.addressLine1 || !planBindsToService(snapshot, current)) return null;
+  const inputs = JSON.parse(JSON.stringify(snapshot.decisionInputs));
+  const replay = buildWeeklyEmailDecision({
+    ...weeklyInputsForCustomer(current, {
+      weekEnding: dateOnlyString(snapshot.weekEnding),
+      weekWeather: { rainInches: inputs.rainfallInches7d, et0Inches: inputs.et0Inches, rainSource: inputs.rainSource },
+      priorWeek: { events: inputs.priorWeekEvents, prescribedInches: inputs.priorWeekPrescribedInches },
+      weekPlanEnabled: true,
+      planWeekEnd: inputs.planWeekEnd,
+      now: new Date(snapshot.planAsOf),
+    }),
+    forecastRainInches: inputs.forecastRainInches,
+    forecastEt0Inches: inputs.forecastEt0Inches,
+  });
+  if (!replay.shouldSend || !replay.weekPlan) return null;
+  // Premise identity was checked above with homesDiffer's street/unit/ZIP
+  // rules. Postal-city spelling and formatting must not invalidate that match.
+  const replayInputs = { ...JSON.parse(JSON.stringify(replay.decisionInputs)), home: inputs.home };
+  if (!isDeepStrictEqual(replay.weekPlan, snapshot.plan)
+    || !isDeepStrictEqual(replayInputs, inputs)) return null;
+  return replay;
 }
 
 // Grass for the water target: the turf profile's canonical key wins; legacy
@@ -1148,9 +1234,12 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   // given.
   const tick = clock || (now ? () => now : () => new Date());
   const weekEnding = lastCompletedWeekEnding(startedAt);
-  const candidates = await findEligibleCustomers({ now: startedAt });
+  const weekPlanGate = gateEnvValue('GATE_IRRIGATION_WEEK_PLAN');
+  const appPublication = gateEnvValue('GATE_IRRIGATION_APP_PLAN') && weekPlanGate;
+  const emailEnabled = isEnabled('irrigationWeeklyEmail');
+  const candidates = await findEligibleCustomers({ now: startedAt, includeApp: appPublication });
 
-  if (!isEnabled('irrigationWeeklyEmail')) {
+  if (!emailEnabled && !appPublication) {
     logger.info(`[irrigation-weekly-email] shadow mode (gate off): ${candidates.length} candidate(s) for week ending ${weekEnding} — no emails sent`);
     return { shadow: true, weekEnding, candidates: candidates.length, sent: 0 };
   }
@@ -1161,6 +1250,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     candidates: candidates.length,
     attempted: 0,
     sent: 0,
+    published: 0,
     deduped: 0,
     blocked: 0,
     skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0, no_longer_eligible: 0, home_moved_mid_sweep: 0 },
@@ -1179,45 +1269,42 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     const { dayOfWeek, hour } = etParts(at);
     return dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;
   };
-  const weekPlanGate = isEnabled('irrigationWeekPlan');
   // Plan-week horizon: the Sunday after the completed week (ET).
   const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
 
-  for (let customer of candidates) {
-    if (summary.attempted >= maxSendAttempts) {
-      summary.skipped.capped += 1;
-      continue;
-    }
-    // The audience row was loaded once at sweep start; with per-customer
-    // weather + provider calls a late candidate's row can be HOURS stale —
-    // an address change in between would send the former home's exact
-    // legal/controller plan (codex gh-r38). Re-read this customer through
-    // the SAME query at their turn; a customer no longer eligible (moved
-    // out of evidence, opted out, deleted) is skipped, and an unreadable
-    // re-read keeps the loaded row (the queue-transition stamp check below
-    // still guards the plan path).
-    try {
-      const fresh = await findEligibleCustomers({ now: startedAt, customerId: customer.id });
-      if (!fresh.length) { summary.skipped.no_longer_eligible += 1; continue; }
-      // A move stamp that CHANGED since the audience load means this row is
-      // mid-transition: the address paths clear and re-geocode coordinates
-      // asynchronously AFTER the stamping transaction, so the re-read can
-      // carry the new address with the former home's lat/lng — weather for
-      // the old premise under the new address (codex gh-r45). Skip the
-      // customer this run; a long-settled move (same stamp in both reads)
-      // has settled coordinates too.
-      const stampMsAt = (v) => (v ? new Date(v).getTime() : null);
-      if (stampMsAt(fresh[0].irrigation_home_changed_at) !== stampMsAt(customer.irrigation_home_changed_at)) {
-        summary.skipped.home_moved_mid_sweep += 1;
-        logger.warn(`[irrigation-weekly-email] home moved mid-sweep for ${customer.id} — skipped this run`);
-        continue;
+  const pendingEmails = [];
+  // Both preparation failures and ambiguous provider outcomes use the same
+  // durable delivery reconciliation before releasing a snapshot claim.
+  const recordFailure = async (err, customer, snapshotArgs) => {
+    // A throw is AMBIGUOUS (sendTemplate can throw after the provider
+    // accepted). Reconcile from the durable record: delivered → stamp;
+    // definitely not delivered → drop the unsent row so a retry's plan is
+    // the one both sent and stored; in flight/unknown → leave it for the
+    // next run to reconcile.
+    if (snapshotArgs) {
+      const prior = await weekPlanDeliveryState({ triggerEventId: snapshotArgs.triggerEventId, idempotencyKey: snapshotArgs.idempotencyKey });
+      if (prior.state === 'sent') {
+        if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
+      } else if (prior.state === null || prior.state === 'blocked') {
+        // Never reached the provider / suppressed: definitely not delivered.
+        // 'failed' is AMBIGUOUS (the library can mark a row failed when its
+        // post-provider status update fails) — the row is retained for a
+        // later reconciliation once the delivery webhook repairs the record.
+        await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
       }
-      customer = fresh[0];
-    } catch (err) {
-      logger.warn(`[irrigation-weekly-email] candidate re-read failed for ${customer.id}: ${err.message}`);
     }
-    // Hoisted so the catch can discard a pre-send snapshot when the send throws.
-    let snapshotArgs = null;
+    summary.failed += 1;
+    const reason = sanitizeFailureReason(err);
+    logger.error(`[irrigation-weekly-email] send failed for customer ${customer.id}: ${reason}`);
+    await logEmailAttempt({
+      customerId: customer.id,
+      templateKey: 'irrigation.weekly',
+      status: 'failed',
+      failureReason: reason,
+      weekEnding,
+    });
+  };
+  const deliverEmail = async ({ customer, decision, decisionInputs, weekWeather, priorWeek, snapshotArgs, forecastRainInches, forecastEt0Inches, triggerEventId, idempotencyKey }) => {
     // The queue-transition renewal's verdict: true (renewed), false (claim
     // LOST to another worker), null (unreadable after retries) — the abort
     // below is counted by cause, never all as "claimed elsewhere".
@@ -1234,207 +1321,32 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     // check before a legal/controller instruction must fail CLOSED — the
     // plan is not sent this run (codex gh-r40).
     let stampCheckFailedAtQueue = false;
-    // THIS customer's clock reading: the window verdict and the snapshot's
-    // planAsOf come from it, not from the sweep's start time.
-    const planAsOf = tick();
-    const isMondayET = planWindowOpen(planAsOf);
-    const weekPlanEnabled = weekPlanGate && isMondayET;
     try {
-      if (!isEmailLike(customer.email)) {
-        summary.skipped.missing_email += 1;
-        continue;
-      }
-
-      const weekWeather = await fetchServiceWeekWeather({
-        latitude: customer.latitude,
-        longitude: customer.longitude,
-        serviceDate: weekEnding,
-      });
-
-      // After a move, every NON-NULL sizing field must have been re-saved
-      // (irrigation_confirmed_fields, reset by the move, accrues one field
-      // per portal autosave) before any of them sizes an instruction — a
-      // single re-saved field, a non-sizing irrigation edit, or the row-wide
-      // updated_at never re-confirms the rest (codex gh-r20/r21).
-      const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
-      const priorWeek = weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding, home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip } }) : null;
-      const priorWeekEvents = priorWeek ? priorWeek.events : null;
-      const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
-      const decisionInputs = {
-        firstName: customer.first_name,
-        // Grass type is a property of the LAWN: after a move the profile
-        // describes the former yard (Bahia Kc 0.45 vs St. Augustine 0.8
-        // changes the target and the hold/run call). Its OWN ledger entry
-        // gates it — re-saving the four sizing fields says nothing about
-        // the grass, so `scheduleUnconfirmed` clearing must not re-enable
-        // the old coefficient (codex gh-r40/r41). Until a turf writer
-        // re-establishes it (grass edit, or auto-capture filling a blank
-        // profile) the plan sizes from the unknown-grass fallback and the
-        // copy says "your lawn".
-        grassType: grassConfirmedAfterMove(customer) ? resolveGrassType(customer) : null,
-        weekEnding,
-        irrigationInchesPerWeek: customer.irrigation_inches_per_week,
-        turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
-        assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
-        turfIrrigationType: customer.turf_irrigation_type,
-        irrigationSystem: customer.irrigation_system,
-        irrigationRunMinutes: customer.irrigation_run_minutes,
-        wateringDays: customer.watering_days,
-        irrigationSystemType: customer.irrigation_system_type,
-        // Settings saved BEFORE the home moved describe the former property's
-        // sprinkler system. The inputs still ride (so the decision routes to
-        // the plan renderer, not the "missing schedule" setup copy — codex
-        // gh-r22); the PLAN drops the sizing fields and says why.
-        scheduleUnconfirmed,
-        priorWeekEvents,
-        priorWeekPrescribedInches,
-        // The rain-sensor flag describes the former home's controller after a
-        // move — trusted again only when the customer re-saves THAT field
-        // (its own ledger entry; the sizing fields clearing
-        // scheduleUnconfirmed say nothing about the sensor — codex
-        // gh-r40/r41).
-        rainSensor: rainSensorConfirmedAfterMove(customer) && (customer.rain_sensor === true || customer.rain_sensor === 't'),
-        rainfallInches7d: weekWeather.rainInches,
-        et0Inches: weekWeather.et0Inches,
-        rainSource: weekWeather.rainSource,
-        weekPlanEnabled,
-        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at, movedAt: customer.irrigation_home_changed_at || null, countyConfirmed: countyConfirmedAfterMove(customer) }),
-        home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
-        // The restriction must cover the WHOLE plan week (through this Sunday).
-        planWeekEnd,
-        now: planAsOf,
-      };
-      // Decide from last week's balance FIRST — the forecast only fills an
-      // optional copy line and never changes shouldSend, so skipped customers
-      // (balanced / rain-unknown) must not cost an Open-Meteo forecast call.
-      let decision = buildWeeklyEmailDecision(decisionInputs);
-      if (!decision.shouldSend) {
-        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
-        else summary.skipped.unknown += 1;
-        continue;
-      }
-      const upcoming = await fetchUpcomingWeekForecast({
-        latitude: customer.latitude,
-        longitude: customer.longitude,
-        // Plan mode only: the plan week ends the Sunday after the completed
-        // week. The legacy templates keep their seven-day window — their
-        // forecast_line says "over the next 7 days".
-        horizonEnd: weekPlanEnabled ? planWeekEnd : null,
-        now: planAsOf,
-      });
-      const forecastRainInches = upcoming ? upcoming.rainInches : null;
-      const forecastEt0Inches = upcoming ? upcoming.et0Inches : null;
-      decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches });
-      // Defensive recheck — today the forecast only reroutes a deficit to the
-      // on-track template (still a send), but a no-send here must be counted.
-      if (!decision.shouldSend) {
-        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
-        else summary.skipped.unknown += 1;
-        continue;
-      }
-
-      // Same bounded per-recipient token as appointment-email so the key fits
-      // email_messages.idempotency_key even for long addresses.
-      const recipientToken = crypto.createHash('sha256')
-        .update(String(customer.email).trim().toLowerCase())
-        .digest('hex')
-        .slice(0, 16);
-      const idempotencyKey = `irrigation.weekly:${customer.id}:${weekEnding}:${recipientToken}`;
-      const triggerEventId = `irrigation.weekly:${customer.id}:${weekEnding}`;
-
-      // One email per customer-week, plan or legacy, WHATEVER the gate reads
-      // now: a late retry (plan mode off, or the kill switch unset after
-      // Monday's plan went out) must not send a second, contradicting email
-      // on a new recipient key (email change, customer merge) — hook P1 on
-      // 41705b745: gating this on weekPlanGate let a gate-off retry bypass
-      // the customer-week dedupe.
-      if (!decision.weekPlan) {
-        const alreadySentLegacyPath = await hasSentWeekPlan({ customerId: customer.id, weekEnding });
-        const priorLegacyPath = alreadySentLegacyPath === true ? { state: 'sent' } : await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
-        if (alreadySentLegacyPath === true || priorLegacyPath.state === 'sent') {
-          summary.deduped += 1;
-          continue;
+      if (summary.attempted >= maxSendAttempts) { summary.skipped.capped += 1; return; }
+      if (appPublication) {
+        // Publication can prepare the whole audience before email starts.
+        // Revalidate delayed work against the current recipient, preferences
+        // and property before consuming an attempt or calling the provider.
+        const current = (await findEligibleCustomers({ customerId: customer.id, now: tick() }))[0];
+        if (!current || String(current.email).trim().toLowerCase() !== String(customer.email).trim().toLowerCase()) {
+          summary.skipped.no_longer_eligible += 1;
+          return;
         }
-        if (priorLegacyPath.state === 'pending') {
-          // In flight, or a post-provider failure the webhook has not yet
-          // repaired: the plan may already be in the inbox — never a second,
-          // contradicting pre-plan email on top of it.
-          summary.plan.claimed_elsewhere += 1;
-          continue;
+        const stampAt = (value) => (value ? new Date(value).getTime() : null);
+        if (stampAt(current.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) {
+          summary.plan.home_moved += 1;
+          return;
         }
-      }
-
-      if (decision.weekPlan) {
-        const p = decision.weekPlan;
-        summary.plan[p.action === 'hold' ? 'hold' : (p.conditionalOnForecast ? 'conditional' : 'run')] += 1;
-        // Exactness, decided from the durable email record, never from a
-        // return shape: if a prior run already delivered this week's email,
-        // the unsent row (that run's pre-send write) is the plan the customer
-        // has — stamp it and never replace it. In flight/unknown → touch
-        // nothing. Otherwise write THIS decision (replacing only an unsent
-        // row) and stamp it after the provider accepts.
-        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey, triggerEventId };
-        // One plan per customer-week. A SENT snapshot with a different
-        // idempotency key (the customer changed email mid-week) means the
-        // week's email already went out — never send a second, possibly
-        // different, plan to the new address.
-        const alreadySent = await hasSentWeekPlan({ customerId: customer.id, weekEnding });
-        if (alreadySent === true) {
-          summary.deduped += 1;
-          continue;
+        const currentDecision = snapshotArgs
+          ? replayWeekPlanForCustomer(snapshotArgs, current)
+          : buildWeeklyEmailDecision({
+            ...weeklyInputsForCustomer(current, { weekEnding, weekWeather, priorWeek, weekPlanEnabled: false, planWeekEnd, now: decisionInputs.now }),
+            forecastRainInches, forecastEt0Inches,
+          });
+        if (!currentDecision || !isDeepStrictEqual(currentDecision.payload, decision.payload)) {
+          summary.plan.unavailable += 1;
+          return;
         }
-        if (alreadySent === null) {
-          // Unreadable snapshot table is not proof of a sent row — but the
-          // durable customer-week email record still is: a delivered or
-          // in-flight plan email stops this run (an email change must not
-          // earn a second, contradicting message). Otherwise the week's
-          // email still goes out on the pre-plan template.
-          const priorUnreadable = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
-          if (priorUnreadable.state === 'sent') { summary.deduped += 1; continue; }
-          if (priorUnreadable.state === 'pending') { summary.plan.claimed_elsewhere += 1; continue; }
-          summary.plan.claim_error += 1;
-          decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
-          snapshotArgs = null;
-        }
-        const prior = snapshotArgs ? await weekPlanDeliveryState({ triggerEventId, idempotencyKey }) : { state: 'pending' };
-        if (!snapshotArgs) {
-          // fell back above — nothing to claim
-        } else if (prior.state === 'sent') {
-          // Delivered by an earlier run: stamp exactly the row its record
-          // names (none named → the report stays without a plan) and STOP —
-          // one email per customer-week, whatever the recipient key now is
-          // (an address change must not earn a second plan).
-          if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
-          summary.deduped += 1;
-          continue;
-        } else if (prior.state !== 'pending') {
-          const claim = await persistWeekPlan(snapshotArgs);
-          snapshotArgs.claimToken = claim.claimToken;
-          if (claim.error) {
-            // A snapshot DB error is not contention: the week's email still
-            // goes out on the pre-plan template (a Tuesday retry could not
-            // restore a Monday-only plan), counted separately.
-            summary.plan.claim_error += 1;
-            decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
-            snapshotArgs = null;
-          } else if (!claim.claimed) {
-            // Another worker holds the customer-week (overlapping sweeps) or
-            // the row is already sent — that worker's decision is the one
-            // sent AND stored; this one must not send a second plan.
-            summary.plan.claimed_elsewhere += 1;
-            continue;
-          } else {
-            snapshotArgs.decisionHash = claim.hash;
-          }
-        } else {
-          // In flight elsewhere: touch nothing, send nothing.
-          summary.plan.claimed_elsewhere += 1;
-          continue;
-        }
-      } else if (decision.weekPlanUnavailable) {
-        summary.plan.unavailable += 1;
-      } else if (weekPlanGate && !isMondayET) {
-        summary.plan.late_retry += 1;
       }
       // Consume the cap BEFORE the provider call: an error thrown after
       // SendGrid accepts (audit/DB failure) must still count as an attempt.
@@ -1472,8 +1384,15 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         // unreadable one (null, after retries) both abort inside the
         // library (fail closed; a reclaimed snapshot must never be
         // followed by this worker's older decision).
-        onQueued: snapshotArgs?.claimToken
-          ? async () => {
+        onQueued: async () => {
+            if (!snapshotArgs?.claimToken) {
+              // Every pre-plan fallback rechecks publication at dispatch,
+              // including a DB-error fallback or a gate-off, late retry.
+              // Unknown availability cannot authorize a contradictory email.
+              const available = await hasSentWeekPlan({ customerId: customer.id, weekEnding, includePublished: true });
+              if (available === null) stampCheckFailedAtQueue = true;
+              return available === false;
+            }
             // Re-read the move stamp at dispatch UNDER the property-
             // preferences advisory lock: a plain MVCC read would not wait
             // for an address-change transaction that already holds the lock
@@ -1516,8 +1435,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
             if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
             claimRenewal = queueVerdict.renewed;
             return claimRenewal === true;
-          }
-          : null,
+          },
             });
           } catch (err) {
             if (err?.code !== 'EMAIL_SEND_IN_PROGRESS' || attempt >= IN_PROGRESS_RETRIES) throw err;
@@ -1527,6 +1445,11 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       };
       let result = await dispatch();
 
+      if (result.aborted && windowClosedAtQueue && snapshotArgs?.published) {
+        summary.plan.window_closed += 1;
+        if (!result.providerAttempted) summary.attempted -= 1;
+        return;
+      }
       if (result.aborted && windowClosedAtQueue) {
         // The cutoff passed while this send waited on the provider: the
         // plan is withheld and its unsent snapshot discarded (this worker's
@@ -1545,7 +1468,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
           summary.attempted -= 1; // the aborted attempt never reached the provider
           if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
           else summary.skipped.unknown += 1;
-          continue;
+          return;
         }
         result = await dispatch();
       }
@@ -1567,7 +1490,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
           // Ops exception, not a resolved race: nothing was sent, the unsent
           // snapshot stays claimable past its lease for a retry.
           summary.plan.claim_error += 1;
-          continue;
+          return;
         }
         if (homeMovedAtQueue) {
           // The plan was decided for the former home: discard its unsent
@@ -1578,7 +1501,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
           summary.plan.home_moved += 1;
           logger.warn(`[irrigation-weekly-email] home moved before dispatch for ${customer.id}/${weekEnding} — plan withheld`);
           await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
-          continue;
+          return;
         }
         if (claimRenewal === null) {
           // Unreadable renewal even after retries: NOT evidence of another
@@ -1587,10 +1510,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
           // 45beb0731). The unsent snapshot stays claimable past its lease.
           summary.plan.claim_error += 1;
           logger.error(`[irrigation-weekly-email] claim renewal unreadable for ${customer.id}/${weekEnding} — plan email not sent this run`);
-          continue;
+          return;
         }
         summary.plan.claimed_elsewhere += 1;
-        continue;
+        return;
       }
 
       if (snapshotArgs) {
@@ -1600,12 +1523,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
           // sent+deduped+providerAttempted). Pre-send write may have failed
           // transiently — one more try, then stamp by this decision's hash.
           const hash = snapshotArgs.decisionHash || (await persistWeekPlan(snapshotArgs)).hash;
-          if (hash) {
-            // One retry on a transient stamp failure; the delivery record
-            // (plan:<hash>) still lets loadCurrentWeekPlan reconcile later.
-            const stamped = await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
-            if (!stamped) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
-          }
+          // The writer rejects a missing hash. Retry one transient stamp
+          // failure; the durable delivery record still permits reconciliation.
+          const stamped = await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
+          if (!stamped) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
         } else if (result.deduped) {
           // Deduped without a provider attempt: the durable record decides,
           // and only the row it names is stamped.
@@ -1644,35 +1565,256 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         });
       }
     } catch (err) {
-      // A throw is AMBIGUOUS (sendTemplate can throw after the provider
-      // accepted). Reconcile from the durable record: delivered → stamp;
-      // definitely not delivered → drop the unsent row so a retry's plan is
-      // the one both sent and stored; in flight/unknown → leave it for the
-      // next run to reconcile.
-      if (snapshotArgs) {
-        const prior = await weekPlanDeliveryState({ triggerEventId: snapshotArgs.triggerEventId, idempotencyKey: snapshotArgs.idempotencyKey });
-        if (prior.state === 'sent') {
-          if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
-        } else if (prior.state === null || prior.state === 'blocked') {
-          // Never reached the provider / suppressed: definitely not delivered.
-          // 'failed' is AMBIGUOUS (the library can mark a row failed when its
-          // post-provider status update fails) — the row is retained for a
-          // later reconciliation once the delivery webhook repairs the record.
-          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+      await recordFailure(err, customer, snapshotArgs);
+    }
+  };
+
+  for (let customer of candidates) {
+    if (summary.attempted >= maxSendAttempts && !appPublication) {
+      summary.skipped.capped += 1;
+      continue;
+    }
+    // The audience row was loaded once at sweep start; with per-customer
+    // weather + provider calls a late candidate's row can be HOURS stale —
+    // an address change in between would send the former home's exact
+    // legal/controller plan (codex gh-r38). Re-read this customer through
+    // the SAME query at their turn; a customer no longer eligible (moved
+    // out of evidence, opted out, deleted) is skipped, and an unreadable
+    // re-read keeps the loaded row (the queue-transition stamp check below
+    // still guards the plan path).
+    try {
+      const fresh = await findEligibleCustomers({ now: tick(), customerId: customer.id, includeApp: appPublication });
+      if (!fresh.length) { summary.skipped.no_longer_eligible += 1; continue; }
+      // A move stamp that CHANGED since the audience load means this row is
+      // mid-transition: the address paths clear and re-geocode coordinates
+      // asynchronously AFTER the stamping transaction, so the re-read can
+      // carry the new address with the former home's lat/lng — weather for
+      // the old premise under the new address (codex gh-r45). Skip the
+      // customer this run; a long-settled move (same stamp in both reads)
+      // has settled coordinates too.
+      const stampMsAt = (v) => (v ? new Date(v).getTime() : null);
+      if (stampMsAt(fresh[0].irrigation_home_changed_at) !== stampMsAt(customer.irrigation_home_changed_at)) {
+        summary.skipped.home_moved_mid_sweep += 1;
+        logger.warn(`[irrigation-weekly-email] home moved mid-sweep for ${customer.id} — skipped this run`);
+        continue;
+      }
+      customer = fresh[0];
+    } catch (err) {
+      logger.warn(`[irrigation-weekly-email] candidate re-read failed for ${customer.id}: ${err.message}`);
+      if (appPublication) { summary.failed += 1; continue; }
+    }
+    // Hoisted so the catch can discard a pre-send snapshot when the send throws.
+    let snapshotArgs = null;
+    // THIS customer's clock reading: the window verdict and the snapshot's
+    // planAsOf come from it, not from the sweep's start time.
+    const planAsOf = tick();
+    const isMondayET = planWindowOpen(planAsOf);
+    const weekPlanEnabled = weekPlanGate && isMondayET;
+    try {
+      const canEmail = emailEnabled && customer.email_enabled !== false && isEmailLike(customer.email);
+      if (!canEmail && !appPublication) {
+        summary.skipped.missing_email += 1;
+        continue;
+      }
+
+      const saved = appPublication ? await loadCurrentWeekPlan(customer.id, { now: planAsOf, strict: true }) : null;
+      if (saved?.sentAt) { summary.deduped += 1; continue; }
+      // Publication freezes this week's weather and decision. Even a later
+      // email attempt consumes those inputs, after validating current settings.
+      if (saved && (!weekPlanEnabled || !replayWeekPlanForCustomer(saved, customer))) {
+        summary.plan.unavailable += 1;
+        continue;
+      }
+      const frozen = saved?.decisionInputs;
+      const weekWeather = frozen
+        ? { rainInches: frozen.rainfallInches7d, et0Inches: frozen.et0Inches, rainSource: frozen.rainSource }
+        : await fetchServiceWeekWeather({ latitude: customer.latitude, longitude: customer.longitude, serviceDate: weekEnding });
+      const priorWeek = frozen ? { events: frozen.priorWeekEvents, prescribedInches: frozen.priorWeekPrescribedInches }
+        : weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding, home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip } }) : null;
+      const decisionInputs = weeklyInputsForCustomer(customer, {
+        weekEnding, weekWeather, priorWeek, weekPlanEnabled, planWeekEnd, now: saved ? new Date(saved.planAsOf) : planAsOf,
+      });
+      // Replay already validated this premise and the current settings. Keep
+      // its saved spelling so a formatting edit cannot change the claim hash.
+      if (frozen) decisionInputs.home = frozen.home;
+      // Decide from last week's balance FIRST — the forecast only fills an
+      // optional copy line and never changes shouldSend, so skipped customers
+      // (balanced / rain-unknown) must not cost an Open-Meteo forecast call.
+      let decision = buildWeeklyEmailDecision(decisionInputs);
+      if (!decision.shouldSend) {
+        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
+        else summary.skipped.unknown += 1;
+        continue;
+      }
+      const upcoming = frozen ? { rainInches: frozen.forecastRainInches, et0Inches: frozen.forecastEt0Inches } : await fetchUpcomingWeekForecast({
+        latitude: customer.latitude,
+        longitude: customer.longitude,
+        // Plan mode only: the plan week ends the Sunday after the completed
+        // week. The legacy templates keep their seven-day window — their
+        // forecast_line says "over the next 7 days".
+        horizonEnd: weekPlanEnabled ? planWeekEnd : null,
+        now: planAsOf,
+      });
+      const forecastRainInches = upcoming ? upcoming.rainInches : null;
+      const forecastEt0Inches = upcoming ? upcoming.et0Inches : null;
+      decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches });
+      // Defensive recheck — today the forecast only reroutes a deficit to the
+      // on-track template (still a send), but a no-send here must be counted.
+      if (!decision.shouldSend) {
+        if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
+        else summary.skipped.unknown += 1;
+        continue;
+      }
+
+      // Same bounded per-recipient token as appointment-email so the key fits
+      // email_messages.idempotency_key even for long addresses.
+      const recipientToken = crypto.createHash('sha256')
+        .update(String(customer.email).trim().toLowerCase())
+        .digest('hex')
+        .slice(0, 16);
+      const idempotencyKey = `irrigation.weekly:${customer.id}:${weekEnding}:${recipientToken}`;
+      const triggerEventId = `irrigation.weekly:${customer.id}:${weekEnding}`;
+
+      // One email per customer-week, plan or legacy, WHATEVER the gate reads
+      // now: a late retry (plan mode off, or the kill switch unset after
+      // Monday's plan went out) must not send a second, contradicting email
+      // on a new recipient key (email change, customer merge) — hook P1 on
+      // 41705b745: gating this on weekPlanGate let a gate-off retry bypass
+      // the customer-week dedupe.
+      if (!decision.weekPlan) {
+        const alreadySentLegacyPath = await hasSentWeekPlan({ customerId: customer.id, weekEnding, includePublished: true });
+        const priorLegacyPath = alreadySentLegacyPath === true ? { state: 'sent' } : await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
+        if (alreadySentLegacyPath === true || priorLegacyPath.state === 'sent') {
+          summary.deduped += 1;
+          continue;
+        }
+        if (priorLegacyPath.state === 'pending') {
+          // In flight, or a post-provider failure the webhook has not yet
+          // repaired: the plan may already be in the inbox — never a second,
+          // contradicting pre-plan email on top of it.
+          summary.plan.claimed_elsewhere += 1;
+          continue;
         }
       }
-      summary.failed += 1;
-      const reason = sanitizeFailureReason(err);
-      logger.error(`[irrigation-weekly-email] send failed for customer ${customer.id}: ${reason}`);
-      await logEmailAttempt({
-        customerId: customer.id,
-        templateKey: 'irrigation.weekly',
-        status: 'failed',
-        failureReason: reason,
-        weekEnding,
-      });
+
+      if (decision.weekPlan) {
+        const p = decision.weekPlan;
+        summary.plan[p.action === 'hold' ? 'hold' : (p.conditionalOnForecast ? 'conditional' : 'run')] += 1;
+        // Exactness, decided from the durable email record, never from a
+        // return shape: if a prior run already delivered this week's email,
+        // the unsent row (that run's pre-send write) is the plan the customer
+        // has — stamp it and never replace it. In flight/unknown → touch
+        // nothing. Otherwise write THIS decision (replacing only an unsent
+        // row) and stamp it after the provider accepts.
+        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf: saved?.planAsOf || planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey, triggerEventId };
+        // One plan per customer-week. A SENT snapshot with a different
+        // idempotency key (the customer changed email mid-week) means the
+        // week's email already went out — never send a second, possibly
+        // different, plan to the new address.
+        const alreadySent = await hasSentWeekPlan({ customerId: customer.id, weekEnding });
+        if (alreadySent === true) {
+          summary.deduped += 1;
+          continue;
+        }
+        if (alreadySent === null) {
+          // Unreadable snapshot table is not proof of a sent row — but the
+          // durable customer-week email record still is: a delivered or
+          // in-flight plan email stops this run (an email change must not
+          // earn a second, contradicting message). Otherwise the week's
+          // email still goes out on the pre-plan template.
+          const priorUnreadable = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
+          if (priorUnreadable.state === 'sent') { summary.deduped += 1; continue; }
+          if (priorUnreadable.state === 'pending') { summary.plan.claimed_elsewhere += 1; continue; }
+          summary.plan.claim_error += 1;
+          decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
+          snapshotArgs = null;
+        }
+        const prior = snapshotArgs ? await weekPlanDeliveryState({ triggerEventId, idempotencyKey }) : { state: 'pending' };
+        if (!snapshotArgs) {
+          // fell back above — nothing to claim
+        } else if (prior.state === 'sent') {
+          // Delivered by an earlier run: stamp exactly the row its record
+          // names (none named → the report stays without a plan) and STOP —
+          // one email per customer-week, whatever the recipient key now is
+          // (an address change must not earn a second plan).
+          if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
+          summary.deduped += 1;
+          continue;
+        } else if (prior.state !== 'pending') {
+          const claim = await persistWeekPlan(snapshotArgs);
+          snapshotArgs.claimToken = claim.claimToken;
+          if (claim.error && saved) { summary.plan.claim_error += 1; continue; }
+          if (claim.error) {
+            // A snapshot DB error is not contention: the week's email still
+            // goes out on the pre-plan template (a Tuesday retry could not
+            // restore a Monday-only plan), counted separately.
+            summary.plan.claim_error += 1;
+            decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
+            snapshotArgs = null;
+          } else if (!claim.claimed) {
+            // Another worker holds the customer-week (overlapping sweeps) or
+            // the row is already sent — that worker's decision is the one
+            // sent AND stored; this one must not send a second plan.
+            summary.plan.claimed_elsewhere += 1;
+            continue;
+          } else {
+            snapshotArgs.decisionHash = claim.hash;
+          }
+        } else {
+          // In flight elsewhere: touch nothing, send nothing.
+          summary.plan.claimed_elsewhere += 1;
+          continue;
+        }
+      } else if (decision.weekPlanUnavailable) {
+        summary.plan.unavailable += 1;
+      } else if (weekPlanGate && !isMondayET) {
+        summary.plan.late_retry += 1;
+      }
+      if (snapshotArgs && appPublication) {
+        // Publish under the existing property lock. Re-read the whole eligible
+        // customer and replay the saved decision while the lock fences moves
+        // and preference edits; clock and rollout gates are checked last.
+        const published = await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customer.id)]);
+          const current = (await findEligibleCustomers({ customerId: customer.id, now: tick(), includeApp: true, conn: trx }))[0];
+          const snapshot = { ...snapshotArgs, plan: decision.weekPlan };
+          if (!current || !replayWeekPlanForCustomer(snapshot, current)) return false;
+          const stampAt = (v) => (v ? new Date(v).getTime() : null);
+          if (stampAt(current.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) return false;
+          const at = tick();
+          if (!planWindowOpen(at) || !gateEnvValue('GATE_IRRIGATION_APP_PLAN') || !gateEnvValue('GATE_IRRIGATION_WEEK_PLAN')) return 'email_only';
+          if (!samePolicy(snapshot.restriction, currentRestrictionPolicy(at, { county: snapshot.decisionInputs.county, horizonEnd: planWeekEnd }))) return false;
+          return (await trx('irrigation_week_plans')
+            .where({ customer_id: customer.id, week_ending: weekEnding, claim_token: snapshotArgs.claimToken, decision_hash: snapshotArgs.decisionHash })
+            .update({ published_at: trx.raw('COALESCE(published_at, ?)', [at]), updated_at: trx.fn.now() })) > 0;
+        });
+        if (published === 'email_only') {
+          // Valid property inputs still support the independent pre-plan
+          // email when app publication loses its Monday window or gate.
+          // The queue-time availability check protects any earlier plan.
+          summary.plan.unavailable += 1;
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+          decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
+          snapshotArgs = null;
+        } else if (published) {
+          snapshotArgs.published = true;
+          if (!saved?.publishedAt) summary.published += 1;
+        } else { summary.plan.unavailable += 1; continue; }
+      }
+      // An unavailable plan never falls into an email-only template when
+      // email is disabled. Publication does not consume the email send cap.
+      if (!canEmail || !decision.shouldSend) continue;
+      const email = { customer, decision, decisionInputs, weekWeather, priorWeek, snapshotArgs, forecastRainInches, forecastEt0Inches, triggerEventId, idempotencyKey };
+      if (appPublication) pendingEmails.push(email);
+      else await deliverEmail(email);
+    } catch (err) {
+      await recordFailure(err, customer, snapshotArgs);
     }
   }
+
+  // Every publishable snapshot is durable before an email provider can delay
+  // the sweep. Legacy email-only runs still deliver at each customer's turn.
+  for (const email of pendingEmails) await deliverEmail(email);
 
   logger.info(
     `[irrigation-weekly-email] week ending ${weekEnding}: ${summary.candidates} candidate(s), `
@@ -1905,6 +2047,8 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
 module.exports = {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
+  weeklyInputsForCustomer,
+  replayWeekPlanForCustomer,
   findUnstampedRecurringLawnMembers,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
