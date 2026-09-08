@@ -177,7 +177,16 @@ async function getLawnProtocolById(knex = db, id, { strict = false } = {}) {
   };
 }
 
-async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId = null, windowKey = null, strict = false } = {}) {
+async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false } = {}) {
+  // An appointment's assigned version must not fall through to the currently
+  // active protocol when that assignment can no longer be resolved.
+  if (!protocolId && protocolKey) {
+    const query = knex('lawn_protocols').where({ protocol_key: protocolKey });
+    if (protocolVersion) query.where({ version: protocolVersion });
+    const assigned = await query.orderBy('effective_from', 'desc').orderBy('created_at', 'desc').first('id');
+    if (!assigned) return null;
+    protocolId = assigned.id;
+  }
   const protocol = protocolId
     ? await getLawnProtocolById(knex, protocolId, { strict })
     : await getActiveLawnProtocol(knex, { grassTrack, region, strict });
