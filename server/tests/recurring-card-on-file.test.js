@@ -698,6 +698,24 @@ describe('replaceRecurringCardIntent ("use a different payment method")', () => 
     }
   });
 
+  // GitHub Codex #4144 r4 P2: the phone-match fallback for an unlinked
+  // estimate rides the same handle.
+  it('passes the transaction handle through the phone-match fallback for an unlinked estimate', async () => {
+    const gates = require('../config/feature-gates').gates;
+    gates.acceptAchCapture = true;
+    try {
+      const UNLINKED = { id: 'est-1', customer_id: null, customer_phone: '9415551234' };
+      mockMatchAcceptCustomerByPhone.mockResolvedValue({ match: null });
+      liveById({ seti_1: { ...LIVE_GOOD, metadata: { ...LIVE_GOOD.metadata, estimate_id: 'est-1' } }, seti_after: FRESH });
+      mockCreateRecurringCardSetupIntent.mockResolvedValue(FRESH);
+      mockRetireSetupIntent.mockResolvedValue({ ...LIVE_GOOD, metadata: { ...LIVE_GOOD.metadata, retired: 'true', replaced_by: 'seti_after' } });
+      expect((await replaceRecurringCardIntent({ estimate: UNLINKED, setupIntentId: 'seti_1' })).ok).toBe(true);
+      expect(mockMatchAcceptCustomerByPhone).toHaveBeenCalledWith(UNLINKED, db.__lastTrx);
+    } finally {
+      gates.acceptAchCapture = false;
+    }
+  });
+
   // GitHub Codex #4144 r2 P0: accepted is not the only terminal state — a
   // decline, expiry or archive that landed after the route's pre-read must
   // also refuse under the lock, before anything is minted or retired.

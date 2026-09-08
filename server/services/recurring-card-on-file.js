@@ -147,7 +147,9 @@ async function resolveProspectiveAcceptCustomer(estimate, database = db) {
     try {
       const gates = require('../routes/estimate-public');
       if (typeof gates.matchAcceptCustomerByPhone === 'function') {
-        const { match } = await gates.matchAcceptCustomerByPhone(estimate);
+        // Same handle as the caller (GitHub Codex #4144 r4 P2): under the
+        // replacement's row lock this must not wait on the pool.
+        const { match } = await gates.matchAcceptCustomerByPhone(estimate, database);
         customerId = match?.id || null;
       }
     } catch (err) {
@@ -330,8 +332,7 @@ const MAX_SETUP_INTENT_GENERATIONS = 5;
 // `database` lets a caller holding a transaction keep these reads on its
 // pinned connection (GitHub Codex #4144 r2 P2: a replacement waiting on the
 // estimate row lock must not also wait on the pool for a second
-// connection). The phone-match fallback inside estimate-public still reads
-// through the module db — it is outside this module's signature.
+// connection), including the phone-match fallback in estimate-public.
 async function resolveRecurringCaptureTender(estimate, database = db) {
   if (require('../config/feature-gates').gates.acceptAchCapture !== true) return 'card';
   const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate, database);
