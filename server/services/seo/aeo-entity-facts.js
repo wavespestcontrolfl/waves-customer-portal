@@ -74,6 +74,11 @@ const ADJACENT_EXCLUSION_RE = new RegExp(`${EXCLUSION_RE.source}\\s+(?:(?:a|an|t
 // begin with the hedged verb ("may cover damage").
 const UNCERTAIN_RE = /\b(?:whether|unclear|unknown|uncertain|unsure|unconfirmed|unverified|possibly|perhaps|probably|presumably|reportedly|allegedly|supposedly|(?:un)?likely|(?:may|might|could)\s+(?!\d|(?:also\s+)?(?:verify|check|look|search|confirm|call|contact|visit|reach|find|use|text|email|see|view|review)\b)|(?:appears?|seems?)\s+(?:to\b|that\b|as if\b))/i;
 const QUESTION_AHEAD_RE = /^[^.!?;\n]*\?/;
+// A conditional or counterfactual about Waves asserts nothing: "If Waves
+// offered fumigation, it would advertise it", "Suppose Waves were a
+// franchise", "Were Waves a franchise, …". A conditional addressed to the
+// reader ("If you want to verify the license, …") leaves the assertion alone.
+const CONDITIONAL_RE = /\b(?:(?:even\s+|what\s+)?if|suppose|supposing|assuming|imagine|hypothetically|in the event that)\s+(?:that\s+)?(?:waves|it|they|the company|the business|adam(?:\s+benetti)?)\s+(?:were|had|was|did|offered|provided|sold|performed|held|served|covered|included|charged|operated|ran|became|belonged|used|owned|founded|started|advertised|listed)\b|\b(?:were|had)\s+(?:waves|it|they|the company|the business)\s+(?:to\s+)?(?:a|an|the|ever|not|offer|provide|sell|perform|hold|serve|cover|include|charge|operate|run|become|belong|use|own)\b/i;
 // A repeated question asserts nothing on its own ("Does Waves offer
 // fumigation?"), but a plain affirmative answer right after it does
 // ("… fumigation? Yes."); a negative or absent answer leaves it unasserted.
@@ -314,8 +319,12 @@ const COMPOUND_WITH_WAVES_RE = new RegExp(`\\b(?:${OTHER_ENTITY_ALTERNATION}|[A-
 // part of a franchise network", "a vendor that serves Manatee County") is the
 // subject of its own relative clause, not Waves — unless the noun is
 // predicated of Waves ("Waves is a company that serves …", "Waves, a family
-// business that …"), where it still describes Waves.
-const GENERIC_PARTY_RE = /(?<!\b(?:is|are|was|were|remains|as|being|became|become)\s+(?:[\w-]+\s+){0,2}|\bwaves,\s+)\b(?:an?|the|another|one|some|any|its|their|this|each|every)\s+(?:(?!\b(?:that|which|who)\b)[\w'-]+\s+){0,2}?(?:contractors?|subcontractors?|vendors?|suppliers?|partners?|providers?|compan(?:y|ies)|firms?|business(?:es)?|competitors?|networks?|affiliates?|franchisees?|technicians?|operators?|brands?|outfits?)\b(?=\s*,?\s*(?:that|which|who|whose)\b)/gi;
+// business that …"), where it still describes Waves. A THIRD party standing
+// before its own predicate ("The contractor offers fumigation") is the
+// subject too; "the company" / "the business" alone still means Waves.
+const THIRD_PARTY_NOUN = '(?:contractors?|subcontractors?|vendors?|suppliers?|partners?|competitors?|affiliates?|franchisees?|networks?)';
+const GENERIC_NOUN = `(?:${THIRD_PARTY_NOUN.slice(3, -1)}|providers?|compan(?:y|ies)|firms?|business(?:es)?|technicians?|operators?|brands?|outfits?)`;
+const GENERIC_PARTY_RE = new RegExp(`(?<!\\b(?:is|are|was|were|remains|as|being|became|become)\\s+(?:[\\w-]+\\s+){0,2}|\\bwaves,\\s+)\\b(?:an?|the|another|one|some|any|its|their|this|each|every)\\s+(?:(?!\\b(?:that|which|who)\\b)[\\w'-]+\\s+){0,2}?(?:${GENERIC_NOUN}\\b(?=\\s*,?\\s*(?:that|which|who|whose)\\b)|${THIRD_PARTY_NOUN}\\b(?=\\s+(?:also\\s+|still\\s+|now\\s+|currently\\s+)?${PREDICATE_VERB}\\b))`, 'gi');
 
 function aboutAnotherEntity(beforeClause, answerPrefix) {
   if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
@@ -386,7 +395,7 @@ function denied(matched, before, after, rest) {
   const inner = NEGATION_RE.exec(innerClause) || EXCLUSION_RE.exec(innerClause);
   const innerAtStart = inner && inner.index === 0 && innerClause === matched;
   return (inner && !innerAtStart)
-    || NEGATION_RE.test(before) || ADJACENT_EXCLUSION_RE.test(before) || UNCERTAIN_RE.test(before + matched)
+    || NEGATION_RE.test(before) || ADJACENT_EXCLUSION_RE.test(before) || UNCERTAIN_RE.test(before + matched) || CONDITIONAL_RE.test(before)
     || AFTER_NEGATION_RE.test(after) || unansweredQuestion(rest)
     || REFUTED_BEFORE_RE.test(before) || (REPORTED_BEFORE_RE.test(before) && REFUTED_AFTER_RE.test(`${matched}${rest}`.split(/[.;!?\n]/)[0]))
     || OUTSIDE_AREA_AFTER_RE.test(rest);

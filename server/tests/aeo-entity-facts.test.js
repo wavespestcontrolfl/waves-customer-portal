@@ -804,3 +804,33 @@ test('a row with an answer but no stored score is rescored from the raw answer, 
   stale.response_raw = 'Founded by John Smith.';
   expect(summarizeEntityObservations([stale])).toEqual(first);
 });
+
+test('a qualified founding year, a standalone third party, adjective-only "-based" values, a past-limited offering, a bond option, and a conditional about Waves (GitHub review r10)', () => {
+  // before / after 2024 does not state the founding year; the approved value is not a wrong claim either.
+  expect(score('E4', 'Waves was founded before 2024.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: false } });
+  expect(score('E4', 'Waves was founded after 2024.').expected.founded_2024).toBe(false);
+  expect(score('E4', 'Waves was founded in early 2024.').expected.founded_2024).toBe(true);
+  // A third party before its own predicate is the subject; "the company" alone is still Waves.
+  expect(score('E6', 'Waves works with a contractor. The contractor offers fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves works with a vendor. The vendor serves Manatee County.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves is based in Lakewood Ranch. The company serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves works with a contractor. The contractor offers fumigation, while Waves offers pest control.')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: false } });
+  // A "-based" value shaped like an adjective is not a place.
+  expect(score('E5', 'Waves is an evidence-based pest control company.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Waves is a science-based, family-based, community-based business.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Waves is a Fort Myers-based company.').forbidden.out_of_footprint_hq).toBe(true);
+  // A past-limited offering is not a current one.
+  for (const text of ['Waves formerly offered fumigation.', 'Waves previously provided fumigation services.', 'Waves stopped offering fumigation in 2025.', 'Waves offered fumigation until 2024.']) {
+    expect([text, score('E6', text).forbidden.fumigation_offered]).toEqual([text, false]);
+  }
+  expect(score('E6', 'Waves offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  // A bond option for a fee is not an included bond.
+  expect(score('E7', 'The first-year treatment comes with a bond option for an added fee.').forbidden.bond_included_first_year).toBe(false);
+  expect(score('E7', 'The first-year treatment comes with a bond.').forbidden.bond_included_first_year).toBe(true);
+  // A conditional about Waves asserts nothing; one addressed to the reader, or a real condition on a claim, does not hedge it.
+  expect(score('E6', 'If Waves offered fumigation, it would advertise that service.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Suppose Waves offered fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E8', 'If Waves were a franchise, its parent company would be listed.').forbidden.franchise).toBe(false);
+  expect(score('E3', 'If you want to verify license JB351547, search the FDACS database.').expected.license_verifiable).toBe(true);
+  expect(score('E7', 'If termites return, re-treatment is free.').forbidden.free_retreat_guarantee).toBe(true);
+});
