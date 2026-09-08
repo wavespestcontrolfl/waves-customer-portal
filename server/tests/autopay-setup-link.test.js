@@ -1056,6 +1056,35 @@ describe('replaceAutopaySetupIntent — "use a different payment method"', () =>
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
   });
 
+  // GH Codex #4163 r1 P0: the GET's closure checks re-run under the lock
+  // before any Stripe state changes — a stale page must not retire a saved
+  // intent for a link completion will refuse.
+  it.each([
+    ['customer archived', () => { mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, deleted_at: new Date() }) }; }, 'not_found'],
+    ['customer gone', () => { mockTableHandlers.customers = { first: () => null }; }, 'not_found'],
+    ['payer-billed', () => { mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' }); }, 'no_longer_needed'],
+    ['unsupported billing lane', () => { mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, billing_mode: 'monthly_membership' }) }; }, 'no_longer_needed'],
+    ['Auto Pay already active elsewhere', () => { mockCustomerOnAutopay.mockResolvedValue(true); }, 'no_longer_needed'],
+  ])('%s since page load is refused under the lock — nothing minted or retired', async (_label, arrange, code) => {
+    arrange();
+    expect(await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' })).toEqual({ ok: false, code });
+    expect(mockCreateSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  it('Auto Pay active elsewhere RETIRES the pending row under the lock (as the GET does), so a refetch renders closed', async () => {
+    mockCustomerOnAutopay.mockResolvedValue(true);
+    await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' });
+    const retire = touches('appointment_card_requests').flatMap((c) => c.calls).find(([op, patch]) => op === 'update' && patch.status === 'expired');
+    expect(retire).toBeTruthy();
+  });
+
+  it('an eligibility lookup failure stays retryable (verification_failed) — never retire on an unknown answer', async () => {
+    mockCustomerOnAutopay.mockRejectedValueOnce(new Error('eligibility down'));
+    expect(await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' })).toEqual({ ok: false, code: 'verification_failed' });
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
   it('an unfinished or already-retired intent has nothing to retire — the ordinary mint/replay is returned', async () => {
     mockRetrieveSetupIntent.mockImplementation(async (id) => (id === 'seti_old' ? { ...SAVED, status: 'requires_payment_method', payment_method: null } : null));
     const res = await replaceAutopaySetupIntent({ request: { ...ROW }, setupIntentId: 'seti_old' });

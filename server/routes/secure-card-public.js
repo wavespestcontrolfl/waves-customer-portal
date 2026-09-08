@@ -123,11 +123,13 @@ router.post('/:token/replace-intent', async (req, res) => {
     });
     if (!result.ok) {
       if (result.code === 'not_found') return res.status(404).json({ error: 'Not found' });
-      if (result.code === 'request_closed') {
-        // Completed by another tab / the webhook, closed by the office, or
-        // expired since page load — the client refetches and renders the
-        // row's true state.
-        return res.status(409).json({ error: 'This link is no longer open for changes. Refresh to see its current status.', code: 'request_closed' });
+      if (result.code === 'request_closed' || result.code === 'no_longer_needed') {
+        // Completed by another tab / the webhook, closed by the office,
+        // expired, or the visit/customer no longer needs a card (cancelled,
+        // past, payer-billed, Auto Pay already on) since page load — the
+        // client refetches and renders the row's true state. Nothing was
+        // retired.
+        return res.status(409).json({ error: 'This link is no longer open for changes. Refresh to see its current status.', code: result.code });
       }
       // intent_mismatch (an id that is not this link's own capture, or one
       // Stripe has never heard of) is the client's error; mint_failed /

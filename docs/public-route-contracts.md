@@ -1443,7 +1443,14 @@ reverted, nothing saved or enrolled; an unreadable one stays
 retryable), on the page POST AND on the `setup_intent.succeeded` webhook
 backstop (which trusts its event payload — the intent as it succeeded).
 A non-pending / expired row under the lock retires nothing (409
-`request_closed` — the client refetches). An unfinished or already-
+`request_closed`), and neither does a link the GET would render closed —
+the visit lane re-runs the completion predicate (visit live, not past,
+priced > 0, no third-party payer) and the standalone lane the GET's
+closure checks (archived customer, payer-billed, unsupported billing
+lane, Auto Pay already active — which retires the row as the GET does),
+all under the lock BEFORE any Stripe state changes (409
+`no_longer_needed`; a lookup failure is 503, never a retirement on an
+unknown answer). The client refetches on either 409. An unfinished or already-
 retired id has nothing to retire and returns the ordinary mint under the
 same lock. Every minted/replayed intent is re-read LIVE before it is
 judged (an idempotent replay returns the ORIGINAL create body, never a

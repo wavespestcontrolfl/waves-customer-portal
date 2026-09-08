@@ -613,8 +613,32 @@ const MAX_SETUP_INTENT_GENERATIONS = 5;
 // then the succeeded intent is stamped retired + `replaced_by` in Stripe,
 // all under the request row lock so the completion claim serializes with
 // it (the tail re-reads the intent live under its claim). A non-pending row
-// retires nothing; an unfinished or already-retired intent hands back the
-// ordinary mint. Returns { ok, intent, retired } or { ok: false, code }.
+// — or a link the GET would render closed — retires nothing; an unfinished
+// or already-retired intent hands back the ordinary mint.
+// Returns { ok, intent, retired } or { ok: false, code }.
+// Is this standalone link still OPEN for a capture? The GET's closure
+// checks (expiry, archived customer, payer-billed, unsupported billing
+// lane, Auto Pay already active elsewhere — which RETIRES the row, as the
+// GET does), re-run under the row lock before the replacement changes any
+// Stripe state (GH Codex #4163 r1 P0): a stale page must not retire a
+// saved intent and be invited to enter a method completion will refuse.
+// Returns { ok: true } or { ok: false, code }.
+async function standaloneLinkStillOpen(request, { database = db } = {}) {
+  if (isExpired(request)) return { ok: false, code: 'request_closed' };
+  const customer = await database('customers').where({ id: request.customer_id }).first();
+  if (!customer || customer.deleted_at) return { ok: false, code: 'not_found' };
+  if (await payerExemption(request.customer_id)) return { ok: false, code: 'no_longer_needed' };
+  if (!billingLaneSupported(customer)) return { ok: false, code: 'no_longer_needed' };
+  const { customerOnAutopay } = require('./autopay-eligibility');
+  if (await customerOnAutopay(customer)) {
+    await database('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update({ status: 'expired', completed_at: new Date(), updated_at: new Date() });
+    return { ok: false, code: 'no_longer_needed' };
+  }
+  return { ok: true };
+}
+
 async function replaceAutopaySetupIntent({ request, setupIntentId }) {
   if (!request || request.kind !== KIND) return { ok: false, code: 'not_found' };
   if (!setupIntentId) return { ok: false, code: 'intent_mismatch' };
@@ -632,7 +656,16 @@ async function replaceAutopaySetupIntent({ request, setupIntentId }) {
   return db.transaction(async (trx) => {
     const row = await trx('appointment_card_requests').where({ id: request.id }).forUpdate().first('id', 'status', 'stripe_setup_intent_id', 'expires_at');
     if (!row) return { ok: false, code: 'not_found' };
-    if (row.status !== 'pending' || isExpired({ ...request, ...row })) return { ok: false, code: 'request_closed' };
+    if (row.status !== 'pending') return { ok: false, code: 'request_closed' };
+    let open;
+    try {
+      open = await standaloneLinkStillOpen({ ...request, ...row }, { database: trx });
+    } catch (err) {
+      // A lookup failure is retryable — never retire on an unknown answer.
+      logger.warn(`[autopay-setup-link] replace: eligibility re-check failed for request ${request.id}: ${err.message}`);
+      return { ok: false, code: 'verification_failed' };
+    }
+    if (!open.ok) return open;
     if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
       const intent = await mintOrReplaySetupIntent({ ...request, ...row }, { database: trx });
       return intent && !intent.stale ? { ok: true, intent, retired: false } : { ok: false, code: 'mint_failed' };

@@ -2145,6 +2145,40 @@ describe('replaceSecureCardIntent — "use a different payment method"', () => {
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
   });
 
+  // GH Codex #4163 r1 P0: a pending row is not enough — the visit can stop
+  // needing a card while its row stays pending. Same predicate as /complete,
+  // evaluated under the lock BEFORE any Stripe state changes.
+  test.each([
+    ['cancelled', { scheduled_services: { first: () => ({ ...VISIT, status: 'cancelled' }) } }],
+    ['rescheduled placeholder', { scheduled_services: { first: () => ({ ...VISIT, status: 'rescheduled' }) } }],
+    ['past-dated', { scheduled_services: { first: () => ({ ...VISIT, scheduled_date: '2020-01-01' }) } }],
+    ['repriced to $0', { scheduled_services: { first: () => ({ ...VISIT, estimated_price: '0' }) } }],
+    ['visit gone', { scheduled_services: { first: () => null } }],
+  ])('a visit that no longer needs a card (%s) is refused under the lock (no_longer_needed) — nothing minted or retired', async (_label, handlers) => {
+    Object.assign(mockTableHandlers, handlers);
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'no_longer_needed' });
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('a third-party payer gained since page load refuses (no_longer_needed); a payer lookup failure stays retryable (verification_failed)', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'no_longer_needed' });
+    mockResolveForInvoice.mockRejectedValueOnce(new Error('payer svc down'));
+    expect(await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' })).toEqual({ ok: false, code: 'verification_failed' });
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('the eligibility re-check reads the visit on the LOCKED transaction handle, after the row lock', async () => {
+    await replaceSecureCardIntent({ token: ROW.token, setupIntentId: 'seti_1' });
+    const order = mockDbTouches.map((t) => `${t.table}:${t.chain.calls.some(([op]) => op === 'forUpdate') ? 'lock' : 'read'}`);
+    const lockAt = order.indexOf('appointment_card_requests:lock');
+    const visitAt = order.indexOf('scheduled_services:read');
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(visitAt).toBeGreaterThan(lockAt);
+  });
+
   test('an unfinished intent has nothing to retire — the ordinary mint is returned under the same lock', async () => {
     mockRetrieveSetupIntent.mockImplementation(async (id) => (id === 'seti_1' ? { ...SAVED, status: 'requires_payment_method', payment_method: null } : echoMintedIntent(id)));
     mockCreateAppointmentCardSetupIntent.mockResolvedValue({ id: 'seti_1', status: 'requires_payment_method', client_secret: 'cs_1' });

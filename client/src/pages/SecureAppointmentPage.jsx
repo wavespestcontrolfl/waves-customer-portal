@@ -311,8 +311,10 @@ export default function SecureAppointmentPage() {
       });
       if (res.status === 404) { setState('notfound'); return false; }
       const body = await res.json().catch(() => ({}));
-      if (res.status === 409 && body?.code === 'request_closed') {
-        // Completed / closed / expired under us — render the row's true state.
+      if (res.status === 409) {
+        // request_closed / no_longer_needed: completed, closed, expired, or
+        // the visit no longer needs a card under us (nothing was retired) —
+        // render the row's true state.
         await refresh();
         return false;
       }

@@ -1409,9 +1409,11 @@ async function createSecureCardSetupIntent(request, { database = db } = {}) {
 // (pending → completing) waits behind it and the tail re-reads the intent
 // live under the claim, so either this commits first and the old intent is
 // refused there, or the claim commits first and this sees a non-pending row
-// and retires nothing. Only an intent pinned to THIS request can be
-// replaced; an unfinished or already-retired one has nothing to retire, so
-// the ordinary mint is returned (under the same lock and pending check).
+// and retires nothing; a visit that no longer needs a card (cancelled,
+// past, $0, payer-billed) is refused under the lock the same way. Only an
+// intent pinned to THIS request can be replaced; an unfinished or
+// already-retired one has nothing to retire, so the ordinary mint is
+// returned (under the same lock and checks).
 // Returns { ok, intent, retired } or { ok: false, code }.
 async function replaceSecureCardIntent({ token, setupIntentId }) {
   const request = await db('appointment_card_requests').where({ token }).first();
@@ -1439,6 +1441,16 @@ async function replaceSecureCardIntent({ token, setupIntentId }) {
     // capture for a row another tab completed, the office closed, or the
     // funnel satisfied meanwhile.
     if (row.status !== 'pending') return { ok: false, code: 'request_closed' };
+    // A pending row is not enough (GH Codex #4163 r1 P0): the visit can be
+    // cancelled / moved to the rescheduled placeholder / past-dated /
+    // repriced to $0 / payer-billed since page load while its row stays
+    // pending. Both GET and /complete refuse those — retiring the saved
+    // intent and offering a fresh capture for them would invite a card
+    // that can never be used. Same predicate as completion, under the lock.
+    const stillNeeded = await secureVisitStillNeedsCard(request, { database: trx });
+    if (!stillNeeded.ok) {
+      return { ok: false, code: stillNeeded.code === 'no_longer_needed' ? 'no_longer_needed' : 'verification_failed' };
+    }
     if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
       const intent = await createSecureCardSetupIntent({ ...request, ...row }, { database: trx });
       return intent ? { ok: true, intent, retired: false } : { ok: false, code: 'mint_failed' };
@@ -1642,16 +1654,24 @@ async function completeSecureCardCaptureFromWebhook(setupIntent) {
 // estimate-card-holds.js.
 const STICKY_DISCLOSURE_VERSION = 'sticky_v1';
 
-async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
-  const visit = await db('scheduled_services')
+// Does this visit still need a card on file? The live re-check the
+// completion tail runs before any save — visit liveness, the same price
+// recheck as page load (Codex #3077 P1: a token minted for a since-
+// unpriced/$0 visit must not complete a capture), not past-dated, no
+// third-party payer — shared with the "use a different payment method"
+// replacement (GH Codex #4163 r1 P0), which must not retire a saved intent
+// or offer a fresh capture for a visit both GET and /complete refuse.
+// `database`: the caller's trx handle when this runs under the row lock.
+// Returns { ok: true } or { ok: false, code } (no_longer_needed, or
+// completion_failed when the payer lookup itself failed — retryable).
+async function secureVisitStillNeedsCard(request, { database = db } = {}) {
+  const visit = await database('scheduled_services')
     .where({ id: request.scheduled_service_id })
     .first('id', 'status', 'scheduled_date', 'estimated_price');
   const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
   const finishPrice = visit && visit.estimated_price != null ? Number(visit.estimated_price) : null;
   if (!visit
     || !LIVE_VISIT_STATUSES.includes(visit.status)
-    // Same price recheck as page load (Codex #3077 P1): a token minted for a
-    // since-unpriced/$0 visit must not complete a capture.
     || !(finishPrice > 0)
     || (dateOnly && dateOnly < etDateString(new Date()))) {
     return { ok: false, code: 'no_longer_needed' };
@@ -1665,9 +1685,15 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     });
     if (resolved?.payerId) return { ok: false, code: 'no_longer_needed' };
   } catch (err) {
-    logger.warn(`[appt-card-request] completion payer re-check failed — refusing enrollment for request ${request.id}: ${err.message}`);
+    logger.warn(`[appt-card-request] payer re-check failed — refusing for request ${request.id}: ${err.message}`);
     return { ok: false, code: 'completion_failed' };
   }
+  return { ok: true };
+}
+
+async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null, disclosureVersion = null }) {
+  const stillNeeded = await secureVisitStillNeedsCard(request);
+  if (!stillNeeded.ok) return stillNeeded;
 
   // Plan-choice lane (Codex #2980 r3): a plan-bearing RECURRING request
   // must carry a durable per_application selection before a card capture
