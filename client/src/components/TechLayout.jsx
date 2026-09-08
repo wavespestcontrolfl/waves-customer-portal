@@ -3,6 +3,7 @@ import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
+import TechFieldShell from './tech/TechFieldShell';
 import useStaffDocumentsAvailable from '../hooks/useStaffDocumentsAvailable';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -231,6 +232,7 @@ export default function TechLayout() {
   };
 
   return (
+    <TechFieldShell techName={techName} techRole={techRole} documentsAvailable={controlledDocumentsAvailable}>
     <div style={{
       minHeight: '100dvh',
       background: DARK.bg,
@@ -325,5 +327,6 @@ export default function TechLayout() {
         })}
       </nav>
     </div>
+    </TechFieldShell>
   );
 }

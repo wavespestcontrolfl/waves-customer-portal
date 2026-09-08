@@ -13,9 +13,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../hooks/useFeatureFlag', () => ({
   refetchFlags: vi.fn(async () => ({})),
+  useFeatureFlagReady: vi.fn(() => ({ enabled: false, ready: true })),
 }));
 
-import { refetchFlags } from '../hooks/useFeatureFlag';
+import { refetchFlags, useFeatureFlagReady } from '../hooks/useFeatureFlag';
 import TechLayout from './TechLayout';
 
 function LocationResult({ label }) {
@@ -51,12 +52,35 @@ describe('TechLayout staff-session verification', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.mocked(refetchFlags).mockResolvedValue({});
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: false, ready: true });
   });
 
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('shows the light navigation only after verified staff access and an enabled workspace flag', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: true, ready: true });
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', name: 'Fixture Tech', role: 'technician' })));
+    renderTech('/tech');
+    expect(await screen.findByText('Protected field route')).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'Field navigation' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Today' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Tools' })).toHaveAttribute('href', '/tech/tools');
+    expect(screen.getByRole('link', { name: 'More' })).toHaveAttribute('href', '/tech/more');
+    expect(screen.queryByText('Messages')).not.toBeInTheDocument();
+  });
+
+  it('holds the outlet until the workspace flag resolves', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: false, ready: false });
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', name: 'Fixture Tech', role: 'technician' })));
+    renderTech();
+    expect(await screen.findByText('Loading field workspace…')).toBeInTheDocument();
+    expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
   });
 
   it('does not treat the retired adminToken storage key as a staff session', () => {
