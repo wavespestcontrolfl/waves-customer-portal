@@ -26,7 +26,8 @@ import {
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
-import { Button, Badge, Card, cn } from "../../components/ui";
+import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, UiSurface, cn } from "../../components/ui";
+import "../../styles/estimate-workflow.css";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
 import { useEstimateSend } from "../../components/admin/EstimateSendDialog";
@@ -916,92 +917,30 @@ function serviceDetailText(item = {}) {
   return unique.join(" · ");
 }
 
-function InputV2({ k, type = "text", placeholder, min, max, className }) {
+function InputV2({ k, id = `estimate-${k}`, ...rest }) {
   const { form, set } = useContext(FormCtx);
-  return (
-    <input
-      id={`estimate-${k}`}
-      type={type}
-      value={form[k] ?? ""}
-      onChange={(e) => set(k, e.target.value)}
-      placeholder={placeholder}
-      min={min}
-      max={max}
-      className={cn(INPUT_CLS, className)}
-    />
-  );
+  return <Input id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest} />;
 }
 
-function SelectV2({ k, options }) {
+function SelectV2({ k, options, id = `estimate-${k}`, ...rest }) {
   const { form, set } = useContext(FormCtx);
-  return (
-    <select
-      id={`estimate-${k}`}
-      value={form[k] ?? ""}
-      onChange={(e) => set(k, e.target.value)}
-      className={cn(
-        INPUT_CLS,
-        "cursor-pointer appearance-none pr-8 bg-no-repeat bg-[right_0.75rem_center]",
-      )}
-      style={{
-        backgroundImage:
-          "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2371717A' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E\")",
-      }}
-    >
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </select>
-  );
+  return <Select id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest}>
+    {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+  </Select>;
 }
 
 function CheckboxV2({ k, label }) {
   const { form, toggle } = useContext(FormCtx);
-  const checked = !!form[k];
-  return (
-    <label className="relative flex items-center gap-2.5 min-h-11 mb-1 cursor-pointer text-14 text-zinc-900 select-none focus-within:ring-2 focus-within:ring-zinc-900 focus-within:rounded-sm">
-      {" "}
-      <span
-        className={cn(
-          "flex-shrink-0 w-4 h-4 border-hairline rounded-xs flex items-center justify-center transition-colors",
-          checked ? "bg-zinc-900 border-zinc-900" : "bg-white border-zinc-300",
-        )}
-      >
-        {checked && (
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            {" "}
-            <path
-              d="M1.5 5L4 7.5L8.5 2.5"
-              stroke="white"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />{" "}
-          </svg>
-        )}
-      </span>{" "}
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={() => toggle(k)}
-        className="sr-only"
-      />
-      {label}
-    </label>
-  );
+  return <div className="mb-1"><Checkbox id={`estimate-${k}`} label={label} checked={!!form[k]} onChange={() => toggle(k)} /></div>;
 }
 
-// Section header within the Create Estimate form. Matches the
-// "Live Status" label style on TimeTrackingPage (15/600).
+// Section header within the Create Estimate form.
 function PanelTitle({ children, description }) {
   return (
     <>
       {" "}
       <h3
-        className="text-zinc-900 mt-0 mb-3"
-        style={{ fontSize: 15, fontWeight: 500 }}
+        className="text-18 font-medium text-zinc-900 mt-0 mb-3"
       >
         {children}
       </h3>
@@ -1018,8 +957,7 @@ function PanelTitle({ children, description }) {
 function SubGroupLabel({ children, className }) {
   return (
     <h4
-      className={cn("text-zinc-900 mt-4 mb-2", className)}
-      style={{ fontSize: 15, fontWeight: 500 }}
+      className={cn("text-16 font-medium text-zinc-900 mt-4 mb-2", className)}
     >
       {children}
     </h4>
@@ -1030,7 +968,7 @@ function StatusLine({ status }) {
   if (!status?.type) return null;
   const isErr = status.type === "err";
   return (
-    <div
+    <ActionFeedback error={isErr}
       className={cn(
         " text-14 px-3 py-2 rounded-xs mb-3 whitespace-pre-line border-hairline",
         isErr
@@ -1039,7 +977,7 @@ function StatusLine({ status }) {
       )}
     >
       {status.msg}
-    </div>
+    </ActionFeedback>
   );
 }
 
@@ -1093,7 +1031,7 @@ function TierRowV2({
 
 function Tag({ children }) {
   return (
-    <span className="inline-block text-14 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-zinc-100 text-ink-secondary ml-2 align-middle">
+    <span className="inline-block text-14 font-medium px-2 py-0.5 rounded-xs bg-zinc-100 text-ink-secondary ml-2 align-middle">
       {children}
     </span>
   );
@@ -1101,7 +1039,7 @@ function Tag({ children }) {
 
 function FieldVerifyTag({ children }) {
   return (
-    <span className="inline-block text-14 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-alert-bg text-alert-fg ml-2 align-middle">
+    <span className="inline-block text-14 font-medium px-2 py-0.5 rounded-xs bg-alert-bg text-alert-fg ml-2 align-middle">
       {children}
     </span>
   );
@@ -1109,7 +1047,7 @@ function FieldVerifyTag({ children }) {
 
 function DiscBadge({ children }) {
   return (
-    <span className="inline-block text-14 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-zinc-900 text-white ml-2 align-middle u-nums">
+    <span className="inline-block text-14 font-medium px-2 py-0.5 rounded-xs bg-zinc-900 text-white ml-2 align-middle u-nums">
       {children}
     </span>
   );
@@ -1117,7 +1055,7 @@ function DiscBadge({ children }) {
 
 function GroupHeader({ children }) {
   return (
-    <div className="text-22 font-bold tracking-tight text-zinc-900 mt-7 mb-3 md:text-14 md:font-medium md:uppercase md:tracking-label md:mb-4 md:pb-2 md:border-b-hairline md:border-zinc-300">
+    <div className="text-22 font-bold tracking-tight text-zinc-900 mt-7 mb-3 md:text-14 md:font-medium md:mb-4 md:pb-2 md:border-b-hairline md:border-zinc-300">
       {children}
     </div>
   );
@@ -4304,33 +4242,30 @@ export default function EstimateToolViewV2({
   // ═══════════════════════════════════════════════════════════════
   return (
     <FormCtx.Provider value={formCtx}>
-      <header className="px-4 md:px-7 py-4 border-b border-zinc-200 mb-5">
+      <UiSurface density="comfortable" className="estimate-builder">
+      <header className="py-4 border-b border-zinc-200 mb-5">
         <Button variant="ghost" className="min-h-11 mb-2" onClick={() => {
           if (!dirty || window.confirm("Leave this estimate with unsaved changes?")) onBack?.();
         }}>← Back to Pipeline</Button>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h1 className="text-24 font-semibold">{editMode ? "Edit estimate" : "Create estimate"}</h1>
+          <h1 className="ui-record-title">{editMode ? "Edit estimate" : "Create estimate"}</h1>
           <span role="status" className="text-14 text-zinc-600">{saving ? "Saving…" : generating ? "Recalculating pricing…" : dirty ? "Unsaved changes" : editMode ? "Saved estimate loaded" : "New estimate"}</span>
         </div>
-        {form.customerPhone && <Button variant="secondary" className="min-h-11" onClick={() => { void openEstimateMessages(form, openMessages); }}>Message contact</Button>}
-        <nav aria-label="Estimate sections" className="flex flex-wrap gap-2 mt-3">
+        {form.customerPhone && <Button variant="secondary" className="mt-3" onClick={(event) => { event.currentTarget.focus(); void openEstimateMessages(form, openMessages); }}>Message contact</Button>}
+        <nav aria-label="Estimate sections" className="ui-workspace-nav mt-3">
           {[["customer", "Customer & property"], ["services", "Services"], ["pricing", "Pricing & terms"], ["review", "Review & send"]].map(([key, label]) =>
-            <Button key={key} variant="ghost" className="min-h-11" onClick={() => document.getElementById(`estimate-${key}`)?.scrollIntoView({ block: "start" })}>{label}</Button>)}
+            <Button key={key} variant="ghost" className="ui-workspace-nav-action" onClick={() => {
+              const section = document.getElementById(`estimate-${key}`);
+              section?.focus({ preventScroll: true });
+              section?.scrollIntoView({ block: "start" });
+            }}>{label}</Button>)}
         </nav>
       </header>
       {" "}
       <div
-        className="max-w-[1440px] mx-auto px-4 md:px-7 pb-7 waves-roboto-scope"
-        style={{ fontFamily: ROBOTO }}
+        className="max-w-[1440px] mx-auto pb-7"
       >
         {" "}
-        <style>{`
-          .waves-roboto-scope,
-          .waves-roboto-scope * {
-            font-family: ${ROBOTO} !important;
-          }
-          .waves-roboto-scope :is(button, input, select, textarea), .estimate-workflow-section { scroll-margin-block: 100px; }
-        `}</style>
         {editLoadError && (
           <div className="mb-4 flex items-start justify-between gap-4 border-hairline border-zinc-300 rounded-xs bg-zinc-50 px-4 py-3">
             <div className="text-14 text-zinc-700">
@@ -4493,27 +4428,32 @@ export default function EstimateToolViewV2({
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-6 min-w-0">
-            <section id="estimate-customer" className="estimate-workflow-section space-y-4" aria-label="Customer and property">
-            <h2 className="text-20 font-semibold">Customer & property</h2>
+            <section tabIndex={-1} id="estimate-customer" className="estimate-workflow-section space-y-4" aria-label="Customer and property">
+            <h2 className="text-18 font-medium">Customer & property</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
-              <FieldV2 label="Customer name"><InputV2 k="customerName" /></FieldV2>
-              <FieldV2 label="Phone"><InputV2 k="customerPhone" type="tel" /></FieldV2>
-              <FieldV2 label="Email" className="sm:col-span-2"><InputV2 k="customerEmail" type="email" /></FieldV2>
+              <Field label="Customer name" id="estimate-customerName" className="mb-4">
+                <InputV2 k="customerName" />
+              </Field>
+              <Field label="Phone" id="estimate-customerPhone" className="mb-4">
+                <InputV2 k="customerPhone" type="tel" />
+              </Field>
+              <Field label="Email" className="mb-4 sm:col-span-2" id="estimate-customerEmail">
+                <InputV2 k="customerEmail" type="email" />
+              </Field>
             </div>
             {/* Customer Lookup */}
             <div>
               {" "}
               <PanelTitle>Customer Lookup</PanelTitle>{" "}
-              <FieldV2 label="Search customers">
-                {" "}
-                <input
+              <Field label="Search customers" className="mb-4">
+                <Input
                   type="text"
                   value={customerSearch}
                   onChange={(e) => setCustomerSearch(e.target.value)}
                   placeholder="Name, phone, email, or address..."
-                  className={INPUT_CLS}
-                />{" "}
-              </FieldV2>
+
+                />
+              </Field>
               {customers.length > 0 && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {
@@ -4521,7 +4461,7 @@ export default function EstimateToolViewV2({
                       `${c.firstName || ""} ${c.lastName || ""}`.trim() ||
                       "(no name)";
                     return (
-                      <button
+                      <button data-ui-text-action
                         key={c.id}
                         type="button"
                         onClick={() => applyCustomerLink(c, { adoptAddress: true })}
@@ -4548,26 +4488,25 @@ export default function EstimateToolViewV2({
               {propertiesError && <p role="alert" className="text-14 text-alert-fg mb-3">{propertiesError}</p>}
               {customerProperties.length > 0 && <div className="mb-4">
                 <label htmlFor="estimate-service-property" className="block text-14 font-medium mb-2">Customer property</label>
-                <select id="estimate-service-property" className={INPUT_CLS} value={form.propertyId || ""} onChange={(event) => selectServiceProperty(event.target.value)}>
+                <Select id="estimate-service-property"  value={form.propertyId || ""} onChange={(event) => selectServiceProperty(event.target.value)}>
                   <option value="">Choose a saved service property, or enter an address</option>
                   {customerProperties.map((property) => <option key={property.id} value={property.id}>
                     {[property.label, property.address_line1, property.address_line2, property.city, property.zip].filter(Boolean).join(" · ")}
                   </option>)}
-                </select>
+                </Select>
                 <p className="text-14 text-zinc-600 mt-2">Changing property clears its measurements. Contact and account records are unchanged.</p>
               </div>}
-              <FieldV2 label="Service address">
-                {" "}
-                <input
+              <Field label="Service address" className="mb-4">
+                <Input
                   ref={addressRef}
                   aria-label="Service address"
                   type="text"
                   value={form.address}
                   onChange={(e) => set("address", e.target.value)}
                   placeholder="Start typing an address..."
-                  className={INPUT_CLS}
-                />{" "}
-              </FieldV2>
+
+                />
+              </Field>
               {form.leadServiceInterest && (
                 <div className="mb-3 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                   Lead interest:{" "}
@@ -4723,7 +4662,7 @@ export default function EstimateToolViewV2({
                       : ""}
                   </span>
                   {canUnlink && (
-                    <button
+                    <button data-ui-text-action
                       type="button"
                       onClick={unlinkCustomer}
                       className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-600 underline underline-offset-2 hover:text-zinc-900 shrink-0"
@@ -4744,7 +4683,7 @@ export default function EstimateToolViewV2({
                     Linked customer:{" "}
                     <strong>{form.customerName || "from the customer record"}</strong>
                   </span>
-                  <button
+                  <button data-ui-text-action
                     type="button"
                     onClick={unlinkCustomer}
                     className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-600 underline underline-offset-2 hover:text-zinc-900 shrink-0"
@@ -4811,7 +4750,7 @@ export default function EstimateToolViewV2({
                       <span className="text-14 text-ink-secondary">
                         Or search above to link someone else.
                       </span>
-                      <button
+                      <button data-ui-text-action
                         type="button"
                         onClick={() => setAddressMatches([])}
                         className="bg-transparent border-0 p-0 cursor-pointer text-14 text-zinc-900 underline underline-offset-2 shrink-0 self-start sm:self-auto"
@@ -4940,7 +4879,7 @@ export default function EstimateToolViewV2({
                             alt="Micro close"
                             className="w-full rounded-xs border border-zinc-900 aspect-square object-cover"
                           />{" "}
-                          <div className="text-14 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">
+                          <div className="text-14 text-zinc-900 text-center mt-0.5 font-medium">
                             Micro
                           </div>{" "}
                         </div>
@@ -4953,7 +4892,7 @@ export default function EstimateToolViewV2({
                             alt="Ultra close"
                             className="w-full rounded-xs border border-zinc-900 aspect-square object-cover"
                           />{" "}
-                          <div className="text-14 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">
+                          <div className="text-14 text-zinc-900 text-center mt-0.5 font-medium">
                             Ultra
                           </div>{" "}
                         </div>
@@ -4966,7 +4905,7 @@ export default function EstimateToolViewV2({
                             alt="Super close"
                             className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
                           />{" "}
-                          <div className="text-14 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                          <div className="text-14 text-ink-tertiary text-center mt-0.5">
                             Detail
                           </div>{" "}
                         </div>
@@ -4978,7 +4917,7 @@ export default function EstimateToolViewV2({
                           alt="Close view"
                           className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
                         />{" "}
-                        <div className="text-14 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                        <div className="text-14 text-ink-tertiary text-center mt-0.5">
                           Property
                         </div>{" "}
                       </div>
@@ -4990,7 +4929,7 @@ export default function EstimateToolViewV2({
                             alt="Area view"
                             className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
                           />{" "}
-                          <div className="text-14 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                          <div className="text-14 text-ink-tertiary text-center mt-0.5">
                             Area
                           </div>{" "}
                         </div>
@@ -5033,8 +4972,7 @@ export default function EstimateToolViewV2({
             <div>
               {" "}
               <PanelTitle>Property Data</PanelTitle>{" "}
-              <FieldV2 label="Property Type">
-                {" "}
+              <Field label="Property Type" id="estimate-propertyType" className="mb-4">
                 <SelectV2
                   k="propertyType"
                   options={[
@@ -5052,10 +4990,10 @@ export default function EstimateToolViewV2({
                     },
                     { value: "Commercial", label: "Commercial" },
                   ]}
-                />{" "}
-              </FieldV2>{" "}
+                />
+              </Field>{" "}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <FieldV2 label="Commercial">
+                <Field label="Commercial" id="estimate-isCommercial" className="mb-4">
                   <SelectV2
                     k="isCommercial"
                     options={[
@@ -5063,8 +5001,8 @@ export default function EstimateToolViewV2({
                       { value: "YES", label: "Yes" },
                     ]}
                   />
-                </FieldV2>
-                <FieldV2 label="Commercial Pricing">
+                </Field>
+                <Field label="Commercial Pricing" id="estimate-commercialPricingMode" className="mb-4">
                   <SelectV2
                     k="commercialPricingMode"
                     options={[
@@ -5072,15 +5010,15 @@ export default function EstimateToolViewV2({
                       { value: "small_commercial_pilot", label: "Small-commercial pilot" },
                     ]}
                   />
-                </FieldV2>
+                </Field>
               </div>
               {(commercialDetected || form.commercialSubtype) && (
-                <FieldV2 label="Commercial Subtype">
+                <Field label="Commercial Subtype" id="estimate-commercialSubtype" className="mb-4">
                   <InputV2 k="commercialSubtype" placeholder="Optional" />
-                </FieldV2>
+                </Field>
               )}
               {(commercialDetected || form.commercialRiskType) && (
-                <FieldV2 label="Business type (cadence)">
+                <Field label="Business type (cadence)" id="estimate-commercialRiskType" className="mb-4">
                   <SelectV2
                     k="commercialRiskType"
                     options={[
@@ -5095,10 +5033,10 @@ export default function EstimateToolViewV2({
                       { value: "multifamily", label: "Multifamily" },
                     ]}
                   />
-                </FieldV2>
+                </Field>
               )}
               {(commercialDetected || form.commercialPestCadence) && (
-                <FieldV2 label="Pest cadence override">
+                <Field label="Pest cadence override" id="estimate-commercialPestCadence" className="mb-4">
                   <SelectV2
                     k="commercialPestCadence"
                     options={[
@@ -5108,10 +5046,10 @@ export default function EstimateToolViewV2({
                       { value: "monthly", label: "Monthly (12x/yr)" },
                     ]}
                   />
-                </FieldV2>
+                </Field>
               )}
               {(commercialDetected || form.commercialInteriorService) && (
-                <FieldV2 label="Pest interior service">
+                <Field label="Pest interior service" id="estimate-commercialInteriorService" className="mb-4">
                   <SelectV2
                     k="commercialInteriorService"
                     options={[
@@ -5119,10 +5057,10 @@ export default function EstimateToolViewV2({
                       { value: "excluded", label: "Exterior-only (interior offered as add-on)" },
                     ]}
                   />
-                </FieldV2>
+                </Field>
               )}
               {(commercialDetected || form.commercialLawnCadence) && form.svcLawn && (
-                <FieldV2 label="Lawn cadence override">
+                <Field label="Lawn cadence override" id="estimate-commercialLawnCadence" className="mb-4">
                   <SelectV2
                     k="commercialLawnCadence"
                     options={[
@@ -5133,10 +5071,10 @@ export default function EstimateToolViewV2({
                       { value: "12", label: "12 apps/yr (monthly)" },
                     ]}
                   />
-                </FieldV2>
+                </Field>
               )}
               {commercialDetected && form.svcTs && (
-                <FieldV2 label="Tree & Shrub density">
+                <Field label="Tree & Shrub density" id="estimate-treeShrubDensity" className="mb-4">
                   <SelectV2
                     k="treeShrubDensity"
                     options={[
@@ -5147,10 +5085,10 @@ export default function EstimateToolViewV2({
                       { value: "very_high", label: "Very high — manual quote" },
                     ]}
                   />
-                </FieldV2>
+                </Field>
               )}
               {commercialDetected && form.svcMosquito && (
-                <FieldV2 label="Mosquito pressure">
+                <Field label="Mosquito pressure" id="estimate-mosquitoPressure" className="mb-4">
                   <SelectV2
                     k="mosquitoPressure"
                     options={[
@@ -5161,7 +5099,7 @@ export default function EstimateToolViewV2({
                       { value: "severe", label: "Severe — manual quote" },
                     ]}
                   />
-                </FieldV2>
+                </Field>
               )}
               {commercialDetected && (
                 <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-14 text-alert-fg">
@@ -5185,33 +5123,32 @@ export default function EstimateToolViewV2({
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {" "}
-                <FieldV2 label="Home Sq Ft">
+                <Field label="Home Sq Ft" id="estimate-homeSqFt" className="mb-4">
                   <InputV2 k="homeSqFt" type="number" placeholder="2000" />
-                </FieldV2>{" "}
-                <FieldV2 label="Stories">
-                  {" "}
-                  <InputV2 k="stories" type="number" min="1" max="4" />
-                  {enrichedProfile?.storiesSource === "default" && (
+                </Field>{" "}
+                <Field label="Stories" id="estimate-stories" className="mb-4" help={enrichedProfile?.storiesSource === "default" && (
                     <div className="mt-1 text-14 text-alert-fg">
                       Verify stories — no data source confirmed a floor count.
                       Defaulted to 1; a 2-story home priced here would
                       under-charge.
                     </div>
-                  )}
-                </FieldV2>{" "}
+                  )}>
+                  <InputV2 k="stories" type="number" min="1" max="4" />
+                </Field>{" "}
               </div>{" "}
-              <FieldV2 label="Lot Sq Ft">
+              <Field label="Lot Sq Ft" id="estimate-lotSqFt" className="mb-4">
                 <InputV2 k="lotSqFt" type="number" placeholder="8000" />
-              </FieldV2>
-              <FieldV2 label="Units on parcel">
-                <InputV2 k="unitCount" type="number" min="1" max="2000" placeholder="1" />
-                <div className="mt-1 text-14 opacity-70">
+              </Field>
+              <div className="mb-4">
+                <Field label="Units on parcel" id="estimate-unitCount" help={<>
                   Whole-parcel total. Corrects a wrong lookup count (e.g. a
                   single condo unit read as the whole building) when saved as
                   verified.
-                </div>
+                </>}>
+                  <InputV2 k="unitCount" type="number" min="1" max="2000" placeholder="1" />
+                </Field>
                 {unitCountSavable && (
-                  <button
+                  <button data-ui-text-action
                     type="button"
                     onClick={saveVerifiedUnitCount}
                     disabled={unitSaveState === "saving" || unitSaveState === "saved"}
@@ -5226,29 +5163,29 @@ export default function EstimateToolViewV2({
                           : "Save unit count as field-verified"}
                   </button>
                 )}
-              </FieldV2>
+              </div>
               {(form.svcTs || form.svcInjection) && (
                 <>
                   {" "}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     {form.svcTs && (
-                      <FieldV2 label="Bed Area (sq ft)">
+                      <Field label="Bed Area (sq ft)" id="estimate-bedArea" className="mb-4">
                         <InputV2
                           k="bedArea"
                           type="number"
                           placeholder="Auto-estimate"
                         />
-                      </FieldV2>
+                      </Field>
                     )}{" "}
-                    <FieldV2 label="Palms on property">
+                    <Field label="Palms on property" id="estimate-palmCount" className="mb-4">
                       <InputV2 k="palmCount" type="number" placeholder="Manual override" />
-                    </FieldV2>{" "}
+                    </Field>{" "}
                   </div>{" "}
                   {form.svcTs && (
-                    <FieldV2 label="Tree Count">
+                    <Field label="Tree Count" id="estimate-treeCount" className="mb-4">
                       <InputV2 k="treeCount" type="number" placeholder="Auto" />
-                    </FieldV2>
+                    </Field>
                   )}{" "}
                   {form.svcTs && !commercialDetected && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -5259,7 +5196,7 @@ export default function EstimateToolViewV2({
                           program is sellable here — the builder used to
                           hardcode standard (audit INP-004). Keys stay
                           light/standard/enhanced. */}
-                      <FieldV2 label="Program">
+                      <Field label="Program" id="estimate-tsTier" className="mb-4">
                         <SelectV2
                           k="tsTier"
                           options={[
@@ -5268,8 +5205,8 @@ export default function EstimateToolViewV2({
                             { value: "enhanced", label: "9x applications/yr" },
                           ]}
                         />
-                      </FieldV2>
-                      <FieldV2 label="Access">
+                      </Field>
+                      <Field label="Access" id="estimate-tsAccess" className="mb-4">
                         <SelectV2
                           k="tsAccess"
                           options={[
@@ -5278,7 +5215,7 @@ export default function EstimateToolViewV2({
                             { value: "difficult", label: "Difficult (+15m)" },
                           ]}
                         />
-                      </FieldV2>
+                      </Field>
                     </div>
                   )}{" "}
                 </>
@@ -5290,7 +5227,7 @@ export default function EstimateToolViewV2({
               <PanelTitle>Property Features</PanelTitle>{" "}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {" "}
-                <FieldV2 label="Pool">
+                <Field label="Pool" id="estimate-hasPool" className="mb-4">
                   <SelectV2
                     k="hasPool"
                     options={[
@@ -5298,8 +5235,8 @@ export default function EstimateToolViewV2({
                       { value: "YES", label: "Yes" },
                     ]}
                   />
-                </FieldV2>{" "}
-                <FieldV2 label="Pool Cage">
+                </Field>{" "}
+                <Field label="Pool Cage" id="estimate-hasPoolCage" className="mb-4">
                   <SelectV2
                     k="hasPoolCage"
                     options={[
@@ -5307,11 +5244,10 @@ export default function EstimateToolViewV2({
                       { value: "YES", label: "Yes" },
                     ]}
                   />
-                </FieldV2>{" "}
+                </Field>{" "}
               </div>
               {form.hasPoolCage === "YES" && (
-                <FieldV2 label="Pool Cage Size">
-                  {" "}
+                <Field label="Pool Cage Size" id="estimate-poolCageSize" className="mb-4">
                   <SelectV2
                     k="poolCageSize"
                     options={[
@@ -5320,12 +5256,12 @@ export default function EstimateToolViewV2({
                       { value: "LARGE", label: "Large (+$12)" },
                       { value: "OVERSIZED", label: "Oversized (+$18)" },
                     ]}
-                  />{" "}
-                </FieldV2>
+                  />
+                </Field>
               )}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {" "}
-                <FieldV2 label="Shrub Density">
+                <Field label="Shrub Density" id="estimate-shrubDensity" className="mb-4">
                   <SelectV2
                     k="shrubDensity"
                     options={[
@@ -5334,8 +5270,8 @@ export default function EstimateToolViewV2({
                       { value: "HEAVY", label: "Heavy" },
                     ]}
                   />
-                </FieldV2>{" "}
-                <FieldV2 label="Tree Density">
+                </Field>{" "}
+                <Field label="Tree Density" id="estimate-treeDensity" className="mb-4">
                   <SelectV2
                     k="treeDensity"
                     options={[
@@ -5344,8 +5280,8 @@ export default function EstimateToolViewV2({
                       { value: "HEAVY", label: "Heavy" },
                     ]}
                   />
-                </FieldV2>{" "}
-                <FieldV2 label="Complexity">
+                </Field>{" "}
+                <Field label="Complexity" id="estimate-landscapeComplexity" className="mb-4">
                   <SelectV2
                     k="landscapeComplexity"
                     options={[
@@ -5354,11 +5290,11 @@ export default function EstimateToolViewV2({
                       { value: "COMPLEX", label: "Complex" },
                     ]}
                   />
-                </FieldV2>{" "}
+                </Field>{" "}
               </div>{" "}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {" "}
-                <FieldV2 label="Near Water">
+                <Field label="Near Water" id="estimate-nearWater" className="mb-4">
                   <SelectV2
                     k="nearWater"
                     options={[
@@ -5366,8 +5302,8 @@ export default function EstimateToolViewV2({
                       { value: "YES", label: "Yes" },
                     ]}
                   />
-                </FieldV2>{" "}
-                <FieldV2 label="Urgency">
+                </Field>{" "}
+                <Field label="Urgency" id="estimate-urgency" className="mb-4">
                   <SelectV2
                     k="urgency"
                     options={[
@@ -5376,11 +5312,11 @@ export default function EstimateToolViewV2({
                       { value: "URGENT", label: "Urgent (within 12 hrs)" },
                     ]}
                   />
-                </FieldV2>{" "}
+                </Field>{" "}
               </div>{" "}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {" "}
-                <FieldV2 label="After Hours">
+                <Field label="After Hours" id="estimate-isAfterHours" className="mb-4">
                   <SelectV2
                     k="isAfterHours"
                     options={[
@@ -5391,8 +5327,8 @@ export default function EstimateToolViewV2({
                       },
                     ]}
                   />
-                </FieldV2>{" "}
-                <FieldV2 label="Recurring Customer">
+                </Field>{" "}
+                <Field label="Recurring Customer" id="estimate-isRecurringCustomer" className="mb-4">
                   <SelectV2
                     k="isRecurringCustomer"
                     options={[
@@ -5400,13 +5336,13 @@ export default function EstimateToolViewV2({
                       { value: "YES", label: "Yes — 15% off one-time" },
                     ]}
                   />
-                </FieldV2>{" "}
+                </Field>{" "}
               </div>{" "}
             </div>
             </section>
             {/* Services */}
-            <section id="estimate-services" className="estimate-workflow-section" aria-label="Services">
-              <h2 className="text-20 font-semibold mb-4">Services</h2>
+            <section tabIndex={-1} id="estimate-services" className="estimate-workflow-section" aria-label="Services">
+              <h2 className="text-18 font-medium mb-4">Services</h2>
               {" "}
               <PanelTitle>Services to Quote</PanelTitle>{" "}
               <SubGroupLabel>Recurring Programs</SubGroupLabel>{" "}
@@ -5420,8 +5356,7 @@ export default function EstimateToolViewV2({
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <FieldV2 label="Grass Type / Track" className="mb-0">
-                      {" "}
+                    <Field label="Grass Type / Track" className="mb-0" id="estimate-grassType">
                       <SelectV2
                         k="grassType"
                         options={[
@@ -5430,9 +5365,9 @@ export default function EstimateToolViewV2({
                           { value: "zoysia", label: "Zoysia" },
                           { value: "bahia", label: "Bahia" },
                         ]}
-                      />{" "}
-                    </FieldV2>
-                    <FieldV2 label="Applications / year" className="mb-0">
+                      />
+                    </Field>
+                    <Field label="Applications / year" className="mb-0" id="estimate-lawnFreq">
                       {/* 4 — Quarterly retired for new sales (owner directive
                           2026-07-09); the engine hides the basic tier. */}
                       <SelectV2
@@ -5443,7 +5378,7 @@ export default function EstimateToolViewV2({
                           { value: "12", label: "12 — Monthly" },
                         ]}
                       />
-                    </FieldV2>
+                    </Field>
                   </div>{" "}
                   {/* Bermuda-in-St.-Augustine suppression add-on — dark behind
                       GATE_BERMUDA_SUPPRESSION. The control renders when the
@@ -5495,17 +5430,17 @@ export default function EstimateToolViewV2({
                     </Badge>
                   </div>
                   <div className="grid grid-cols-[1fr_auto] gap-2 items-end">
-                    <FieldV2 label="Confirmed Sq Ft" className="mb-0">
-                      <input
+                    <Field label="Confirmed Sq Ft" className="mb-0">
+                      <Input
                         type="number"
                         min="0"
                         step="250"
                         value={form.measuredTurfSf || ""}
                         onChange={(e) => set("measuredTurfSf", e.target.value)}
                         placeholder={effectiveTurfSqFt > 0 ? String(effectiveTurfSqFt) : "Measured turf"}
-                        className={INPUT_CLS}
+
                       />
-                    </FieldV2>
+                    </Field>
                     {confirmedTurfSqFt !== null && (
                       <Button
                         type="button"
@@ -5518,14 +5453,14 @@ export default function EstimateToolViewV2({
                       </Button>
                     )}
                   </div>
-                  <input
+                  <input aria-label="Treatable lawn area"
                     type="range"
                     min="0"
                     max={turfSliderMax}
                     step="250"
                     value={effectiveTurfSqFt}
                     onChange={(e) => set("measuredTurfSf", e.target.value)}
-                    className="mt-3 w-full accent-zinc-900"
+                    className="mt-3 w-full min-h-11 accent-zinc-900 u-focus-ring"
                   />
                   <div className="mt-1 flex items-center justify-between text-14 text-ink-secondary">
                     <span>0 sf</span>
@@ -5573,7 +5508,7 @@ export default function EstimateToolViewV2({
                   {" "}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
-                    <FieldV2 label="Frequency">
+                    <Field label="Frequency" id="estimate-pestFreq" className="mb-4">
                       <SelectV2
                         k="pestFreq"
                         options={[
@@ -5582,8 +5517,8 @@ export default function EstimateToolViewV2({
                           { value: "12", label: "Monthly (12x/yr)" },
                         ]}
                       />
-                    </FieldV2>{" "}
-                    <FieldV2 label="Roach Activity">
+                    </Field>{" "}
+                    <Field label="Roach Activity" id="estimate-roachModifier" className="mb-4">
                       <SelectV2
                         k="roachModifier"
                         options={[
@@ -5598,18 +5533,18 @@ export default function EstimateToolViewV2({
                           },
                         ]}
                       />
-                    </FieldV2>{" "}
+                    </Field>{" "}
                   </div>{" "}
                   {form.roachModifier && form.roachModifier !== "NONE" && (
                     <>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
-                        <FieldV2 label="One-Time Fee Override ($)">
+                        <Field label="One-Time Fee Override ($)" id="estimate-roachFeeOverride" className="mb-4">
                           <InputV2
                             k="roachFeeOverride"
                             type="number"
                             placeholder="Engine price"
                           />
-                        </FieldV2>
+                        </Field>
                       </div>
                       <RoachOverrideAppliedNote
                         estimate={estimate}
@@ -5630,18 +5565,18 @@ export default function EstimateToolViewV2({
               {form.svcInjection && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <FieldV2 label="Treatment Type">
+                    <Field label="Treatment Type" id="estimate-palmTreatmentType" className="mb-4">
                       <SelectV2 k="palmTreatmentType" options={PALM_TREATMENT_OPTIONS} />
-                    </FieldV2>
-                    <FieldV2 label="Palms to treat">
+                    </Field>
+                    <Field label="Palms to treat" id="estimate-palmTreatmentCount" className="mb-4">
                       <InputV2 k="palmTreatmentCount" type="number" placeholder={form.palmCount || "Required"} />
-                    </FieldV2>
+                    </Field>
                   </div>
                   {(form.palmTreatmentType === "insecticide" || form.palmTreatmentType === "combo") && (
                     <>
-                      <FieldV2 label="Palm size for this treatment">
+                      <Field label="Palm size for this treatment" id="estimate-palmSize" className="mb-4">
                         <SelectV2 k="palmSize" options={PALM_SIZE_OPTIONS} />
-                      </FieldV2>
+                      </Field>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                         <CheckboxV2 k="palmHighDose" label="High dose" />
                         <CheckboxV2 k="palmLargeDiameter" label="Large diameter" />
@@ -5650,7 +5585,7 @@ export default function EstimateToolViewV2({
                     </>
                   )}
                   {form.palmTreatmentType === "nutrition" && (
-                    <FieldV2 label="Applications per year">
+                    <Field label="Applications per year" id="estimate-palmAppsPerYear" className="mb-4">
                       <SelectV2
                         k="palmAppsPerYear"
                         options={[
@@ -5658,11 +5593,11 @@ export default function EstimateToolViewV2({
                           { value: "2", label: "2" },
                         ]}
                       />
-                    </FieldV2>
+                    </Field>
                   )}
                   {form.palmTreatmentType === "fungal" && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <FieldV2 label="Selected product">
+                      <Field label="Selected product" id="estimate-palmSelectedProduct" className="mb-4">
                         <SelectV2
                           k="palmSelectedProduct"
                           options={[
@@ -5670,24 +5605,24 @@ export default function EstimateToolViewV2({
                             { value: "Propizol", label: "Propizol" },
                           ]}
                         />
-                      </FieldV2>
-                      <FieldV2 label="Interval months">
+                      </Field>
+                      <Field label="Interval months" id="estimate-palmIntervalMonths" className="mb-4">
                         <InputV2 k="palmIntervalMonths" type="number" placeholder="4" />
-                      </FieldV2>
+                      </Field>
                       <CheckboxV2 k="palmDiagnosisConfirmed" label="Diagnosis confirmed" />
                     </div>
                   )}
                   {form.palmTreatmentType === "lethalBronzing" && (
-                    <FieldV2 label="Palm status">
+                    <Field label="Palm status" id="estimate-palmStatus" className="mb-4">
                       <SelectV2 k="palmStatus" options={PALM_STATUS_OPTIONS} />
-                    </FieldV2>
+                    </Field>
                   )}
                   {form.palmTreatmentType === "treeAge" && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <FieldV2 label="DBH inches">
+                      <Field label="DBH inches" id="estimate-palmDbhInches" className="mb-4">
                         <InputV2 k="palmDbhInches" type="number" placeholder="12" />
-                      </FieldV2>
-                      <FieldV2 label="Product">
+                      </Field>
+                      <Field label="Product" id="estimate-palmProduct" className="mb-4">
                         <SelectV2
                           k="palmProduct"
                           options={[
@@ -5695,15 +5630,15 @@ export default function EstimateToolViewV2({
                             { value: "Tree-Age R10", label: "Tree-Age R10" },
                           ]}
                         />
-                      </FieldV2>
+                      </Field>
                       {form.palmProduct === "Tree-Age R10" && (
                         <CheckboxV2 k="palmLicensedApplicator" label="Licensed applicator" />
                       )}
                     </div>
                   )}
-                  <FieldV2 label="Custom $/palm">
+                  <Field label="Custom $/palm" id="estimate-palmCustomPricePerPalm" className="mb-4">
                     <InputV2 k="palmCustomPricePerPalm" type="number" placeholder="Optional" />
-                  </FieldV2>
+                  </Field>
                   {palmMeasurementWarning && (
                     <div className="px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-14 text-alert-fg">
                       {palmMeasurementWarning}
@@ -5722,8 +5657,7 @@ export default function EstimateToolViewV2({
                     className={`grid ${form.svcMosquito ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1 sm:grid-cols-2"} gap-3`}
                   >
                     {form.svcMosquito && (
-                      <FieldV2 label="Program">
-                        {" "}
+                      <Field label="Program" id="estimate-mosquitoProgram" className="mb-4">
                         <SelectV2
                           k="mosquitoProgram"
                           options={[
@@ -5736,27 +5670,25 @@ export default function EstimateToolViewV2({
                               label: "Seasonal Program (9 visits)",
                             },
                           ]}
-                        />{" "}
-                      </FieldV2>
+                        />
+                      </Field>
                     )}
-                    <FieldV2 label="Mosquito Stations">
-                      {" "}
+                    <Field label="Mosquito Stations" id="estimate-mosquitoStationCount" className="mb-4">
                       <InputV2
                         k="mosquitoStationCount"
                         type="number"
                         min="0"
                         placeholder="0"
-                      />{" "}
-                    </FieldV2>{" "}
-                    <FieldV2 label="Bti Dunk Tablets">
-                      {" "}
+                      />
+                    </Field>{" "}
+                    <Field label="Bti Dunk Tablets" id="estimate-mosquitoDunkCount" className="mb-4">
                       <InputV2
                         k="mosquitoDunkCount"
                         type="number"
                         min="0"
                         placeholder="0"
-                      />{" "}
-                    </FieldV2>{" "}
+                      />
+                    </Field>{" "}
                   </div>
                   {form.svcMosquito && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 text-14 text-ink-secondary">
@@ -5871,8 +5803,7 @@ export default function EstimateToolViewV2({
               {form.svcOnetimeLawn && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <FieldV2 label="Type" className="mb-0">
-                    {" "}
+                  <Field label="Type" className="mb-0" id="estimate-otLawnType">
                     <SelectV2
                       k="otLawnType"
                       options={[
@@ -5881,8 +5812,8 @@ export default function EstimateToolViewV2({
                         { value: "PEST", label: "Lawn Pest (+30%)" },
                         { value: "FUNGICIDE", label: "Fungicide (+45%)" },
                       ]}
-                    />{" "}
-                  </FieldV2>{" "}
+                    />
+                  </Field>{" "}
                 </div>
               )}
               <CheckboxV2 k="svcPlugging" label="Lawn Plugging Service" />
@@ -5891,14 +5822,14 @@ export default function EstimateToolViewV2({
                   {" "}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
-                    <FieldV2 label="Plug Area (sq ft)">
+                    <Field label="Plug Area (sq ft)" id="estimate-plugArea" className="mb-4">
                       <InputV2
                         k="plugArea"
                         type="number"
                         placeholder="e.g. 1000"
                       />
-                    </FieldV2>{" "}
-                    <FieldV2 label="Spacing">
+                    </Field>{" "}
+                    <Field label="Spacing" id="estimate-plugSpacing" className="mb-4">
                       <SelectV2
                         k="plugSpacing"
                         options={[
@@ -5907,7 +5838,7 @@ export default function EstimateToolViewV2({
                           { value: "6", label: '6" Premium' },
                         ]}
                       />
-                    </FieldV2>{" "}
+                    </Field>{" "}
                   </div>{" "}
                 </div>
               )}
@@ -5915,13 +5846,13 @@ export default function EstimateToolViewV2({
               {form.svcTopdress && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <FieldV2 label="Area (sq ft)">
+                  <Field label="Area (sq ft)" id="estimate-topDressArea" className="mb-4">
                     <InputV2
                       k="topDressArea"
                       type="number"
                       placeholder="Blank = est. lawn"
                     />
-                  </FieldV2>{" "}
+                  </Field>{" "}
                   <div className="mt-1 text-14 text-zinc-500">
                     Optional — enter sq ft for just the front or back yard.
                     Leave blank to auto-estimate from the property's lawn area.
@@ -5939,15 +5870,15 @@ export default function EstimateToolViewV2({
               {form.svcDethatch && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <FieldV2 label="Lawn Sq Ft Used">
-                      <input
+                    <Field label="Lawn Sq Ft Used" className="mb-4">
+                      <Input
                         type="text"
                         readOnly
                         value={`${Math.round(effectiveTurfSqFt || 0).toLocaleString()} sf`}
-                        className={cn(INPUT_CLS, "bg-white text-ink-secondary")}
+
                       />
-                    </FieldV2>
-                    <FieldV2 label="Grass Type / Track">
+                    </Field>
+                    <Field label="Grass Type / Track" id="estimate-grassType" className="mb-4">
                       <SelectV2
                         k="grassType"
                         options={[
@@ -5958,8 +5889,8 @@ export default function EstimateToolViewV2({
                           { value: "unknown", label: "Unknown - review" },
                         ]}
                       />
-                    </FieldV2>
-                    <FieldV2 label="Cleanup Level">
+                    </Field>
+                    <Field label="Cleanup Level" id="estimate-dethatchingCleanupLevel" className="mb-4">
                       <SelectV2
                         k="dethatchingCleanupLevel"
                         options={[
@@ -5969,8 +5900,8 @@ export default function EstimateToolViewV2({
                           { value: "heavy", label: "Heavy cleanup / bagging" },
                         ]}
                       />
-                    </FieldV2>
-                    <FieldV2 label="Access">
+                    </Field>
+                    <Field label="Access" id="estimate-dethatchingAccess" className="mb-4">
                       <SelectV2
                         k="dethatchingAccess"
                         options={[
@@ -5979,19 +5910,19 @@ export default function EstimateToolViewV2({
                           { value: "difficult", label: "Difficult - review" },
                         ]}
                       />
-                    </FieldV2>
+                    </Field>
                   </div>
                   <CheckboxV2 k="dethatchingDebrisRemovalIncluded" label="Debris removal included" />
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <FieldV2 label="Thatch Probe #1">
+                    <Field label="Thatch Probe #1" id="estimate-thatchProbe1Inches" className="mb-4">
                       <InputV2 k="thatchProbe1Inches" type="number" min="0" placeholder="inches" />
-                    </FieldV2>
-                    <FieldV2 label="Thatch Probe #2">
+                    </Field>
+                    <Field label="Thatch Probe #2" id="estimate-thatchProbe2Inches" className="mb-4">
                       <InputV2 k="thatchProbe2Inches" type="number" min="0" placeholder="inches" />
-                    </FieldV2>
-                    <FieldV2 label="Thatch Probe #3">
+                    </Field>
+                    <Field label="Thatch Probe #3" id="estimate-thatchProbe3Inches" className="mb-4">
                       <InputV2 k="thatchProbe3Inches" type="number" min="0" placeholder="inches" />
-                    </FieldV2>
+                    </Field>
                   </div>
                   {form.dethatchingCleanupLevel === "none" && !form.dethatchingDebrisRemovalIncluded && (
                     <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
@@ -6884,7 +6815,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
             </section>
-            <section id="estimate-pricing" className="estimate-workflow-section space-y-4" aria-label="Pricing and terms">
+            <section tabIndex={-1} id="estimate-pricing" className="estimate-workflow-section space-y-4" aria-label="Pricing and terms">
             <h2 className="text-20 font-semibold">Pricing & terms</h2>
             <label className="block text-14 font-medium">Customer-visible notes
               <textarea className={`${INPUT_CLS} h-24 mt-2 py-2`} value={form.notes || ""} onChange={(event) => set("notes", event.target.value)} />
@@ -7048,7 +6979,7 @@ export default function EstimateToolViewV2({
               </div>
             )}
             </section>
-            <section id="estimate-review" className="estimate-workflow-section space-y-4" aria-label="Review and send">
+            <section tabIndex={-1} id="estimate-review" className="estimate-workflow-section space-y-4" aria-label="Review and send">
             <h2 className="text-20 font-semibold">Review & send</h2>
             {saveError && <p role="alert" className="text-14 text-alert-fg">{saveError}</p>}
             {/* Action buttons */}
@@ -8357,6 +8288,7 @@ export default function EstimateToolViewV2({
           </aside>{" "}
         </div>{" "}
       </div>{" "}
+      </UiSurface>
     </FormCtx.Provider>
   );
 }
