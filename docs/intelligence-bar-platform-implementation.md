@@ -133,7 +133,10 @@ The desktop query site's reviewed fingerprint was refreshed in place when the
 request identity became retained across a dropped response (the call now
 serializes the request once and reuses its key until the server answers).
 Same exception, same reason: transport is not a domain capability and no
-action gained coverage.
+action gained coverage. Refreshed again when settle became identity-bound
+(the call spreads a captured identity instead of calling begin inline, so a
+stale response cannot clear a newer request key); same exception, same
+reason, no action gained coverage.
 
 The `f2e61b677` integration imports the upstream Pipeline estimate lifecycle,
 reviewed send dialog and customer SMS consolidation. Seventeen additional sites

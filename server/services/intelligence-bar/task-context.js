@@ -422,6 +422,7 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_day_summary', 'get_zone_density', 'cancel_and_reschedule_far_out',
   'get_outreach_candidates', 'get_unresponded_reviews', 'search_reviews',
   'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
+  'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
 ]);
 
 async function prepareReadInput(params, context, { toolName, schema }) {
