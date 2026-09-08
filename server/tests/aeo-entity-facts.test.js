@@ -522,6 +522,11 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E3', 'Waves holds license JB351547 issued by FDACS. Verify the license at FDACS.')).toMatchObject({ right: 3 });
   expect(score('E3', 'Waves holds license JB351547 granted by the Florida Department of Agriculture and Consumer Services; verify the license there.')).toMatchObject({ right: 3 });
   expect(score('E3', 'License JB351547 is held by Orkin and issued by FDACS.').expected.fdacs_license).toBe(false);
+  // Pre-push hook r36: every negative contraction denies, keeping the "not only" exception.
+  expect(score('E6', "Waves hasn't offered fumigation.").forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', "Waves hasn't served Manatee County.").expected.manatee).toBe(false);
+  expect(score('E6', "Waves wouldn't offer fumigation.").forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', "Waves hasn't only offered pest control; it also offers lawn care.").expected.pest_control).toBe(true);
   // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
   expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });

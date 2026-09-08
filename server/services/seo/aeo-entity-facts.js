@@ -58,7 +58,7 @@ function compile(def) {
 // sentence punctuation or a contrastive conjunction, so "not a franchise, but
 // it offers fumigation" still flags fumigation. "no-contract" and "not only"
 // are not negations.
-const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|(?:doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not)(?!\s+only\b)|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
+const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|(?:(?:does|do|is|are|was|were|has|have|had|did|would|could|should|must|might|need)n'?t|does not|do not|is not|are not|was not|were not|has not|have not|had not|did not|would not|could not|should not|must not)(?!\s+only\b)|cannot|can'?t|won'?t|will not|shan'?t|neither)\b/i;
 // An exclusion preposition denies only the phrase it governs: "except
 // fumigation" and "without fumigation" deny, but "pest control without
 // contracts, including lawn care" does not reach lawn care. "As an
