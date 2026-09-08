@@ -1,10 +1,12 @@
 import React, { forwardRef } from 'react';
 import { cn } from './cn';
+import { useUiDensity } from './UiSurface';
 
 export const Checkbox = forwardRef(function Checkbox(
   { className, label, id, ...rest },
   ref
 ) {
+  const density = useUiDensity();
   const input = (
     <input
       ref={ref}
@@ -31,7 +33,7 @@ export const Checkbox = forwardRef(function Checkbox(
   );
   if (!label) return input;
   return (
-    <label htmlFor={id} className="ui-choice-label inline-flex items-center gap-2 cursor-pointer text-ui-body text-zinc-900">
+    <label htmlFor={id} data-ui-density={density} className="ui-choice-label inline-flex items-center gap-2 cursor-pointer text-ui-body text-zinc-900">
       {input}
       <span>{label}</span>
     </label>
