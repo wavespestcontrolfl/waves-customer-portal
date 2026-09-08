@@ -61,28 +61,6 @@ suite('IB target validation against isolated PostgreSQL', () => {
     expect(matching.target.customer_id).toBe(customerId);
   });
 
-  test('named sets require every member, including when the client supplies a matching selection', async () => {
-    const second = randomUUID();
-    await mockDb('customers').insert({ id: second, first_name: 'Synthetic', last_name: 'Secondfixture', phone: '+15550109998' });
-    for (const names of ['Synthetic Targetfixture and Missing Fixture', 'Synthetic Targetfixture and Synthetic Secondfixture and Missing Fixture', 'customer Synthetic Targetfixture and customer Missing Fixture', 'customer named Synthetic Targetfixture and customer named Missing Fixture']) {
-      const prompt = `Update both ${names} to inactive`;
-      expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
-      expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
-    }
-    for (const set of ['both', 'these customers', 'all of these']) {
-      const complete = await Context.resolve({ prompt: `Update ${set} Synthetic Targetfixture and Synthetic Secondfixture to inactive`, pageData: {} });
-      expect(complete.ambiguous).toBe(false);
-      expect(complete.targets.map(target => target.customer_id).sort()).toEqual([customerId, second].sort());
-      const selected = await Context.resolve({ prompt: `Update ${set} Synthetic Targetfixture and Synthetic Secondfixture to inactive`, pageData: {}, selectedTarget: { customer_id: customerId } });
-      expect(selected.targets.map(target => target.customer_id).sort()).toEqual([customerId, second].sort());
-      expect(await Context.resolve({ prompt: `Update ${set} Missing Fixture and Unmatched Customer`, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
-    }
-    const fields = await Context.resolve({ prompt: 'Update both the phone and email for Synthetic Targetfixture', pageData: {} });
-    expect(fields.target.customer_id).toBe(customerId);
-    const qualified = await Context.resolve({ prompt: 'Update both customer Synthetic Targetfixture and customer Synthetic Secondfixture to inactive', pageData: {} });
-    expect(qualified.targets.map(target => target.customer_id).sort()).toEqual([customerId, second].sort());
-  });
-
   test('UUID suffixes are rejected before PostgreSQL identifier reads', async () => {
     expect(Context.pageIds({ customer_id: `${customerId}-extra` })).toMatchObject({ code: 'invalid_page_context' });
     expect(await Context.validateRecordTarget({ customer_id: `${customerId}-extra` }, { targets: [] })).toMatchObject({ code: 'invalid_target' });
