@@ -292,6 +292,15 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
         else pending = true;
       }
     }
+    // The ledger, not the library's return value, decides what was accepted:
+    // a bounce webhook can land between the provider handoff and the
+    // library's return, in which case the row already carries its terminal
+    // status while the call still reports sent.
+    const ledger = (await database('email_messages').where({
+      trigger_event_id: `visit_summary:${visit.id}`, template_key: 'service.visit_summary', recipient_id: customer.id,
+    }).select('status', 'sent_at', 'provider_message_id', 'error_message')).map(summaryEmailState);
+    sent = ledger.includes('sent');
+    unknown ||= ledger.includes('unknown_delivery');
     // Finish proven-unsent recipients before surfacing an earlier uncertain
     // recipient. Its durable email row is always skipped on a later retry.
     const outcome = pending ? 'retry' : unknown ? 'unknown_delivery' : sent ? 'sent' : 'suppressed';
