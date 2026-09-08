@@ -6,8 +6,9 @@ jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: mockRegister, alertRegistrationFailure: jest.fn(),
 }));
 
-const enabled = !!process.env.DATABASE_URL;
-(enabled ? describe : describe.skip)('recurring add-on atomicity (PostgreSQL)', () => {
+// Exact marker the CI DB-gated selector greps for (.github/workflows/tests.yml).
+const SKIP = !process.env.DATABASE_URL;
+(SKIP ? describe.skip : describe)('recurring add-on atomicity (PostgreSQL)', () => {
   let db;
   let maintain;
   let parent;
@@ -24,11 +25,15 @@ const enabled = !!process.env.DATABASE_URL;
 
   // Import the route before timed DB hooks: a cold Jest transform of its
   // dependency graph can exceed the database setup budget on a busy runner.
-  if (enabled) {
+  if (!SKIP) {
+    const url = new URL(process.env.DATABASE_URL);
     const expected = `/waves_qa_${(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
-    if (process.env.WAVES_LOCAL_DEV !== '1' || !process.env.WAVES_WORKTREE_ID ||
-        new URL(process.env.DATABASE_URL).pathname !== expected) {
-      throw new Error('Use the managed worktree-owned QA database for PostgreSQL tests.');
+    const managedQa = process.env.WAVES_LOCAL_DEV === '1' && !!process.env.WAVES_WORKTREE_ID && url.pathname === expected;
+    // The isolated CI database (tests.yml DB-gated step), like the sibling
+    // PostgreSQL suites — never a shared or production database.
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!managedQa && !ciTest) {
+      throw new Error('Use the managed worktree-owned QA database or the isolated CI database for PostgreSQL tests.');
     }
     db = require('../models/db');
     maintain = require('../routes/admin-schedule').runRecurringSeriesMaintenance;
