@@ -1948,8 +1948,8 @@ export default function EstimateToolViewV2({
   }, [activeLeadId, groupAnchorId]);
 
   useEffect(() => {
-    if (!editEstimateId || (editEstimateId === editMode?.id && (!estimateRefresh || loadedEstimateRefresh.current === estimateRefresh))) return undefined;
-    const refreshing = editEstimateId === editMode?.id;
+    if (!editEstimateId || (sameEstimateId(editEstimateId, editMode?.id) && (!estimateRefresh || loadedEstimateRefresh.current === estimateRefresh))) return undefined;
+    const refreshing = sameEstimateId(editEstimateId, editMode?.id);
     loadedEstimateRefresh.current = estimateRefresh;
     if (refreshing && dirty) {
       setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");

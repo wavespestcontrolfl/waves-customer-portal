@@ -495,7 +495,10 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       customer_id: 'cust-estimate', property_id: '00000000-0000-0000-0000-000000000003', lawn_applications: 9,
     }, { customers: [{ id: 'cust-estimate', first_name: 'Estimate', last_name: 'Fixture' }],
       customer_properties: [{ id: '00000000-0000-0000-0000-000000000003', customer_id: 'cust-estimate', address_line1: '1 Example St',
-        city: 'Bradenton', state: 'FL', zip: '34208', property_sqft: 5000, lot_sqft: 10000, lawn_type: 'St. Augustine' }] }],
+        city: 'Bradenton', state: 'FL', zip: '34208', property_sqft: 5000, lot_sqft: 10000, lawn_type: 'St. Augustine' }],
+      // No active service: the shared stops include a lawn visit, which the
+      // preview would refuse as a duplicate before reaching its gate.
+      scheduled_services: [] }],
     ['property-tools', 'executePropertyTool', 'add_customer_property', { customer_id: 'cust-property',
       address_line1: '2 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' }, propertySeed],
     ['property-tools', 'executePropertyTool', 'update_customer_property', { customer_id: 'cust-property', property_id: 'prop-saved', label: 'Family' }, propertySeed],
