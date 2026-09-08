@@ -757,3 +757,50 @@ test('the prober stores a fact score for cohort questions and null for everythin
   expect(scoreEntityAnswer(e4, byQuery[e4].response_raw)).toEqual(JSON.parse(byQuery[e4].entity_facts));
   expect(byQuery[benchmark.questions[0].query].response_raw).toHaveLength(8000);
 });
+
+test('a subordinate generic party is its own subject; inflected verification, direct alias answers, adjectival bases, included re-treatment under a bond, cadence and purchase wording (GitHub review r9)', () => {
+  // A contractor / vendor introduced by a relative clause is the subject of that clause, not Waves.
+  expect(score('E8', 'Waves works with a contractor that is part of a franchise network.').forbidden.franchise).toBe(false);
+  expect(score('E5', 'Waves works with a vendor that serves Manatee County.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves is a family-owned company that serves Manatee County customers.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves, a local business that serves Manatee County, is not a franchise.')).toMatchObject({ expected: { manatee: true }, forbidden: { franchise: false } });
+  // The verification verb counts in any inflection.
+  expect(score('E3', 'Waves holds FDACS license JB351547, which can be verified on the department website.')).toMatchObject({ expected: { fdacs_license: true, fdacs: true, license_verifiable: true }, missing: 0 });
+  expect(score('E3', 'The license JB351547 is verifiable in the FDACS lookup.').expected.license_verifiable).toBe(true);
+  // Direct affirmative alias answers.
+  for (const text of ['Yes, both names refer to Waves Pest Control.', 'They refer to a single business.', 'Yes, they are one and the same.']) {
+    expect([text, score('E9', text).expected.alias_same]).toEqual([text, true]);
+  }
+  expect(score('E9', 'No, they are not one and the same.')).toMatchObject({ expected: { alias_same: false } });
+  // An adjectival base is a headquarters claim; footprint, state and non-place adjectives are not.
+  expect(score('E5', 'Waves is a Tampa-based pest control company.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves, a Naples-based company, serves Sarasota.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is a Lakewood Ranch-based pest control company.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Waves is a Florida-based, locally based, family-based company.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Orkin is a Tampa-based company; Waves is based in Lakewood Ranch.').forbidden.out_of_footprint_hq).toBe(false);
+  // Re-treatment "included" is a free re-treatment only outside a bond context.
+  expect(score('E7', 'Re-treatment is included under an active paid bond.').forbidden.free_retreat_guarantee).toBe(false);
+  expect(score('E7', 'Re-treatment is included with the separately purchased annual bond.').forbidden.free_retreat_guarantee).toBe(false);
+  expect(score('E7', 'Re-treatment is included.').forbidden.free_retreat_guarantee).toBe(true);
+  expect(score('E7', 'Under the bond, re-treatments are included at no additional cost.').forbidden.free_retreat_guarantee).toBe(true);
+  // Ordinary annual-renewal cadence.
+  expect(score('E7', 'The termite bond is optional and must be renewed once a year.')).toMatchObject({ expected: { bond_optional: true, bond_renewable: true } });
+  expect(score('E7', 'The bond renews every 12 months.').expected.bond_renewable).toBe(true);
+  expect(score('E7', 'The bond is renewed on an annual basis.').expected.bond_renewable).toBe(true);
+  // Separately purchased bond wording.
+  for (const text of ['The termite bond is available for an additional charge.', 'Customers can purchase the bond for an extra fee.', 'The bond can be added to treatment if desired.']) {
+    expect([text, score('E7', text).expected.bond_optional]).toEqual([text, true]);
+  }
+  expect(score('E7', 'The bond cannot be purchased separately; it is included with every treatment.').expected.bond_optional).toBe(false);
+});
+
+test('a row with an answer but no stored score is rescored from the raw answer, and a stale row is scored once per row object', () => {
+  const unscored = row(byId('E1').query, { response_raw: 'Founded by Adam Benetti.', entity_facts: null });
+  expect(summarizeEntityObservations([unscored])).toMatchObject({ observed: 1, factsRight: 1, wrongClaims: 0 });
+  expect(summarizeEntityObservations([{ ...unscored, response_raw: null }])).toMatchObject({ observed: 0 });
+  const stale = row(byId('E1').query, { text: 'Founded by Adam Benetti.', response_raw: 'Founded by Adam Benetti.' });
+  stale.entity_facts = { ...stale.entity_facts, scorer: 'old-rules' };
+  const first = summarizeEntityObservations([stale]);
+  stale.response_raw = 'Founded by John Smith.';
+  expect(summarizeEntityObservations([stale])).toEqual(first);
+});

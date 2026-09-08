@@ -310,10 +310,17 @@ function lastSubjectIndex(re, text) {
 // from the compound before the subject is read.
 const COMPOUND_WITH_WAVES_RE = new RegExp(`\\b(?:${OTHER_ENTITY_ALTERNATION}|[A-Z][\\w'&-]*(?:\\s+[A-Z][\\w'&-]*){0,3})\\s+(?:and|&)\\s+(?=Waves\\b)|(?<=\\bWaves\\s+)(?:and|&)\\s+(?:${OTHER_ENTITY_ALTERNATION}|[A-Z][\\w'&-]*(?:\\s+[A-Z][\\w'&-]*){0,3})(?=\\s+(?:both\\s+|all\\s+|each\\s+)?${PREDICATE_VERB}\\b)`, 'g');
 
+// A generic party introduced as a subordinate subject ("a contractor that is
+// part of a franchise network", "a vendor that serves Manatee County") is the
+// subject of its own relative clause, not Waves — unless the noun is
+// predicated of Waves ("Waves is a company that serves …", "Waves, a family
+// business that …"), where it still describes Waves.
+const GENERIC_PARTY_RE = /(?<!\b(?:is|are|was|were|remains|as|being|became|become)\s+(?:[\w-]+\s+){0,2}|\bwaves,\s+)\b(?:an?|the|another|one|some|any|its|their|this|each|every)\s+(?:(?!\b(?:that|which|who)\b)[\w'-]+\s+){0,2}?(?:contractors?|subcontractors?|vendors?|suppliers?|partners?|providers?|compan(?:y|ies)|firms?|business(?:es)?|competitors?|networks?|affiliates?|franchisees?|technicians?|operators?|brands?|outfits?)\b(?=\s*,?\s*(?:that|which|who|whose)\b)/gi;
+
 function aboutAnotherEntity(beforeClause, answerPrefix) {
   if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
   const named = answerPrefix.replace(COMPARISON_PHRASE_RE, ' ').replace(COMPOUND_WITH_WAVES_RE, ' ');
-  return Math.max(lastSubjectIndex(OTHER_ENTITY_RE, named), lastSubjectIndex(GOV_SUBJECT_RE, named)) > lastSubjectIndex(WAVES_NAMED_RE, named);
+  return Math.max(lastSubjectIndex(OTHER_ENTITY_RE, named), lastSubjectIndex(GOV_SUBJECT_RE, named), lastIndexOfMatch(GENERIC_PARTY_RE, named)) > lastSubjectIndex(WAVES_NAMED_RE, named);
 }
 
 // A claim that captures a value ("founded in 2019", "based in Tampa") is
@@ -443,18 +450,31 @@ function asEntityFacts(value) {
   } catch { return null; }
 }
 
+// A row rescored from its raw answer is scored once per row object: the
+// dashboard reads the same row for the overall summary, its platform group
+// and its question group, and after a scorer revision every stored row is
+// stale until the next daily run overwrites it. Keyed weakly, so the cache
+// lives exactly as long as the request's grid.
+const rescored = new WeakMap();
+function rescoreFromRaw(row) {
+  if (typeof row.response_raw !== 'string') return null;
+  if (!rescored.has(row)) rescored.set(row, scoreEntityAnswer(row.query, row.response_raw));
+  return rescored.get(row);
+}
+
 /**
  * The fact score for a row under the CURRENT rules. A fact score needs an
  * answer; it does not need resolved citations. A score stored under another
- * cohort version or scorer revision is recomputed from the raw answer; with
- * no raw answer to rescore, the row stays out of the dashboard.
+ * cohort version or scorer revision, or missing altogether (the migration's
+ * down-and-up cycle keeps observations and drops the column), is recomputed
+ * from the raw answer; with no raw answer to rescore, the row stays out of
+ * the dashboard.
  */
 function currentEntityFacts(row) {
   if (row.measurement_version !== MEASUREMENT_VERSION || row.answer_available !== true) return null;
   const stored = asEntityFacts(row.entity_facts);
-  if (!stored) return null;
-  if (stored.cohort === cohort.version && stored.scorer === SCORER_REVISION) return stored;
-  return typeof row.response_raw === 'string' ? scoreEntityAnswer(row.query, row.response_raw) : null;
+  if (stored && stored.cohort === cohort.version && stored.scorer === SCORER_REVISION) return stored;
+  return rescoreFromRaw(row);
 }
 
 function isScorableAnswer(row) {
