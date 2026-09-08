@@ -8,7 +8,7 @@
 
 This contract records the admin UI that is actually shipped and supported. Where the older `waves-portal-ui-redesign-spec.md` conflicts with this document, this document governs new admin work. In particular, the shipped admin font is Roboto rather than Inter.
 
-The September 8, 2026 foundation revision promotes the accepted Customer workspace presentation for new and deliberately migrated work. Start those surfaces with `<UiSurface density="comfortable">`. The existing catalog at `/admin/_design-system` demonstrates the controls, behavior, and implementation source. This revision does not globally restyle existing pages. See [the acceptance record](admin-foundation-acceptance-2026-09-08.md) for implementation status and verification limits.
+The September 8, 2026 foundation revision promotes the accepted Customer workspace presentation for new and deliberately migrated work. Start those surfaces with `<UiSurface density="comfortable">`. The existing catalog at `/admin/_design-system` demonstrates the controls, behavior, and implementation source. This revision does not globally restyle existing pages.
 
 ## Safety rules
 
@@ -140,7 +140,7 @@ Before changing a page, record its current routes, query parameters, API request
 5. Keyboard navigation, focus return, accessible names, and active states work.
 6. Desktop and mobile layouts work at representative widths.
 7. Focused tests and the production build pass.
-8. Computed button/input/select sizes at 390, 700, 820, 1024, and 1440px, with fine/coarse pointers, portrait/landscape, and contracted keyboard viewport cases. Run `node scripts/qa/design-system.cjs` for the synthetic catalog checks; it uses the existing local frontend runner and never connects to the backend.
+8. Computed button/input/select sizes at 390, 700, 820, 1024, and 1440px, with fine/coarse pointers, portrait/landscape, and contracted keyboard viewport cases.
 9. Record screenshot paths, exact checked commit/state, CI when applicable, and physical-device checks separately. Emulated viewport contraction is not an installed-iPhone keyboard/safe-area test.
 
 Legacy cleanup is a later change. Do not delete the previous route or component in the same pull request that introduces its replacement.
