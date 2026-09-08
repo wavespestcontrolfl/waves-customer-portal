@@ -83,6 +83,16 @@ class IOSPushTests(unittest.TestCase):
             [config["buildSettings"]["CODE_SIGN_ENTITLEMENTS"] for config in self.app_configs(project)],
         )
 
+    def test_capacitor_can_read_the_configured_project(self):
+        configure(self.project_dir)
+        version = subprocess.check_output([
+            "node", "-e",
+            "const {getMajoriOSVersion}=require('@capacitor/cli/dist/ios/common');"
+            "process.stdout.write(getMajoriOSVersion({ios:{nativeXcodeProjDirAbs:process.argv[1]}}));",
+            str(self.project_file.parent),
+        ], cwd=ROOT, text=True)
+        self.assertEqual(version, "14")
+
     def test_repeated_setup_is_idempotent(self):
         configure(self.project_dir)
         first = (self.project_file.read_bytes(), self.entitlement_file.read_bytes())
@@ -114,6 +124,7 @@ class IOSPushTests(unittest.TestCase):
         # Sign a disposable Mach-O fixture. No Apple identity, device install,
         # production account, or live push token is used by these tests.
         shutil.copyfile("/usr/bin/true", app / "App")
+        (app / "App").chmod(0o755)
         (app / "Info.plist").write_bytes(plistlib.dumps({
             "CFBundleIdentifier": BUNDLE_ID, "CFBundleExecutable": "App",
             "CFBundlePackageType": "APPL", "CFBundleSupportedPlatforms": ["iPhoneOS"],

@@ -291,6 +291,7 @@ jobs:
         run: |
           xcodebuild -version
           pod --version
+          xcodeproj --version
       - name: Generate and sync the pinned iOS app
         run: bash scripts/mobile/bootstrap-ios.sh
       - name: Verify iOS push signing setup and release checks

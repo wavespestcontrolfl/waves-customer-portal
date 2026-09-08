@@ -67,10 +67,17 @@ def configure(project_dir):
     for path, value in entitlements.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plistlib.dumps(value, sort_keys=False))
-    if json.dumps(project, sort_keys=True) != original:
-        # Xcode accepts XML project plists; use Apple's parser and plistlib so
-        # updating a build setting cannot corrupt nested OpenStep project data.
-        project_file.write_bytes(plistlib.dumps(project, sort_keys=False))
+    if json.dumps(project, sort_keys=True) != original or not project_file.read_bytes().startswith(b"// !$*UTF8*$!"):
+        # Capacitor also reads the OpenStep text directly. Use CocoaPods'
+        # bundled xcodeproj writer to retain that format, staging the conversion
+        # so a missing tool or failed conversion leaves the project intact.
+        with tempfile.TemporaryDirectory(prefix="waves-ios-project-") as temp_dir:
+            staged_project = Path(temp_dir) / "App.xcodeproj"
+            staged_project.mkdir()
+            staged_file = staged_project / "project.pbxproj"
+            staged_file.write_bytes(plistlib.dumps(project, sort_keys=False))
+            subprocess.run(["xcodeproj", "sort", str(staged_project)], capture_output=True, check=True)
+            project_file.write_bytes(staged_file.read_bytes())
     print(f"APNs configured for all {len(configurations)} App build configurations")
 
 
