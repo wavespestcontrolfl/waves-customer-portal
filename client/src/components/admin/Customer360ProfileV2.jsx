@@ -7634,7 +7634,8 @@ export default function Customer360ProfileV2({
             <SheetBody>{conversation}</SheetBody>
           </Sheet>) : (activeTab === "comms" && conversation)}
 
-          {embedded && isAdmin && activeTab === "comms" && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
+          {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
+          {embedded && activeTab === "comms" && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
 
           {embedded && isAdmin && activeTab === "comms" && <Customer360Activity missingSources={timelineMissingSources} timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
 
