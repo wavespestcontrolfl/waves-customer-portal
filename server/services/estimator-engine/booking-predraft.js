@@ -41,12 +41,10 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 
-// The catch-all assessment is the catalog services row service_key
-// 'lawn_inspection' (renamed "Waves Assessment" by migration
-// 20260619000002); bookings denormalize the name into service_type. Match
-// either — legacy rows can carry the name without the FK.
-const ASSESSMENT_NAME_RE = /^waves assessment$/i;
-const ASSESSMENT_SERVICE_KEY = 'lawn_inspection';
+// Assessment identity lives in services/assessment-booking.js — the same
+// predicate the booking paths use to keep an assessment from converting a
+// lead to won, so the pre-draft hook and the conversion gates can't drift.
+const { isAssessmentBooking } = require('../assessment-booking');
 
 // Terminal booking states — a booking already dead by the time the
 // detached hook runs must not seed a draft.
@@ -57,15 +55,6 @@ function bookingPreDraftsEnabled() {
   if (!['1', 'true', 'on'].includes(flag)) return false;
   const { estimatorEngineEnabled } = require('./index');
   return estimatorEngineEnabled();
-}
-
-async function isAssessmentBooking(booking) {
-  if (ASSESSMENT_NAME_RE.test(String(booking.service_type || '').trim())) return true;
-  if (!booking.service_id) return false;
-  const serviceRow = await db('services').where({ id: booking.service_id }).first();
-  if (!serviceRow) return false;
-  return serviceRow.service_key === ASSESSMENT_SERVICE_KEY
-    || ASSESSMENT_NAME_RE.test(String(serviceRow.name || '').trim());
 }
 
 // Merge the booking linkage into an engine-created draft's estimate_data.

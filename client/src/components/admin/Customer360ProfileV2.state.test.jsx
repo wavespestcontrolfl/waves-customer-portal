@@ -71,6 +71,63 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
   });
 
+  it.each([
+    [{ status: 'processing', amount: '102.90' }, 'Payment $102.90 is processing. Settlement is pending.'],
+    [{ status: 'paid', amount: '102.90' }, 'Payment $102.90 completed'],
+    [{ status: 'unknown' }, 'Payment status is not confirmed. Check payment history before trying again.'],
+    [undefined, 'Payment status is not confirmed. Check payment history before trying again.'],
+  ])('announces the returned charge outcome without assuming settlement: %j', async (payment, expected) => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const detail = customerDetail('customer-a', 'Avery');
+    Object.assign(detail.customer, { billingMode: 'monthly_membership', monthlyRate: 100 });
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) return response(detail);
+      if (path.endsWith('/charge-now')) return response({ success: true, payment });
+      if (path.endsWith('/autopay-state')) return response({ state: 'active' });
+      return response({});
+    }));
+    const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('tab', { name: 'Billing', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Charge now ($100.00)' }));
+    expect(await screen.findByText(expected)).toHaveAttribute('role', 'status');
+    expect(screen.queryByText('Charged $100.00 successfully')).not.toBeInTheDocument();
+    const charges = fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'));
+    expect(charges).toHaveLength(1);
+    expect(charges[0][1]).toMatchObject({ method: 'POST', body: '{}' });
+  });
+
+  it('announces a failed charge and clears the error after a processing retry', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const detail = customerDetail('customer-a', 'Avery');
+    Object.assign(detail.customer, { billingMode: 'monthly_membership', monthlyRate: 100 });
+    let failed = true;
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) return response(detail);
+      if (path.endsWith('/charge-now')) return failed
+        ? response({ error: 'Synthetic decline' }, 502)
+        : response({ success: true, payment: { status: 'processing', amount: '100.00' } });
+      return response({});
+    }));
+    const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('tab', { name: 'Billing', exact: true }));
+    const charge = screen.getByRole('button', { name: 'Charge now ($100.00)' });
+    fireEvent.click(charge);
+    expect(await screen.findByText('Synthetic decline')).toHaveAttribute('role', 'alert');
+    failed = false;
+    fireEvent.click(charge);
+    expect(await screen.findByText('Payment $100.00 is processing. Settlement is pending.')).toHaveAttribute('role', 'status');
+    expect(screen.queryByText('Synthetic decline')).not.toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-now'))).toHaveLength(2);
+  });
+
   it('preserves technician texting when admin-only conversation history is unavailable', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);

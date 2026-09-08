@@ -280,8 +280,42 @@ ach_status lookup failure). The accept-time verify re-resolves the same
 tender policy and refuses a captured bank method (402
 RECURRING_CARD_REQUIRED → the client re-mints card-only) once the gate is
 off or the customer's ACH state is unhealthy, so a previously minted
-bank-capable intent cannot outlive the kill switch. The one-time
-card-hold-intent route above stays card-only regardless).
+bank-capable intent cannot outlive the kill switch. Optional body
+`replaceSetupIntentId` ("use a different payment method" after a capture
+already succeeded): the named intent must be THIS estimate's own
+`estimate_recurring_card` capture (foreign or unknown id → 400; a Stripe
+read failure → 503). The replacement is minted
+FIRST (idempotency key salted by the retired id — unbounded, no
+generation consumed), then the succeeded intent is stamped
+`metadata.retired='true'` + `replaced_by=<new id>` in Stripe; a mint
+failure leaves the saved method untouched (503). From then on the
+accept-time verify refuses the retired id (402 RECURRING_CARD_REQUIRED)
+and the deterministic mint follows `replaced_by` to the live capture, so
+a refresh lands on the replacement. Replacement and acceptance serialize
+on the estimate ROW LOCK: the replacement runs in a transaction that
+locks the row (`FOR UPDATE`, read-only — no `updated_at` move, so the
+accept's freshness CAS is untouched) and the accept re-reads its verified
+intent live under the same lock before committing, so a retirement that
+landed after the pre-transaction verify aborts the accept (402 → re-mint)
+and a replacement that finds the estimate already accepted retires
+nothing (409 "Estimate already accepted") — every replacement outcome
+takes that lock, including a stale retry with an already-retired or
+unfinished intent, and the locked read re-judges the full accept-active
+gate (declined / expired / archived / off-surface → 409 "Estimate is no
+longer active"), so no fresh capture is minted (and no checkout step
+recorded) for an estimate that turned terminal after the route's read.
+The `setup_intent.succeeded` webhook backstop re-reads an UNSTAMPED
+(legacy / flag-off) capture live from Stripe before enrolling and never
+enrolls a retired one. A chain head is judged by what it captured, like the accept
+gate: a saved card stays valid after GATE_ACCEPT_ACH_CAPTURE closes, a
+captured bank under a card-only policy is skipped like a dead replay
+(unfinished heads must match the tender family exactly) so the
+generation walk mints a compatible card-only intent. Every minted/replayed intent is
+re-read live before it is judged (an idempotent replay returns the
+original create body). A succeeded replay's response carries
+`capturedMethodType`, and the capture UIs render it as a saved-method
+panel with a continue/replace choice instead of a Payment Element. The
+one-time card-hold-intent route above stays card-only regardless).
 `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
 per-service details-packet PDF for the estimate view's "full details"
 buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
