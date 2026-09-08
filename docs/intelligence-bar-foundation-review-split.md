@@ -145,3 +145,51 @@ explicit estimate IDs, while message-body commands grant no record authority.
 Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
 PostgreSQL tests. Independent review closed both additional edge cases before
 the fifth remote review. No provider, customer message or production write ran.
+
+## B1 selection follow-up
+
+Target validation #4062 stopped receiving pushes at `600841fa52` after its
+fifth review introduced a new P1: an unmatched explicit customer name could
+accept a stale `selectedTarget` (3948877186). Review history: round 1
+`265f8c4173` had two P1/four P2; round 2 `7c15c116e7` had two P1/three P2;
+round 3 on the same head had two P1/one P2; round 4 `27897bb40c` had two
+P1/one P2; round 5 `600841fa52` had one P1/three P2. `e18a438cf` later merged
+main after catalog #4041 squash-merged (graft merge, no conflicts).
+
+`fix/ib-target-selection` is the focused child of B1 that fixes that P1. Its
+first shape (five heads, `b9b2793b5` … `a4676a38b`) also carried a named-cohort
+grammar ("both A and B", "these customers …", "all of these …": member runs,
+field-set tails, action-clause splits, member matching, merged single-name
+lookups). Rounds 2–5 each found a new P1 in that grammar and none in the
+selection rule, so it hit the round cap. Owner decision 2026-09-08: fail closed
+on named cohorts. The current shape keeps two rules and deletes the grammar:
+
+- A selection never overrides current-request evidence. An explicit name that
+  matched nothing, a capped lookup, or a named cohort refuses the selected
+  customer with `context_mismatch`; a selection among the fresh matches (or
+  with no name evidence at all) remains an operator selection.
+- A set quantifier is never a target. Any request containing `both`,
+  `these customers` or `all of these` resolves to no targets and
+  `ambiguous: true`, so the caller asks for one target at a time; write
+  validation and read preparation refuse an ambiguous context, and a selection
+  is refused. This is deliberately literal: first-name cohorts with no fresh
+  match ("text both Alice and Bob"), field pairs ("both the phone and email")
+  and product pairs all refuse, because any evidence-based narrowing is the
+  cohort grammar the round cap retired. Duplicate-name ambiguity stays
+  distinct: an operator selection among complete same-name matches resolves
+  it. Nothing downstream executes on a multi-customer cohort:
+  `prepareReadInput` fills `customer_id` only from exactly one target, and the
+  route reads `targets` solely as read-scope ids.
+
+A capped name lookup refuses any selection, and `prepareReadInput` refuses an
+ambiguous context or an unresolved explicit name (`namesRequested` now travels
+in the context) before the empty-target broad-read fallback, so neither a
+refused cohort nor an unresolved name widens into an unscoped read. An explicit
+email or phone recipient is a contact, never a name. `namesTargetCustomer` no
+longer accepts a name after `both` or `and`, and the
+resolver keeps page errors in the page shape and anchors its recipient/review
+matches, so its structural warning falls below the pre-split level.
+
+Validation: 153 target cases pass (129 unit and 24 rollback-only isolated
+PostgreSQL cases). No model, provider, production query, migration, merge or
+gate change occurred.

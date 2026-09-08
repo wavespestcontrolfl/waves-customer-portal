@@ -54,6 +54,31 @@ test('viewed and selected targets retain the database text version without Date 
   expect(viewed.target.version).toBe('2026-09-01 12:00:00.123456+00');
   expect(selected.target.version).toBe(viewed.target.version);
 });
+
+test('an unmatched current name refuses a stale operator selection', async () => {
+  const result = await Context.resolve({ prompt: 'Update Synthetiic Person', pageData: { customer_id: A }, selectedTarget: { customer_id: A } });
+  expect(result).toMatchObject({ code: 'context_mismatch' });
+  lookupRows = [rows.customers[0]];
+  const matching = await Context.resolve({ prompt: 'Update Synthetic Person', pageData: { customer_id: B }, selectedTarget: { customer_id: A } });
+  expect(matching.target.customer_id).toBe(A);
+  expect(matching.target.provenance).toBe('operator_selection');
+});
+
+test.each(['both', 'these customers', 'all of these'])('a "%s" cohort asks for clarification even when every name matches', async set => {
+  lookupRows = [rows.customers[0], { id: B, first_name: 'Synthetic', last_name: 'Second' }];
+  const prompt = `Update ${set} Synthetic Person and Synthetic Second to inactive`;
+  expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+  expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
+  expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  // Fail closed on every set quantifier, including first-name cohorts with
+  // no fresh match and sets that are not people.
+  expect(await Context.resolve({ prompt: `Update ${set} the phone and email for this customer`, pageData: { customer_id: A }, selectedTarget: { customer_id: A } }))
+    .toMatchObject({ code: 'context_mismatch' });
+  expect(await Context.resolve({ prompt: `Text ${set} Alice and Bob`, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  expect(await Context.resolve({ prompt: `Check stock for ${set} Talstar and Bifen`, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+  const cohort = await Context.resolve({ prompt, pageData: {} });
+  expect((await Context.validateRecordTarget({ customer_ids: [A, B] }, cohort, { toolName: 'move_stops_to_day' })).code).toBe('target_clarification_required');
+});
 const context = (customerId = A) => ({ targets: customerId ? [{ customer_id: customerId }] : [], page: { ids: {} } });
 
 test('explicit child identifiers constrain same-customer choices and exclude message content', async () => {
@@ -116,12 +141,14 @@ test('a name-only lead write cannot bypass current-request identity validation',
 test('a name lookup at its cap cannot authorize a truncated bulk cohort', async () => {
   lookupRows = Array.from({ length: 10 }, (_, i) => ({ id: `50000000-0000-4000-8000-${String(i).padStart(12, '0')}`, first_name: 'Synthetic', last_name: `Cohort${i}` }));
   const task = await Context.resolve({ prompt: `Update both ${lookupRows.map(c => `${c.first_name} ${c.last_name}`).join(' and ')}`, pageData: {} });
-  expect(task.candidates).toHaveLength(10);
+  expect(task.candidates).toEqual([]);
   expect(task.targets).toEqual([]);
   expect(task.ambiguous).toBe(true);
+  const capped = await Context.resolve({ prompt: 'Update Synthetic', pageData: {}, selectedTarget: { customer_id: lookupRows[0].id } });
+  expect(capped).toMatchObject({ code: 'context_mismatch' });
   lookupRows[9] = { id: B, first_name: 'Synthetic', last_name: 'Incidental' };
   const incomplete = await Context.resolve({ prompt: `Update both ${lookupRows.slice(0, 9).map(c => `${c.first_name} ${c.last_name}`).join(' and ')} and Synthetic MissingOne and Synthetic MissingTwo after checking with Synthetic Incidental`, pageData: {} });
-  expect(incomplete.candidates).toHaveLength(9);
+  expect(incomplete.candidates).toEqual([]);
   expect(incomplete.targets).toEqual([]);
   expect(incomplete.ambiguous).toBe(true);
 });
@@ -323,6 +350,20 @@ test('selector-free customer reads inherit one resolved task target and never ch
   const args = { toolName: 'get_call_log', schema: { properties: { customer_id: { type: 'string' } } } };
   expect(await Context.prepareReadInput({ days_back: 7 }, context(), args)).toEqual({ input: { days_back: 7, customer_id: A } });
   expect(await Context.prepareReadInput({ days_back: 7 }, context(null), args)).toEqual({ input: { days_back: 7 } });
+  lookupRows = [rows.customers[0], { id: B, first_name: 'Synthetic', last_name: 'Second' }];
+  const cohort = await Context.resolve({ prompt: 'Show call logs for both Synthetic Person and Synthetic Second', pageData: {} });
+  expect((await Context.prepareReadInput({ days_back: 7 }, cohort, args)).code).toBe('target_clarification_required');
+  const firstNames = await Context.resolve({ prompt: 'Show messages for both Alice and Bob', pageData: {} });
+  expect((await Context.prepareReadInput({ days_back: 7 }, firstNames, args)).code).toBe('target_clarification_required');
+  lookupRows = [rows.customers[0], { id: B, first_name: 'Synthetic', last_name: 'Person' }];
+  const duplicate = await Context.resolve({ prompt: 'Update Synthetic Person', pageData: {}, selectedTarget: { customer_id: B } });
+  expect(duplicate.target).toMatchObject({ customer_id: B, provenance: 'operator_selection' });
+  const emailed = await Context.resolve({ prompt: 'Reply to synthetic@example.invalid', pageData: {} });
+  expect(emailed).toMatchObject({ ambiguous: false, explicitEmails: ['synthetic@example.invalid'] });
+  expect(await Context.prepareReadInput({ days_back: 7 }, emailed, args)).toEqual({ input: { days_back: 7 } });
+  const unmatched = await Context.resolve({ prompt: 'Show call logs for Synthetiic Person', pageData: { customer_id: A } });
+  expect(unmatched).toMatchObject({ target: null, targets: [], ambiguous: false, namesRequested: true });
+  expect((await Context.prepareReadInput({ days_back: 7 }, unmatched, args)).code).toBe('target_clarification_required');
   const multiple = { ...context(), targets: [{ customer_id: A }, { customer_id: B }] };
   expect((await Context.prepareReadInput({}, multiple, args)).code).toBe('target_clarification_required');
   expect(await Context.prepareReadInput({ customer_id: B }, multiple, args)).toEqual({ input: { customer_id: B } });

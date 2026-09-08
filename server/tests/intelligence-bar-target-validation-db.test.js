@@ -122,15 +122,29 @@ suite('IB target validation against isolated PostgreSQL', () => {
     expect(await Context.validateRecordTarget({ lead_id: ids[0] }, task, options)).toBeNull();
   });
 
+  test('an unmatched name refuses a stale selection and a named cohort asks for clarification', async () => {
+    const second = randomUUID();
+    await mockDb('customers').insert({ id: second, first_name: 'Synthetic', last_name: 'Secondfixture', phone: '+15550109998' });
+    expect(await Context.resolve({ prompt: 'Update Synthetiic Targetfixture', pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
+    const matching = await Context.resolve({ prompt: 'Update Synthetic Targetfixture', pageData: { customer_id: second }, selectedTarget: { customer_id: customerId } });
+    expect(matching.target.customer_id).toBe(customerId);
+    for (const set of ['both', 'these customers', 'all of these']) {
+      const prompt = `Update ${set} Synthetic Targetfixture and Synthetic Secondfixture to inactive`;
+      expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
+      expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
+    }
+  });
+
   test('eleven explicit customer names cannot silently become ten approved targets', async () => {
     const customers = Array.from({ length: 11 }, (_, i) => ({ id: randomUUID(), first_name: 'Synthetic', last_name: `Cohortfixture${i}`,
       phone: `+15550000${String(i).padStart(3, '0')}` }));
     await mockDb('customers').insert(customers);
     const task = await Context.resolve({ prompt: `Update both ${customers.map(c => `${c.first_name} ${c.last_name}`).join(' and ')}`, pageData: {} });
-    expect(task.candidates).toHaveLength(10);
+    expect(task.candidates).toEqual([]);
     expect(task.targets).toEqual([]);
     expect(task.ambiguous).toBe(true);
-    expect(await Context.validateRecordTarget({ customer_ids: task.candidates.map(c => c.customer_id) }, task)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.validateRecordTarget({ customer_ids: customers.slice(0, 10).map(c => c.id) }, task)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.resolve({ prompt: 'Update Synthetic', pageData: {}, selectedTarget: { customer_id: customers[0].id } })).toMatchObject({ code: 'context_mismatch' });
     const incidental = await Context.resolve({ prompt: `Update both ${customers.map(c => `${c.first_name} ${c.last_name}`).join(' and ')} after checking with Synthetic Targetfixture`, pageData: {} });
     expect(incidental.targets).toEqual([]);
     expect(incidental.ambiguous).toBe(true);

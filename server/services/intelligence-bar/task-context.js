@@ -30,7 +30,11 @@ const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
-const NON_PERSON_NAMES = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
+const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
+// A set quantifier ("both A and B", "these customers …", "all of these …") is
+// never a target: one target per request, so the request asks to clarify.
+// Owner decision 2026-09-08: fail closed rather than parse cohorts.
+const SET_QUANTIFIER_RE = /\b(?:both|these customers|all of these)\b/i;
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
 const CUSTOMER_LOOKUP_LIMIT = 10;
 
@@ -54,7 +58,9 @@ function targetClause(prompt, retainRecordConstraints = false) {
 }
 
 function explicitSingleNames(prompt) {
-  const clause = targetClause(prompt);
+  // An explicit email or phone recipient is a contact, never a person's name.
+  const clause = targetClause(prompt).replace(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi, ' ')
+    .replace(/(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/g, ' ');
   const normalized = normalizeName(clause);
   return [...new Set([
     ...[...normalized.matchAll(PERSON_REFERENCE)]
@@ -105,8 +111,7 @@ function namesTargetCustomer(clause, customer) {
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
-  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE})(?:\\s+both)?$`).test(before)
-    || (/\bboth\b/.test(clause) && /\band$/.test(before));
+  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE})$`).test(before);
 }
 
 async function namedCustomers(prompt) {
@@ -194,9 +199,10 @@ function customerIds(records) {
   return [...new Set(records.map(r => r.kind === 'customer_id' ? r.id : r.customer_id).filter(Boolean))];
 }
 
+// Errors keep the page shape so the resolver never branches on them twice.
 async function loadPage(pageData, prompt) {
   let ids = pageIds(pageData);
-  if (ids.error) return ids;
+  if (ids.error) return { ids: {}, records: {}, ...ids };
   const referencedKinds = new Set([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => `${match[1].toLowerCase() === 'account' ? 'customer' : match[1].toLowerCase()}_id`));
   // A directly referenced available hint takes precedence over unrelated page
@@ -205,24 +211,19 @@ async function loadPage(pageData, prompt) {
     ids = Object.fromEntries(Object.entries(ids).filter(([kind]) => referencedKinds.has(kind)));
   }
   const resolved = await readReferences(ids);
-  if (resolved.error) return resolved;
+  if (resolved.error) return { ids: {}, records: {}, ...resolved };
   const customers = customerIds(resolved.records);
-  if (customers.length > 1) return { error: 'The viewed records belong to different customers', code: 'context_mismatch' };
+  if (customers.length > 1) return { ids: {}, records: {}, error: 'The viewed records belong to different customers', code: 'context_mismatch' };
   const page = { ids, records: Object.fromEntries(resolved.records.map(r => [r.kind, r])) };
   if (!customers.length) return page;
   const customer = resolved.parents.find(parent => parent.id === customers[0]);
-  if (!customer) return { error: 'The viewed customer is unavailable', code: 'record_unavailable' };
+  if (!customer) return { ids: {}, records: {}, error: 'The viewed customer is unavailable', code: 'record_unavailable' };
   page.customer = customerTarget(customer, 'viewed_record');
   return page;
 }
 
-function candidateSelection(candidates, prompt, viewedCustomer, complete) {
-  if (!complete) return { target: null, targets: [], ambiguous: true };
-  const labels = candidates.map(c => normalizeName(c.label));
-  const namedSet = candidates.length > 1 && new Set(labels).size === candidates.length
-    && /\b(?:both|these customers|all of these)\b/i.test(prompt)
-    && labels.every(label => normalizeName(prompt).includes(label));
-  if (namedSet) return { target: null, targets: candidates, ambiguous: false };
+function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort) {
+  if (!complete || cohort) return { target: null, targets: [], ambiguous: true };
   if (candidates.length === 1) return { target: candidates[0], targets: candidates, ambiguous: false };
   if (candidates.length > 1) return { target: null, targets: [], ambiguous: true };
   const pageReference = PAGE_REFERENCE_RE.test(targetClause(prompt));
@@ -231,17 +232,21 @@ function candidateSelection(candidates, prompt, viewedCustomer, complete) {
 }
 
 async function resolve({ prompt, pageData, selectedTarget }) {
-  const [viewed, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
+  const [page, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
   const named = namedResult.matches;
   // A stale page hint cannot block an unrelated task or an explicitly named
   // customer. A request relying on the unavailable viewed record still stops.
-  if (viewed.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length && !selectedTarget?.customer_id) return viewed;
-  const page = viewed.error ? { ids: {}, records: {} } : viewed;
+  if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length && !selectedTarget?.customer_id) return page;
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete);
+  const cohort = SET_QUANTIFIER_RE.test(targetClause(prompt));
+  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort);
   if (selectedTarget?.customer_id) {
     const selected = await customerById(selectedTarget.customer_id);
-    if (!selected || (named.length && !named.some(c => c.id === selected.id))) {
+    // A selection never overrides current-request evidence: an explicit name
+    // that matched nothing, a capped lookup, or a set quantifier all refuse
+    // it. Duplicate-name ambiguity is the one case a selection resolves.
+    if (!selected || !namedResult.complete || cohort
+      || ((namesRequested(prompt) || named.length) && !named.some(c => c.id === selected.id))) {
       return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch' };
     }
     const target = customerTarget(selected, 'operator_selection');
@@ -249,9 +254,9 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   }
   // Only the leading recipient expression establishes a raw contact. A later
   // "text <number>" inside a note or an unresolved person's message is data.
-  const recipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/i)?.[1] || '';
+  const recipient = [...targetClause(prompt).matchAll(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/gi)].map(match => match[1]).join('');
   const reviewClause = targetClause(prompt);
-  const explicitReview = reviewClause.match(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i)?.[1];
+  const [explicitReview] = [...reviewClause.matchAll(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)].map(match => match[1].toLowerCase());
   const reviewReference = explicitReview || (!namesRequested(prompt)
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
   const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
@@ -271,8 +276,8 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   for (const [kind, ids] of Object.entries(explicitRecords)) {
     requestedRecords[kind] = Object.hasOwn(requestedRecords, kind) ? ids.filter(id => id === requestedRecords[kind]) : ids;
   }
-  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
-    reviewReference: reviewReference?.toLowerCase() || null,
+  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)), namesRequested: namesRequested(prompt),
+    reviewReference: reviewReference || null,
     bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
       .map(match => normalizeEmail(match[1])),
@@ -329,6 +334,9 @@ function bulkLeadSelection(toolName, records, params) {
 }
 
 async function validateRecordTarget(params, context = {}, { toolName } = {}) {
+  // A refused cohort or unresolved name stops here too; explicit record IDs
+  // inside "both appointment A and appointment B" do not reopen it.
+  if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
   const policy = require('./action-policy.json')[toolName];
   if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
     return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };
@@ -371,6 +379,10 @@ async function validateRecordTarget(params, context = {}, { toolName } = {}) {
 // the immutable ID to existing readers. Broad searches without a selector stay
 // broad. No fuzzy result or model-selected alternate contact becomes authority.
 async function prepareReadInput(params, context, { toolName, schema }) {
+  // A refused cohort or an unresolved name never widens into an unscoped read.
+  if (context.ambiguous || (schema.properties?.customer_id && !context.targets?.length && context.namesRequested)) {
+    return { error: 'Name one customer for this record lookup', code: 'target_clarification_required' };
+  }
   const input = { ...params };
   if (schema.properties?.customer_id && (params.customer_name || params.phone)) {
     const permitted = new Set(context.targets.map(target => target.customer_id));
