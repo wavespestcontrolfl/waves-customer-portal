@@ -463,6 +463,9 @@ it('changing only the amount unit withdraws a plan-suggested total: blank throug
   await waitFor(() => expect(totals()[1].value).toBe('8'));
   expect(totals()[0].value).toBe('');
   expect(unitOf(0).value).toBe('gal');
+  // The untouched product area still follows the visit (Codex r9 P1): a unit
+  // choice alone does not freeze the row's rate or treated area.
+  expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('4000');
   // A rate edit derives the total in the RATE's unit — not under the tech's gallons.
   fireEvent.change(screen.getAllByPlaceholderText('Rate')[0], { target: { value: '4' } });
   expect(totals()[0].value).toBe('');

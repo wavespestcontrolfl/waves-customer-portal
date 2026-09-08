@@ -17,7 +17,11 @@ export function previousLawnAssessment(history, service) {
 }
 
 const PLAN_FIELDS = ['rate', 'rateUnit', 'amountUnit', 'areaValue', 'areaUnit', 'totalAmount', 'applicationMethod'];
-const CALCULATION_INPUTS = ['rate', 'rateUnit', 'amountUnit', 'areaValue', 'areaUnit', 'applicationMethod'];
+// A chosen amount unit is not a calculation input: the derived total is
+// withdrawn while that unit differs from the plan's (below), but an untouched
+// rate or treated area must still follow a visit-area refresh — a stale
+// product area would be the nutrient ledger's denominator (Codex r9 P1).
+const CALCULATION_INPUTS = ['rate', 'rateUnit', 'areaValue', 'areaUnit', 'applicationMethod'];
 
 export function lawnPlanSelections(items, buildProduct, catalog, { areas = LAWN_DEFAULT_AREAS, governed = false } = {}) {
   const seen = new Set();
@@ -105,6 +109,10 @@ export function reconcileLawnPlanSelections(current, defaults, removedIds = []) 
       if (manual.has(key) || ownCalculation) continue;
       next[key] = fresh[key];
     }
+    // The plan's amount is in the plan's unit and is never scaled into the
+    // unit the tech chose: a still-derived total stays withdrawn until the
+    // units agree again or the tech enters the actual.
+    if (manual.has('amountUnit') && !manual.has('totalAmount') && next.amountUnit !== fresh.amountUnit) next.totalAmount = '';
     if (fresh.totalAmount === '' && !row.totalAmountManual) next.totalAmount = '';
     if (fresh.rate === '' && !manual.has('rate')) next.rate = '';
     if (row.applicationAreaDefault !== false) next.applicationArea = fresh.applicationArea;
