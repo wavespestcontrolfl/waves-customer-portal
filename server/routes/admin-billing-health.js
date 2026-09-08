@@ -235,7 +235,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       details: { source: 'manual_charge', description: desc, admin_id: req.technicianId || null },
     });
 
-    // Processing bank payments are receipted by the terminal webhook.
+    // An accepted bank payment is not evidence of a completed charge.
     if (payment?.status !== 'paid') return res.json({ success: true, payment });
 
     // Send receipt SMS

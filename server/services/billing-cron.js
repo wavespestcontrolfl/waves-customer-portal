@@ -321,7 +321,7 @@ const BillingCron = {
         await db('customers').where({ id: customer.id })
           .update({ next_charge_date: nextChargeDate });
 
-        // Async settlement owns the terminal webhook/receipt; do not send a paid SMS now.
+        // The webhook settles async payments; do not send a paid SMS now.
         if (!settled) continue;
 
         // Extract receipt URL and include in confirmation SMS
