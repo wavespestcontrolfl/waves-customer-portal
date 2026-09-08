@@ -36,6 +36,8 @@ const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', '
   // every update_customer field (tools.js) and the contractions a request may open with
   'first', 'last', 'city', 'state', 'zip', 'waveguard', 'tier', 'pipeline', 'stage', 'source', 'monthly', 'rate', 'mode', 'membership',
   'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using',
+  'on', 'at', 'in', 'of', 'about', 'regarding', 'via', 'through', 'after', 'before', 'during', 'until', 'since', 'over', 'into', 'off',
+  'up', 'out', 'whose', 'whom', 'which', 'if', 'while', 'because', 'so', 'but', 'not', 'no', 'please', 'now', 'later', 'again', 'still', 'also', 'then', 'just', 'only',
   'account', 'accounts', 'profile', 'record', 'records',
   // record nouns that follow an action verb name a thing, never a person
   'appointment', 'appointments', 'property', 'properties', 'estimate', 'estimates', 'invoice', 'invoices', 'product', 'products',
