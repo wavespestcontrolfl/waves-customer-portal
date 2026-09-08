@@ -4480,6 +4480,13 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       waveguardManagerApproval = resumedStructuredNotes.waveguardManagerApproval || null;
       waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
       waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
+      // "Customer asked for the link" was frozen with the record — a resumed
+      // retry (possibly another operator, later) must not re-stamp who/when
+      // (codex #4140 r2).
+      customerRequestedReview = resumedStructuredNotes.customerRequestedReview
+        && typeof resumedStructuredNotes.customerRequestedReview === 'object'
+        ? resumedStructuredNotes.customerRequestedReview
+        : null;
       durableCompletionCommitted = true;
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion

@@ -336,15 +336,19 @@ function normalizeReviewTiming(value) {
 }
 // What the chosen timing means, from the server preview (never a client
 // approximation of the smart window).
-function reviewTimingHint({ reviewTiming, reviewCustomAt, preview }) {
+function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
   const fmt = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
   if (reviewTiming === "auto") {
     return preview?.at ? `Review text goes out separately, about ${fmt(preview.at)}.` : "Review text goes out separately at the smart send window.";
   }
   if (reviewTiming === "customer_requested") {
-    return preview && preview.reviewSequencesEnabled === false
+    // `bundled` is the panel's own bundling condition (legacy path, completion
+    // text going out) — the same shape as dispatch's shouldBundleReview. No
+    // bounded time is promised: the next cadence tick still waits for the
+    // 8 AM–8 PM send window (codex #4140 r2).
+    return bundled
       ? "Review link is included in the completion text."
-      : `Review text goes out separately within ${preview?.cadenceTickMinutes || 30} minutes. The request is recorded.`;
+      : "Review text goes out separately as soon as the send window allows. The request is recorded.";
   }
   if (reviewTiming === "tomorrow_8") return "Review text goes out separately tomorrow at 8:00 AM.";
   if (reviewTiming === "custom") {
@@ -11865,7 +11869,7 @@ export function CompletionPanel({
     (oneTimeRecapOnly ||
       (reviewTiming === "customer_requested" && reviewSendPreview?.reviewSequencesEnabled === false));
   const reviewTimingHintText = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms })
     : "";
   const smsPreview = [
     smsRecapPreview(customerRecap),
