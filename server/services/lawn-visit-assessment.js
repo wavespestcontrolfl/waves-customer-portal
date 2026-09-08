@@ -911,7 +911,8 @@ function overallScoreFor(finalScores, calculateOverallScore) {
 // coerces a NULL score to 0 or 100 — so an unavailable run or a partial
 // answer saves the technician's scores and review but stays pending, with
 // no customer output, no calibration and no baseline, until the technician
-// fills the gaps and confirms again. `missing` names the gaps for the client.
+// fills the gaps and confirms again. `missing` names the gaps for the client;
+// calibration needs a confirmed row with AI scores to compare against.
 function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
   const finalScores = resolveConfirmScores(assessment, adjustedScores, scoreValue);
   const confirmed = scoresComplete(finalScores);
@@ -920,7 +921,6 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
     overallScore: overallScoreFor(finalScores, calculateOverallScore),
     confirmed,
     missing: missingScores(finalScores),
-    customerOutputEligible: confirmed,
     calibrationEligible: confirmed && run.status !== 'unavailable',
   };
 }

@@ -128,20 +128,33 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/if \(!visitAssessmentEnabled && !validResults\.length\)/);
     });
 
-    test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and holds customer output on an unavailable run', () => {
+    test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
       expect(confirm.indexOf('visitAssessment.validateReview(')).toBeLessThan(confirm.indexOf('installConfirmedBaseline('));
-      // One branch: the run-backed row's scores, overall and holds come from the module; the legacy block is untouched.
-      expect(confirm).toMatch(/if \(reviewedRun\) \{\s*\(\{ finalScores, overallScore, customerOutputEligible, calibrationEligible \} = visitAssessment\.confirmScores\(assessment, visitRun, adjustedScores, \{ scoreValue, calculateOverallScore \}\)\);/);
+      // One branch: the run-backed row's scores, overall and confirmed verdict come from the module; the legacy block is untouched.
+      expect(confirm).toMatch(/if \(reviewedRun\) \{\s*\(\{ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible \} = visitAssessment\.confirmScores\(assessment, visitRun, adjustedScores, \{ scoreValue, calculateOverallScore \}\)\);/);
       expect(confirm).toMatch(/overall_score: overallScore,/);
+      // confirmed_by_tech / confirmed_at are stamped only on a confirmed row; a pending row never becomes the property baseline.
+      expect(confirm).toMatch(/\.\.\.\(confirmed \? \{ confirmed_by_tech: true, confirmed_at: new Date\(\) \} : \{\}\),/);
+      expect(confirm.match(/confirmed_by_tech: true/g)).toHaveLength(1);
+      expect(confirm.match(/installConfirmedBaseline\(/g)).toHaveLength(2);
+      expect(confirm).toMatch(/const installBaseline = propertyHistoryEnabled && confirmed;/);
+      expect(confirm).toMatch(/installBaseline\s*\? await lawnAssessment\.installConfirmedBaseline\(/);
+      expect(confirm).toMatch(/else if \(installBaseline\) \{/);
       // Confirm + review commit together when a review was sent; a score-only confirm stamps nothing.
-      expect(confirm).toMatch(/if \(reviewedRun && visitReview\.provided\) \{\s*\(\{ updated, reviewedVisitRun \} = await db\.transaction\(async \(trx\) => \{[\s\S]{0,600}visitAssessment\.reviewRun\(\{ run: visitRun, review: visitReview, technicianId: req\.technicianId \}, trx\)/);
+      expect(confirm).toMatch(/if \(reviewedRun && visitReview\.provided\) \{\s*\(\{ updated, reviewedVisitRun \} = await db\.transaction\(async \(trx\) => \{[\s\S]{0,700}visitAssessment\.reviewRun\(\{ run: visitRun, review: visitReview, technicianId: req\.technicianId \}, trx\)/);
       expect(confirm).not.toMatch(/reviewRun\([\s\S]{0,120}, db\)/);
+      // A pending row returns right after the write with the missing scores — before the wiki link and the intelligence pipeline.
+      const pending = confirm.indexOf('if (!confirmed) {');
+      expect(pending).toBeGreaterThan(confirm.indexOf('persistProtocolFieldChecks('));
+      expect(pending).toBeLessThan(confirm.indexOf('wiki.linkTreatmentOutcome('));
+      expect(pending).toBeLessThan(confirm.indexOf('setImmediate('));
+      expect(confirm.slice(pending, pending + 200)).toMatch(/success: true, confirmed: false, missingScores, assessment: updated, \.\.\.runPayload/);
       expect(confirm).toMatch(/if \(adjustedScores && calibrationEligible\)/);
-      // Every customer-facing step sits inside the one hold; any missing score on a run-backed row keeps it closed (confirmScores).
-      const hold = confirm.slice(confirm.indexOf('if (customerOutputEligible) {'), confirm.indexOf('// 7. Track assessment completion'));
+      // Every customer-facing step runs once, inside the pipeline only a confirmed row reaches.
+      const pipeline = confirm.slice(confirm.indexOf('setImmediate('), confirm.indexOf('// 7. Track assessment completion'));
       for (const call of ['KnowledgeBridge.generateAssessmentRecommendations(assessmentId)', 'LawnIntel.emitHealthSignal(updated.customer_id)', 'LawnIntel.sendAssessmentNotification(assessmentId)', 'LawnIntel.generateServiceReport(assessmentId)']) {
-        expect(hold).toContain(call);
-        expect(confirm.split(call)).toHaveLength(2); // the call exists only inside the hold
+        expect(pipeline).toContain(call);
+        expect(confirm.split(call)).toHaveLength(2);
       }
     });
   });

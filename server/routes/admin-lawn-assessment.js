@@ -1051,15 +1051,19 @@ router.post('/confirm', async (req, res, next) => {
 
     // Run-backed row: a NULL column (the model could not determine it and the
     // technician did not enter it) stays NULL — the legacy fallback below
-    // would read it as 0 — the overall score waits for every input, and the
-    // customer-facing steps + calibration are held accordingly. Legacy rows
-    // compute exactly as before (both holds open).
+    // would read it as 0 — and the row CONFIRMS only when every score column
+    // is known: every customer reader selects on confirmed_by_tech and
+    // coerces a NULL score, so a partial row saves the technician's scores
+    // and review but stays pending (no baseline, no calibration, no
+    // customer-facing step) until the gaps are filled and it confirms again.
+    // Legacy rows compute and confirm exactly as before.
     let finalScores;
     let overallScore;
-    let customerOutputEligible = true;
+    let confirmed = true;
+    let missingScores = [];
     let calibrationEligible = true;
     if (reviewedRun) {
-      ({ finalScores, overallScore, customerOutputEligible, calibrationEligible } = visitAssessment.confirmScores(assessment, visitRun, adjustedScores, { scoreValue, calculateOverallScore }));
+      ({ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible } = visitAssessment.confirmScores(assessment, visitRun, adjustedScores, { scoreValue, calculateOverallScore }));
     } else {
       finalScores = {
         turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
@@ -1089,8 +1093,7 @@ router.post('/confirm', async (req, res, next) => {
     }
 
     const updateData = {
-      confirmed_by_tech: true,
-      confirmed_at: new Date(),
+      ...(confirmed ? { confirmed_by_tech: true, confirmed_at: new Date() } : {}),
       updated_at: new Date(),
       ...finalScores,
       overall_score: overallScore,
@@ -1118,18 +1121,22 @@ router.post('/confirm', async (req, res, next) => {
     // confirmed) commit TOGETHER — a lost review can never ride a successful
     // confirm. A score-only confirm from a client that never showed the
     // findings is not a finding review and stamps nothing; a pre-gate row has
-    // no run and confirms exactly as before.
+    // no run and confirms exactly as before. A pending (incomplete) row is a
+    // plain update — installConfirmedBaseline stamps confirmed_by_tech and
+    // installs the row as the property baseline, which only a confirmed row
+    // may become.
+    const installBaseline = propertyHistoryEnabled && confirmed;
     let updated;
     let reviewedVisitRun = null;
     if (reviewedRun && visitReview.provided) {
       ({ updated, reviewedVisitRun } = await db.transaction(async (trx) => {
-        const row = propertyHistoryEnabled
+        const row = installBaseline
           ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: trx })
           : (await trx('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
         const run = await visitAssessment.reviewRun({ run: visitRun, review: visitReview, technicianId: req.technicianId }, trx);
         return { updated: row, reviewedVisitRun: run };
       }));
-    } else if (propertyHistoryEnabled) {
+    } else if (installBaseline) {
       updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
     } else {
       [updated] = await db('lawn_assessments')
@@ -1140,6 +1147,15 @@ router.post('/confirm', async (req, res, next) => {
     if (protocolFieldChecksProvided) {
       await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
       Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
+    }
+
+    // A pending row: the scores and review are saved; everything that reads a
+    // confirmed assessment (wiki outcome link, weather, calibration, the
+    // customer-facing steps, completion tracking) waits for the confirm that
+    // completes it. The client is told which scores are still missing.
+    const runPayload = reviewedRun ? { visitAssessment: visitAssessment.responseForRun(reviewedVisitRun || visitRun) } : {};
+    if (!confirmed) {
+      return res.json({ success: true, confirmed: false, missingScores, assessment: updated, ...runPayload });
     }
 
     // Agronomic Wiki: link only when a durable service_record exists.
@@ -1188,30 +1204,28 @@ router.post('/confirm', async (req, res, next) => {
           await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
         }
 
-        // Customer-facing steps — held while a run-backed row has any score
-        // missing (see customerOutputEligible above); order within unchanged.
-        if (customerOutputEligible) {
-          // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
-          await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
+        // Customer-facing steps — a run-backed row reaches here only once it
+        // confirmed with every score (the pending return above).
+        // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
+        await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
 
-          // 4. Lawn health → customer health signal
-          await LawnIntel.emitHealthSignal(updated.customer_id);
+        // 4. Lawn health → customer health signal
+        await LawnIntel.emitHealthSignal(updated.customer_id);
 
-          // 5. Standalone lawn assessments (fallback customer picker, no
-          //    scheduled service — service_id is null) have no later completion
-          //    SMS at all, so they still get the standalone "lawn health report
-          //    ready" notification. Assessments linked to a service do NOT: that
-          //    visit's completion text is a short link to the report, and the
-          //    score lives on the report (owner ruling 2026-08-01 retired the
-          //    score fold-in). This step runs after recommendation generation
-          //    (step 2) so the standalone notification's tip is populated.
-          if (!updated.service_id) {
-            await LawnIntel.sendAssessmentNotification(assessmentId);
-          }
-
-          // 6. Auto-generate service report
-          await LawnIntel.generateServiceReport(assessmentId);
+        // 5. Standalone lawn assessments (fallback customer picker, no
+        //    scheduled service — service_id is null) have no later completion
+        //    SMS at all, so they still get the standalone "lawn health report
+        //    ready" notification. Assessments linked to a service do NOT: that
+        //    visit's completion text is a short link to the report, and the
+        //    score lives on the report (owner ruling 2026-08-01 retired the
+        //    score fold-in). This step runs after recommendation generation
+        //    (step 2) so the standalone notification's tip is populated.
+        if (!updated.service_id) {
+          await LawnIntel.sendAssessmentNotification(assessmentId);
         }
+
+        // 6. Auto-generate service report
+        await LawnIntel.generateServiceReport(assessmentId);
 
         // 7. Track assessment completion
         await LawnIntel.trackAssessmentCompletion(updated.service_date);
@@ -1221,11 +1235,7 @@ router.post('/confirm', async (req, res, next) => {
       }
     });
 
-    res.json({
-      success: true,
-      assessment: updated,
-      ...(reviewedRun ? { visitAssessment: visitAssessment.responseForRun(reviewedVisitRun || visitRun) } : {}),
-    });
+    res.json({ success: true, confirmed: true, assessment: updated, ...runPayload });
   } catch (err) {
     next(err);
   }

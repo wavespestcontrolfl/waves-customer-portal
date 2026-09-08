@@ -448,18 +448,18 @@ describe('confirm scores preserve NULLs', () => {
     expect(partial.finalScores.color_health).toBeNull();
     expect(partial.overallScore).toBeNull();
     // one score missing → the row stays pending: nothing customer-facing, no calibration
-    expect(partial).toMatchObject({ confirmed: false, missing: ['color_health'], customerOutputEligible: false, calibrationEligible: false });
+    expect(partial).toMatchObject({ confirmed: false, missing: ['color_health'], calibrationEligible: false });
     const filled = visit.confirmScores(assessment, { status: 'complete' }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
-    expect(filled).toMatchObject({ overallScore: 77, confirmed: true, missing: [], customerOutputEligible: true, calibrationEligible: true });
+    expect(filled).toMatchObject({ overallScore: 77, confirmed: true, missing: [], calibrationEligible: true });
     // the overall inputs can all be known while a sub-score is not — still pending
     const subScoreMissing = visit.confirmScores({ ...assessment, color_health: 70, thatch_level: null }, { status: 'complete' }, {}, { scoreValue, calculateOverallScore: () => 77 });
-    expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], customerOutputEligible: false });
+    expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], calibrationEligible: false });
     const unavailable = visit.confirmScores({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }, { status: 'unavailable' }, {}, { scoreValue, calculateOverallScore: () => 77 });
-    expect(unavailable).toMatchObject({ overallScore: null, confirmed: false, customerOutputEligible: false, calibrationEligible: false });
+    expect(unavailable).toMatchObject({ overallScore: null, confirmed: false, calibrationEligible: false });
     expect(unavailable.missing).toEqual(visit.SCORE_KEYS);
     // an unavailable run the technician scored by hand confirms, but has no AI scores to calibrate against
     const handScored = visit.confirmScores(assessment, { status: 'unavailable' }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
-    expect(handScored).toMatchObject({ confirmed: true, customerOutputEligible: true, calibrationEligible: false });
+    expect(handScored).toMatchObject({ confirmed: true, calibrationEligible: false });
   });
 
   test('the AI stress floor still bounds the derivation when it exists', () => {
