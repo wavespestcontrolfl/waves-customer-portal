@@ -483,7 +483,15 @@ function parseDecision(v) {
  * @param {string} serviceType - e.g. 'pest_control', 'lawn_care', 'mosquito'
  * @returns {Date} optimal send timestamp
  */
-function calculateReviewSendTime(completedAt, serviceType, { jitter: withJitter = true } = {}) {
+// The smart-window rule as a PLAN: the send time plus the bucket that names
+// the rule behind it. Two kinds of answer come out of the rules below —
+// "anchored" (a wall-clock hour on a calendar day: 10 AM tomorrow, 4:30 PM
+// today) and "relative" (N minutes after completion). The completion panel
+// previews the plan and re-checks it at submit; a relative answer is
+// re-derived from a new Date() on every request, so comparing instants
+// would never match twice (codex #4140 r4 P1). `bucket` is equal for two
+// previews that mean the same thing.
+function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter = true } = {}) {
   // Read ET wall-clock — server runs UTC, so getHours/getDay would be 4-5h off.
   const { hour, dayOfWeek: day } = etParts(completedAt);
 
@@ -491,8 +499,15 @@ function calculateReviewSendTime(completedAt, serviceType, { jitter: withJitter 
   // the completion panel's preview (same rules, stable answer).
   const jitter = () => (withJitter ? Math.floor(Math.random() * 31) - 15 : 0);
 
+  // Last writer wins: normalizeReviewSendWindow may turn a relative answer
+  // into an anchored one (9 AM / 5 PM fences).
+  let kind = "anchored";
+  let relativeMinutes = null;
+
   // Build a Date at ET hour H of `date`'s ET calendar day (respecting DST).
   function atHour(date, targetHour) {
+    kind = "anchored";
+    relativeMinutes = null;
     const p = etParts(date);
     const h = Math.floor(targetHour);
     const m = Math.round((targetHour - h) * 60) + jitter();
@@ -519,9 +534,12 @@ function calculateReviewSendTime(completedAt, serviceType, { jitter: withJitter 
   }
 
   function addMins(date, mins) {
+    kind = "relative";
+    relativeMinutes = mins;
     return new Date(date.getTime() + mins * 60000);
   }
 
+  const at = (() => {
   const LATE_AFTERNOON = 16.5; // 4:30 PM — last review-request window
   const MORNING = 10; // 10:00 AM
 
@@ -572,6 +590,41 @@ function calculateReviewSendTime(completedAt, serviceType, { jitter: withJitter 
   if (hour >= 15 && hour < 17) return nextDayAtHour(completedAt, MORNING); // late afternoon: next morning
   // After 5 PM or before 7 AM — next morning 10 AM
   return nextDayAtHour(completedAt, MORNING);
+  })();
+
+  const p = etParts(at);
+  const pad = (n) => String(n).padStart(2, "0");
+  const dayKey = `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+  const bucket = kind === "relative"
+    ? `relative:${dayKey}:+${relativeMinutes}m`
+    : `anchored:${dayKey}T${pad(p.hour)}:${pad(p.minute)}`;
+  return { at, kind, bucket };
+}
+
+function calculateReviewSendTime(completedAt, serviceType, opts) {
+  return calculateReviewSendPlan(completedAt, serviceType, opts).at;
+}
+
+// processReviewSequences runs at :14 and :44 (scheduler.js — kept in step by
+// review-sequences.test.js). A cadence row's next_run_at is when it becomes
+// ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
+// page shows that tick, not the eligibility instant (codex #4140 r4 P2).
+const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
+function nextCadenceTickAt(from) {
+  const d = from instanceof Date ? from : new Date(from);
+  if (Number.isNaN(d.getTime())) return null;
+  const minute = d.getUTCMinutes();
+  const pastTheMinute = d.getUTCSeconds() > 0 || d.getUTCMilliseconds() > 0;
+  const tick = new Date(d.getTime());
+  tick.setUTCSeconds(0, 0);
+  // Minutes are zone-independent (every ET offset is a whole hour).
+  const next = REVIEW_CADENCE_TICK_MINUTES.find((m) => m > minute || (m === minute && !pastTheMinute));
+  if (next != null) {
+    tick.setUTCMinutes(next);
+  } else {
+    tick.setUTCHours(tick.getUTCHours() + 1, REVIEW_CADENCE_TICK_MINUTES[0]);
+  }
+  return tick;
 }
 
 async function retryReviewRequestAfterTemplateMiss(requestId) {
@@ -4207,7 +4260,21 @@ const ReviewService = {
         await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested, decision });
         return { started: false, reason: "deferred_inflight", deferred: true };
       }
-      if (!supersedeOpenerId && !proceedFresh) return { started: false, reason: "already_active", sequence: active };
+      if (!supersedeOpenerId && !proceedFresh) {
+        // No new cadence starts, but "the customer asked for the link" is
+        // still a fact about this customer (codex #4140 r4 P2): record who
+        // asked and when on the ACTIVE cadence so the Reviews page shows the
+        // capture instead of dropping it. Its schedule is not moved — a
+        // second ask inside the window is what the 3-day rule (PR 3) spaces.
+        // Only customer_requested is written: updated_at is the runner's
+        // claim stamp (claimIsStale) and must not be refreshed here.
+        let requestRecorded = false;
+        if (customerRequested) {
+          await db("review_sequences").where({ id: active.id }).update({ customer_requested: JSON.stringify(customerRequested) });
+          requestRecorded = true;
+        }
+        return { started: false, reason: "already_active", sequence: active, requestRecorded };
+      }
     }
 
     // One cadence per SERVICE RECORD, ever (codex #3235 r3 P1): the legacy
@@ -5400,6 +5467,9 @@ const ReviewService = {
         currentStep: r.current_step,
         totalSteps: plan.length,
         nextRunAt: r.next_run_at,
+        // The worker tick that will actually pick the row up (null while the
+        // runner holds the claim).
+        nextSendTickAt: r.next_run_at ? nextCadenceTickAt(r.next_run_at) : null,
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon
@@ -5629,6 +5699,9 @@ ReviewService.__private = {
   ASK_SPACING_MS,
   retryAtForDeferredSend,
   calculateReviewSendTime,
+  calculateReviewSendPlan,
+  nextCadenceTickAt,
+  REVIEW_CADENCE_TICK_MINUTES,
   sequenceDecision,
   nextTouchRunAt,
   shiftToWeekdayMorning,

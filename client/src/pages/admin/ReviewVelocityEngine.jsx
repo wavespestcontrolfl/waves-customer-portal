@@ -328,7 +328,10 @@ function decisionLine(seq) {
   if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
   const d = seq.decision || {};
   const label = DECISION_LABELS[d.reason] || (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
-  const when = seq.nextRunAt || d.plannedAt || d.nextEvalAt;
+  // nextRunAt is when the row becomes ELIGIBLE; the worker runs at :14/:44,
+  // so the planned send is the next tick the server computes
+  // (nextSendTickAt) — a 4:30 PM row cannot text before 4:44 (codex #4140 r4).
+  const when = seq.nextSendTickAt || seq.nextRunAt || d.plannedAt || d.nextEvalAt;
   const whenText = when
     ? new Date(when).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
     : null;
@@ -663,12 +666,17 @@ export default function ReviewVelocityEngine() {
     async (customer, opts = {}) => {
       const svcType = customer.lastSvc;
       try {
+        // `techName` is sent as-is (null when the candidates feed carries no
+        // technician): the route coalesces null to "no tech" and resolves the
+        // sender from the record. Keep this request expression byte-identical
+        // to main — the IB coverage gate fingerprints it, and its operation
+        // has not changed.
         const res = await adminFetch("/admin/reviews/send-request", {
           method: "POST",
           body: JSON.stringify({
             customerId: customer.id,
             serviceType: svcType,
-            ...(customer.lastTech ? { techName: customer.lastTech } : {}),
+            techName: customer.lastTech,
             ...(opts.templateId ? { templateId: opts.templateId } : {}),
             ...(opts.body ? { body: opts.body } : {}),
           }),
