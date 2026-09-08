@@ -111,6 +111,7 @@ describe('review request follow-up flow', () => {
         },
       ]),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }), // 3-day rule: no newer ask to this customer
       updateQuery,
     ];
     const customerQuery = chain({
@@ -158,6 +159,38 @@ describe('review request follow-up flow', () => {
     }));
   });
 
+  test('the 3-day rule holds the legacy follow-up while a newer ask to the customer is under 72h old (codex #4141 r1)', async () => {
+    const updateQuery = chain();
+    const eligibleQuery = collection([
+      { id: 'rr-old', customer_id: 'cust-1', sms_sent_at: '2026-05-30T15:00:00.000Z', status: 'sent', score: null },
+    ]);
+    const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
+      collection([]),
+      eligibleQuery,
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      // A cadence touch / manual ask went to this customer inside 72h.
+      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-newer', customer_id: 'cust-1' }) }),
+      updateQuery,
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await ReviewService.processFollowups();
+
+    expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // The row stays followup_sent=false so the selector re-picks it later.
+    expect(updateQuery.update).not.toHaveBeenCalled();
+    // And the selector itself is bounded by the ask's actual send + 72h, not
+    // just the ET calendar-day cutoff.
+    const spacingBound = eligibleQuery.whereRaw.mock.calls.find(([sql]) => /<= \?/.test(sql));
+    expect(spacingBound).toBeTruthy();
+    expect(Math.abs(spacingBound[1][0].getTime() - (Date.now() - 72 * 3600000))).toBeLessThan(5000);
+  });
+
   test('marks terminal follow-up policy blocks as handled', async () => {
     const updateQuery = chain();
     const reviewRequestQueries = [
@@ -173,6 +206,7 @@ describe('review request follow-up flow', () => {
         },
       ]),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }), // 3-day rule: no newer ask to this customer
       updateQuery,
     ];
     const customerQuery = chain({
@@ -226,6 +260,7 @@ describe('review request follow-up flow', () => {
         },
       ]),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }), // 3-day rule: no newer ask to this customer
       updateQuery,
     ];
     const customerQuery = chain({

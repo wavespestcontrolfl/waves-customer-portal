@@ -62,6 +62,10 @@ function valueFor(row, column) { return row[String(column).split('.').pop()]; }
 function makeMock(initial = {}, opts = {}) {
   const state = { rows: { customers: [], review_sequences: [], review_requests: [], notification_prefs: [], google_reviews: [], scheduled_services: [], activity_log: [], ...initial } };
   const throwUpdateFor = new Set(opts.throwUpdateFor || []);
+  // Fail one specific SELECT: a predicate over the built query (table,
+  // equals/ops/raws/selected) so a test can break a single lookup and leave
+  // the rest of the runner alone.
+  const throwSelectWhen = typeof opts.throwSelectWhen === 'function' ? opts.throwSelectWhen : null;
   function filtered(q) {
     let rows = [...(state.rows[q.table] || [])];
     rows = rows.filter((r) => q.equals.every(([k, v]) => valueFor(r, k) === v));
@@ -80,7 +84,7 @@ function makeMock(initial = {}, opts = {}) {
   function make(tbl) {
     const t = String(tbl).split(/\s+as\s+/i)[0];
     const q = {
-      table: t, equals: [], notEquals: [], notNull: [], nulls: [], ops: [], ins: [], notIns: [], order: null, limitValue: null,
+      table: t, equals: [], notEquals: [], notNull: [], nulls: [], ops: [], ins: [], notIns: [], raws: [], order: null, limitValue: null,
       where(a, op, v) {
         if (typeof a === 'function') { a(this); return this; }
         if (a && typeof a === 'object') { Object.entries(a).forEach(([k, val]) => this.equals.push([k, val])); return this; }
@@ -88,13 +92,13 @@ function makeMock(initial = {}, opts = {}) {
         this.equals.push([a, op]); return this;
       },
       orWhere() { return this; },
-      whereRaw() { return this; },
+      whereRaw(sql) { this.raws.push(sql); return this; },
       whereNot(c, v) { this.notEquals.push([c, v]); return this; },
       whereIn(c, vs) { this.ins.push([c, vs]); return this; },
       whereNotIn(c, vs) { this.notIns.push([c, vs]); return this; },
       whereNotNull(c) { this.notNull.push(c); return this; },
       whereNull(c) { this.nulls.push(c); return this; },
-      leftJoin() { return this; }, select() { return this; },
+      leftJoin() { return this; }, select(...cols) { this.selected = cols; return this; },
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
       orderByRaw() { return this; }, groupBy() { return this; }, groupByRaw() { return this; },
       limit(n) { this.limitValue = n; return this; },
@@ -108,7 +112,12 @@ function makeMock(initial = {}, opts = {}) {
       },
       async update(patch) { if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
       async del() { const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
-      then(res, rej) { return Promise.resolve(filtered(this)).then(res, rej); },
+      then(res, rej) {
+        if (throwSelectWhen && throwSelectWhen(this)) {
+          return Promise.reject(new Error('pg blip on select')).then(res, rej);
+        }
+        return Promise.resolve(filtered(this)).then(res, rej);
+      },
     };
     return q;
   }
@@ -883,6 +892,34 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       } finally {
         Date.now = realNow;
       }
+    });
+
+    test('a private no-link check-in at the next step is not held behind the 3-day rule (codex #4141 r1)', async () => {
+      const mock = makeMock(fixture('seq-3d4', { lastAskAgoMs: 20 * 3600000, step: { day: 1, channel: 'sms', templateKey: 'resolution_check' } }));
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).not.toContain('/rate/');
+    });
+
+    test('an unavailable last-ask lookup defers the ask instead of sending inside 72h (codex #4141 r1 P1)', async () => {
+      const mock = makeMock(fixture('seq-3d5', { lastAskAgoMs: 20 * 3600000 }), {
+        // The runner's own last-ask lookup: review_requests, delivered asks,
+        // bounded by created_at > now-30d (the cap-stats read has no such bound).
+        throwSelectWhen: (q) => q.table === 'review_requests' && q.ops.some(([k, op]) => k === 'created_at' && op === '>') && (q.selected || []).includes('sequence_id'),
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(out.sent).toBe(0);
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.status).toBe('active');
+      expect(parse(seq.decision)).toMatchObject({ reason: 'spacing_lookup_unavailable', ownerAction: 'none' });
+      expect(seq.next_run_at.getTime()).toBeGreaterThan(Date.now() + 25 * 60000);
     });
 
     test('the first ask has no timing gate: a Day-0 step with no prior ask sends at its scheduled time', async () => {

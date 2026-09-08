@@ -2850,6 +2850,11 @@ const ReviewService = {
       // must not leave the row instantly follow-up eligible (r17 P2).
       .whereNotNull("sms_sent_at")
       .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
+      // The 3-day rule (owner ruling 2026-09-07) applies to this legacy
+      // follow-up too (codex #4141 r1): measured from the ask's actual send,
+      // not the ET calendar day — a late-Monday ask is not followed up at
+      // Wednesday's cron.
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) <= ?", [new Date(Date.now() - ASK_SPACING_MS)])
       .where({ followup_sent: false })
       .whereNull("rated_at")
       // Draft score taps are durable but not final. Do not send the
@@ -2890,6 +2895,26 @@ const ReviewService = {
           followup_sent: true,
           followup_sent_at: new Date(),
         });
+        suppressed++;
+        continue;
+      }
+
+      // The 3-day rule against ANY newer ask to this customer (a manual
+      // one-off, a cadence touch): leave the row for a later run — the
+      // selector re-picks it once 72 h have passed. A failed lookup holds
+      // too (fail closed).
+      let newerAsk = null;
+      try {
+        newerAsk = await db("review_requests")
+          .where({ customer_id: request.customer_id })
+          .where("id", "!=", request.id)
+          .whereRaw("GREATEST(COALESCE(sms_sent_at, sent_at), COALESCE(sent_at, sms_sent_at)) > ?", [new Date(Date.now() - ASK_SPACING_MS)])
+          .whereRaw(ASK_TOUCH_SQL)
+          .first();
+      } catch {
+        newerAsk = { unavailable: true };
+      }
+      if (newerAsk) {
         suppressed++;
         continue;
       }
@@ -4504,6 +4529,7 @@ const ReviewService = {
       return stop("stale");
     }
     let recentAskRows = [];
+    let recentAskLookupFailed = false;
     try {
       recentAskRows = await db("review_requests")
         .where({ customer_id: seq.customer_id })
@@ -4513,6 +4539,7 @@ const ReviewService = {
         .select("sequence_id", "template_key", "sms_sent_at", "sent_at");
     } catch {
       recentAskRows = []; // hygiene check is best-effort; the cap/cooldown guards below still hold
+      recentAskLookupFailed = true; // …but the 3-day rule fails closed (below)
     }
     const externallyAsked = recentAskRows.some(
       (r) => (r.sms_sent_at || r.sent_at)
@@ -4528,12 +4555,25 @@ const ReviewService = {
     // first-treatment ask — so the last DELIVERED ask decides, not the plan.
     // A held step keeps its place: next_run_at moves to lastSent + 72h (then
     // the weekday shift), the decision says why, and nothing is dropped.
+    // Only an ask is spaced: a private no-link check-in an admin plan names
+    // (resolution_check / satisfaction_confirm) is a support message and
+    // must not wait 72 h behind the last ask (codex #4141 r1).
+    const stepForSpacing = plan[seq.current_step] || {};
+    const stepIsAsk = (stepForSpacing.channel || "sms") !== "email" ? OUTREACH.isAskTemplate(stepForSpacing.templateKey) : true;
+    if (stepIsAsk && recentAskLookupFailed) {
+      // No evidence is not "no ask": an unavailable lookup defers the step
+      // instead of sending inside the promised 72 h (codex #4141 r1 P1).
+      const nextEvalAt = new Date(Date.now() + 30 * 60 * 1000);
+      await db("review_sequences")
+        .where({ id: seq.id, status: "active" })
+        .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "spacing_lookup_unavailable", nextEvalAt }), updated_at: new Date() });
+      return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
+    }
     const lastAskAtMs = recentAskRows.reduce((max, r) => {
       const t = new Date(r.sms_sent_at || r.sent_at).getTime();
       return Number.isFinite(t) && t > max ? t : max;
     }, 0);
-    if (lastAskAtMs && Date.now() - lastAskAtMs < ASK_SPACING_MS) {
-      const stepForSpacing = plan[seq.current_step] || {};
+    if (stepIsAsk && lastAskAtMs && Date.now() - lastAskAtMs < ASK_SPACING_MS) {
       let spacedAt = new Date(lastAskAtMs + ASK_SPACING_MS);
       if (stepForSpacing.weekdaysOnly) spacedAt = shiftToWeekdayMorning(spacedAt);
       await db("review_sequences")
