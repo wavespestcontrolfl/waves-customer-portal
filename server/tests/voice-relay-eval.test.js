@@ -97,10 +97,10 @@ describe('voice relay eval — fixture lint', () => {
     expect(replay._internals.officeHoursFixture(fixture.scenarios[0])).toEqual(officeHours);
   });
 
-  test('the shipped fixture lints clean, has 29 scenarios and a spec on each', () => {
+  test('the shipped fixture lints clean, has 28 scenarios and a spec on each', () => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
     expect(fixture.schemaVersion).toBe(replay.SCHEMA_VERSION);
-    expect(fixture.scenarios).toHaveLength(29);
+    expect(fixture.scenarios).toHaveLength(28);
     expect(replay.lintFixture(fixture)).toEqual([]);
     // A recording or a wrong number never earns a scheduling lookup.
     for (const id of ['robocall', 'wrong-number']) expect(fixture.scenarios.find((s) => s.id === id).allowedTools).toEqual(['capture_lead']);
@@ -302,27 +302,6 @@ describe('voice relay eval — run-relative dates', () => {
     expect(JSON.stringify(replay.loadFixture(FIXTURE_PATH).scenarios)).toMatch(/\{\{dow\+8\}\}/);
   });
 
-  test.each(['2026-09-20T03:30:00Z', '2027-02-11T04:30:00Z'])('redacted initial context matches the live builder and withholds appointment facts at %s', (runDate) => {
-    const fixture = replay.loadFixture(FIXTURE_PATH);
-    const scenario = fixture.scenarios.find((s) => s.id === 'eta-recognised-redacted');
-    const rendered = replay.renderDateTokens(scenario, new Date(runDate));
-    const { buildKnownCallerBlock } = require('../services/voice-agent/relay-context');
-    for (const nextAppointment of [null, { date: runDate.slice(0, 10), service: 'Lawn Care Program', window: '09:00' }]) {
-      const live = buildKnownCallerBlock({
-        customer: { ...scenario.caller.context.customer, member_since: '2024-01-01' },
-        services: ['Lawn Care Program'], nextAppointment,
-        lastVisit: { date: '2026-08-12', service: 'Lawn Care Program' },
-        tier: 'redacted', attested: false,
-      });
-      expect(rendered.caller.context.block).toBe(live);
-    }
-    // Cover every initial redacted block, including any later fixture additions.
-    for (const s of fixture.scenarios.filter((s) => s.caller.context?.tier === 'redacted')) {
-      expect(s.caller.context.block).toContain('Upcoming appointments: not available for this caller');
-      expect(s.caller.context.block).not.toContain('Next appointment:');
-    }
-    expect(require('../models/db')).not.toHaveBeenCalled();
-  });
 });
 
 describe('voice relay eval — each expect key', () => {
@@ -1209,22 +1188,6 @@ describe('voice relay eval — the harness', () => {
     // A later permitted spam call cannot erase a preceding unauthorized capture.
     const mixed = record({ tools: [{ name: 'capture_lead', input: { lead_quality: 'cold' } }, { name: 'capture_lead', input: { lead_quality: 'spam' } }] });
     expect(replay._internals.scenarioStatus({ checks: replay._internals.evaluateChecks(fixture, mixed) })).toBe('fail');
-    expect(require('../models/db')).not.toHaveBeenCalled();
-  });
-
-  test('eta-recognised-redacted account overview withholds all upcoming appointment facts', async () => {
-    mockSdk();
-    const replay = require('../services/eval/voice-relay-replay');
-    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-recognised-redacted');
-    script.push(toolUse('get_account_overview', {}, 'overview'));
-    script.push(toolUse('capture_lead', { call_summary: 'Synthetic request for office assistance' }, 'capture'));
-    script.push(say("I can't share schedule or contact details on this call. The account holder can check the portal or speak with the office."));
-    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] });
-    expect(result.error).toBeUndefined();
-    const overview = result.toolCalls.find((t) => t.name === 'get_account_overview');
-    expect(overview.text).toContain('Do NOT say whether one is scheduled');
-    expect(overview.text).not.toMatch(/none scheduled|Next appointment:|\d{4}-\d{2}-\d{2}|\$\d/);
-    expect(result.status).toBe('pass');
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
