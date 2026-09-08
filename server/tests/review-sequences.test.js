@@ -820,6 +820,80 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     });
   });
 
+  test('"Customer asked for the link" against an ACTIVE cadence is recorded on that cadence, its schedule untouched (codex #4140 r4 P2)', async () => {
+    mockGates.reviewSequences = true;
+    const nextRun = new Date(Date.now() + 3 * 3600000);
+    const mock = makeMock({
+      customers: [{ id: 'aa-1', first_name: 'Lee', last_name: 'K', phone: '+19410000144', nearest_location_id: 'venice' }],
+      review_sequences: [{ id: 'seq-aa1', customer_id: 'aa-1', status: 'active', current_step: 1, touches_sent: 1, plan: JSON.stringify([{ day: 0 }, { day: 4 }]), started_at: new Date(), next_run_at: nextRun, updated_at: new Date(Date.now() - 3600000), decision: JSON.stringify({ reason: 'follow_up_scheduled', ownerAction: 'none' }) }],
+    });
+    db.mockImplementation(mock);
+    const requested = { by: 'tech-1', byName: 'Adam', at: new Date().toISOString(), source: 'completion_panel' };
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'aa-1', serviceType: 'pest control', techName: 'Adam', customerRequested: requested, decision: { reason: 'customer_requested' } });
+
+    expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: true });
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+    const active = mock.__state.rows.review_sequences[0];
+    const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+    expect(parse(active.customer_requested)).toEqual(requested);
+    // Schedule and decision belong to the running cadence; the runner's claim
+    // stamp (updated_at) is not refreshed by a request capture.
+    expect(active.next_run_at).toBe(nextRun);
+    expect(parse(active.decision)).toMatchObject({ reason: 'follow_up_scheduled' });
+    expect(active.updated_at.getTime()).toBeLessThan(Date.now() - 3000000);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an already_active result without a request leaves the cadence untouched and reports requestRecorded:false', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'aa-2', first_name: 'Mo', last_name: 'B', phone: '+19410000145', nearest_location_id: 'venice' }],
+      review_sequences: [{ id: 'seq-aa2', customer_id: 'aa-2', status: 'active', current_step: 0, touches_sent: 0, plan: '[]', started_at: new Date(), next_run_at: new Date() }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'aa-2', serviceType: 'pest control', techName: 'Adam' });
+
+    expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: false });
+    expect(mock.__state.rows.review_sequences[0].customer_requested == null).toBe(true);
+  });
+
+  describe('the planned send is the worker tick, not the eligibility instant (codex #4140 r4 P2)', () => {
+    const { nextCadenceTickAt, REVIEW_CADENCE_TICK_MINUTES } = ReviewService.__private;
+
+    test('the scheduler cron and the tick table name the same minutes', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+      expect(scheduler).toContain(`cron.schedule('${REVIEW_CADENCE_TICK_MINUTES.join(',')} * * * *'`);
+    });
+
+    test.each([
+      ['4:30:00 → 4:44', '2026-05-26T20:30:00.000Z', '2026-05-26T20:44:00.000Z'],
+      ['4:45:00 → 5:14', '2026-05-26T20:45:00.000Z', '2026-05-26T21:14:00.000Z'],
+      ['4:14:00 exactly → 4:14 (the tick fires on it)', '2026-05-26T20:14:00.000Z', '2026-05-26T20:14:00.000Z'],
+      ['4:14:30 → 4:44 (the :14 tick already ran)', '2026-05-26T20:14:30.000Z', '2026-05-26T20:44:00.000Z'],
+      ['11:50 PM → 12:14 AM next day', '2026-05-26T23:50:00.000Z', '2026-05-27T00:14:00.000Z'],
+    ])('%s', (_label, from, expected) => {
+      expect(nextCadenceTickAt(new Date(from)).toISOString()).toBe(expected);
+    });
+
+    test('getActiveSequencesForCustomers exposes nextSendTickAt for the Reviews page, null while the runner holds the claim', async () => {
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-t1', customer_id: 't-1', status: 'active', current_step: 0, plan: '[{"day":0}]', next_run_at: new Date('2026-05-26T20:30:00Z') },
+          { id: 'seq-t2', customer_id: 't-2', status: 'active', current_step: 0, plan: '[{"day":0}]', next_run_at: null, updated_at: new Date() },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      const map = await ReviewService.getActiveSequencesForCustomers(['t-1', 't-2']);
+      expect(map['t-1'].nextSendTickAt.toISOString()).toBe('2026-05-26T20:44:00.000Z');
+      expect(map['t-2']).toMatchObject({ nextSendTickAt: null, sending: true });
+    });
+  });
+
   test('enrollPostService is idempotent per customer — an active cadence blocks a second enrollment', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({

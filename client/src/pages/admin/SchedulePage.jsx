@@ -358,12 +358,26 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     const iso = etDatetimeLocalToISO(reviewCustomAt);
     if (!iso) return "Choose a time for the review text.";
     // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
-    // outside it is held to the next window (codex #4140 r3).
+    // outside it is held to the next window (codex #4140 r3) — but only
+    // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
+    // checkSendWindow passes everything, so the copy must not promise a
+    // hold it will not get (codex #4140 r4 P2). The preview says which.
     const { hour } = etParts(new Date(iso));
-    if (hour < 8 || hour >= 20) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmt(iso)}.`;
+    if ((hour < 8 || hour >= 20) && preview?.smsSendWindowEnabled === true) {
+      return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmt(iso)}.`;
+    }
     return `Review text goes out separately ${fmt(iso)}.`;
   }
   return "";
+}
+
+// The key two "Automatic" previews are compared by: the server's `bucket`
+// (the rule behind the time), or the minute of `at` from a server that
+// predates it.
+function reviewPreviewBucket(preview) {
+  if (!preview) return null;
+  if (preview.bucket) return preview.bucket;
+  return typeof preview.at === "string" ? preview.at.slice(0, 16) : null;
 }
 
 const CUSTOMER_INTERACTION_ALIASES = {
@@ -11900,11 +11914,15 @@ export function CompletionPanel({
   // (non-cadence) path with an immediate ask — the server's shouldBundleReview.
   // In cadence mode the ask is always its own message, so the preview must
   // not claim "[review link inserted]" (it never was — the Aug 30 2026 ask).
+  // `bundlesImmediateAsk` is the server's own shouldBundleReview verdict as far
+  // as it can be known before the completion exists (legacy path AND no
+  // service-report-v1 delivery) — not a client re-derivation of one of its
+  // predicates (codex #4140 r4 P2). Unknown reads as "not bundled".
   const reviewSendsWithCompletionSms =
     willReview &&
     effectiveSendSms &&
     (oneTimeRecapOnly ||
-      (reviewTiming === "customer_requested" && reviewSendPreview?.reviewSequencesEnabled === false));
+      (reviewTiming === "customer_requested" && reviewSendPreview?.bundlesImmediateAsk === true));
   const reviewTimingHintText = willReview && !oneTimeRecapOnly
     ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms })
     : "";
@@ -14688,7 +14706,14 @@ export function CompletionPanel({
     if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && reviewTiming === "auto") {
       const fresh = await fetchReviewSendPreview();
       const shown = reviewSendPreviewRef.current;
-      if (fresh && shown?.at && fresh.at !== shown.at) {
+      // Compare the scheduling BUCKET the server names, never the instant
+      // (codex #4140 r4 P1): a relative answer ("90 minutes after
+      // completion", the legacy +120) is re-derived from a new Date() on
+      // every request, so its ISO string never matches twice and a strict
+      // comparison alerted on every submit. Only a rule change — a
+      // different day, an anchored hour, relative → anchored — needs a
+      // second look from the operator.
+      if (fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
         setReviewSendPreview(fresh);
         alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
         return;

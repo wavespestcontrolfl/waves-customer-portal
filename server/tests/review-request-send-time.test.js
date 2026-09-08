@@ -61,6 +61,43 @@ describe('review request send-time calculator', () => {
     expect(etParts(a)).toMatchObject({ year: 2026, month: 5, day: 26, hour: 16, minute: 30 });
   });
 
+  describe('calculateReviewSendPlan — the bucket behind the preview (codex #4140 r4 P1)', () => {
+    const { calculateReviewSendPlan } = ReviewService.__private;
+
+    test('a relative rule keeps one bucket while the completion instant moves by seconds', () => {
+      // 10:00:05 vs 10:00:47 AM EDT — pest control in the morning is "+120 minutes",
+      // so `at` differs by 42 seconds but the plan is the same plan.
+      const a = calculateReviewSendPlan(new Date('2026-05-26T14:00:05Z'), 'pest control', { jitter: false });
+      const b = calculateReviewSendPlan(new Date('2026-05-26T14:00:47Z'), 'pest control', { jitter: false });
+      expect(a.kind).toBe('relative');
+      expect(a.at.getTime()).not.toBe(b.at.getTime());
+      expect(a.bucket).toBe(b.bucket);
+      expect(a.bucket).toBe('relative:2026-05-26:+120m');
+    });
+
+    test('an anchored rule is bucketed by its wall-clock minute on its day', () => {
+      const lawn = calculateReviewSendPlan(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });
+      expect(lawn.kind).toBe('anchored');
+      expect(lawn.bucket).toBe('anchored:2026-05-26T16:30');
+      expect(lawn.at.getTime()).toBe(calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false }).getTime());
+    });
+
+    test('crossing a rule boundary changes the bucket — that is the change the panel re-confirms', () => {
+      // 2:59 PM EDT pest control = +90 min (relative); 3:00 PM = next morning 10 AM (anchored).
+      const before = calculateReviewSendPlan(new Date('2026-05-26T18:59:30Z'), 'pest control', { jitter: false });
+      const after = calculateReviewSendPlan(new Date('2026-05-26T19:00:10Z'), 'pest control', { jitter: false });
+      expect(before.kind).toBe('relative');
+      expect(after).toMatchObject({ kind: 'anchored', bucket: 'anchored:2026-05-27T10:00' });
+      expect(before.bucket).not.toBe(after.bucket);
+    });
+
+    test('a relative answer the 5 PM fence pushes to next morning is anchored, not relative', () => {
+      // WDO at 3:45 PM EDT: +90 min = 5:15 PM → normalizeReviewSendWindow → 10 AM next day.
+      const plan = calculateReviewSendPlan(new Date('2026-05-26T19:45:00Z'), 'wdo inspection', { jitter: false });
+      expect(plan).toMatchObject({ kind: 'anchored', bucket: 'anchored:2026-05-27T10:00' });
+    });
+  });
+
   test('moves WDO review requests that would land after 5 PM to the next morning', () => {
     const sendAt = calculateReviewSendTime(new Date('2026-05-26T19:45:00Z'), 'wdo inspection');
 

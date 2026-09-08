@@ -49,4 +49,17 @@ describe('GET /api/admin/reviews/send-time-preview — staff-scoped', () => {
     expect(route).toBeGreaterThan(-1);
     expect(guard).toBeGreaterThan(route);
   });
+
+  test('previews the plan bucket, the send-window gate, and the bundling verdict — not just an instant (codex #4140 r4)', () => {
+    const start = source.indexOf("router.get('/send-time-preview'");
+    const end = source.indexOf('router.use(adminAuthenticate, requireAdmin);');
+    const handler = source.slice(start, end);
+    // The panel compares `bucket`; the instant alone can never match twice for a relative rule.
+    expect(handler).toContain('calculateReviewSendPlan(new Date(), serviceType, { jitter: false })');
+    expect(handler).toMatch(/bucket: plan \? plan\.bucket : `legacy:\+\$\{ReviewService\.LEGACY_REVIEW_DELAY_MINUTES\}m`/);
+    // The hold copy is conditional on the gate the server actually consults.
+    expect(handler).toContain("smsSendWindowEnabled: isEnabled('smsSendWindow')");
+    // Bundling is the server's verdict (legacy path AND no report-v1 delivery); unknown never claims a bundle.
+    expect(handler).toContain('bundlesImmediateAsk: !reviewSequencesEnabled && serviceReportV1Delivery === false');
+  });
 });
