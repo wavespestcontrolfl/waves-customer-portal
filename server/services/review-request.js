@@ -1591,6 +1591,17 @@ const ReviewService = {
 
     const reviewUrl = await buildReviewUrl(request, customer.id);
     const techName = request.tech_name || "Our team";
+    // Outreach-template renders (custom_body / template_key) resolve the tech
+    // exactly as sendOutreachTouch did on the first attempt (codex #4139 r1):
+    // first name only for {tech}, and {sender} = "<tech> with Waves" from the
+    // record, else the company — a quiet-hours retry must not re-sign a
+    // Day-0 ask as "Our team with Waves" or a full name past the segment
+    // budget. The canonical sms_templates path below keeps its own tech_name.
+    const outreachTechFirst = firstNameFrom(request.tech_name) || null;
+    const outreachVars = {
+      tech: outreachTechFirst || TECH_FALLBACK_SMS,
+      sender: outreachTechFirst ? `${outreachTechFirst} with Waves` : "Waves Pest Control",
+    };
 
     // Body source priority so a deferred/retried send keeps the operator's
     // approved copy instead of reverting:
@@ -1616,7 +1627,7 @@ const ReviewService = {
         request.custom_body,
         {
           first: firstNameFrom(contact.name) || customer.first_name || "",
-          tech: techName,
+          ...outreachVars,
           service_type: request.service_type || "service",
           review_url: customIsNoLink ? "" : reviewUrl,
         },
@@ -1627,7 +1638,7 @@ const ReviewService = {
         outreachTpl.body,
         {
           first: firstNameFrom(contact.name) || customer.first_name || "",
-          tech: techName,
+          ...outreachVars,
           service_type: request.service_type || "service",
           review_url: reviewUrl,
         },
@@ -3757,9 +3768,15 @@ const ReviewService = {
           tName = tName || sr?.tech_name || null;
           svcDate = svcDate || sr?.service_date || null;
         } else {
+          // scheduled_services has no tech_name column — the technician
+          // comes from the row the visit points at (codex #4139 r1: the
+          // bare read always resolved null, so a drawer send with no
+          // techName signed as the company).
           const lastSvc = await db("scheduled_services")
-            .where({ customer_id: cid, status: "completed" })
-            .orderBy("scheduled_date", "desc")
+            .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+            .where({ "scheduled_services.customer_id": cid, "scheduled_services.status": "completed" })
+            .orderBy("scheduled_services.scheduled_date", "desc")
+            .select("scheduled_services.service_type", "scheduled_services.scheduled_date", "technicians.name as tech_name")
             .first()
             .catch(() => null);
           svcType = svcType || lastSvc?.service_type || "pest control";

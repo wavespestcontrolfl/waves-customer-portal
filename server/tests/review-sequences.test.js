@@ -19,6 +19,8 @@ jest.mock('../services/review-ask-drafter', () => ({
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The per-customer send lock needs a real pool; its own suite covers it.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (_key, fn) => fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
@@ -2554,6 +2556,46 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(out.sent).toBe(1);
       expect(mock.__state.rows.review_requests[0].template_key).toBe('first_treatment_ask');
       expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain("First treatment's done");
+    });
+
+    test('a quiet-hours retry through sendSMS signs the Day-0 ask the same way: first name with Waves, else the company (codex #4139 r1)', async () => {
+      const mock = makeMock({
+        customers: [
+          { id: 'd0-6', first_name: 'Lee', last_name: 'P', phone: '+19410000095', nearest_location_id: 'venice' },
+          { id: 'd0-7', first_name: 'Kim', last_name: 'P', phone: '+19410000096', nearest_location_id: 'venice' },
+        ],
+        review_requests: [
+          { id: 'rr-d06', customer_id: 'd0-6', channel: 'sms', status: 'pending', template_key: 'day0_ask', tech_name: 'Christopher Longname', token: 'tok-d06', location_id: 'venice' },
+          { id: 'rr-d07', customer_id: 'd0-7', channel: 'sms', status: 'pending', template_key: 'day0_ask', tech_name: null, token: 'tok-d07', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.sendSMS('rr-d06');
+      await ReviewService.sendSMS('rr-d07');
+
+      const bodies = mockSendCustomerMessage.mock.calls.map((c) => c[0].body);
+      expect(bodies[0]).toContain('Hi Lee! Christopher with Waves.');
+      expect(bodies[0]).not.toContain('Longname');
+      expect(bodies[1]).toContain('Hi Kim! Waves Pest Control.');
+      expect(bodies[1]).not.toContain('Our team');
+    });
+
+    test('a drawer send with no techName resolves the technician from the latest completed visit (codex #4139 r1)', async () => {
+      const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+      const mock = makeMock({
+        customers: [{ id: 'd0-8', first_name: 'Ora', last_name: 'P', phone: '+19410000097', nearest_location_id: 'venice' }],
+        // The mock's leftJoin is a no-op, so the technician's name rides the
+        // visit row under the joined alias.
+        scheduled_services: [{ id: 'ss-d08', customer_id: 'd0-8', status: 'completed', scheduled_date: d(1), service_type: 'pest control', technician_id: 'tech-9', tech_name: 'Christopher Longname' }],
+        technicians: [{ id: 'tech-9', name: 'Christopher Longname' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.sendGatedAsk({ customerId: 'd0-8', channel: 'sms', templateId: 'day0_ask', triggeredBy: 'admin' });
+
+      expect(result.outcome).toBe('sent');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Ora! Christopher with Waves.');
     });
   });
 
