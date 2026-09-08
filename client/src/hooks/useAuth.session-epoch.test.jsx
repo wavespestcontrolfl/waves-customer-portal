@@ -10,6 +10,10 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from './useAuth';
+import { clearNativeBadge } from '../native/nativeBadge';
+import { deactivateNativePushToken } from '../native/nativePush';
+
+vi.mock('../native/nativeBadge', () => ({ clearNativeBadge: vi.fn() }));
 
 vi.mock('../utils/api', () => ({
   default: {
@@ -83,6 +87,19 @@ afterEach(() => {
 });
 
 describe('session epoch guards', () => {
+  it('clears the badge before waiting for native sign-out cleanup', async () => {
+    stubLocalStorage({ waves_token: 'fixture-token', waves_refresh_token: 'fixture-refresh' });
+    api.getMe.mockResolvedValueOnce({ id: 'fixture-customer' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    const release = deferred();
+    deactivateNativePushToken.mockReturnValueOnce(release.promise);
+    await act(async () => { authApi.logout(); });
+    expect(clearNativeBadge).toHaveBeenCalledTimes(1);
+    expect(api.clearTokens).not.toHaveBeenCalled();
+    await act(async () => { release.resolve(); });
+    expect(api.clearTokens).toHaveBeenCalledTimes(1);
+  });
+
   it('publishes a new epoch immediately for a same-customer family adoption but not token rotation', async () => {
     const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     const tokenFor = (sessionId, suffix) => `${b64u({ alg: 'none' })}.${b64u({ customerId: 'cust-a', sessionId })}.${suffix}`;
