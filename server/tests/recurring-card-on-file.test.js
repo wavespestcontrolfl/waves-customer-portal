@@ -646,6 +646,25 @@ describe('replaceRecurringCardIntent ("use a different payment method")', () => 
     });
     expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1', generation: 0, paymentMethodType: 'card' });
     expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+    // Even the nothing-to-retire outcome runs under the estimate row lock.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  // GitHub Codex #4144 r1 P0: a stale tab retrying with an intent that was
+  // already retired (or never confirmed) must not mint a fresh capture for
+  // an estimate another tab accepted meanwhile — same lock, same 409.
+  it('refuses a stale retry (already-retired or unfinished intent) once the estimate is accepted under the lock', async () => {
+    const retired = { ...LIVE_GOOD, metadata: { ...LIVE_GOOD.metadata, retired: 'true', replaced_by: 'seti_after' } };
+    liveById({ seti_1: retired, seti_after: FRESH });
+    mockCreateRecurringCardSetupIntent.mockResolvedValue(FRESH);
+    mockDbFixtures.estimates = { id: 'est-1', status: 'accepted', accepted_at: '2026-09-08T15:00:00Z' };
+    expect(await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'estimate_accepted' });
+    const open = { ...LIVE_GOOD, status: 'requires_payment_method', payment_method: null };
+    liveById({ seti_1: open });
+    expect(await replaceRecurringCardIntent({ estimate: EST, setupIntentId: 'seti_1' })).toEqual({ ok: false, reason: 'estimate_accepted' });
+    expect(mockCreateRecurringCardSetupIntent).not.toHaveBeenCalled();
+    expect(mockRetireSetupIntent).not.toHaveBeenCalled();
+    expect(db.transaction).toHaveBeenCalledTimes(2);
   });
 
   it('leaves the saved method untouched when the replacement cannot be minted (mint-first ordering)', async () => {
@@ -758,6 +777,19 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
     expect(await createRecurringCardSetupIntentForEstimate(EST))
       .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2', paymentMethodTypes: ['card'], capturedMethodType: null });
     expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(2, { estimateId: 'est-1', generation: 1, paymentMethodType: 'card' });
+  });
+
+  // GitHub Codex #4144 r1 P2: a succeeded head is judged by what it captured,
+  // like the accept gate — a CARD saved on a bank-capable intent is still a
+  // valid card after the ACH gate closes; only a captured bank is refused.
+  it('keeps a chain head whose captured card sits on a bank-capable intent under a card-only policy', async () => {
+    mockCreateRecurringCardSetupIntent
+      .mockResolvedValueOnce({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method' });
+    liveById.set('seti_old', { id: 'seti_old', status: 'succeeded', payment_method: 'pm_old', payment_method_types: ['card'], metadata: { retired: 'true', replaced_by: 'seti_card' } });
+    liveById.set('seti_card', { id: 'seti_card', client_secret: 'cs_card', status: 'succeeded', payment_method: { id: 'pm_c', type: 'card' }, payment_method_types: ['card', 'us_bank_account'], metadata: {} });
+    expect(await createRecurringCardSetupIntentForEstimate(EST))
+      .toEqual(expect.objectContaining({ clientSecret: 'cs_card', setupIntentId: 'seti_card', capturedMethodType: 'card' }));
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledTimes(1);
   });
 
   it('walks the generation salt when a retired replay\'s chain is broken or ends canceled', async () => {

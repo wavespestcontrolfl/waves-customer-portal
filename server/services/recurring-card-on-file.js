@@ -444,9 +444,23 @@ async function createRecurringCardSetupIntentForEstimate(estimate) {
 // mint? (The generation keys are salted by this, so only a replacement
 // chain head can drift.)
 function intentTenderMatches(setupIntent, paymentMethodType) {
+  const bankAllowed = paymentMethodType === 'card_or_bank';
+  // A SUCCEEDED head is judged by what it actually captured, the same way
+  // the accept gate judges it (GitHub Codex #4144 r1 P2): a card saved on a
+  // bank-capable intent is still a valid card after the ACH gate closes —
+  // skipping it would make the customer re-enter a card already on file.
+  // Only a captured bank is refused under a card-only policy.
+  if (setupIntent?.status === 'succeeded' && setupIntent.payment_method) {
+    const pm = setupIntent.payment_method;
+    const capturedType = typeof pm === 'object' ? pm?.type : null;
+    if (capturedType === 'card') return true;
+    if (capturedType === 'us_bank_account') return bankAllowed;
+  }
+  // An unfinished intent (or a capture whose tender could not be read)
+  // must match the family exactly — it still decides what can be saved.
   const bankCapable = Array.isArray(setupIntent?.payment_method_types)
     && setupIntent.payment_method_types.includes('us_bank_account');
-  return bankCapable === (paymentMethodType === 'card_or_bank');
+  return bankCapable === bankAllowed;
 }
 
 // Stripe's "No such setupintent" (HTTP 404, code resource_missing) — the
@@ -513,22 +527,26 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
   if (!recurringCardIntentBelongsToEstimate(current, estimate.id)) {
     return { ok: false, reason: 'intent_mismatch' };
   }
-  if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
-    const intent = await createRecurringCardSetupIntentForEstimate(estimate);
-    return intent ? { ok: true, intent, retired: false } : { ok: false, reason: 'mint_failed' };
-  }
-  const paymentMethodType = await resolveRecurringCaptureTender(estimate);
   // Serialized with the accept on the estimate ROW LOCK (pre-push Codex P1
   // r3): the accept's first write is a guarded UPDATE of this row that
   // holds the lock to commit, and it re-reads the intent live under that
   // lock (verifyRecurringCardIntentUnderLock). So either the retirement
   // commits first and the accept 402s on it, or the accept commits first
   // and this sees `accepted` and retires nothing. Read-only on the row —
-  // an UPDATE here would move updated_at and 409 the accept's CAS.
+  // an UPDATE here would move updated_at and 409 the accept's CAS. EVERY
+  // outcome takes the lock (GitHub Codex #4144 r1 P0): a stale tab
+  // retrying with an already-retired or unfinished intent must not mint a
+  // fresh capture — or record a checkout step — for an estimate another
+  // tab has accepted in the meantime.
   return db.transaction(async (trx) => {
     const row = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'status', 'accepted_at');
     if (!row) return { ok: false, reason: 'intent_mismatch' };
     if (row.status === 'accepted' || row.accepted_at) return { ok: false, reason: 'estimate_accepted' };
+    if (current.status !== 'succeeded' || isRetiredSetupIntent(current)) {
+      const intent = await createRecurringCardSetupIntentForEstimate(estimate);
+      return intent ? { ok: true, intent, retired: false } : { ok: false, reason: 'mint_failed' };
+    }
+    const paymentMethodType = await resolveRecurringCaptureTender(estimate);
     let replacement = null;
     try {
       const created = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, paymentMethodType, replacing: current.id });

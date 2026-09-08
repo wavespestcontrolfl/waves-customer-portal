@@ -298,10 +298,14 @@ accept's freshness CAS is untouched) and the accept re-reads its verified
 intent live under the same lock before committing, so a retirement that
 landed after the pre-transaction verify aborts the accept (402 → re-mint)
 and a replacement that finds the estimate already accepted retires
-nothing (409). A chain head whose tender family no longer matches the
-current policy (bank-capable, minted while GATE_ACCEPT_ACH_CAPTURE was
-on) is skipped like a dead replay so the generation walk mints a
-compatible card-only intent. Every minted/replayed intent is
+nothing (409) — every replacement outcome takes that lock, including a
+stale retry with an already-retired or unfinished intent, so no fresh
+capture is minted (and no checkout step recorded) for an accepted
+estimate. A chain head is judged by what it captured, like the accept
+gate: a saved card stays valid after GATE_ACCEPT_ACH_CAPTURE closes, a
+captured bank under a card-only policy is skipped like a dead replay
+(unfinished heads must match the tender family exactly) so the
+generation walk mints a compatible card-only intent. Every minted/replayed intent is
 re-read live before it is judged (an idempotent replay returns the
 original create body). A succeeded replay's response carries
 `capturedMethodType`, and the capture UIs render it as a saved-method
