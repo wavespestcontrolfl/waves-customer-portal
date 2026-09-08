@@ -541,8 +541,9 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
  * lead, Twilio, proposal win, …) create one — prod 2026-09-07: 144 live,
  * addressed customers had no property row, and every booking anchored for
  * them fell to NULL. This sweep fills the gap within the day so no later
- * consumer has to assume the row exists (the booking anchor backfills
- * its own at booking time — this catches customers nothing read). Per customer, one transaction:
+ * consumer has to assume the row exists (once #4115 lands the booking
+ * anchor backfills its own at booking time and this catches customers
+ * nothing read; until then it is the only backstop). Per customer, one transaction:
  * customers row FOR UPDATE, re-check (still live, still addressed, still
  * no row — a concurrent read may have backfilled it), then the same core
  * every lazy read uses. Newest first (a fresh lead is the one about to be

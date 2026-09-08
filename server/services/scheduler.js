@@ -737,10 +737,12 @@ function initScheduledJobs() {
   // DAILY 3:20 AM ET — primary-property backstop. The same customer-create
   // paths never create the lazily-backfilled primary customer_properties
   // row, so a booking for a fresh lead anchored to NULL (prod 2026-09-07:
-  // 144 rows missing). Daily is enough (owner 2026-09-07): the booking
-  // anchor itself backfills a missing primary at booking time, so this
-  // only has to catch customers nothing read in between. Own job_health
-  // name so the watchdog reports it apart from the geocode sweep.
+  // 144 rows missing). Daily is enough (owner 2026-09-07) once #4115
+  // lands: from then on the booking anchor backfills a missing primary at
+  // booking time and this only has to catch customers nothing read in
+  // between. Until #4115 merges this sweep is the only backstop, so #4115
+  // merges first. Own job_health name so the watchdog reports it apart
+  // from the geocode sweep.
   cron.schedule('20 3 * * *', async () => {
     try {
       const { runExclusive } = require('../utils/cron-lock');

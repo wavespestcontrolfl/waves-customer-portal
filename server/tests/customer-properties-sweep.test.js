@@ -19,21 +19,27 @@ function installDb({ candidates = [], customersById = {}, props = {}, insertErro
   const inserted = [];
   const chain = (table) => {
     const q = {
-      _id: null, _excluded: [], _limit: Infinity,
+      _id: null, _excluded: [], _limit: Infinity, _primaryOnly: false,
       whereNull: () => q, whereRaw: () => q, whereNotExists: () => q, orderBy: () => q, select: () => q,
       modify: (cb) => { cb(q); return q; },
       whereNotIn: (col, ids) => { q._excluded = ids; return q; },
       limit: (n) => { q._limit = n; return q; },
       forUpdate: () => { if (appearOnLock[q._id]) props[q._id] = appearOnLock[q._id]; return q; },
-      where: (arg) => { if (arg && typeof arg === 'object') q._id = arg.id || arg.customer_id || null; return q; },
+      where: (arg) => {
+        if (arg && typeof arg === 'object') { q._id = arg.id || arg.customer_id || null; q._primaryOnly = arg.is_primary === true; }
+        return q;
+      },
       // Candidate list mirrors the real predicate: a customer that now HAS a
       // property row (created this run) drops out; excluded ids drop out.
       then: (resolve) => resolve(
         candidates.filter((id) => !(props[id] || []).length && !q._excluded.includes(id)).slice(0, q._limit).map((id) => ({ id })),
       ),
+      // `first()` honours a `{ is_primary: true }` filter: the core's own
+      // guard only sees primaries, so a NON-primary row that appeared under
+      // the lock is skipped by the sweep's any-row re-check alone.
       first: async () => {
         if (table === 'customers') return customersById[q._id] || null;
-        return (props[q._id] || [])[0] || null;
+        return (props[q._id] || []).find((p) => !q._primaryOnly || p.is_primary) || null;
       },
       insert: (row) => ({
         returning: async () => {
@@ -48,7 +54,7 @@ function installDb({ candidates = [], customersById = {}, props = {}, insertErro
     return q;
   };
   mockDb.mockImplementation((table) => chain(table));
-  mockDb.transaction = async (fn) => fn(mockDb);
+  mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
   return { inserted };
 }
 
@@ -67,13 +73,19 @@ describe('sweepMissingPrimaryProperties (daily primary backstop)', () => {
   });
 
   test('re-checks under the lock: a row that appeared, a soft-delete, or a blanked address since selection is skipped', async () => {
+    // `raced` lands a NON-primary row under the lock: ensurePrimaryCore's
+    // primary-only guard would still insert, so only the sweep's any-row
+    // re-check can skip it — delete that re-check and this case goes red.
     const { inserted } = installDb({
       candidates: ['gone', 'blank', 'raced'],
       customersById: { gone: live('gone', { deleted_at: new Date() }), blank: live('blank', { address_line1: '   ' }), raced: live('raced') },
-      appearOnLock: { raced: [{ id: 'p-existing', is_primary: true, active: true }] },
+      appearOnLock: { raced: [{ id: 'p-existing', is_primary: false, active: true }] },
     });
     expect(await sweepMissingPrimaryProperties()).toEqual({ checked: 3, created: 0, skipped: 3, failed: 0 });
     expect(inserted).toHaveLength(0);
+    // One transaction per candidate row (the lock, the re-check and the
+    // core share it) — the docstring's contract.
+    expect(mockDb.transaction).toHaveBeenCalledTimes(3);
   });
 
   test('a failing insert is counted, logged by code only, every row is still attempted, and the sweep then rejects so job_health records the failure', async () => {
@@ -124,6 +136,6 @@ describe('sweepMissingPrimaryProperties (daily primary backstop)', () => {
 describe('scheduler wiring', () => {
   test('a daily 3:20 AM ET tick runs the primary backstop under its own job_health name', () => {
     const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
-    expect(src).toMatch(/cron\.schedule\('20 3 \* \* \*', async \(\) => \{[\s\S]{0,600}runExclusive\('primary-property-backstop', \(\) => sweepMissingPrimaryProperties\(\)\)/);
+    expect(src).toMatch(/cron\.schedule\('20 3 \* \* \*', async \(\) => \{[\s\S]{0,600}runExclusive\('primary-property-backstop', \(\) => sweepMissingPrimaryProperties\(\)\)[\s\S]{0,200}timezone: 'America\/New_York'/);
   });
 });

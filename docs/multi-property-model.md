@@ -30,7 +30,8 @@ for new data**.
   the primary, so any live, addressed customer with no property row gets one
   within the day (newest first, per-row lock + re-check, same core as the
   lazy reads). A later consumer may therefore assume the row exists after at
-  most a day — never at insert time; the booking anchor backfills its own.
+  most a day — never at insert time; once #4115 lands the booking anchor
+  backfills its own at booking time (until then the sweep is the only backstop).
   The day holds while the backlog is under the run's `maxRows` guard (2000);
   a capped run logs a warning and the remainder waits for the next tick.
   Rows the sweep creates carry `source = 'backfill'`, so with
