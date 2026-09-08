@@ -29,7 +29,7 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
-function makeKnex({ existing = null, insertError = null, isTransaction = false } = {}) {
+function makeKnex({ existing = null, insertError = null, isTransaction = false, metadataAvailable = true } = {}) {
   let insertPayload = null;
   const columnInfo = {
     service_record_id: {},
@@ -45,9 +45,13 @@ function makeKnex({ existing = null, insertError = null, isTransaction = false }
 
   const knex = jest.fn(() => {
     const chain = {
-      columnInfo: jest.fn(async () => columnInfo),
+      columnInfo: jest.fn(async () => {
+        if (!metadataAvailable) throw new Error('Metadata lookup unavailable');
+        return columnInfo;
+      }),
       where: jest.fn(() => chain),
       select: jest.fn(() => chain),
+      forUpdate: jest.fn(() => chain),
       first: jest.fn(async () => existing),
       whereNotNull: jest.fn(() => chain),
       orderByRaw: jest.fn(() => chain),
@@ -57,11 +61,10 @@ function makeKnex({ existing = null, insertError = null, isTransaction = false }
         if (insertError) throw insertError;
         return chain;
       }),
-      returning: jest.fn(async () => [{
-        id: 'photo-1',
-        ...insertPayload,
-        created_at: new Date('2026-05-16T12:00:00.000Z'),
-      }]),
+      returning: jest.fn(async (fields) => {
+        const saved = { id: 'photo-1', ...insertPayload, created_at: new Date('2026-05-16T12:00:00.000Z') };
+        return [fields === '*' ? saved : Object.fromEntries(fields.map(field => [field, saved[field]]))];
+      }),
       update: jest.fn(() => chain),
     };
     return chain;
@@ -90,12 +93,12 @@ function makePromotionKnex({ staged = [], existingHash = null } = {}) {
       columnInfo: jest.fn(async () => columns),
       first: jest.fn(async (column) => {
         if (table === 'service_records') return { id: 'record-1' };
-        if (table === 'service_photos' && column === 'hash_sha256' && existingHash) {
+        if (table === 'service_photos' && Array.isArray(column) && column.includes('hash_sha256') && existingHash) {
           return { hash_sha256: existingHash };
         }
         return null;
       }),
-      forUpdate: jest.fn(async () => staged),
+      forUpdate: jest.fn(() => table === 'service_records' ? chain : Promise.resolve(staged)),
       insert: jest.fn((payload) => {
         insertPayload = payload;
         inserts.push(payload);
@@ -124,6 +127,14 @@ describe('service photo uploads', () => {
   beforeEach(() => {
     mockS3Send.mockReset();
     mockS3Send.mockResolvedValue({});
+  });
+
+  test('metadata-read fallback retains the object when INSERT returns only its id', async () => {
+    const { uploadServicePhotoBuffer } = require('../services/service-photos');
+    const photo = await uploadServicePhotoBuffer({ serviceRecordId: 'record-1', buffer: Buffer.from('photo'), knex: makeKnex({ metadataAvailable: false }) });
+    expect(photo).toEqual({ id: 'photo-1' });
+    expect(mockS3Send).toHaveBeenCalledTimes(1);
+    expect(mockS3Send.mock.calls[0][0].constructor.name).toBe('PutObjectCommand');
   });
 
   test('uploads completion data-url photos into service_photos rows', async () => {

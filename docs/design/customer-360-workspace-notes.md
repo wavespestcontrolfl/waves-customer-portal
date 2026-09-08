@@ -1,6 +1,6 @@
 # Customer workspace reference implementation
 
-The workspace is available at `/admin/customers?customer360=workspace`. A selected record adds `&customerId=<id>`. The query option defaults off and preserves existing customer links and the standalone profile used by other screens.
+The workspace is the default at `/admin/customers`. A selected record adds `?customerId=<id>`. Existing `customer360=workspace` links still work; `customer360=overlay` restores the previous directory/profile presentation. The standalone profile used by other screens is unchanged.
 
 ## Design direction
 
@@ -62,4 +62,4 @@ Focused client checks cover section navigation, directory/filter/edit state, pro
 
 Browser verification uses synthetic fixtures with backend/provider requests intercepted. Desktop Chromium and mobile/tablet WebKit checks exercise the directory, menus, editing, four sections, billing links, contract expansion and draft retention, messaging tools, history search, filters, and overflow. Desktop and mobile screenshots accompany the PR. The shared static preview contains fictional records and is separate from the portal deployment.
 
-No customer messages, provider AI calls, or charges are performed during verification. Device speech recognition and the installed iPhone home-screen experience still require an on-device check. The layout remains opt-in through `customer360=workspace`; remove the query parameter to return to the existing profile presentation. Read-side additions and directory health consolidation apply to the existing Customers route.
+No customer messages, provider AI calls, or charges are performed during verification. Device speech recognition and the installed iPhone home-screen experience still require an on-device check. The layout is the default at `/admin/customers`, including existing customer deep links. `customer360=workspace` links remain valid; use `customer360=overlay` to return to the existing profile presentation. Read-side additions and directory health consolidation apply to the existing Customers route.
