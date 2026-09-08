@@ -644,8 +644,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     const base = { customer_id: message.customer_id, property_id: context.properties[0].id,
       service_type: 'Quarterly Lawn', scheduled_date: etDateString(after), window_start: '09:00:00',
       status: 'confirmed', created_at: before, updated_at: after };
-    const [moved, touched, sameDate, earlyMove, noShow] = await mockPg('scheduled_services').insert([base, base, base, base, base]).returning('id');
     const nextWeek = etDateString(new Date(after.getTime() + 7 * 86400000));
+    const [moved, touched, sameDate, earlyMove, noShow] = await mockPg('scheduled_services')
+      .insert([{ ...base, scheduled_date: nextWeek }, base, base, { ...base, scheduled_date: nextWeek }, base]).returning('id');
     await mockPg('reschedule_log').insert([
       // A no-show entry records the missed date with no new date: not a move.
       { scheduled_service_id: noShow.id, customer_id: message.customer_id, original_date: etDateString(after),
@@ -668,6 +669,78 @@ postgres('SMS commitments on PostgreSQL', () => {
     const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString() };
     expect(admissibleWitness(record, { kind: 'schedule_visit', sms_context })).toBe(true);
     expect(admissibleWitness(record, { kind: 'technician_follow_up', sms_context })).toBe(false);
+  });
+
+  test.each([
+    ['a forward chain landing on the current date', ['A>B', 'B>C'], 'C', true],
+    ['a chain reverted to the original date', ['A>B', 'B>A'], 'A', false],
+    ['a latest move that does not describe the current row', ['A>B'], 'C', false],
+  ])('move chains prove a move only by their net result: %s', async (_label, chain, current, admissible) => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const day = (letter) => etDateString(new Date(after.getTime() + { A: 0, B: 7, C: 14 }[letter] * 86400000));
+    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Lawn', scheduled_date: day(current), window_start: '09:00:00', status: 'confirmed', created_at: before }).returning('id');
+    await mockPg('reschedule_log').insert(chain.map((step, i) => ({ scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: day(step[0]), new_date: day(step[2]), initiated_by: 'admin', created_at: new Date(after.getTime() + i * 1000) })));
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 60000));
+    const record = evidence.records.find((r) => r.type === 'visit' && r.id === visit.id);
+    expect(!!record).toBe(true);
+    const sms_context = { property_id: context.properties[0].id, source_at: message.created_at.toISOString() };
+    expect(admissibleWitness(record, { kind: 'schedule_visit', sms_context })).toBe(admissible);
+    expect(record.text.includes('moved after the request')).toBe(admissible);
+  });
+
+  test('a recipient-specific estimate request treats estimate-delivery email truncation as fatal', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      status: 'sent', service_interest: 'Lawn', estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    const [email] = await mockPg('email_messages').insert({ recipient_type: 'customer', recipient_id: message.customer_id,
+      recipient_email_snapshot: 'synthetic@example.invalid', trigger_event_id: `estimate_delivery:${estimate.id}`,
+      status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your lawn estimate is attached' }).returning('id');
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, now);
+    const commitment = { kind: 'send_estimate', evidence: [{ quote: 'Email the lawn estimate to synthetic@example.invalid' }],
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const witness = evidence.records.find((r) => r.id === email.id);
+    const complete = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'lawn estimate' }, evidence, commitment);
+    expect(complete).toMatchObject({ verdict: 'fulfilled', linked_record_type: 'estimate', linked_record_id: estimate.id });
+    const truncated = { ...evidence, failures: ['email_delivery_truncated'] };
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'lawn estimate' }, truncated, commitment))
+      .toMatchObject({ verdict: 'uncertain', reason: 'incomplete_sources', failures: ['email_delivery_truncated'] });
+  });
+
+  test('revalidation of an estimate-delivery witness also holds the linked estimate without waiting', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], quote: 'Please email the estimate to synthetic@example.invalid',
+      description: 'email the estimate to synthetic@example.invalid', due_at: after.toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const commitment = await mockPg('call_commitments').first();
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      status: 'sent', service_interest: 'Lawn', estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    const [email] = await mockPg('email_messages').insert({ recipient_type: 'customer', recipient_id: message.customer_id,
+      recipient_email_snapshot: 'synthetic@example.invalid', trigger_event_id: `estimate_delivery:${estimate.id}`,
+      status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your lawn estimate is attached' }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `email_delivery:${email.id}`, quote: 'lawn estimate' } });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const verdict = await verifySmsFulfillment(commitment, evidence, { now });
+    expect(verdict).toMatchObject({ verdict: 'fulfilled', record_type: 'email_delivery', linked_record_id: estimate.id });
+    const estimateWriter = await mockPg.transaction();
+    try {
+      await estimateWriter('estimates').where({ id: estimate.id }).forUpdate().first();
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '500ms'");
+        await trx('customers').where({ id: message.customer_id }).forUpdate().first();
+        expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(false);
+      });
+    } finally {
+      await estimateWriter.rollback();
+    }
+    await mockPg.transaction(async (trx) => {
+      expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(true);
+    });
   });
 
   test.each([

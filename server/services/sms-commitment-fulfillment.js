@@ -87,10 +87,22 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
           WHERE h.job_id = scheduled_services.id AND h.to_status IN ('confirmed', 'rescheduled')
             AND h.transitioned_at > ? AND h.transitioned_at <= ?) as booked_at`, [after, now]),
+        // A move chain proves a move only when its net result is the visit's
+        // current date: the latest logged new date must be that date and the
+        // earliest logged original date must not be (a reverted chain).
         conn.raw(`(SELECT MIN(r.created_at) FROM reschedule_log r
           WHERE r.scheduled_service_id = scheduled_services.id
             AND r.original_date IS NOT NULL AND r.new_date IS NOT NULL AND r.new_date <> r.original_date
-            AND r.created_at > ? AND r.created_at <= ?) as moved_at`, [after, now]),
+            AND r.created_at > ? AND r.created_at <= ?
+            AND scheduled_services.scheduled_date = (SELECT l.new_date FROM reschedule_log l
+              WHERE l.scheduled_service_id = scheduled_services.id
+                AND l.original_date IS NOT NULL AND l.new_date IS NOT NULL AND l.new_date <> l.original_date
+                AND l.created_at > ? AND l.created_at <= ? ORDER BY l.created_at DESC LIMIT 1)
+            AND scheduled_services.scheduled_date <> (SELECT f.original_date FROM reschedule_log f
+              WHERE f.scheduled_service_id = scheduled_services.id
+                AND f.original_date IS NOT NULL AND f.new_date IS NOT NULL AND f.new_date <> f.original_date
+                AND f.created_at > ? AND f.created_at <= ? ORDER BY f.created_at ASC LIMIT 1)) as moved_at`,
+        [after, now, after, now, after, now]),
         conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
           WHERE h.job_id = scheduled_services.id AND h.to_status = scheduled_services.status
             AND h.transitioned_at > ? AND h.transitioned_at <= ?) as transitioned_at`, [after, now])),
@@ -143,6 +155,14 @@ function visitWitnessAt(record, commitment) {
 }
 
 const ESTIMATE_DELIVERY_EVENT = /^estimate_delivery:([0-9a-f-]{36})$/i;
+// An account id is not proof of the requested recipient. Only one literal
+// address in the grounded source can authorize an email witness.
+function requestedEmails(commitment) {
+  return new Set(JSON.stringify(commitment.evidence ?? []).toLowerCase().match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/g) ?? []);
+}
+function recipientSpecificEstimate(commitment) {
+  return commitment.kind === 'send_estimate' && requestedEmails(commitment).size === 1;
+}
 function scopedToProperty(record, commitment) {
   const propertyId = commitment.sms_context?.property_id;
   const witnessProperty = record.property_id || record.address_property_id;
@@ -152,24 +172,16 @@ function scopedToProperty(record, commitment) {
 function admissibleWitness(record, commitment, records = []) {
   // Deliverables and completed work need their actual records. A staff
   // text/call saying "sent" or "done" is only an association hint.
-  const requestedEmails = new Set(JSON.stringify(commitment.evidence ?? []).toLowerCase()
-    .match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/g) ?? []);
+  const emails = requestedEmails(commitment);
   // A request naming the recipient of an estimate is proved by the
   // estimate-delivery email to that exact address: the email names its
   // estimate, and that estimate must itself be an admissible handoff.
-  const estimateDelivery = commitment.kind === 'send_estimate' && requestedEmails.size === 1 && record.type === 'email_delivery';
-  if (!estimateDelivery && !(REQUIRED_TYPES[commitment.kind] || ANSWER_TYPES).includes(record.type)) return false;
+  const estimateDelivery = recipientSpecificEstimate(commitment) && record.type === 'email_delivery';
+  if (!witnessTypes(commitment).includes(record.type)) return false;
   if (['estimate', 'visit'].includes(record.type) && !scopedToProperty(record, commitment)) return false;
-  // An account id is not proof of the requested recipient. Only one
-  // literal address in the grounded source can authorize an email witness.
-  if (requestedEmails.size && record.type !== 'email_delivery') return false;
+  if (emails.size && record.type !== 'email_delivery') return false;
   const after = new Date(commitment.sms_context?.source_at);
-  const deliveredEstimate = () => {
-    const estimateId = ESTIMATE_DELIVERY_EVENT.exec(record.trigger_event_id || '')?.[1]?.toLowerCase();
-    const estimate = estimateId && records.find((r) => r.type === 'estimate' && String(r.id).toLowerCase() === estimateId);
-    return !!estimate && scopedToProperty(estimate, commitment) && !!witnessAt(estimate, after)
-      && new Date(record.sent_at) > after;
-  };
+  const deliveredEstimate = () => !!linkedEstimate(record, commitment, records) && new Date(record.sent_at) > after;
   const witnesses = {
     sms: () => record.status === 'delivered'
       && (SMS_TYPES[commitment.kind] || HUMAN_SMS_TYPES).includes(record.message_type),
@@ -179,7 +191,7 @@ function admissibleWitness(record, commitment, records = []) {
     // delivery event was lost.
     email_delivery: () => (['delivered', 'opened', 'clicked'].includes(record.status) || !!record.opened_at || !!record.clicked_at)
       && !!record.sent_at && !record.bounced_at
-      && requestedEmails.size === 1 && requestedEmails.has(normalized(record.recipient_email_snapshot))
+      && emails.size === 1 && emails.has(normalized(record.recipient_email_snapshot))
       && (!estimateDelivery || deliveredEstimate()),
     estimate: () => !!witnessAt(record, new Date(commitment.sms_context?.source_at)),
     visit: () => VISIT_STATUSES[commitment.kind].includes(record.status) && !!visitWitnessAt(record, commitment),
@@ -199,16 +211,25 @@ const ORDERING_TIME = {
   sms: (row) => row.created_at, call: (row) => row.created_at, email: (row) => row.received_at,
   email_delivery: (row) => row.delivered_at || row.sent_at, invoice: (row) => row.sent_at,
 };
-function witnessTypes(kind) {
-  return REQUIRED_TYPES[kind]?.length ? REQUIRED_TYPES[kind] : ANSWER_TYPES;
+function witnessTypes(commitment) {
+  if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
+  return REQUIRED_TYPES[commitment.kind]?.length ? REQUIRED_TYPES[commitment.kind] : ANSWER_TYPES;
 }
-function relaxableTruncation(failure, kind) {
+// The estimate an estimate-delivery email names, when that estimate is
+// itself admissible post-request evidence for the requested property.
+function linkedEstimate(record, commitment, records) {
+  const estimateId = ESTIMATE_DELIVERY_EVENT.exec(record.trigger_event_id || '')?.[1]?.toLowerCase();
+  const estimate = estimateId && records.find((r) => r.type === 'estimate' && String(r.id).toLowerCase() === estimateId);
+  return estimate && scopedToProperty(estimate, commitment) && witnessAt(estimate, new Date(commitment.sms_context?.source_at))
+    ? estimate : null;
+}
+function relaxableTruncation(failure, commitment) {
   const type = /^(\w+)_truncated$/.exec(failure)?.[1];
-  return !!type && !failure.endsWith('_body_truncated') && !!ORDERING_TIME[type] && !witnessTypes(kind).includes(type) ? type : null;
+  return !!type && !failure.endsWith('_body_truncated') && !!ORDERING_TIME[type] && !witnessTypes(commitment).includes(type) ? type : null;
 }
 function fatalFailures(evidence, commitment, witness) {
   return evidence.failures.filter((failure) => {
-    const type = relaxableTruncation(failure, commitment.kind);
+    const type = relaxableTruncation(failure, commitment);
     if (!type || type === witness?.type) return true;
     const retained = evidence.records.filter((r) => r.type === type).map((r) => new Date(ORDERING_TIME[type](r)))
       .filter((d) => !Number.isNaN(d.getTime()));
@@ -233,7 +254,10 @@ function groundFulfillment(parsed, evidence, commitment) {
   const matched = new Date(matchedAt);
   const failures = fatalFailures(evidence, commitment, { type: witness.type, matched_at: matched });
   if (failures.length) return { verdict: 'uncertain', reason: 'incomplete_sources', failures };
+  const linked = witness.type === 'email_delivery' && recipientSpecificEstimate(commitment)
+    ? linkedEstimate(witness, commitment, evidence.records) : null;
   return { verdict: 'fulfilled', record_type: witness.type, record_id: witness.id,
+    ...(linked ? { linked_record_type: 'estimate', linked_record_id: linked.id } : {}),
     matched_at: matchedAt, quote: parsed.quote,
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
 }
@@ -258,6 +282,13 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
   // first, so never wait here and reverse that order; retry busy witnesses.
   const locked = await trx(table).where({ id: verdict.record_id }).forUpdate().skipLocked().first('id');
   if (!locked) return false;
+  // A composite witness (estimate-delivery email) also depends on the
+  // estimate it names; hold that row too, again without waiting.
+  if (verdict.linked_record_id) {
+    const linkedTable = tables[verdict.linked_record_type];
+    const linkedLock = linkedTable && await trx(linkedTable).where({ id: verdict.linked_record_id }).forUpdate().skipLocked().first('id');
+    if (!linkedLock) return false;
+  }
   const evidence = await loadSmsFulfillmentEvidence(trx, commitment, message, now);
   if (fulfillmentFingerprint(commitment, evidence).evidenceHash !== verdict.evidence_hash) return false;
   return groundFulfillment({ verdict: 'fulfilled', record_ref: `${verdict.record_type}:${verdict.record_id}`,
@@ -279,7 +310,7 @@ async function verifySmsFulfillment(commitment, evidence, { now = new Date() } =
 async function checkSmsFulfillment(commitment, evidence) {
   // Only a supporting channel's truncation may wait for the witness; every
   // other failure is settled before a provider sees the evidence.
-  const settled = evidence.failures.filter((failure) => !relaxableTruncation(failure, commitment.kind));
+  const settled = evidence.failures.filter((failure) => !relaxableTruncation(failure, commitment));
   if (settled.length) return { verdict: 'uncertain', reason: 'incomplete_sources', failures: settled };
   if (!evidence.records.length) return { verdict: 'open' };
   const sms = evidence.records.filter((row) => row.type === 'sms')
