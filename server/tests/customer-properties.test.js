@@ -150,11 +150,16 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
   // property. Fake knex: `customer_properties` reads answer with `rows`
   // (then, after an insert, the inserted primary); `customers` answers with
   // the mirror row; `transaction(fn)` hands back the same fake (a savepoint).
-  const fakeConn = ({ rows = [], customer = null, insertError = null, isTransaction = false } = {}) => {
-    const state = { rows: [...rows], inserted: [], failures: [] };
+  const fakeConn = ({ rows = [], customer = null, locked, insertError = null, isTransaction = false } = {}) => {
+    const state = { rows: [...rows], inserted: [], failures: [], locked: 0 };
     const conn = (table) => {
       if (table === 'customers') {
-        return { where: () => ({ first: async () => customer }) };
+        // A transaction fake answers the locked read with `locked` when
+        // given (the row as it is once the lock is granted), else the
+        // plain row.
+        const first = async () => customer;
+        const forUpdate = () => { state.locked += 1; return { first: async () => (locked === undefined ? customer : locked) }; };
+        return { where: () => ({ first, forUpdate }) };
       }
       const q = {
         where: () => q,
@@ -202,6 +207,23 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
     const conn = fakeConn({ customer: { ...addressed, deleted_at: '2026-09-01T00:00:00.000Z' } });
     expect(await soleActivePropertyId('c1', conn)).toBeNull();
     expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('inside a transaction the liveness check reads the LOCKED customers row — a merge that archives the customer while the anchor waits wins (codex #4115 r3 P2)', async () => {
+    // The caller's snapshot is live; the row under FOR UPDATE is archived.
+    const conn = fakeConn({ customer: addressed, locked: { ...addressed, deleted_at: '2026-09-08T00:00:00.000Z' }, isTransaction: true });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
+    expect(conn.state.locked).toBe(1);
+    expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('a caller-supplied customer object keeps its address overrides but not its stale liveness', async () => {
+    const { ensurePrimaryProperty } = require('../services/customer-properties');
+    const conn = fakeConn({ customer: addressed, locked: addressed, isTransaction: true });
+    const r = await ensurePrimaryProperty({ ...addressed, address_line2: 'Unit 7' }, { conn });
+    expect(r.created).toBe(true);
+    expect(conn.state.inserted[0]).toMatchObject({ address_line2: 'Unit 7', address_line1: '100 Main St' });
+    const archivedUnderLock = fakeConn({ customer: addressed, locked: { ...addressed, deleted_at: '2026-09-08T00:00:00.000Z' }, isTransaction: true });
+    expect(await ensurePrimaryProperty({ ...addressed, address_line2: 'Unit 7' }, { conn: archivedUnderLock })).toEqual({ created: false, propertyId: null });
+    expect(archivedUnderLock.state.inserted).toHaveLength(0);
   });
   test('an inactive-only primary is a deliberate deactivation — not recreated, null', async () => {
     const conn = fakeConn({ customer: addressed });
@@ -272,5 +294,16 @@ describe('property relationships (constants/property-relationships)', () => {
     expect(normalizeRelationship(' Family_Home ')).toEqual({ ok: true, value: 'family_home' });
     expect(normalizeRelationship('family')).toEqual({ ok: false });
     expect(normalizeRelationship(42)).toEqual({ ok: false });
+  });
+});
+
+describe('ops/agents/primary-property-backfill.js rollback guards (codex #4115 r3)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'ops', 'agents', 'primary-property-backfill.js'), 'utf8');
+  test('the rollback fingerprint keeps NULL positions (jsonb array, not concat_ws)', () => {
+    expect(src).toMatch(/md5\(jsonb_build_array\(/);
+    expect(src).not.toMatch(/concat_ws\(/);
+  });
+  test('the printed rollback locks the FK-less visual_service_moments table before the row locks', () => {
+    expect(src).toMatch(/BEGIN; LOCK TABLE visual_service_moments IN SHARE ROW EXCLUSIVE MODE; `\s*\n\s*\+ `SELECT 1 FROM customer_properties WHERE id = ANY/);
   });
 });

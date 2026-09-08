@@ -112,7 +112,11 @@ if (limitIdx > -1) {
   // the rollback too.
   const fpCols = ['customer_id', 'label', 'occupancy_type', 'address_key', 'active', 'is_primary', 'address_line1', 'address_line2', 'city', 'state', 'zip']
     .concat(cols.relationship ? ['relationship'] : []);
-  const fpExpr = `md5(concat_ws('|', ${fpCols.map((c) => `${c}::text`).join(', ')}))`;
+  // jsonb_build_array, not concat_ws: concat_ws SKIPS NULL arguments, so a
+  // value moved between two nullable fields (line2 → city) hashed the same
+  // and the rollback could delete an edited row (codex #4115 r3 P2). A JSON
+  // array keeps every position, NULLs included.
+  const fpExpr = `md5(jsonb_build_array(${fpCols.map((c) => `${c}::text`).join(', ')})::text)`;
 
   const created = []; // { id, fp } per row this run inserted
   let skipped = 0;
@@ -174,9 +178,15 @@ if (limitIdx > -1) {
     // either commits before the lock is granted (and the NOT EXISTS sees
     // it) or waits behind it until COMMIT — a plain DELETE would instead
     // wait on the FK lock and then SET NULL the freshly committed link.
+    // visual_service_moments has NO FK, so it takes no key-share lock: the
+    // rollback locks that table against writers (SHARE ROW EXCLUSIVE —
+    // reads continue, a tech's insert waits for COMMIT) BEFORE the row
+    // locks, so its NOT EXISTS cannot miss an insert landing after the
+    // snapshot (codex #4115 r3 P2). Table lock first, then row locks.
     const ids = `'{${createdIds.join(',')}}'::uuid[]`;
     console.log(`[primary-property-backfill] rollback (this run's rows only, unedited since insert, unreferenced by any of ${guardRefs.length} reference(s) — ${refs.rows.length} FK(s) + visual_service_moments.property_id; run as ONE transaction): `
-      + `BEGIN; SELECT 1 FROM customer_properties WHERE id = ANY(${ids}) FOR UPDATE; `
+      + `BEGIN; LOCK TABLE visual_service_moments IN SHARE ROW EXCLUSIVE MODE; `
+      + `SELECT 1 FROM customer_properties WHERE id = ANY(${ids}) FOR UPDATE; `
       + `DELETE FROM customer_properties USING (VALUES ${values}) AS snap(id, fp) `
       + `WHERE customer_properties.id = snap.id AND customer_properties.source='backfill' AND ${fpExpr} = snap.fp${guards}; COMMIT;`);
   }

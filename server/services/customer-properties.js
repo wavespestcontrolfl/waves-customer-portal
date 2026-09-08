@@ -170,17 +170,35 @@ async function ensurePrimaryProperty(customerOrId, opts = {}) {
       return ensurePrimaryCore(customerOrId, opts, trx);
     });
   }
-  return ensurePrimaryCore(customerOrId, opts, conn && conn.isTransaction ? conn : db);
+  if (conn && conn.isTransaction) return ensurePrimaryCore(customerOrId, opts, conn);
+  // Unfenced callers get one transaction of their own so the liveness
+  // check and the insert below run under the customers row lock (codex
+  // #4115 r3 P2): an unlocked read could see a merge loser before its
+  // deleted_at commits, wait behind executeMerge's FOR UPDATE, and then
+  // insert a primary for a customer that was archived meanwhile.
+  return db.transaction((trx) => ensurePrimaryCore(customerOrId, opts, trx));
 }
 
 async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, conn = db) {
-  const customer = typeof customerOrId === 'string'
-    ? await conn('customers').where({ id: customerOrId }).first()
-    : customerOrId;
+  const custId = typeof customerOrId === 'string' ? customerOrId : customerOrId?.id;
+  if (!custId) return { created: false, propertyId: null };
+  // LOCK ORDER: customers row FIRST (same row lock customer-dedupe's
+  // executeMerge takes, and the same first lock the claim fence above and
+  // the wizard activation already hold on this connection — a re-lock on
+  // one's own transaction is free). The liveness re-check reads the
+  // LOCKED row, never the caller's snapshot: a caller-supplied customer
+  // object still wins for the address fields (estimate-clarify-asks passes
+  // an amended address_line2 on purpose), but deleted_at is decided by the
+  // row as it is once the lock is granted. A non-transaction conn (unit
+  // fakes) keeps the plain read.
+  const live = conn.isTransaction
+    ? await conn('customers').where({ id: custId }).forUpdate().first()
+    : (typeof customerOrId === 'string' ? await conn('customers').where({ id: custId }).first() : customerOrId);
   // An archived customer never grows a primary: a merge loser keeps its
   // address after its property rows move to the winner, and a row created
   // here would collide on a merge undo (same guard as the ops backfill).
-  if (!customer || !customer.id || customer.deleted_at) return { created: false, propertyId: null };
+  if (!live || !live.id || live.deleted_at) return { created: false, propertyId: null };
+  const customer = typeof customerOrId === 'string' ? live : { ...live, ...customerOrId, deleted_at: live.deleted_at };
 
   const existing = await conn('customer_properties').where({ customer_id: customer.id, is_primary: true }).first();
   if (existing) return { created: false, propertyId: existing.id };
@@ -573,7 +591,9 @@ async function soleActivePropertyId(customerId, conn = db) {
     // a deliberate deactivation stays office-placed. Runs in the same
     // savepoint discipline as the read so a failed statement cannot
     // poison the caller's transaction.
-    const ensured = await inSavepoint((c) => ensurePrimaryCore(customerId, {}, c));
+    // The core takes the customers row lock, so it always runs on a
+    // transaction: a savepoint under the caller's, or one of its own.
+    const ensured = await conn.transaction((c) => ensurePrimaryCore(customerId, {}, c));
     if (ensured.created) return ensured.propertyId;
     // Not created: a concurrent anchor may have just committed the primary
     // (found by the core's existence check, or the 23505 race) — re-read so
