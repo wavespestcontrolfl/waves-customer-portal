@@ -12,6 +12,7 @@ const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+const { placeBridgeCall } = require('../services/call-bridge');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
@@ -22,11 +23,11 @@ const { isEnabled } = require('../config/feature-gates');
 const {
   SUGGEST_WORKFLOW,
   HUMAN_REPLY_TYPES,
-  revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
+  sweepStaleSuggestionsAfterReply,
   lockSuggestThread,
   suggestionAnchorIsStale,
   supersedeStaleDecision,
@@ -974,67 +975,15 @@ router.post('/sms', async (req, res, next) => {
       await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
     }
 
-    // Belt-and-braces sweep for cards published BETWEEN the park commit and
-    // send completion (the thread lock releases when the park transaction
-    // commits, and a publish can land while Twilio runs). Phone-scoped
-    // through the suggestion's inbound sms_log row — the same ownership
-    // match the composer card fetch uses. Cutoff on the INBOUND's timestamp
-    // vs send start: a suggestion for a customer message that arrived while
-    // the send was in flight was never on the operator's screen and must
-    // keep its card.
-    const runStaleSweep = async () => {
-      const ignoredPhoneLast10 = normalizePhoneLast10(to);
-      if (!ignoredPhoneLast10) return;
-      await db.transaction(async (trx) => {
-        // Same thread lock the drafter's publish takes: a publish that
-        // hasn't committed yet will land AFTER this sweep and re-check
-        // the (now committed) outbound in its answered guard.
-        await lockSuggestThread(trx, ignoredPhoneLast10);
-
-        // s is always the suggestion's INBOUND row — from_phone is the
-        // customer; matching to_phone (the Waves line) would sweep every
-        // suggestion that arrived on that line.
-        const staleQuery = trx('agent_decisions as ad')
-          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-          .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
-          .where('s.created_at', '<', sendStartedAt)
-          .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
-        if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
-        const stale = await staleQuery.select('ad.id', 'ad.entity_id');
-        if (stale.length) {
-          // Revert only rows the guarded UPDATE actually changed: a parallel
-          // operator can send one of these suggestions between the SELECT
-          // and the UPDATE, and that draft must stay out of the judge pool.
-          const ignored = await trx('agent_decisions')
-            .whereIn('id', stale.map((r) => r.id))
-            .where('status', 'pending_review')
-            .update({
-              status: 'ignored',
-              human_verdict: 'ignored',
-              correction_note: 'Staff sent their own reply from the SMS inbox.',
-              reviewed_by: req.technicianId || 'Admin',
-              reviewed_at: new Date(),
-              updated_at: new Date(),
-            })
-            .returning(['id', 'entity_id']);
-          await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
-        }
-      });
-    };
-    // Retried once: this sweep is the only path that resolves cards
-    // published between the park commit and send completion — cards it
-    // misses have no recovery linkage and stay actionable on an answered
-    // thread until the next staff send on the thread or the 48h expiry.
-    try {
-      await runStaleSweep();
-    } catch (sweepErr) {
-      logger.warn(`[sms-suggest] stale-card sweep failed, retrying once: ${sweepErr.message}`);
-      try {
-        await runStaleSweep();
-      } catch (retryErr) {
-        logger.error(`[sms-suggest] stale-card sweep failed twice — pending cards may linger on an answered thread until the next send or expiry: ${retryErr.message}`);
-      }
-    }
+    // Cards published BETWEEN the park commit and send completion — the
+    // shared post-reply sweep (sms-suggest-mode.js), retried once.
+    await sweepStaleSuggestionsAfterReply({
+      phoneLast10: normalizePhoneLast10(to),
+      sendStartedAt,
+      excludeDecisionId: verifiedAgentDecision?.id,
+      reviewedBy: req.technicianId || 'Admin',
+      note: 'Staff sent their own reply from the SMS inbox.',
+    });
 
     res.json(reviewEmailOutcome ? { ...result, reviewEmail: reviewEmailOutcome } : result);
   } catch (err) {
@@ -1234,19 +1183,15 @@ router.post('/call', async (req, res, next) => {
       return res.json({ success: false, error: 'Voice gate is disabled' });
     }
 
-    const twilio = require('twilio');
-    const config = require('../config');
-    if (!config.twilio.accountSid || !config.twilio.authToken) {
-      return res.status(500).json({ error: 'Twilio not configured' });
-    }
-    const client = twilio(config.twilio.accountSid, config.twilio.authToken);
+    // Credentials are checked by the bridge (TWILIO_NOT_CONFIGURED → 500
+    // below); it also owns the call_log row, the Twilio call, and the
+    // touchpoint. This handler keeps the admin-only validations.
 
     // All outbound calls present the main company line, regardless of which
     // endpoint the UI picker selected (fromNumber is still validated above so
     // garbage input fails loudly rather than silently dialing as main).
     const from = TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
-    const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
     const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
     const metadata = relatedCallId ? { relatedCallId } : null;
 
@@ -1285,59 +1230,16 @@ router.post('/call', async (req, res, next) => {
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
 
-    // Insert call_log FIRST so outbound-admin-prompt / outbound-connect can
-    // update the row reliably. Twilio typically fires those webhooks 2–5s
-    // after calls.create() returns, but racing the insert is cheap to avoid.
-    const [callLogRow] = await db('call_log')
-      .insert({
-        customer_id: customer?.id || null,
-        direction: 'outbound',
-        from_phone: from,
-        to_phone: to,
-        status: 'initiated',
-        source,
-        metadata: metadata ? JSON.stringify(metadata) : null,
-      })
-      .returning(['id']);
-    const callLogId = callLogRow?.id;
-
-    const promptParams = new URLSearchParams({
-      customerNumber: to,
-      callerIdNumber: from,
-    });
-    if (callLogId) promptParams.set('callLogId', callLogId);
-    if (leadName) promptParams.set('leadName', leadName);
-
-    // Step 1: Call the admin first. When admin picks up and presses 1, dial the customer.
-    const call = await client.calls.create({
-      to: adminPhone,
-      from,
-      url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
-      statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+    // Step 1 (services/call-bridge.js — shared with the tech portal's
+    // "Call from my line"): call the admin first; on press-1, dial the
+    // customer with the main line as caller ID.
+    const bridged = await placeBridgeCall({
+      to, bridgePhone: adminPhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
     });
 
-    // Backfill the Twilio CallSid now that we have it.
-    if (callLogId) {
-      await db('call_log').where({ id: callLogId }).update({
-        twilio_call_sid: call.sid,
-        updated_at: new Date(),
-      }).catch(() => {});
-    }
-    require('../services/conversations').recordTouchpoint({
-      customerId: customer?.id || null,
-      channel: 'voice',
-      ourEndpointId: from,
-      contactPhone: customer ? null : to,
-      direction: 'outbound',
-      authorType: 'admin',
-      adminUserId: req.technicianId,
-      twilioSid: call.sid,
-      deliveryStatus: 'initiated',
-    }).catch(() => {});
-
-    res.json({ success: true, callSid: call.sid, callLogId });
+    res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId });
   } catch (err) {
+    if (err.code === 'TWILIO_NOT_CONFIGURED') return res.status(500).json({ error: 'Twilio not configured' });
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'outbound',

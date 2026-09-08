@@ -202,7 +202,7 @@ describe('every call_log query site is either sandbox-excluding or audited as sa
     'services/knowledge-index/resolution-sync.js': 'requires ai_extraction_enriched, which the relay never writes',
     'services/ai-assistant/assistant.js': 'writer keyed by CallSid',
     'routes/admin-triage.js': 'keyed by id',
-    'routes/admin-communications.js': 'keyed by id',
+    'services/call-bridge.js': 'writer: inserts the outbound row and backfills its own SID (keyed by id)',
     'routes/admin-call-recordings.js': 'requires a recording',
     'services/call-ingest-watchdog.js': 'a known-SID set — a sandbox call IS an ingested call',
     'services/ops-queue.js': 'requires a recording or a PAN quarantine',

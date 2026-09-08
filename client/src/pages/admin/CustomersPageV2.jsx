@@ -1617,6 +1617,8 @@ function CustomersWorkspacePage({
   selectedId,
   onSelect,
   onClose,
+  initialTab,
+  tabKey,
   children,
   overlays,
 }) {
@@ -1624,6 +1626,8 @@ function CustomersWorkspacePage({
     <div className={selectedId ? "c360-workspace-page" : "c360-directory-page"}>
       {selectedId ? (
         <Customer360Workspace
+          key={`${selectedId}:${tabKey}`}
+          initialTab={initialTab}
           selectedId={selectedId}
           onSelect={onSelect}
           onClose={onClose}
@@ -1640,6 +1644,8 @@ function CustomersOverlayPage({
   selectedId,
   onSelect,
   onClose,
+  initialTab,
+  tabKey,
   children,
   overlays,
 }) {
@@ -1649,7 +1655,8 @@ function CustomersOverlayPage({
       {overlays}
       {selectedId && (
         <Customer360Profile
-          key={selectedId}
+          key={`${selectedId}:${tabKey}`}
+          initialTab={initialTab}
           customerId={selectedId}
           onSelectCustomer={onSelect}
           onClose={onClose}
@@ -1744,6 +1751,7 @@ export default function CustomersPageV2() {
     setSearchParams(
       (current) => {
         const next = new URLSearchParams(current);
+        next.delete("tab");
         if (nextId) next.set("customerId", nextId);
         else next.delete("customerId");
         return next;
@@ -2028,6 +2036,8 @@ export default function CustomersPageV2() {
       selectedId={selected360Id}
       onSelect={openCustomerProfile}
       onClose={closeCustomerProfile}
+      initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
+      tabKey={searchParams.get("tab") === "comms" ? location.key : "overview"}
       overlays={
         <>
           {/* Filters dialog */}

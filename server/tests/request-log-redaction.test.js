@@ -22,6 +22,11 @@ describe('request URL log redaction', () => {
     expect(isSensitiveQueryKey(key)).toBe(true);
   });
 
+  test('redacts the customer number and name the call bridge puts on the Twilio prompt URL; the opaque ids stay', () => {
+    expect(redactRequestUrl('/api/webhooks/twilio/outbound-admin-prompt?customerNumber=%2B19415550100&callerIdNumber=%2B19413529161&callLogId=log-1&leadName=Pat+Sample'))
+      .toBe('/api/webhooks/twilio/outbound-admin-prompt?customerNumber=[REDACTED]&callerIdNumber=%2B19413529161&callLogId=log-1&leadName=[REDACTED]');
+  });
+
   test('redacts free-text lookup parameters (typed addresses, phones, names) but keeps the rest of the query', () => {
     expect(redactRequestUrl('/api/admin/customers?search=123%20Palm%20Ave&limit=10&sort=name'))
       .toBe('/api/admin/customers?search=[REDACTED]&limit=10&sort=name');

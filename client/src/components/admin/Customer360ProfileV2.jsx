@@ -5783,7 +5783,11 @@ function CustomerWorkspaceNavigation({
     </>
   );
 }
-function CustomerOverlayNavigation({ activeTab, setActiveTab }) {
+function CustomerOverlayNavigation({
+  activeTab,
+  setActiveTab,
+  activeTabButtonRef,
+}) {
   return (
     <>
       {/* ZONE 3 — TAB BAR */}
@@ -5796,6 +5800,8 @@ function CustomerOverlayNavigation({ activeTab, setActiveTab }) {
         ).map((t) => (
           <button
             key={t.key}
+            ref={activeTab === t.key ? activeTabButtonRef : null}
+            aria-pressed={activeTab === t.key}
             onClick={() => setActiveTab(t.key)}
             className={cn(
               "h-11 px-4 text-12 uppercase tracking-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
@@ -8101,6 +8107,9 @@ function CustomerConversation({
     <div className="c360-conversation flex flex-col">
       {" "}
       <OwedCommitmentsSummary customerId={customerId} />
+      {!embedded && (
+        <OwedCommitmentsSummary customerId={customerId} source="sms" />
+      )}
       <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
       <div className="flex flex-col gap-1.5 mb-3">
         {commsLoading && (
@@ -8285,6 +8294,7 @@ function CustomerWorkspacePresentation({
     menuOpen,
     setMenuOpen,
     menuRef,
+    customerId,
   } = headerProps;
   return (
     <div className="c360-embedded">
@@ -8361,6 +8371,8 @@ function CustomerWorkspacePresentation({
           )}
           {activeTab === "comms" && (
             <>
+              {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
+              <OwedCommitmentsSummary customerId={customerId} source="sms" />
               {isAdmin && sections.activity}
               {sections.services}
             </>
@@ -8381,6 +8393,7 @@ function CustomerWorkspacePresentation({
 
 function CustomerOverlayPresentation({
   panelRef,
+  activeTabButtonRef,
   headerProps,
   activeTab,
   profileContentId,
@@ -8407,6 +8420,7 @@ function CustomerOverlayPresentation({
         <CustomerOverlayNavigation
           activeTab={activeTab}
           setActiveTab={setActiveTab}
+          activeTabButtonRef={activeTabButtonRef}
         />
         <div className="c360-tab-content p-6 flex-1" id={profileContentId}>
           <CustomerProfileActionError error={profileActionErr} />
@@ -9137,6 +9151,7 @@ function useCustomerProfileNavigation({
   const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
   const [refundPayment, setRefundPayment] = useState(null);
   const panelRef = useRef(null);
+  const activeTabButtonRef = useRef(null);
   const [headerPast, setHeaderPast] = useState(false);
   const tabsAnchorRef = useRef(null);
   const profileContentId = useId();
@@ -9149,6 +9164,13 @@ function useCustomerProfileNavigation({
     embedded && !isAdmin && requestedTab === "billing"
       ? "overview"
       : requestedTab;
+  useEffect(() => {
+    if (!loading)
+      activeTabButtonRef.current?.scrollIntoView?.({
+        block: "nearest",
+        inline: "nearest",
+      });
+  }, [loading, activeTab]);
   // Every sub-modal owns Escape while it is open (ui/Dialog and the
   // hand-rolled modals each close themselves through useModalFocus); the
   // profile only closes when nothing sits above it — otherwise one keypress
@@ -9253,6 +9275,7 @@ function useCustomerProfileNavigation({
     timelineSearch,
     setTimelineSearch,
     panelRef,
+    activeTabButtonRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -9582,6 +9605,7 @@ export default function Customer360ProfileV2({
     timelineSearch,
     setTimelineSearch,
     panelRef,
+    activeTabButtonRef,
     headerPast,
     menuOpen,
     setMenuOpen,
@@ -9889,6 +9913,7 @@ export default function Customer360ProfileV2({
   return (
     <Presentation
       panelRef={panelRef}
+      activeTabButtonRef={activeTabButtonRef}
       headerPast={headerPast}
       headerProps={{
         c,
