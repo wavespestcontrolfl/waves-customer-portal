@@ -856,7 +856,7 @@ const ReviewService = {
    * bound total volume, and an sms_log blip must not silently kill every
    * post-service enrollment.
    */
-  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null } = {}) {
+  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null, failClosed = false, returnAt = false } = {}) {
     // yelp.com/writeareview and facebook.com/<page>/reviews are the Insert
     // Link sheet's seeded write-a-review destinations (link-library.js) —
     // an operator texting one is a personal ask exactly like a pasted
@@ -914,7 +914,9 @@ const ReviewService = {
         .filter((t) => Number.isFinite(t));
       const unused = sentTimes.filter((sT) =>
         candidateTimes.some((cT) => Math.abs(cT - sT) <= CORRESPONDENCE_MS));
-      return candidates.some((c) => {
+      // Newest manual ask's send time (candidates are created_at DESC).
+      let manualAt = null;
+      candidates.some((c) => {
         const t = new Date(c.created_at).getTime();
         let best = -1;
         let bestGap = Infinity;
@@ -922,11 +924,17 @@ const ReviewService = {
           const gap = Math.abs(sT - t);
           if (gap <= TEN_MIN && gap < bestGap) { best = i; bestGap = gap; }
         });
-        if (best === -1) return true; // no unconsumed pipeline send → manual ask
+        if (best === -1) { manualAt = new Date(t); return true; } // no unconsumed pipeline send → manual ask
         unused.splice(best, 1);
         return false;
       });
+      // returnAt: the 3-day rule anchors to the ask's actual send, so the
+      // dispatch guards get the Date (null = no manual ask), not a boolean.
+      return returnAt ? manualAt : manualAt != null;
     } catch (err) {
+      // failClosed: the 3-day rule treats an unavailable lookup as a hold,
+      // never as "no ask" — only the enrollment standdown fails open.
+      if (failClosed) throw err;
       logger.warn(`[review] manual-ask lookup failed (customerId=${customerId}): ${err.message} — enrolling anyway`);
       return false;
     }
@@ -1653,15 +1661,16 @@ const ReviewService = {
     // including a staff-sent one with no request row. Held rows stay
     // pending with scheduled_for pushed out; an unavailable lookup holds
     // 30 min (fail closed).
-    try {
+    // Asks only: a private no-link check-in (resolution_check /
+    // satisfaction_confirm) retrying through here is a support message.
+    if (OUTREACH.isAskTemplate(request.template_key)) {
+      try {
       const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: requestId });
-      const recentRowAsk = !!lastAsk && Date.now() - lastAsk.getTime() < ASK_SPACING_MS;
-      const manualRecent = recentRowAsk
-        ? false
-        : await this.manualReviewAskSentRecently(request.customer_id, { since: new Date(Date.now() - ASK_SPACING_MS) });
-      const holdUntil = recentRowAsk
-        ? new Date(lastAsk.getTime() + ASK_SPACING_MS)
-        : manualRecent ? new Date(Date.now() + ASK_SPACING_MS) : null;
+      const manualAt = await this.manualReviewAskSentRecently(request.customer_id, {
+        since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
+      });
+      const anchorMs = Math.max(lastAsk ? lastAsk.getTime() : 0, manualAt ? manualAt.getTime() : 0);
+      const holdUntil = anchorMs && Date.now() - anchorMs < ASK_SPACING_MS ? new Date(anchorMs + ASK_SPACING_MS) : null;
       if (holdUntil) {
         await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: holdUntil });
         logger.info(`[review] Held request for the 3-day rule (requestId=${requestId} until=${holdUntil.toISOString()})`);
@@ -1672,6 +1681,7 @@ const ReviewService = {
       await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: retryAt }).catch(() => {});
       logger.warn(`[review] 3-day rule lookup failed, holding request (requestId=${requestId}): ${err.message}`);
       return { deferred: "spacing_lookup_unavailable", nextAllowedAt: retryAt };
+      }
     }
 
     // Route to the service beneficiary (see services/customer-contact.js) —
@@ -2959,8 +2969,11 @@ const ReviewService = {
       let newerAsk = false;
       try {
         const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: request.id });
-        newerAsk = (!!lastAsk && Date.now() - lastAsk.getTime() < ASK_SPACING_MS)
-          || await this.manualReviewAskSentRecently(request.customer_id, { since: new Date(Date.now() - ASK_SPACING_MS) });
+        const manualAt = await this.manualReviewAskSentRecently(request.customer_id, {
+          since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
+        });
+        const anchorMs = Math.max(lastAsk ? lastAsk.getTime() : 0, manualAt ? manualAt.getTime() : 0);
+        newerAsk = !!anchorMs && Date.now() - anchorMs < ASK_SPACING_MS;
       } catch {
         newerAsk = true;
       }

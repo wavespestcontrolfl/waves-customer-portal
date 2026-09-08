@@ -945,6 +945,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
           { id: 'rr-lq2', customer_id: 'lq-2', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 't2', location_id: 'bradenton', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() },
           // No prior ask at all: sends.
           { id: 'rr-lq3', customer_id: 'lq-3', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 't3', location_id: 'bradenton', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() },
+          // A private check-in retrying for lq-1 is a support message, not an ask: sends.
+          { id: 'rr-lq1c', customer_id: 'lq-1', channel: 'sms', status: 'pending', template_key: 'resolution_check', token: 't1c', location_id: 'bradenton', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() },
         ],
         sms_log: [{ id: 'sms-lq2', customer_id: 'lq-2', direction: 'outbound', status: 'delivered', message_body: 'Here is our Google review link https://g.page/r/waves/review', created_at: new Date(Date.now() - 3 * 3600000) }],
       });
@@ -953,6 +955,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const held = await ReviewService.sendSMS('rr-lq1b');
       const heldManual = await ReviewService.sendSMS('rr-lq2');
       const sent = await ReviewService.sendSMS('rr-lq3');
+      const checkIn = await ReviewService.sendSMS('rr-lq1c');
 
       expect(held).toMatchObject({ deferred: 'spacing' });
       expect(Math.abs(new Date(held.nextAllowedAt).getTime() - (Date.now() + 62 * 3600000))).toBeLessThan(5000);
@@ -960,9 +963,29 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(row.status).toBe('pending');
       expect(row.scheduled_for.getTime()).toBe(new Date(held.nextAllowedAt).getTime());
       expect(heldManual).toMatchObject({ deferred: 'spacing' });
+      // Anchored to the staff text's actual send (3 h ago), not to now.
+      expect(Math.abs(new Date(heldManual.nextAllowedAt).getTime() - (Date.now() + 69 * 3600000))).toBeLessThan(5000);
       expect(sent === undefined || sent.deferred === undefined).toBe(true);
-      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(checkIn === undefined || checkIn.deferred === undefined).toBe(true);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(2);
       expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Di!');
+      expect(mockSendCustomerMessage.mock.calls[1][0].body).not.toContain('/rate/');
+    });
+
+    test('an unavailable staff-sent-ask lookup holds a queued ask 30 min instead of sending (codex #4141 r2, local P1)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'lq-4', first_name: 'Ed', last_name: 'Q', phone: '+19410000155', nearest_location_id: 'bradenton' }],
+        review_requests: [{ id: 'rr-lq4', customer_id: 'lq-4', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 't4', location_id: 'bradenton', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() }],
+      }, { throwSelectWhen: (q) => q.table === 'sms_log' });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-lq4');
+
+      expect(out).toMatchObject({ deferred: 'spacing_lookup_unavailable' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending');
+      expect(row.scheduled_for.getTime()).toBeGreaterThan(Date.now() + 25 * 60000);
     });
 
     test('the first ask has no timing gate: a Day-0 step with no prior ask sends at its scheduled time', async () => {
