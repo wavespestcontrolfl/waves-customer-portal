@@ -546,6 +546,11 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E6', 'Waves provides information about fumigation.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves also offers fumigation.').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Waves provides pest control and also fumigation.').forbidden.fumigation_offered).toBe(true);
+  // Pre-push hook r40: a coordinated bare verb shares the negation; a finite verb starts a new clause.
+  expect(score('E6', 'Waves does not sell insulation or offer fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E7', 'The bond does not cover repairs or provide free retreatment.')).toMatchObject({ forbidden: { damage_repair_coverage: false, free_retreat_guarantee: false } });
+  expect(score('E6', 'Waves does not sell insulation and offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves does not offer fumigation and provides pest control.')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: false } });
   // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
   expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });

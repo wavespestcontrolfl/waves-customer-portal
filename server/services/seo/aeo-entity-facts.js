@@ -106,7 +106,11 @@ const PREDICATE_VERB = '(?:is|are|was|were|does|do|did|offers?|provides?|has|hav
 // A period ends a clause only before whitespace or the end of the text: the
 // dots inside "www.wavespestcontrol.com" or "941.297.5749" are not boundaries,
 // so "Do not visit www.wavespestcontrol.com" keeps its negation.
-const CLAUSE_BOUNDARY_RE = new RegExp(`[!?;\\n]|\\.(?!\\S)|,?\\s+(?:but|however|whereas|although|though|yet)\\b|,?\\s+(?:and|or)\\s+(?=(?:\\w+\\s+){0,2}${PREDICATE_VERB}\\b)`, 'i');
+// Only a FINITE verb opens a new coordinated clause: "does not sell
+// insulation or offer fumigation" keeps its shared negation over the bare
+// "offer", while "… and offers fumigation" is a new assertion.
+const FINITE_PREDICATE_VERB = '(?:is|are|was|were|does|do|did|has|have|had|will|can|offers|provides|covers|includes|charges|treats|serves|handles|performs|operates|holds|specializes|focuses|excels|delivers|carries|sells|uses|maintains|guarantees|promises|claims|states|says|remains|continues|employs|runs|owns|works|falls|lies|sits|also)';
+const CLAUSE_BOUNDARY_RE = new RegExp(`[!?;\\n]|\\.(?!\\S)|,?\\s+(?:but|however|whereas|although|though|yet)\\b|,?\\s+(?:and|or)\\s+(?=(?:\\w+\\s+){0,2}${FINITE_PREDICATE_VERB}\\b)`, 'i');
 // "does not offer: fumigation, insulation" — a negated verb right before a
 // colon governs the list that follows; "is not a franchise: it offers …" does not.
 // Active ("does not offer:") and passive ("Services not offered:") intros.
