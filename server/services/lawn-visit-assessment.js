@@ -59,9 +59,13 @@ const UNAVAILABLE_OBSERVATIONS = 'Visual analysis unavailable';
 
 const PHOTO_ZONES = ['front', 'back', 'side'];
 const PHOTO_QUALITY = ['adequate', 'limited', 'poor'];
+// A photo the model never rated (missing entry, or an unavailable run) is
+// 'unrated': kept for audit, never customer-visible, never the best photo.
+const UNRATED_QUALITY = 'unrated';
+const CUSTOMER_VISIBLE_QUALITY = new Set(['adequate', 'limited']);
 // Best-photo ranking under the gate: the model's quality read replaces the
 // legacy per-photo score blend (no per-photo scores exist in one call).
-const QUALITY_SCORE = { adequate: 80, limited: 55, poor: 20 };
+const QUALITY_SCORE = { adequate: 80, limited: 55, poor: 20, [UNRATED_QUALITY]: 0 };
 const CONFIDENCE = ['high', 'moderate', 'low', 'unknown'];
 const SEVERITY_LEVELS = ['none', 'minor', 'moderate', 'severe', 'unknown'];
 const THATCH_LEVELS = ['low', 'moderate', 'high', 'unknown'];
@@ -70,6 +74,9 @@ const STRESS_SIGNALS = ['fungal_activity', 'insect_damage', 'drought_stress', 'm
 const GRASS_TYPES = ['st_augustine', 'bermuda', 'zoysia', 'bahia', 'mixed', 'unknown'];
 // The four legacy inputs of calculateOverallScore (routes/admin-lawn-assessment.js).
 const OVERALL_INPUTS = ['turf_density', 'weed_suppression', 'color_health', 'stress_damage'];
+// safeConditionLabel's label for a finding that LEADS with a negation / health
+// phrase ("No major visible stress") — a clean lawn, not a condition to treat.
+const NO_STRESS_LABEL = 'no major visible stress';
 const TECH_TEXT_MAX = 500;
 
 // ── Native JSON schema (both providers) ───────────────────────────────
@@ -285,8 +292,9 @@ function validateVisitPhotos(photos) {
 }
 
 // sha256 of everything the model saw: prompt version, the context lines'
-// inputs, and each photo's bytes with its position and zone. The eval replays
-// by assessment id and compares hashes to prove it rebuilt the same input.
+// inputs, and each photo's bytes with its position, zone and media type. The
+// eval replays by assessment id and compares hashes to prove it rebuilt the
+// same input.
 function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) {
   const c = visionContext || {};
   const hash = crypto.createHash('sha256');
@@ -297,7 +305,7 @@ function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) 
     technicianNotes: c.technicianNotes ?? null, priorSummary: c.priorSummary ?? null,
   })).update('\n');
   photos.forEach((photo, index) => {
-    hash.update(`${index}:${photoZones[index] || ''}:`);
+    hash.update(`${index}:${photoZones[index] || ''}:${String(photo?.mimeType || 'image/jpeg').toLowerCase()}:`);
     hash.update(crypto.createHash('sha256').update(String(photo?.data || '')).digest('hex')).update('\n');
   });
   return hash.digest('hex');
@@ -331,18 +339,26 @@ function scoreOrNull(raw, min, max) {
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+// A photo the answer did not rate stays 'unrated' — it never inherits a
+// passing grade it was not given.
 function normalizePhotoQuality(list, photoCount) {
-  const rows = Array.from({ length: photoCount }, (_, i) => ({ photo: i + 1, quality: 'limited', issue: 'not rated by the model' }));
+  const rows = Array.from({ length: photoCount }, (_, i) => ({ photo: i + 1, quality: UNRATED_QUALITY, issue: 'not rated by the model' }));
   for (const entry of Array.isArray(list) ? list : []) {
     const index = Number(entry?.photo) - 1;
     if (!Number.isInteger(index) || index < 0 || index >= photoCount) continue;
-    rows[index] = {
-      photo: index + 1,
-      quality: PHOTO_QUALITY.includes(entry.quality) ? entry.quality : 'limited',
-      issue: clip(entry.issue, 200),
-    };
+    if (!PHOTO_QUALITY.includes(entry?.quality)) continue;
+    rows[index] = { photo: index + 1, quality: entry.quality, issue: clip(entry.issue, 200) };
   }
   return rows;
+}
+
+// A finding's zone is the technician's label on the photos it cites — the
+// only zone source. One consistent label across the cited photos → that zone;
+// no cited photo, no label, or conflicting labels → 'unknown'. The model's own
+// zone claim is never persisted.
+function zoneFromRefs(photoRefs, photoZones = []) {
+  const zones = new Set(photoRefs.map((ref) => photoZones[ref - 1]).filter(Boolean));
+  return zones.size === 1 ? [...zones][0] : 'unknown';
 }
 
 // Schema enforcement should guarantee the shape; the chain's validate hook is
@@ -356,19 +372,29 @@ function validateAssessmentJson(result) {
   return null;
 }
 
-function normalizeAssessment(json, photoCount) {
+function normalizeAssessment(json, photoCount, photoZones = []) {
   const rawFindings = Array.isArray(json.findings) ? json.findings : [];
   const findings = normalizeFindings(rawFindings).map((finding, index) => {
     const raw = rawFindings[index] || {};
+    const canDetermine = raw.can_determine !== false;
+    // A finding the model itself says the photos cannot settle carries no
+    // confidence claim: unknown, so the naming gate publishes no cause.
+    const confidence = canDetermine ? finding.confidence : 'unknown';
+    const photoRefs = uniqueInts(raw.photo_refs, photoCount);
     return {
       ...finding,
-      photo_refs: uniqueInts(raw.photo_refs, photoCount),
-      zone: normalizePhotoZone(raw.zone) || 'unknown',
-      can_determine: raw.can_determine !== false,
-      cannot_determine_reason: raw.can_determine === false ? clip(raw.cannot_determine_reason, 300) : '',
+      // Server-authored ids: the review keys on them, so a duplicate or a
+      // technician-shaped ("T1") model id can never alias another finding.
+      finding_id: `F${index + 1}`,
+      model_finding_id: clip(raw.finding_id, 40) || null,
+      confidence,
+      photo_refs: photoRefs,
+      zone: zoneFromRefs(photoRefs, photoZones),
+      can_determine: canDetermine,
+      cannot_determine_reason: canDetermine ? '' : clip(raw.cannot_determine_reason, 300),
       // The allowlisted customer label — the naming gate applied here, once,
       // so no consumer ever maps the raw name itself.
-      label: safeConditionLabel(finding.name, finding.confidence),
+      label: safeConditionLabel(finding.name, confidence),
       source: 'model',
     };
   });
@@ -397,7 +423,7 @@ function emptyAnalysis(photoCount) {
     findings: [],
     severities: null,
     scores: { turf_density: null, weed_coverage: null, color_health: null },
-    photoQuality: Array.from({ length: photoCount }, (_, i) => ({ photo: i + 1, quality: 'limited', issue: 'not rated (analysis unavailable)' })),
+    photoQuality: Array.from({ length: photoCount }, (_, i) => ({ photo: i + 1, quality: UNRATED_QUALITY, issue: 'not rated (analysis unavailable)' })),
     grassType: null,
     observations: UNAVAILABLE_OBSERVATIONS,
   };
@@ -450,7 +476,7 @@ async function analyzeVisit({ photos = [], photoZones = [], visionContext = {}, 
     ...base, status: 'complete', reason: null,
     provider: outcome.provider, model: outcome.model, fallbackUsed: !!outcome.fallbackUsed,
     usage: outcome.usage || null, raw: outcome.json,
-    ...normalizeAssessment(outcome.json, photos.length),
+    ...normalizeAssessment(outcome.json, photos.length, photoZones),
   };
 }
 
@@ -546,14 +572,16 @@ function assessmentScoreFields({ displayScores, adjustedScores, overallScore }) 
 
 // What the route's photo-storage loop reads per photo: the model's quality
 // read in the legacy { passed, issues } shape, and a quality score for the
-// best-photo election. A 'poor' photo stays auditable but customer-hidden.
+// best-photo election. Only a photo the model rated adequate or limited
+// passes; 'poor' and unrated (missing entry, unavailable run) photos stay
+// auditable but never customer-visible and never the best photo.
 function photoRowInputs(analysis) {
   const qualityResults = [];
   const resultByPhotoIndex = {};
   for (const row of analysis?.photoQuality || []) {
     const index = row.photo - 1;
-    qualityResults[index] = { passed: row.quality !== 'poor', issues: row.issue ? [row.issue] : [] };
-    resultByPhotoIndex[index] = { qualityScore: QUALITY_SCORE[row.quality] ?? QUALITY_SCORE.limited };
+    qualityResults[index] = { passed: CUSTOMER_VISIBLE_QUALITY.has(row.quality), issues: row.issue ? [row.issue] : [] };
+    resultByPhotoIndex[index] = { qualityScore: QUALITY_SCORE[row.quality] ?? 0 };
   }
   return { qualityResults, resultByPhotoIndex };
 }
@@ -587,13 +615,30 @@ function runRowFor({ assessment, analysis, photoRecords = [] }) {
   };
 }
 
-async function recordRun({ assessment, analysis, photoRecords }, knex) {
+// Written in the same transaction as the assessment row (the run IS the
+// provenance and the review target — never optional bookkeeping); the photo
+// row ids are attached once the photos are stored.
+async function recordRun({ assessment, analysis, photoRecords = [] }, knex) {
   const [row] = await knex('lawn_assessment_runs').insert(runRowFor({ assessment, analysis, photoRecords })).returning('*');
   return row;
 }
 
-function loadRun(assessmentId, knex) {
-  return knex('lawn_assessment_runs').where({ assessment_id: assessmentId }).first();
+async function attachRunPhotos(runId, photoIds, knex) {
+  const [row] = await knex('lawn_assessment_runs').where({ id: runId })
+    .update({ photo_ids: JSON.stringify(photoIds), updated_at: knex.fn.now() }).returning('*');
+  return row;
+}
+
+// The run row's existence — not the gate — says how an assessment row was
+// produced, so /confirm resolves it for every row. A database without the
+// table yet (migration lag) reads as "no run": the legacy path, unchanged.
+async function loadRun(assessmentId, knex) {
+  try {
+    return await knex('lawn_assessment_runs').where({ assessment_id: assessmentId }).first();
+  } catch (err) {
+    if (err && err.code === '42P01') return undefined;
+    throw err;
+  }
 }
 
 const parseJsonArray = (value) => {
@@ -618,9 +663,14 @@ const parseJsonObject = (value) => {
  *   appliedProducts[]   { product_id, product_name, addresses_findings[], role } — what
  *                         was applied, for the deterministic reconciliation
  */
+const REVIEW_FIELDS = ['reviewedFindings', 'addedDetails', 'appliedProducts'];
+
 function validateReview(body = {}, run) {
   const errors = [];
   const source = body && typeof body === 'object' ? body : {};
+  // A confirm that carries none of the review fields (the pre-review clients)
+  // is not a finding review — nothing is stamped as reviewed.
+  const provided = REVIEW_FIELDS.some((field) => source[field] != null);
   const known = new Set(parseJsonArray(run?.findings).map((finding) => String(finding.finding_id)));
   const isText = (value, max) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= max;
   const optionalText = (value, max) => value == null || value === '' || isText(value, max);
@@ -669,7 +719,7 @@ function validateReview(body = {}, run) {
     });
   }
 
-  return { errors, review: { reviewedFindings, addedDetails, appliedProducts } };
+  return { errors, review: { provided, reviewedFindings, addedDetails, appliedProducts } };
 }
 
 // A technician-added detail becomes a finding of its own: moderate at most
@@ -721,7 +771,9 @@ function buildReview(run, review = {}) {
     };
   });
   const added = (review.addedDetails || []).map(technicianFinding);
-  const kept = [...reviewed.filter((finding) => finding.keep), ...added];
+  // A clean-lawn finding ("No major visible stress") is not a condition a
+  // product treats — it stays in the review, out of the reconciliation.
+  const kept = [...reviewed.filter((finding) => finding.keep), ...added].filter((finding) => finding.label !== NO_STRESS_LABEL);
   const products = normalizeProducts(review.appliedProducts || []);
   const treatmentRationale = buildTreatmentRationale({ products, findings: kept });
   const flags = buildReconciliationFlags({ findings: kept, products, treatmentRationale });
@@ -760,8 +812,16 @@ async function reviewRun({ run, review, technicianId }, knex) {
 function resolveConfirmScores(assessment, adjustedScores, scoreValue) {
   const adjusted = adjustedScores && typeof adjustedScores === 'object' ? adjustedScores : {};
   const present = (value) => value != null && value !== '';
+  // An override counts only when it is a finite number (or a non-blank string
+  // that parses to one) — a blank, whitespace or malformed value falls back to
+  // the stored score exactly as the legacy path does, never to 0.
+  const numeric = (value) => {
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (typeof value !== 'string' || !value.trim()) return false;
+    return Number.isFinite(Number(value));
+  };
   const pick = (key) => {
-    if (present(adjusted[key])) return scoreValue(adjusted[key]);
+    if (numeric(adjusted[key])) return scoreValue(adjusted[key]);
     return present(assessment[key]) ? scoreValue(assessment[key]) : null;
   };
   const final = {
@@ -771,7 +831,7 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue) {
     fungus_control: pick('fungus_control'),
     thatch_level: pick('thatch_level'),
   };
-  if (present(adjusted.stress_damage)) {
+  if (numeric(adjusted.stress_damage)) {
     final.stress_damage = scoreValue(adjusted.stress_damage);
   } else {
     const parts = [final.fungus_control, final.thatch_level, present(assessment.stress_damage) ? Number(assessment.stress_damage) : null]
@@ -847,7 +907,11 @@ module.exports = {
   photoRowInputs,
   runRowFor,
   recordRun,
+  attachRunPhotos,
   loadRun,
+  zoneFromRefs,
+  UNRATED_QUALITY,
+  NO_STRESS_LABEL,
   validateReview,
   buildReview,
   reviewRun,

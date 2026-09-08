@@ -145,28 +145,47 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(mockDispatch.mock.calls[0][1].thinkingLevel).toBe('LOW');
   });
 
-  test('normalizes the answer: naming gate, photo refs, zones, unknown signals, undeterminable scores, photo quality defaults', async () => {
-    mockDispatch.mockResolvedValue(okOutcome(answer()));
+  test('normalizes the answer: server ids, naming gate, photo refs, technician zones, unknown signals, undeterminable scores, unrated photos', async () => {
+    mockDispatch.mockResolvedValue(okOutcome(answer({ findings: [finding({ finding_id: 'T1' }), finding({ finding_id: 'T1', name: 'Chinch bug damage', confidence: 'low', photo_refs: [2], zone: 'back' })] })));
     const result = await visit.analyzeVisit({ photos: [photo('a', 'front'), photo('b'), photo('c')], photoZones: ['front', null, null] });
     expect(result.findings).toHaveLength(2);
     const [f1, f2] = result.findings;
+    // Server-authored ids: the model's duplicate technician-shaped ids can never alias a review edit.
+    expect([f1.finding_id, f2.finding_id]).toEqual(['F1', 'F2']);
+    expect(f1.model_finding_id).toBe('T1');
     expect(f1.photo_refs).toEqual([1, 2]); // 9 out of range, duplicate 1 dropped
+    // Zone comes from the technician's labels on the cited photos: photos 1 (front) + 2 (unlabeled) → one consistent label.
     expect(f1.zone).toBe('front');
     expect(f1.label).toBe('a lawn condition we are monitoring'); // "browning" matches no allowlisted pattern → the monitored-condition label
     expect(f1.source).toBe('model');
     expect(f1.can_determine).toBe(true);
-    // A low-confidence cause name never publishes: the allowlisted label is the generic symptom.
+    // A low-confidence cause name never publishes; the model's "back" zone claim on an unlabeled photo is not a zone.
     expect(f2.label).toBe('general lawn stress');
+    expect(f2.zone).toBe('unknown');
     expect(result.severities.insect_damage).toEqual({ level: 'unknown', evidence: '', confidence: 'unknown' });
     expect(result.severities.overwatering_signal.level).toBe('yes');
     expect(result.scores).toEqual({ turf_density: 72, weed_coverage: 15, color_health: null });
     expect(result.photoQuality).toEqual([
       { photo: 1, quality: 'adequate', issue: '' },
       { photo: 2, quality: 'poor', issue: 'blurred' },
-      { photo: 3, quality: 'limited', issue: 'not rated by the model' }, // photo 7 ignored, photo 3 missing → default
+      { photo: 3, quality: 'unrated', issue: 'not rated by the model' }, // photo 7 ignored, photo 3 missing → never inherits a grade
     ]);
     expect(result.grassType).toBe('st_augustine');
     expect(result.observations).toBe('Dense turf with one dry edge; photos were adequate.');
+  });
+
+  test('a finding the model marks undeterminable carries no confidence claim and publishes no cause', async () => {
+    mockDispatch.mockResolvedValue(okOutcome(answer({ findings: [finding({ name: 'Chinch bug damage', confidence: 'high', can_determine: false, cannot_determine_reason: 'no blade close-up' })] })));
+    const result = await visit.analyzeVisit({ photos: [photo('a')] });
+    expect(result.findings[0]).toMatchObject({ confidence: 'unknown', label: 'general lawn stress', can_determine: false, cannot_determine_reason: 'no blade close-up' });
+  });
+
+  test('finding zones follow the cited photos\' technician labels only', () => {
+    expect(visit.zoneFromRefs([1, 2], ['front', 'front'])).toBe('front');
+    expect(visit.zoneFromRefs([1, 2], ['front', null])).toBe('front');
+    expect(visit.zoneFromRefs([1, 2], ['front', 'back'])).toBe('unknown');
+    expect(visit.zoneFromRefs([2], [null, null])).toBe('unknown');
+    expect(visit.zoneFromRefs([], ['front'])).toBe('unknown');
   });
 
   test('both providers missing is a recorded unavailable state, never a throw', async () => {
@@ -179,9 +198,11 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(result.severities).toBeNull();
     expect(result.scores).toEqual({ turf_density: null, weed_coverage: null, color_health: null });
     expect(result.observations).toBe(visit.UNAVAILABLE_OBSERVATIONS);
-    expect(result.photoQuality).toHaveLength(2);
+    expect(result.photoQuality.map((q) => q.quality)).toEqual(['unrated', 'unrated']);
     expect(result.contextHash).toMatch(/^[0-9a-f]{64}$/);
     expect(visit.deriveLegacyScores(result)).toBeNull();
+    // Unrated photos are kept for audit but never pass the customer gate.
+    expect(visit.photoRowInputs(result).qualityResults.map((q) => q.passed)).toEqual([false, false]);
   });
 
   test('the chain validator rejects a malformed answer so the fallback leg runs', () => {
@@ -191,12 +212,13 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(visit.validateAssessmentJson({ json: null })).toBe('malformed_assessment');
   });
 
-  test('the context hash changes with the photos, their zones, and the visit context — not with unrelated fields', () => {
+  test('the context hash changes with the photos, their media types, their zones, and the visit context — not with unrelated fields', () => {
     const photos = [photo('a'), photo('b')];
     const base = visit.contextHash({ photos, photoZones: [null, null], visionContext: { season: 'peak' } });
     expect(visit.contextHash({ photos, photoZones: [null, null], visionContext: { season: 'peak', productsApplied: ['x'] } })).toBe(base);
     expect(visit.contextHash({ photos, photoZones: ['front', null], visionContext: { season: 'peak' } })).not.toBe(base);
     expect(visit.contextHash({ photos: [photo('a'), photo('c')], photoZones: [null, null], visionContext: { season: 'peak' } })).not.toBe(base);
+    expect(visit.contextHash({ photos: [{ ...photo('a'), mimeType: 'image/png' }, photo('b')], photoZones: [null, null], visionContext: { season: 'peak' } })).not.toBe(base);
     expect(visit.contextHash({ photos, photoZones: [null, null], visionContext: { season: 'dormant' } })).not.toBe(base);
   });
 });
@@ -252,12 +274,12 @@ describe('legacy column derivation — missing is not healthy', () => {
     expect(unavailable).toMatchObject({ composite_scores: null, adjusted_scores: null, turf_density: null, stress_damage: null, observations: visit.UNAVAILABLE_OBSERVATIONS, overall_score: null });
   });
 
-  test('the photo-storage inputs: a poor photo fails the quality gate and ranks last for best photo', () => {
+  test('the photo-storage inputs: poor and unrated photos fail the customer gate; only rated usable photos can be the best photo', () => {
     const { qualityResults, resultByPhotoIndex } = visit.photoRowInputs({ photoQuality: [
-      { photo: 1, quality: 'adequate', issue: '' }, { photo: 2, quality: 'poor', issue: 'blurred' }, { photo: 3, quality: 'limited', issue: 'glare' },
+      { photo: 1, quality: 'adequate', issue: '' }, { photo: 2, quality: 'poor', issue: 'blurred' }, { photo: 3, quality: 'limited', issue: 'glare' }, { photo: 4, quality: 'unrated', issue: 'not rated by the model' },
     ] });
-    expect(qualityResults).toEqual([{ passed: true, issues: [] }, { passed: false, issues: ['blurred'] }, { passed: true, issues: ['glare'] }]);
-    expect(resultByPhotoIndex).toEqual({ 0: { qualityScore: 80 }, 1: { qualityScore: 20 }, 2: { qualityScore: 55 } });
+    expect(qualityResults).toEqual([{ passed: true, issues: [] }, { passed: false, issues: ['blurred'] }, { passed: true, issues: ['glare'] }, { passed: false, issues: ['not rated by the model'] }]);
+    expect(resultByPhotoIndex).toEqual({ 0: { qualityScore: 80 }, 1: { qualityScore: 20 }, 2: { qualityScore: 55 }, 3: { qualityScore: 0 } });
   });
 
   test('the composite the route reads carries the grass read and the signal levels', () => {
@@ -289,9 +311,19 @@ describe('technician review on confirm', () => {
     { finding_id: 'F2', name: 'Chinch bug damage', confidence: 'low', severity: 'mild', urgency: 'monitor', spread_risk: 'unknown', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: '', customer_wording: null, photo_refs: [], zone: 'unknown', label: 'general lawn stress', source: 'model' },
   ]) };
 
-  test('a plain confirm is valid; every payload field is optional', () => {
-    expect(visit.validateReview({}, run)).toEqual({ errors: [], review: { reviewedFindings: [], addedDetails: [], appliedProducts: [] } });
-    expect(visit.validateReview(undefined, run).errors).toEqual([]);
+  test('a plain confirm is valid and is NOT a review; any review field makes it one', () => {
+    expect(visit.validateReview({ assessmentId: 'a', adjustedScores: { turf_density: 70 } }, run)).toEqual({ errors: [], review: { provided: false, reviewedFindings: [], addedDetails: [], appliedProducts: [] } });
+    expect(visit.validateReview(undefined, run).review.provided).toBe(false);
+    expect(visit.validateReview({ reviewedFindings: [] }, run).review.provided).toBe(true);
+    expect(visit.validateReview({ appliedProducts: [] }, run).review.provided).toBe(true);
+  });
+
+  test('the clean-lawn sentinel stays in the review but out of the reconciliation', () => {
+    const clean = { ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'No major visible stress', confidence: 'moderate', severity: 'mild', urgency: 'monitor', spread_risk: 'low', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: '', customer_wording: null, photo_refs: [1], zone: 'unknown', label: 'no major visible stress', source: 'model' }]) };
+    const built = visit.buildReview(clean, { reviewedFindings: [], addedDetails: [], appliedProducts: [] });
+    expect(built.reviewed_findings).toHaveLength(1);
+    expect(built.reconciliation.flags).toEqual([]);
+    expect(built.reconciliation.watch_items).toEqual([]);
   });
 
   test('rejects unknown finding ids, free-text renames, oversized notes, and malformed lists', () => {
@@ -359,6 +391,8 @@ describe('confirm scores preserve NULLs', () => {
       turf_density: 72, weed_suppression: null, color_health: null, fungus_control: 75, thatch_level: null, stress_damage: 75,
     });
     expect(visit.resolveConfirmScores(assessment, { color_health: '81', stress_damage: 40 }, scoreValue)).toMatchObject({ color_health: 81, stress_damage: 40, weed_suppression: null });
+    // A blank or malformed override never becomes a 0 — it falls back to the stored value, as the legacy path does.
+    expect(visit.resolveConfirmScores(assessment, { turf_density: ' ', fungus_control: 'abc', stress_damage: 'x' }, scoreValue)).toMatchObject({ turf_density: 72, fungus_control: 75, stress_damage: 75 });
     const nothing = visit.resolveConfirmScores({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }, {}, scoreValue);
     expect(nothing).toEqual({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null });
     expect(visit.scoresComplete(nothing)).toBe(false);

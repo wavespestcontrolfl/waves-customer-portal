@@ -2264,24 +2264,37 @@ the frozen per-issue customer story is stage 3.
   coercing them to 0.
 - **Unavailable is a recorded state, not an error.** Both providers missing writes
   an `unavailable` run with the reason; the assessment row still exists with NULL
-  scores and `observations = 'Visual analysis unavailable'`, its photos are stored,
-  the technician confirms it, and the completion preflight (confirmed-row check) is
-  satisfied — the visit closes honestly. Technician calibration is skipped for such
-  a row (no AI scores to calibrate against).
+  scores and `observations = 'Visual analysis unavailable'`, its photos are stored
+  (unrated, so never customer-visible and never the best photo), the technician
+  confirms it, and the completion preflight (confirmed-row check) is satisfied — the
+  visit closes honestly. Customer-facing generation (recommendations, health signal,
+  the standalone report-ready notification, the auto-generated report) and
+  technician calibration are held for such a row until the technician supplies a
+  complete set of scores — a provider outage never becomes a lawn result.
 - **Provenance row.** `lawn_assessment_runs` (additive migration, one row per
   assessment row, UNIQUE) records provider, requested model, fallback use and leg
   failures, prompt version, a sha256 of the perception input (context + photo
-  bytes + zones), the photo row ids, per-photo quality, findings, severities, raw
-  scores, tokens (including thinking) and latency. A re-analyze is a fresh
-  assessment row with its own run, exactly as today.
-- **One overall review on `/confirm`** (owner ruling: no per-finding approvals):
-  optional `reviewedFindings` (keep / allowlisted rename / tech note),
+  bytes, media types and zones), the photo row ids, per-photo quality, findings,
+  severities, raw scores, tokens (including thinking) and latency. It is written in
+  the same transaction as the assessment row — the run is the provenance and the
+  review target, never optional bookkeeping — and its existence, not the gate,
+  decides how `/confirm` treats a row (a kill-switch flip between analyze and
+  confirm cannot coerce a run-backed row's NULLs to 0). Finding ids are
+  server-authored (`F1…`), zones come only from the technician's labels on the
+  cited photos, and a finding the model marks undeterminable carries no
+  confidence claim. A re-analyze is a fresh assessment row with its own run,
+  exactly as today.
+- **One overall review on `/confirm`** (owner ruling: no per-finding approvals),
+  recorded only when the confirm carries a review field — a score-only confirm from
+  a client that never showed the findings is not a review: optional
+  `reviewedFindings` (keep / allowlisted rename / tech note),
   `addedDetails` (technician findings, capped at moderate confidence — the
   diagnostic tool's evidence rule) and `appliedProducts`; the deterministic
   reconciliation (`buildTreatmentRationale` / `buildReconciliationFlags` /
   `buildWatchItems`) runs over the kept findings and those products and is stored
   on the run. Absent products → every finding reads untreated until the completion
-  records what was applied. Technician `customer_wording` edits are deliberately
+  records what was applied; the clean-lawn finding is never reconciled as a
+  condition. Technician `customer_wording` edits are deliberately
   not accepted: customer copy is derived server-side (AGENTS.md lawn-diagnostic
   lockstep).
 - **Photo zones become real.** The technician's zone label writes
