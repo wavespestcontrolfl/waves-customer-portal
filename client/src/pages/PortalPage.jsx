@@ -5489,9 +5489,9 @@ function BillingTab({ customer, refreshCustomer }) {
       // /auth/me reload lands (out-of-order reloads would show the
       // opposite of the persisted preference).
       if (typeof refreshCustomer === 'function') await refreshCustomer();
-    } catch (err) {
+    } catch {
       setAutoApplyCredit(!next);
-      console.error('account-credit preference update failed', err);
+      showCustomerAlert('Could not save your credit preference. Please try again.');
     } finally {
       setAutoApplyCreditBusy(false);
     }
@@ -13769,9 +13769,38 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // =========================================================================
 // NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
+// Keyboard opening can resize AND pan the visual viewport on iOS.
+function useSheetViewport(open, dialogRef) {
+  const [viewport, setViewport] = useState(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!open || !vv) return undefined;
+    const update = () => setViewport({ height: Math.round(vv.height), top: Math.round(vv.offsetTop) });
+    update();
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+    };
+  }, [open]);
+  useEffect(() => {
+    if (!open || !viewport) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const focused = document.activeElement;
+      if (dialogRef.current?.contains(focused) && focused.matches('input, textarea')) {
+        focused.scrollIntoView({ block: 'nearest' });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open, viewport?.height, viewport?.top, dialogRef]);
+  return viewport;
+}
+
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
+  const viewport = useSheetViewport(open, dialogRef);
   const compact = useIsMobile(760);
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
@@ -14077,6 +14106,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   return (
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
+      ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
       background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
       backdropFilter: compact ? 'none' : 'blur(5px)',
       display: 'flex',
@@ -15162,18 +15192,8 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // The iOS keyboard doesn't resize the layout viewport — it pans it, which
-  // shoved the sheet (header and close button included) off the top of the
-  // screen while typing. Cap the sheet to the visual viewport instead.
-  const [viewportH, setViewportH] = useState(null);
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return undefined;
-    const update = () => setViewportH(Math.round(vv.height));
-    update();
-    vv.addEventListener('resize', update);
-    return () => vv.removeEventListener('resize', update);
-  }, []);
+  const viewport = useSheetViewport(true, dialogRef);
+  const viewportH = viewport?.height;
 
   // A question handed in from the Waves AI bar sends itself on open.
   useEffect(() => {
@@ -15216,6 +15236,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
   return (
     <div data-glass-scrim="" style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, top: 0, zIndex: 200,
+      ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
       background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)',
       display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
       padding: compact ? 0 : 24,
@@ -15912,7 +15933,7 @@ export default function PortalPage() {
                     </div>
                   </div>
                 )}
-                <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
+                <div style={{ padding: 12, background: PORTAL_SHELL.surface, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
                   <div style={{
                     fontSize: 14,
                     color: PORTAL_SHELL.muted,
