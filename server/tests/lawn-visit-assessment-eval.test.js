@@ -10,7 +10,7 @@ jest.mock('../services/llm/call', () => ({ ...jest.requireActual('../services/ll
 const evalLib = require('../services/eval/lawn-visit-assessment-eval');
 
 const row = (overrides = {}) => ({
-  id: 'a1', customer_id: 'c1', service_id: 's1', service_date: '2026-09-01', season: 'peak', observations: 'legacy obs',
+  id: 'a1', customer_id: 'c1', service_id: 's1', service_date: '2026-09-01', season: 'peak', observations: 'legacy obs mentioning the LOCKBOX 4471 and Mrs. Smith',
   composite_scores: JSON.stringify({ turf_density: 70, weed_suppression: 85, color_health: 75, fungus_control: 75, thatch_level: 60, stress_damage: 50 }),
   turf_density: 75, weed_suppression: 85, color_health: 80, fungus_control: 75, thatch_level: 60, stress_damage: 55,
   scheduled_date: '2026-08-30', first_name: 'MUST NOT LEAK', phone: '+15550000000', address_line1: '1 Private Way',
@@ -39,8 +39,22 @@ describe('fixture export shape', () => {
     expect(c.legacyAi.turf_density).toBe(70);
     expect(c.photos).toEqual([{ id: 'p1', s3Key: 'k1', mimeType: 'image/png', zone: 'front' }, { id: 'p2', s3Key: 'k2', mimeType: 'image/jpeg', zone: null }]); // pending/ dropped, ordered
     expect(c.context.priorSummary).toHaveLength(400);
-    expect(JSON.stringify(c)).not.toMatch(/MUST NOT LEAK|\+1555|Private Way/);
+    // No names, phones, addresses — and no legacy observation text (it can echo technician context).
+    expect(JSON.stringify(c)).not.toMatch(/MUST NOT LEAK|\+1555|Private Way|LOCKBOX|Smith|legacy obs/);
+    expect(c.legacyObservations).toBeUndefined();
     expect(evalLib.fixtureCase(row({ scheduled_date: null, composite_scores: null }), []).visitDate).toBe('2026-09-01');
+  });
+
+  test('pg DATE values arrive as Date objects or strings; both become the ISO calendar day, never String(Date)', () => {
+    expect(evalLib.dateString(new Date('2026-09-01T04:00:00.000Z'))).toBe('2026-09-01');
+    expect(evalLib.dateString('2026-07-15')).toBe('2026-07-15');
+    expect(evalLib.dateString('2026-07-15T00:00:00.000Z')).toBe('2026-07-15');
+    expect(evalLib.dateString('Tue Sep 01 2026')).toBeNull();
+    expect(evalLib.dateString(null)).toBeNull();
+    const c = evalLib.fixtureCase(row({ scheduled_date: new Date('2026-01-15T05:00:00.000Z') }), [], {});
+    expect(c.visitDate).toBe('2026-01-15');
+    expect(c.month).toBe(1);
+    expect(evalLib.contextFor(c).season).toBe('dormant');
   });
 
   test('selection is by explicit ids first, else a deterministic sample', () => {
@@ -62,9 +76,9 @@ describe('fixture export shape', () => {
 describe('scoring', () => {
   const testCase = evalLib.fixtureCase(row(), photos, {});
 
-  test('cost uses the listed prices per model, reasoning tokens billed as output; unknown model → null', () => {
+  test('cost uses the listed prices per model; Gemini thoughts are added, OpenAI reasoning is already inside output_tokens; unknown model → null', () => {
     expect(evalLib.costUsd('gemini-3.8-flash', { input_tokens: 1_000_000, output_tokens: 500_000, reasoning_tokens: 500_000 })).toBe(0.75 + 3.75);
-    expect(evalLib.costUsd('gpt-6-astra', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 0 })).toBe(1.5);
+    expect(evalLib.costUsd('gpt-6-astra', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 8_000 })).toBe(1.5); // reasoning not billed twice
     expect(evalLib.costUsd('mystery', { input_tokens: 1 })).toBeNull();
     expect(evalLib.costUsd('gpt-6-astra', null)).toBeNull();
   });

@@ -29,13 +29,25 @@ const { applySeasonalAdjustment } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores, contextHash } = require('../lawn-visit-assessment');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 
-// USD per 1M tokens, standard tier, checked 2026-09-08 (Gemini 3.8 Flash:
-// output price includes thinking; GPT-6 Astra: output includes reasoning).
-// Cost is an estimate for the hand-check, not a bill.
+// USD per 1M tokens, standard tier, checked 2026-09-08. Thinking is billed at
+// the output rate on both providers, but the usage shapes differ: Gemini
+// reports thoughts SEPARATELY from candidates (add them), OpenAI's
+// reasoning_tokens are a SUBSET of output_tokens (already counted) —
+// llm-dispatch-metrics.js extractUsage. Cost is an estimate for the
+// hand-check, not a bill.
 const PRICES_PER_M = Object.freeze({
-  'gemini-3.8-flash': { input: 0.75, output: 3.75 },
-  'gpt-6-astra': { input: 10, output: 50 },
+  'gemini-3.8-flash': { input: 0.75, output: 3.75, reasoningSeparate: true },
+  'gpt-6-astra': { input: 10, output: 50, reasoningSeparate: false },
 });
+
+// A pg DATE arrives as a Date (local midnight) or 'YYYY-MM-DD'; either way the
+// calendar day is the first ten characters of the ISO form — never String(Date).
+function dateString(value) {
+  if (value == null || value === '') return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
+  const text = String(value).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+}
 
 const SCORE_KEYS = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
 const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
@@ -62,7 +74,7 @@ const parseJson = (value, fallback) => {
  */
 function fixtureCase(row, photos = [], context = {}) {
   const composite = parseJson(row.composite_scores, {}) || {};
-  const visitDate = String(row.scheduled_date || row.service_date || '').slice(0, 10);
+  const visitDate = dateString(row.scheduled_date) || dateString(row.service_date) || '';
   const month = Number(visitDate.slice(5, 7)) || null;
   return {
     assessmentId: row.id,
@@ -73,7 +85,6 @@ function fixtureCase(row, photos = [], context = {}) {
     season: row.season || null,
     confirmed: Object.fromEntries(SCORE_KEYS.map((key) => [key, numberOrNull(row[key])])),
     legacyAi: Object.fromEntries(SCORE_KEYS.map((key) => [key, numberOrNull(composite[key])])),
-    legacyObservations: row.observations || null,
     photos: photos
       .filter((photo) => photo && photo.s3_key && !String(photo.s3_key).startsWith('pending/'))
       .sort((a, b) => (a.photo_order ?? 0) - (b.photo_order ?? 0))
@@ -125,7 +136,7 @@ function costUsd(model, usage) {
   const price = PRICES_PER_M[String(model || '')];
   if (!price || !usage) return null;
   const input = Number(usage.input_tokens) || 0;
-  const output = (Number(usage.output_tokens) || 0) + (Number(usage.reasoning_tokens) || 0);
+  const output = (Number(usage.output_tokens) || 0) + (price.reasoningSeparate ? (Number(usage.reasoning_tokens) || 0) : 0);
   return Math.round(((input * price.input) + (output * price.output)) / 1e6 * 1e4) / 1e4;
 }
 
@@ -323,6 +334,7 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
 module.exports = {
   PRICES_PER_M,
   SCORE_KEYS,
+  dateString,
   fixtureCase,
   selectCases,
   contextFor,
