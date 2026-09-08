@@ -162,10 +162,13 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
     hang: Joi.boolean(),
     transfer: Joi.boolean(),
     booking: Joi.boolean(),
-    reservice: Joi.boolean(),
+    // `true` files a ticket; 'existing' is the live already-open answer — a
+    // durable ticket the office holds, which backs the follow-up it directs
+    // without claiming a new write.
+    reservice: Joi.alternatives().try(Joi.boolean(), Joi.valid('existing')),
     capture: Joi.alternatives().try(Joi.boolean(), Joi.object().min(1).unknown(true)),
   }).custom((entry, helpers) => {
-    const hasEffect = ['hang', 'transfer', 'booking', 'reservice', 'capture'].some((key) => entry[key] === true);
+    const hasEffect = ['hang', 'transfer', 'booking', 'reservice', 'capture'].some((key) => entry[key] === true) || entry.reservice === 'existing';
     if (entry.text || hasEffect || (entry.capture && typeof entry.capture === 'object')) return entry;
     return helpers.message('response needs non-empty text, a side effect, or hang: true');
   }),
@@ -287,6 +290,8 @@ function lintExpectation(e, i, knownTools) {
 // author wrote.
 const SCENARIO_KEYS = new Set(['id', 'description', 'language', 'gates', 'allowedTools', 'allowedToolInputs', 'caller', 'fixtures', 'turns', 'spec', 'expect']);
 const FIXTURE_KEYS = new Set(['officeHours', 'toolResponses', 'resume', 'modelFailures']);
+const CALLER_KEYS = new Set(['from', 'verified', 'context']);
+const CALLER_CONTEXT_KEYS = new Set(['customer', 'tier', 'attested', 'block', 'dataTurn']);
 
 // The exact key sets, and the live release condition for an earlier segment:
 // recovery releases it only behind the recovery gate on a verified session, so
@@ -308,7 +313,15 @@ function scenarioShapeRules(s) {
     ...scenarioKeyRules(s),
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
     [!s.caller || typeof s.caller.from !== 'string' || !/^\+1\d{10}$/.test(s.caller.from), 'caller.from must be an E.164 US number'],
+    ...Object.keys(s.caller || {}).filter((k) => !CALLER_KEYS.has(k)).map((k) => [true, `caller: unknown key "${k}"`]),
+    [!s.caller || typeof s.caller.verified !== 'boolean', 'caller.verified must be boolean'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
+    // The tier and attestation decide which reads and writes production
+    // allows; a misspelt value would silently grade the redacted, unattested
+    // posture instead of the one the author wrote.
+    ...Object.keys((s.caller && s.caller.context) || {}).filter((k) => !CALLER_CONTEXT_KEYS.has(k)).map((k) => [true, `caller.context: unknown key "${k}"`]),
+    [s.caller && s.caller.context != null && !['full', 'redacted'].includes(s.caller.context.tier), 'caller.context.tier must be full or redacted'],
+    [s.caller && s.caller.context != null && s.caller.context.attested !== undefined && typeof s.caller.context.attested !== 'boolean', 'caller.context.attested must be boolean'],
     // Live resolveCallerContext returns null whenever verification fails, so a
     // context on an unverified caller is a call production can never produce.
     [s.caller && s.caller.context != null && s.caller.verified !== true, 'caller.context requires caller.verified: true (an unverified live caller gets no context)'],
@@ -584,8 +597,45 @@ const MATCHED_ONLY_REFUSALS = Object.freeze({
 const LOOKUP_UNVERIFIED_TEXT = 'I cannot pull up an account on this call. Ask the caller for their name, the service address and '
   + 'what they need, capture the lead, and tell them a Waves team member will call them back. Do NOT tell '
   + 'the caller whether anything matched, and do not confirm or deny that an account exists.';
+// The live write refusals (relay-booking / relay-reservice): both writes
+// need a customer account, and without VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES
+// only a FULL ANI match may write — a looked-up ref or a contact-slot match
+// is captured as a lead instead.
+const WRITE_REFUSALS = Object.freeze({
+  request_booking: {
+    noCustomer: 'Booking requests need a customer account: the caller\'s own matched account, or a '
+      + 'customer_ref from lookup_customer. For a brand-new caller, capture the lead with their '
+      + 'preferred time — a team member will call to book them. Do NOT tell the caller anything is booked.',
+    thirdParty: 'Booking requests are only placed for the account the caller\'s own phone number matches. '
+      + 'Capture the lead with the caller\'s name, the account they are calling about and their preferred '
+      + 'time, and tell them a Waves team member will call to confirm. Do NOT tell the caller anything is booked.',
+  },
+  request_reservice: {
+    noCustomer: 'This tool only works for the account the caller\'s own phone number matches. For anyone else, '
+      + 'use capture_lead with what is going on and tell them a Waves team member will follow up. '
+      + 'Do NOT promise a free re-service.',
+    thirdParty: 'Re-service requests are only filed for the account the caller\'s own phone number matches. '
+      + 'Capture the lead with what they are seeing and where, and tell them a Waves team member will call '
+      + 'them back about it. Do NOT tell the caller a re-service has been scheduled or filed.',
+  },
+});
+function writeRefusal(name, input, ctx) {
+  const refusals = WRITE_REFUSALS[name];
+  if (!refusals) return null;
+  const { matchedCallerTier } = require('../voice-agent/relay-tools');
+  const { allowsThirdPartyWrites } = require('../voice-agent/relay-booking');
+  const ref = String(input.customer_ref || '').trim();
+  // A re-service is the matched caller's own account only; a booking may
+  // name a looked-up account, which is then a third-party write.
+  if (name === 'request_reservice' && ref) return refusals.noCustomer;
+  if (!ref && !ctx.customerId) return refusals.noCustomer;
+  const thirdParty = !!ref || matchedCallerTier(ctx) !== 'full';
+  return thirdParty && !allowsThirdPartyWrites() ? refusals.thirdParty : null;
+}
 function liveAuthorizationRefusal(name, input = {}, ctx = {}) {
   const { ATTESTATION_ONLY_TOOLS, matchedCallerTier } = require('../voice-agent/relay-tools');
+  const write = writeRefusal(name, input, ctx);
+  if (write) return write;
   // lookup_customer is reachable by an unmatched caller, so it proves the
   // call itself (relay-context lookupCustomersText) before anything else.
   if (name === 'lookup_customer' && ctx.callerVerified !== true) return LOOKUP_UNVERIFIED_TEXT;
@@ -695,12 +745,17 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
     receipt = input.lead_quality !== 'spam'; // the live spam branch suppresses capture without writing a lead or callback
   }
   if (response.booking) { ctxCall('markBookingRequested', null); receipt = true; }
-  if (response.reservice) {
+  if (response.reservice === true) {
     // The live tool latches capture too (relay-reservice: the call's artifact
     // is a ticket, no lead) — so the session ends after the goodbye as in
     // production instead of taking turns production would ignore.
     ctxCall('markCaptured', { leadCreated: false });
     ctxCall('markReserviceFiled');
+    receipt = true;
+  } else if (response.reservice === 'existing') {
+    // Already open: nothing filed, nothing latched (the live path returns
+    // before either mark), but the ticket on file is the office's record —
+    // the follow-up it directs is backed.
     receipt = true;
   }
   if (!response.transfer) return { text, receipt };

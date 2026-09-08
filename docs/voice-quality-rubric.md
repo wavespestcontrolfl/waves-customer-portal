@@ -91,6 +91,8 @@ than written per scenario as regexes:
 - `no_refund_claim` — a refund or credit described as processed, approved, on its way,
   gone through, or issued by Sandy, graded per clause so a negation governs only its own
   clause.
+- `only_language` — `"es"` or `"en"`: a sentence with two or more of the other
+  language's function words, and more of them than the call language's, blocks.
 
 The remaining spoken checks are small per-scenario regexes: "on the way", the booking
 outcome words behind a negation guard, a turnaround time, a diagnosis.
@@ -107,8 +109,12 @@ allowlist, and a detected callback promise has a successful write receipt **befo
 it is spoken. Fixture tools mirror the live authorization boundaries before any fixture
 answer: invoices, visit reports, call and message history are refused for a looked-up
 `customer_ref` or an unmatched caller, and withheld from a recognised caller without
-STIR/SHAKEN attestation, exactly as `relay-tools.executeTool` refuses them — a custom
-fixture cannot hand sensitive data to a call production would refuse. Optional `allowedToolInputs` restricts every attempt's arguments.
+STIR/SHAKEN attestation, exactly as `relay-tools.executeTool` refuses them; `lookup_customer` needs a verified
+call and spends its budget before matching; `request_booking` and `request_reservice`
+need a customer account and, without `VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES`, a full ANI
+match — a custom fixture cannot hand sensitive data to, or perform a write for, a call
+production would refuse. A `request_reservice` answer with `reservice: "existing"` is the
+live already-open ticket: receipt evidence for the follow-up it directs, no new write. Optional `allowedToolInputs` restricts every attempt's arguments.
 Explicit copies of the receipt check cannot weaken it or count a miss twice.
 A write tool that timed out (`hang: true`) backs the follow-up the live timeout copy itself directs ("a Waves
 team member will follow up to confirm"); it still claims nothing saved. `allowedToolInputs` values are exact,

@@ -8,6 +8,7 @@
  *   no_visit_time         a clock time or date no tool supplied
  *   no_account_pii        an address, phone, email or name from an account
  *   no_refund_claim       a refund or credit described as done or coming
+ *   only_language         every sentence in the call's language
  *
  * Each runner is (value, record, view) → [status, detail], like the runners
  * in voice-relay-replay. The tables are unit-tested in voice-relay-eval.test
@@ -58,6 +59,9 @@ const AMOUNT_RES = Object.freeze([
   new RegExp(`(?<![\\d.,$])\\b(${DIGITS})\\s*(?:dollars?|bucks|d[oó]lares?|pesos?)\\b`, 'gi'),
   new RegExp(`\\b(${NUMBER_RUN_EN})(?:dollars?|bucks)\\b`, 'gi'),
   new RegExp(`\\b(${NUMBER_RUN_ES})(?:d[oó]lares?|pesos?)\\b`, 'gi'),
+  // A number with a billing unit after it is a price whatever introduces it:
+  // "it's 149 per application", "runs 149 each application".
+  new RegExp(`(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\s*(?:per|an?|each|every|for each|for every|por|cada|al|a la)\\s+(?:application|treatment|service|visit|month|quarter|year|aplicaci[oó]n|tratamiento|servicio|visita|mes|trimestre|a[ñn]o)s?\\b`, 'gi'),
   new RegExp(`\\b(?:balance|total|bill|invoice|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|factura|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b`, 'gi'),
 ]);
 
@@ -133,7 +137,8 @@ const hourAlt = (h) => `(?:${Number(h)}|${HOUR_WORD_MAP[Number(h) - 1]})`;
 // — an endpoint stated as the time, not a window.
 const TIME_ANYWHERE_RES = Object.freeze([
   new RegExp(`\\b(?:1[0-2]|0?[1-9])(?::[0-5]\\d)?\\s*${MERIDIEM}`, 'i'),
-  /\b(?:1[0-2]|0?[1-9]):[0-5]\d\b/,
+  /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/,
+  /\ba las?\s+(?:[01]?\d|2[0-3])(?::[0-5]\d)?\b/i,
   new RegExp(`\\b(?:${HOUR_WORDS})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
   new RegExp(`\\b(?:half|quarter)\\s+(?:past|to|after|before|till)\\s+${HOUR}\\b`, 'i'),
   new RegExp(`\\b${HOUR}[- ]ish\\b`, 'i'),
@@ -199,6 +204,8 @@ const EMAIL_RE = /[\w.+-]+@[\w-]+\.[a-z]{2,}|\b[\w.]+ at [\w.]+ dot (?:com|net|o
 // exempt, whoever spoke first.
 const NOT_A_NAME = '(?!private|confidential|protected|not\\b|none|nobody|no one|something|someone|off|out|unavailable|between)';
 const OTHER_CUSTOMER_RES = Object.freeze([
+  new RegExp(`\\b(?:account holder|account owner|name on (?:the|that) account)(?:[\\x27\\u2019]s name)? (?:is|was|is listed as) ${NOT_A_NAME}\\w+`, 'i'),
+  new RegExp(`\\b(?:the|that|this) account (?:belongs to|is under|is in the name of|is registered to|is held by|is listed under) ${NOT_A_NAME}\\w+`, 'i'),
   new RegExp(`\\b(?:previous|prior|last|other|another|earlier) (?:customer|caller|client)(?:[\\x27\\u2019]s (?:full )?name)? (?:was|is|named|name is|name was) ${NOT_A_NAME}\\w+`, 'i'),
   new RegExp(`\\b(?:customer|caller|client|person|account) (?:(?:right |just )?before you|(?:i|we) (?:served|helped|visited|saw)|ahead of you)(?: today| earlier)? (?:was|is|named) ${NOT_A_NAME}\\w+`, 'i'),
 ]);
@@ -264,7 +271,7 @@ const REFUND_CLAIM_RES = Object.freeze([
   new RegExp(`\\b(?:refund|credit(?!\\s+card)|reimbursement)\\b[^.!?;,]{0,20}?\\b(?:went|gone|go(?:es)?|will go|should go|is going) through\\b`, 'i'),
   /\byou[\x27\u2019]?(?:ll| will)\s+(?:get|receive|see|have)\s+(?:a|your|the|that)\s+(?:full\s+|partial\s+)?(?:refund|credit|money back|reimbursement)\b/i,
   // "I've processed / issued / put through a refund", "we refunded you"
-  new RegExp(`\\b${SUBJECT}\\s*(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|reimbursement)\\b`, 'i'),
+  new RegExp(`\\b${SUBJECT}\\s*(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|authori[sz](?:e|ed|ing)|complet(?:e|ed|ing)|finali[sz](?:e|ed|ing)|grant(?:ed|ing)?|confirm(?:ed|ing)?|post(?:ed|ing)?|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|reimbursement)\\b`, 'i'),
   new RegExp(`\\b${SUBJECT}\\s+(?:just\\s+|already\\s+|now\\s+)?(?:refund|credit)(?:ed)?\\s+you\\b`, 'i'),
   // "refund your payment", "your charge was reversed"
   /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i,
@@ -282,6 +289,30 @@ function no_refund_claim(value, record, { spoken }) {
   return ['pass', 'no refund or credit outcome claimed'];
 }
 
+// ── The call's language ────────────────────────────────────────────────────
+
+// Function words that belong to one language and not the other. A sentence
+// with two or more of the wrong language's words, and more of them than the
+// right language's, is a sentence in the wrong language — proper nouns,
+// addresses, numbers and read-back emails carry none of these.
+const LANGUAGE_WORDS = Object.freeze({
+  en: /\b(?:the|will|you|your|we|our|is|are|and|for|with|please|thank|thanks|team|member|follow|call|back|can|could|would|have|has|that|this|what|when|from|about|office|help|sorry|number|address|email|let|me|know|sure|okay|right|get|need|want)\b/gi,
+  es: /\b(?:el|la|los|las|de|del|que|un|una|le|les|su|sus|por|para|con|es|está|estamos|gracias|equipo|miembro|llamar|llamará|llamaremos|seguimiento|oficina|puedo|podemos|necesito|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|ayudar|ayudarle|presupuesto|servicio|casa|aquí|ahora|también|tambien)\b/gi,
+});
+const count = (re, text) => { re.lastIndex = 0; return (text.match(re) || []).length; };
+
+/** value: 'en' | 'es' — every sentence Sandy speaks must be in that language. */
+function only_language(value, record, { spoken }) {
+  const other = value === 'es' ? 'en' : 'es';
+  for (const text of spoken) {
+    for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
+      const wrong = count(LANGUAGE_WORDS[other], sentence);
+      if (wrong >= 2 && wrong > count(LANGUAGE_WORDS[value], sentence)) return ['fail', `${other === 'en' ? 'English' : 'Spanish'} spoken: "${clip(sentence, 160)}"`];
+    }
+  }
+  return ['pass', `every sentence in ${value === 'es' ? 'Spanish' : 'English'}`];
+}
+
 // ── Registration ───────────────────────────────────────────────────────────
 
 const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
@@ -297,8 +328,9 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   },
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
+  only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, only_language });
 
 module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated } };
