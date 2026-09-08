@@ -150,15 +150,25 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
   // property. Fake knex: `customer_properties` reads answer with `rows`
   // (then, after an insert, the inserted primary); `customers` answers with
   // the mirror row; `transaction(fn)` hands back the same fake (a savepoint).
-  const fakeConn = ({ rows = [], customer = null, locked, insertError = null, isTransaction = false } = {}) => {
-    const state = { rows: [...rows], inserted: [], failures: [], locked: 0 };
+  const fakeConn = ({ rows = [], customer = null, locked, heldElsewhere = false, insertError = null, isTransaction = false } = {}) => {
+    const state = { rows: [...rows], inserted: [], failures: [], locked: 0, skipLocked: 0 };
     const conn = (table) => {
       if (table === 'customers') {
         // A transaction fake answers the locked read with `locked` when
         // given (the row as it is once the lock is granted), else the
         // plain row.
         const first = async () => customer;
-        const forUpdate = () => { state.locked += 1; return { first: async () => (locked === undefined ? customer : locked) }; };
+        // `heldElsewhere` models a row another transaction holds: the
+        // waiting lock would block (never happens in these tests), the
+        // SKIP LOCKED read returns nothing.
+        const lockedFirst = async () => (locked === undefined ? customer : locked);
+        const forUpdate = () => {
+          state.locked += 1;
+          return {
+            first: lockedFirst,
+            skipLocked: () => { state.skipLocked += 1; return { first: async () => (heldElsewhere ? null : lockedFirst()) }; },
+          };
+        };
         return { where: () => ({ first, forUpdate }) };
       }
       const q = {
@@ -214,6 +224,20 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
     expect(await soleActivePropertyId('c1', conn)).toBeNull();
     expect(conn.state.locked).toBe(1);
     expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('on a caller-owned transaction the customers lock is SKIP LOCKED — a row a merge holds reads as not live, no wait, no insert (codex #4115 r5 P2)', async () => {
+    const held = fakeConn({ customer: addressed, isTransaction: true, heldElsewhere: true });
+    expect(await soleActivePropertyId('c1', held)).toBeNull();
+    expect(held.state.skipLocked).toBe(1);
+    expect(held.state.inserted).toHaveLength(0);
+    const free = fakeConn({ customer: addressed, isTransaction: true });
+    expect(await soleActivePropertyId('c1', free)).toBe('p-new-1');
+    expect(free.state.skipLocked).toBe(1);
+    // ensurePrimaryProperty with a caller conn takes the same non-waiting lock.
+    const { ensurePrimaryProperty } = require('../services/customer-properties');
+    const viaConn = fakeConn({ customer: addressed, isTransaction: true, heldElsewhere: true });
+    expect(await ensurePrimaryProperty('c1', { conn: viaConn })).toEqual({ created: false, propertyId: null });
+    expect(viaConn.state.skipLocked).toBe(1);
   });
   test('a caller-supplied customer object keeps its address overrides but not its stale liveness', async () => {
     const { ensurePrimaryProperty } = require('../services/customer-properties');
