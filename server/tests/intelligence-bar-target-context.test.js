@@ -379,6 +379,25 @@ test.each(['Text this customer', 'Email this customer', 'Send this customer a te
     expect((await Context.validateRecordTarget({ customer_id: A }, task)).code).toBe('target_clarification_required');
   });
 
+test('"this stop" and "this visit" on a schedule panel resolve the appointment and its customer', async () => {
+  const appointment = '40000000-0000-4000-8000-000000000014';
+  rows.scheduled_services = [{ id: appointment, customer_id: B }];
+  for (const prompt of ["Show this stop's notes", 'Summarize this visit']) {
+    const task = await Context.resolve({ prompt, pageData: { appointment_id: appointment, customer_id: B } });
+    expect(task.target.customer_id).toBe(B);
+    expect(task.requestedRecords.appointment_id).toBe(appointment);
+    expect(await Context.validateRecordTarget({ service_id: appointment }, task, { toolName: 'get_stop_details' })).toBeNull();
+  }
+});
+
+test('route-wide writers are refused inside a customer-scoped task', async () => {
+  for (const [toolName, params] of [['optimize_all_routes', { date: '2026-09-09' }], ['optimize_tech_route', { date: '2026-09-09', technician_name: 'Synthetic Tech' }],
+    ['swap_tech_assignments', { date: '2026-09-09', tech_a_name: 'A', tech_b_name: 'B' }]]) {
+    expect(await Context.validateRecordTarget(params, context(), { toolName })).toMatchObject({ code: 'customer_scope_required' });
+    expect(await Context.validateRecordTarget(params, { targets: [] }, { toolName })).toBeNull();
+  }
+});
+
 test('a technician name in assignment is not an explicit customer selector', async () => {
   lookupRows = [rows.customers[0]];
   const appointment = '40000000-0000-4000-8000-000000000004';

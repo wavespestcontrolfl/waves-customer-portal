@@ -33,8 +33,12 @@ const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
-const NON_PERSON_NAMES = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
-const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
+const NON_PERSON_NAMES = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using',
+  'account', 'appointment', 'appointments', 'stop', 'stops', 'visit', 'visits', 'property', 'estimate', 'invoice', 'call', 'product', 'thread', 'route', 'schedule', 'week', 'month', 'year', 'yesterday']);
+// "this stop" / "this visit" on the schedule surfaces are the appointment.
+const RECORD_KIND_ALIASES = { account: 'customer', stop: 'appointment', visit: 'appointment' };
+const recordKind = word => RECORD_KIND_ALIASES[word.toLowerCase()] || word.toLowerCase();
+const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|stop|visit|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
 const CUSTOMER_LOOKUP_LIMIT = 10;
 
 function targetClause(prompt, retainRecordConstraints = false) {
@@ -55,7 +59,7 @@ function targetClause(prompt, retainRecordConstraints = false) {
   // After an explicit communication recipient, the requested message is
   // content: e.g. 'a reminder to call' cannot name a new customer 'call'.
   clause = clause.replace(/^(\s*(?:please\s+)?(?:text|sms|message|email|send|notify|tell)\s+(?:this|that|current|selected|viewed|open)\s+(?:customer|account))\s+(?:a|an|the)\s+(?:reminder|message|text|sms|email)\b.*$/i, '$1');
-  const opener = new RegExp(`^(\\s*(?:(?:please|can you|could you|would you|will you)\\s+)*(?:(?:${PERSON_ACTIONS}|set|rename|relabel|add|save)(?:\\s+(?:to|for))?|(?:draft|write|post|submit)\\s+(?:(?:a|the)\\s+)?(?:reply|response)\\s+(?:to|for)|send\\s+(?:a|an)\\s+(?:text|sms|message|reminder|email|reply)\\s+(?:to|for))\\s+)that(?=\\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\\b)`, 'i');
+  const opener = new RegExp(`^(\\s*(?:(?:please|can you|could you|would you|will you)\\s+)*(?:(?:${PERSON_ACTIONS}|set|rename|relabel|add|save)(?:\\s+(?:to|for))?|(?:draft|write|post|submit)\\s+(?:(?:a|the)\\s+)?(?:reply|response)\\s+(?:to|for)|send\\s+(?:a|an)\\s+(?:text|sms|message|reminder|email|reply)\\s+(?:to|for))\\s+)that(?=\\s+(?:customer|account|property|appointment|stop|visit|estimate|invoice|review|email|call|product|lead)\\b)`, 'i');
   return clause.replace(opener, '$1this').split(/\bthat\b/i)[0];
 }
 
@@ -204,8 +208,8 @@ function customerIds(records) {
 async function loadPage(pageData, prompt) {
   let ids = pageIds(pageData);
   if (ids.error) return ids;
-  const referencedKinds = new Set([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
-    .map(match => `${match[1].toLowerCase() === 'account' ? 'customer' : match[1].toLowerCase()}_id`));
+  const referencedKinds = new Set([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(customer|account|property|appointment|stop|visit|estimate|invoice|review|email|call|product|lead)\b/gi)]
+    .map(match => `${recordKind(match[1])}_id`));
   // A directly referenced available hint takes precedence over unrelated page
   // hints. With no direct customer hint, retain child-owner lookup as before.
   if (referencedKinds.size && [...referencedKinds].every(kind => ids[kind])) {
@@ -276,8 +280,8 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   const explicitReview = reviewClause.match(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i)?.[1];
   const reviewReference = explicitReview || (!namesRequested(prompt)
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
-  const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
-    .map(match => { const kind = `${match[1].toLowerCase()}_id`; return [kind, page.ids[kind] || null]; }));
+  const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|stop|visit|estimate|invoice|review|email|call|product|lead)\b/gi)]
+    .map(match => { const kind = `${recordKind(match[1])}_id`; return [kind, page.ids[kind] || null]; }));
   // Explicit current-request child IDs narrow even same-customer operations.
   // Keep all deliberately named records for compound requests; body text never
   // enters this clause and page hints cannot replace the explicit selection.
@@ -352,8 +356,16 @@ function bulkLeadSelection(toolName, records, params) {
   });
 }
 
+// Writers that act on every stop for a date or technician and carry no record
+// identifiers. A customer-scoped task cannot mint an approval for them: the
+// stored action would have no references for the confirm-time recheck.
+const ROUTE_WIDE_WRITERS = new Set(['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments']);
+
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   const policy = require('./action-policy.json')[toolName];
+  if (context.targets?.length && ROUTE_WIDE_WRITERS.has(toolName)) {
+    return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
+  }
   if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
     return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };
   }
@@ -423,6 +435,7 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_outreach_candidates', 'get_unresponded_reviews', 'search_reviews',
   'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
+  'get_email_suppressions', 'get_twilio_failed_messages',
 ]);
 
 const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
