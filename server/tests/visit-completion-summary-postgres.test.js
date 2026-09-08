@@ -497,8 +497,11 @@ postgres('visit summary recipient recovery', () => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     jest.spyOn(VisitGroups, 'beginVisitNotificationDispatch').mockRejectedValueOnce(new Error('Synthetic claim read outage'));
+    // The canonical sender converts a thrown check into a non-retryable
+    // PRE_DISPATCH_CHECK_FAILED block; only an explicit verdict carries retryable.
     sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
-      const verdict = await preDispatchCheck();
+      let verdict;
+      try { verdict = await preDispatchCheck(); } catch (err) { verdict = { ok: false, code: 'PRE_DISPATCH_CHECK_FAILED', reason: err.message }; }
       return verdict.ok ? { sent: true } : { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable === true };
     });
     expect(await deliver()).toEqual({ state: 'delivery_pending' });
