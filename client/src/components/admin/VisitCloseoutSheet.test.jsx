@@ -43,6 +43,28 @@ async function prepareBoth() {
   await screen.findByText('2 of 2 forms ready. Saved forms and photos stay on this device until the visit is recorded.');
 }
 
+it('retained terminal members need no form and one live member can close the visit', async () => {
+  adminFetch.mockImplementation(async (path, options) => {
+    if (options?.method === 'POST') return { packetId: 'packet', state: 'done' };
+    if (path.startsWith('/admin/schedule?')) return { services: [services[0]] };
+    return { visitId: 'visit', serviceDate: '2020-01-01', packet, members: [
+      { ...services[0], status: 'on_site' },
+      { id: 'gone', serviceType: 'Lawn Care', status: 'cancelled' },
+      { id: 'done', serviceType: 'Mosquito', status: 'completed' },
+    ] };
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Open form' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save fixture form' }));
+  await screen.findByText('1 of 1 forms ready. Saved forms and photos stay on this device until the visit is recorded.');
+  expect(screen.queryByText('Lawn Care')).not.toBeInTheDocument();
+  expect(screen.queryByText('Mosquito')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Complete visit' }));
+  await screen.findByText('Visit closeout is complete.');
+  const [, options] = adminFetch.mock.calls.find(([, opts]) => opts?.method === 'POST');
+  expect(JSON.parse(options.body).items.map((item) => item.serviceId)).toEqual(['one']);
+});
+
 it('requires every form and preserves the exact photo bodies and key across a reload', async () => {
   const view = mount();
   expect(await screen.findByRole('button', { name: 'Complete visit' })).toBeDisabled();

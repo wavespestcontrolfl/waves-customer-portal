@@ -5,6 +5,13 @@ import { CompletionPanel, createCompletionIdempotencyKey } from '../../pages/adm
 import { adminFetch } from '../../utils/admin-fetch';
 import { getCompletionResumeBody, putCompletionResumeBody, deleteCompletionResumeBody } from '../../lib/completion-resume-store';
 
+// A frozen visit retains its terminal children as history (the server's
+// TERMINAL_ROW_STATUSES); they never need a form. A completed member is only
+// history before a packet exists — once one does, it is a recorded member.
+const RETAINED_STATUSES = ['cancelled', 'skipped', 'no_show'];
+const liveMembers = (detail) => detail.members.filter((member) => !RETAINED_STATUSES.includes(member.status)
+  && (detail.packet || member.status !== 'completed'));
+
 const OUTCOMES = {
   completed: 'Completed', incomplete: 'Incomplete — office follow-up',
   inspection_only: 'Inspection only', customer_declined: 'Customer declined',
@@ -32,7 +39,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
       // A lost final response can leave a draft after the server finished.
       if (['done', 'failed'].includes(detail.packet?.status)) await deleteCompletionResumeBody(storageKey);
       const day = await adminFetch(`/admin/schedule?date=${encodeURIComponent(detail.serviceDate)}`);
-      const rows = detail.members.map((member) => (day.services || []).find((service) => service.id === member.id));
+      const rows = liveMembers(detail).map((member) => (day.services || []).find((service) => service.id === member.id));
       if (rows.some((row) => !row || row.visitId !== visitId)) throw new Error('The service list changed. Refresh the schedule before closing this visit.');
       if (!live) return;
       setVisit(detail);
@@ -45,7 +52,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
   const packet = visit?.packet;
   const finished = result ? ['done', 'office_required'].includes(result.state) : ['done', 'failed'].includes(packet?.status);
   const officeReview = result ? result.state === 'office_required' : packet?.status === 'failed' || packet?.officeReview;
-  const ready = services.length > 1 && services.every((service) => draft?.forms?.[service.id]?.body);
+  const ready = services.length > 0 && services.every((service) => draft?.forms?.[service.id]?.body);
   const prepared = services.filter((service) => draft?.forms?.[service.id]?.body).length;
 
   async function prepare(serviceId, body, formDraft) {
