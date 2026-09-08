@@ -873,3 +873,16 @@ test('ended coverage, a non-renewable bond, a prospective offering, a City suffi
   }
   expect(score('E8', 'Waves is a franchise of Orkin.').forbidden.franchise).toBe(true);
 });
+
+test('prospective coverage and a former franchise assert nothing; treatment and control verbs are service evidence (GitHub review r12 follow-up)', () => {
+  expect(score('E5', 'Waves plans to serve Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves will begin serving Sarasota and Charlotte counties next year.').right).toBe(0);
+  expect(score('E5', 'Waves serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E8', 'Waves was formerly a franchise but is now independently owned.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false } });
+  expect(score('E8', 'Waves is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves controls mosquitoes and rodents.')).toMatchObject({ expected: { mosquito: true, rodent: true } });
+  expect(score('E6', 'Waves eliminates termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves does not treat termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves controls ants but not rodents.').expected.rodent).toBe(false);
+  expect(score('E6', 'Orkin controls termites.').expected.termite).toBe(false);
+});
