@@ -107,7 +107,15 @@ function isCommitment(text) {
     if (!own && carried && coordinated && commits(`${carried} ${clause.trim()}`)) return true;
     // A fragment with its own subject resets the carry; a coordinated fragment
     // without one ("… and then reach out") keeps it; any other break drops it.
-    if (own) carried = NON_COMMITMENT_PREFIX_RE.test(clause) ? null : own[1];
+    // A negation or condition before the subject, or a negation right after
+    // its modal ("I will not call you and get back later"), governs the carry;
+    // a condition inside the complement ("I'll check if the office has
+    // availability and get back to you") does not.
+    if (own) {
+      const negated = NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, own.index))
+        || /^\s*(?:not|never)\b/i.test(clause.slice(own.index + own[0].length));
+      carried = negated ? null : own[1];
+    }
     else if (!coordinated) carried = null;
   }
   return false;
@@ -484,6 +492,12 @@ function validateToolInput(name, input = {}, record) {
     if (String(input[field]).trim() === '') {
       return `Missing required argument "${field}" — nothing was done. Ask the caller for it and call ${name} again.`;
     }
+  }
+  // The live resolvers (relay-conversation resolveSlotRef / resolveLookupRef)
+  // trim and upper-case a handle before the lookup, so "s2" books S2 there —
+  // the same call must not read as an invented ref here.
+  for (const key of ['slot_ref', 'customer_ref']) {
+    if (typeof input[key] === 'string') input[key] = input[key].trim().toUpperCase();
   }
   if (name === 'request_booking' && !offeredRefs(record, SLOT_REF_RE).has(String(input.slot_ref))) {
     return `slot_ref "${input.slot_ref}" was not offered on this call — NOTHING was booked. Call find_slots and pass back a slot_ref it printed.`;
