@@ -290,7 +290,17 @@ generation consumed), then the succeeded intent is stamped
 failure leaves the saved method untouched (503). From then on the
 accept-time verify refuses the retired id (402 RECURRING_CARD_REQUIRED)
 and the deterministic mint follows `replaced_by` to the live capture, so
-a refresh lands on the replacement. Every minted/replayed intent is
+a refresh lands on the replacement. Replacement and acceptance serialize
+on the estimate ROW LOCK: the replacement runs in a transaction that
+locks the row (`FOR UPDATE`, read-only — no `updated_at` move, so the
+accept's freshness CAS is untouched) and the accept re-reads its verified
+intent live under the same lock before committing, so a retirement that
+landed after the pre-transaction verify aborts the accept (402 → re-mint)
+and a replacement that finds the estimate already accepted retires
+nothing (409). A chain head whose tender family no longer matches the
+current policy (bank-capable, minted while GATE_ACCEPT_ACH_CAPTURE was
+on) is skipped like a dead replay so the generation walk mints a
+compatible card-only intent. Every minted/replayed intent is
 re-read live before it is judged (an idempotent replay returns the
 original create body). A succeeded replay's response carries
 `capturedMethodType`, and the capture UIs render it as a saved-method

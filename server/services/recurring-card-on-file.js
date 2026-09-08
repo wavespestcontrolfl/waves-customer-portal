@@ -425,13 +425,28 @@ async function createRecurringCardSetupIntentForEstimate(estimate) {
         logger.warn(`[recurring-cof] replacement chain read failed from ${setupIntent.id}: ${err.message}`);
         return null;
       }
-      if (!head) continue;
+      // A replacement was minted under the tender policy of ITS moment; a
+      // head whose tender family no longer matches (bank-capable after the
+      // ACH gate closed, or card-only after it opened) is treated like a
+      // dead replay — the next generation's key is tender-salted, so it
+      // mints a compatible intent instead of advertising ['card'] over a
+      // bank the accept would refuse (pre-push Codex P1 r3).
+      if (!head || !intentTenderMatches(head, paymentMethodType)) continue;
       return shapeCaptureIntent(head, paymentMethodType);
     }
     return shapeCaptureIntent(setupIntent, paymentMethodType);
   }
   logger.error(`[recurring-cof] exhausted SetupIntent generations for estimate ${estimate.id} — all replays terminal`);
   return null;
+}
+
+// Does a live intent's tender family match what the current policy would
+// mint? (The generation keys are salted by this, so only a replacement
+// chain head can drift.)
+function intentTenderMatches(setupIntent, paymentMethodType) {
+  const bankCapable = Array.isArray(setupIntent?.payment_method_types)
+    && setupIntent.payment_method_types.includes('us_bank_account');
+  return bankCapable === (paymentMethodType === 'card_or_bank');
 }
 
 // Retirement stamp (replaceRecurringCardIntent): the customer replaced this
@@ -493,28 +508,57 @@ async function replaceRecurringCardIntent({ estimate, setupIntentId }) {
     return intent ? { ok: true, intent, retired: false } : { ok: false, reason: 'mint_failed' };
   }
   const paymentMethodType = await resolveRecurringCaptureTender(estimate);
-  let replacement = null;
+  // Serialized with the accept on the estimate ROW LOCK (pre-push Codex P1
+  // r3): the accept's first write is a guarded UPDATE of this row that
+  // holds the lock to commit, and it re-reads the intent live under that
+  // lock (verifyRecurringCardIntentUnderLock). So either the retirement
+  // commits first and the accept 402s on it, or the accept commits first
+  // and this sees `accepted` and retires nothing. Read-only on the row —
+  // an UPDATE here would move updated_at and 409 the accept's CAS.
+  return db.transaction(async (trx) => {
+    const row = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'status', 'accepted_at');
+    if (!row) return { ok: false, reason: 'intent_mismatch' };
+    if (row.status === 'accepted' || row.accepted_at) return { ok: false, reason: 'estimate_accepted' };
+    let replacement = null;
+    try {
+      const created = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, paymentMethodType, replacing: current.id });
+      replacement = created ? await readLiveSetupIntent(created.id) : null;
+    } catch (err) {
+      logger.warn(`[recurring-cof] replace: replacement mint failed for ${current.id}`, { error: err.message });
+      return { ok: false, reason: 'mint_failed' };
+    }
+    // The replacement key is deterministic per retired id, so a replay that
+    // has itself been retired or canceled cannot be offered — nothing is
+    // retired in that case and the customer keeps the saved method.
+    if (!replacement || replacement.status === 'canceled' || isRetiredSetupIntent(replacement)) {
+      return { ok: false, reason: 'mint_failed' };
+    }
+    try {
+      await StripeService.retireSetupIntent(current.id, { replacedBy: replacement.id });
+    } catch (err) {
+      logger.warn(`[recurring-cof] replace: retire stamp failed for ${current.id}`, { error: err.message });
+      return { ok: false, reason: 'retire_failed' };
+    }
+    logger.info(`[recurring-cof] retired succeeded SetupIntent ${current.id} for estimate ${estimate.id} → replaced by ${replacement.id} (customer chose a different payment method)`);
+    return { ok: true, intent: await shapeCaptureIntent(replacement, paymentMethodType), retired: true };
+  });
+}
+
+// In-transaction re-check of the verified intent under the accept's row lock
+// (pre-push Codex P1 r3): the pre-transaction verify can be a moment stale —
+// a replacement from another tab/request retires the intent between that
+// verify and the commit, and the enrollment would save the retired method.
+// Same lock the replacement takes, so the two are serialized. True when the
+// intent is still a live succeeded capture; a read failure fails closed.
+async function verifyRecurringCardIntentUnderLock({ setupIntentId }) {
+  if (!setupIntentId) return false;
   try {
-    const created = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, paymentMethodType, replacing: current.id });
-    replacement = created ? await readLiveSetupIntent(created.id) : null;
+    const setupIntent = await StripeService.retrieveSetupIntent(setupIntentId);
+    return !!setupIntent && setupIntent.status === 'succeeded' && !isRetiredSetupIntent(setupIntent);
   } catch (err) {
-    logger.warn(`[recurring-cof] replace: replacement mint failed for ${current.id}`, { error: err.message });
-    return { ok: false, reason: 'mint_failed' };
+    logger.warn('[recurring-cof] in-lock SetupIntent re-check failed — refusing', { error: err.message });
+    return false;
   }
-  // The replacement key is deterministic per retired id, so a replay that
-  // has itself been retired or canceled cannot be offered — nothing is
-  // retired in that case and the customer keeps the saved method.
-  if (!replacement || replacement.status === 'canceled' || isRetiredSetupIntent(replacement)) {
-    return { ok: false, reason: 'mint_failed' };
-  }
-  try {
-    await StripeService.retireSetupIntent(current.id, { replacedBy: replacement.id });
-  } catch (err) {
-    logger.warn(`[recurring-cof] replace: retire stamp failed for ${current.id}`, { error: err.message });
-    return { ok: false, reason: 'retire_failed' };
-  }
-  logger.info(`[recurring-cof] retired succeeded SetupIntent ${current.id} for estimate ${estimate.id} → replaced by ${replacement.id} (customer chose a different payment method)`);
-  return { ok: true, intent: await shapeCaptureIntent(replacement, paymentMethodType), retired: true };
 }
 
 // Accept GATE (pre-commit): live-verify the named SetupIntent WITHOUT writing.
@@ -1494,6 +1538,7 @@ module.exports = {
   replaceRecurringCardIntent,
   resolveRecurringCaptureTender,
   verifyRecurringCardIntent,
+  verifyRecurringCardIntentUnderLock,
   bankTenderAllowedUnderLock,
   completeRecurringCardEnrollment,
   _private: {
