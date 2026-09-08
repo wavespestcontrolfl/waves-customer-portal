@@ -25,6 +25,9 @@ const { firstNameFrom } = require("./customer-contact");
 // 43-char shortened link); email has no segment budget.
 const TECH_FALLBACK = "Your technician";
 const TECH_FALLBACK_SMS = "Your tech";
+// Legacy (non-cadence) post-service ask: a separate text this long after
+// completion when the operator picks no timing.
+const LEGACY_REVIEW_DELAY_MINUTES = 120;
 
 // First name from the technician row when an ask carries technician_id but no
 // tech_name (override callers, legacy rows). Null when unknown.
@@ -412,14 +415,29 @@ function nextTouchRunAt({ startedAt, step, now = new Date() }) {
  * whether the owner has anything to do — a routine deferral is
  * ownerAction 'none', never a send/drop question.
  */
-function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none" }) {
+function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null }) {
   return JSON.stringify({
     reason,
     plannedAt: plannedAt ? new Date(plannedAt).toISOString() : null,
     nextEvalAt: nextEvalAt ? new Date(nextEvalAt).toISOString() : null,
     ownerAction,
     at: new Date().toISOString(),
+    // A parked series final keeps the enrollment's own reason so redemption
+    // re-labels the active sequence honestly (codex #4140 r1).
+    ...(enrollmentReason ? { enrollmentReason } : {}),
   });
+}
+// A send claim (next_run_at NULL on an active row) older than this is not a
+// live send — same horizon the deferred-final sweep uses for a stale lease.
+const SEND_CLAIM_STALE_MS = 15 * 60 * 1000;
+function claimIsStale(row) {
+  const t = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+  return !t || Date.now() - t > SEND_CLAIM_STALE_MS;
+}
+function parseDecision(v) {
+  if (!v) return null;
+  if (typeof v === "object") return v;
+  try { return JSON.parse(v); } catch { return null; }
 }
 
 /**
@@ -1499,7 +1517,7 @@ const ReviewService = {
         serviceRecordId: invoice.service_record_id,
         triggeredBy: "auto",
         delayMinutes,
-        legacyDelayMinutes: 120,
+        legacyDelayMinutes: LEGACY_REVIEW_DELAY_MINUTES,
         customerRequested: notes.customerRequestedReview && typeof notes.customerRequestedReview === "object"
           ? notes.customerRequestedReview
           : null,
@@ -3943,14 +3961,23 @@ const ReviewService = {
    * started_at carries the intended firstTouchAt; completed_at records the
    * parking time for the 24h age cap. Write failures propagate.
    */
-  async _parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal }) {
+  async _parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested = null, decision = null }) {
     const existingPark = await db("review_sequences")
       .where({ customer_id: customerId })
       .whereIn("status", ["deferred", "redeeming"])
       .first();
     if (existingPark) return;
+    const parkAt = new Date(Date.now() + 10 * 60 * 1000);
     await db("review_sequences").insert({
       customer_id: customerId,
+      // The completion panel's "Customer asked for the link" and the
+      // enrollment's reason ride the park so redemption keeps both.
+      customer_requested: customerRequested ? JSON.stringify(customerRequested) : null,
+      decision: sequenceDecision({
+        reason: "opener_in_flight",
+        nextEvalAt: parkAt,
+        enrollmentReason: parseDecision(decision)?.reason || null,
+      }),
       // Canonical resolution at park time — the sweep later passes this back
       // as an EXPLICIT locationId, so persisting raw nearest_location_id here
       // would bypass the resolver and send the redeemed final cadence to the
@@ -3962,7 +3989,7 @@ const ReviewService = {
       plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),
       current_step: 0,
       touches_sent: 0,
-      next_run_at: new Date(Date.now() + 10 * 60 * 1000),
+      next_run_at: parkAt,
       series_final: seriesFinal === true,
       service_record_id: serviceRecordId || null,
       scheduled_service_id: scheduledServiceId || null,
@@ -4049,7 +4076,7 @@ const ReviewService = {
         // Deliberately OUTSIDE the proof's catch (r26 P2): a parking-write
         // failure must propagate to the caller, never degrade into
         // already_active with no retry.
-        await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal });
+        await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested, decision });
         return { started: false, reason: "deferred_inflight", deferred: true };
       }
       if (!supersedeOpenerId && !proceedFresh) return { started: false, reason: "already_active", sequence: active };
@@ -4213,7 +4240,7 @@ const ReviewService = {
           started_at: new Date(),
           customer_requested: customerRequested ? JSON.stringify(customerRequested) : null,
           decision: decision || sequenceDecision({
-            reason: firstTouchAt ? "operator_timing" : "immediate",
+            reason: customerRequested ? "customer_requested" : firstTouchAt ? "operator_timing" : "immediate",
             plannedAt: firstTouchAt || new Date(),
             nextEvalAt: firstTouchAt || new Date(),
           }),
@@ -4234,7 +4261,7 @@ const ReviewService = {
           // The cron CLAIMED the opener between the proof and the commit
           // (codex #3243 r27 P2) — its send is now in flight, so the final
           // parks durably instead of vanishing into already_active.
-          await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal });
+          await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested, decision });
           return { started: false, reason: "deferred_inflight", deferred: true };
         }
         if (existing) return { started: false, reason: "already_active", sequence: existing };
@@ -4575,11 +4602,13 @@ const ReviewService = {
       return stop("opted_out");
     }
 
-    // Deferred / transient → retry this step later without advancing. A
-    // send-window hold (nextAllowedAt) is a planned send; a provider blip is
-    // a re-check.
+    // Deferred / transient → retry this step later without advancing. Only a
+    // real quiet-hours hold is a planned send at the window; every other
+    // deferral (provider blip, consent lookup, push in flight) carries a
+    // synthesized nextAllowedAt too, so classify by the outcome code, not by
+    // the presence of a retry time (codex #4140 r1).
     const retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
-    const decision = outcome.nextAllowedAt
+    const decision = outcome.code === "QUIET_HOURS_HOLD"
       ? sequenceDecision({ reason: "send_window", plannedAt: retryAt, nextEvalAt: retryAt })
       : sequenceDecision({ reason: outcome.reason || "provider_retry", nextEvalAt: retryAt });
     await db("review_sequences").where({ id: seq.id }).update({ next_run_at: retryAt, decision, updated_at: new Date() });
@@ -4634,6 +4663,14 @@ const ReviewService = {
           scheduledServiceId: row.scheduled_service_id,
           firstTouchAt: row.started_at ? new Date(row.started_at) : null,
           seriesFinal: row.series_final === true,
+          customerRequested: parseDecision(row.customer_requested),
+          decision: parseDecision(row.decision)?.enrollmentReason
+            ? sequenceDecision({
+              reason: parseDecision(row.decision).enrollmentReason,
+              plannedAt: row.started_at || new Date(),
+              nextEvalAt: row.started_at || new Date(),
+            })
+            : null,
         });
       } catch (err) {
         logger.error(`[review] deferred enrollment redeem failed (customerId=${row.customer_id} errType=${err?.name || "Error"})`);
@@ -5194,21 +5231,22 @@ const ReviewService = {
     const map = {};
     rows.forEach((r) => {
       const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
-      const parseJson = (v) => {
-        if (!v) return null;
-        if (typeof v === "object") return v;
-        try { return JSON.parse(v); } catch { return null; }
-      };
+
       map[r.customer_id] = {
         id: r.id,
         currentStep: r.current_step,
         totalSteps: plan.length,
         nextRunAt: r.next_run_at,
         // next_run_at NULL on an active row = the runner holds the send claim
-        // right now (or an inline start is in progress).
-        sending: r.next_run_at == null,
-        decision: parseJson(r.decision),
-        customerRequested: parseJson(r.customer_requested),
+        // right now (or an inline start is in progress). The claim stamps
+        // updated_at; one older than the runner's own reconciliation horizon
+        // is a stranded claim (process exit mid-send), not a live one — the
+        // cron never re-selects a NULL schedule, so say so instead of
+        // "Sending now" forever (codex #4140 r1).
+        sending: r.next_run_at == null && !claimIsStale(r),
+        stranded: r.next_run_at == null && claimIsStale(r),
+        decision: parseDecision(r.decision),
+        customerRequested: parseDecision(r.customer_requested),
       };
     });
     return map;
@@ -5439,5 +5477,6 @@ ReviewService.__private = {
 // raw /rate/<token> URL, which bypasses the gate and the click stamp.
 ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
 ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
+ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
 
 module.exports = ReviewService;

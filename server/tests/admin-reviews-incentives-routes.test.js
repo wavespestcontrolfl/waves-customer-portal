@@ -37,3 +37,16 @@ describe('GET /api/admin/reviews/stats — removed reviews excluded everywhere',
     expect(filtered).toBe(aggregates);
   });
 });
+
+describe('GET /api/admin/reviews/send-time-preview — staff-scoped', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-reviews.js'), 'utf8');
+
+  test('mounted ahead of the router-wide admin guard with its own auth + tech-or-admin check (codex #4140 r1)', () => {
+    // The shared CompletionPanel is used by technicians; a route after
+    // router.use(adminAuthenticate, requireAdmin) can never widen access.
+    const route = source.indexOf("router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin,");
+    const guard = source.indexOf('router.use(adminAuthenticate, requireAdmin);');
+    expect(route).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(route);
+  });
+});

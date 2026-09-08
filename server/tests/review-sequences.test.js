@@ -712,7 +712,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     test('a send-window hold records the planned send; a sent touch records the scheduled follow-up', async () => {
       mockGates.reviewSequences = true;
       const nextAllowedAt = new Date(Date.now() + 9 * 3600000);
-      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deferred: true, nextAllowedAt: nextAllowedAt.toISOString(), code: 'SEND_WINDOW' });
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deferred: true, nextAllowedAt: nextAllowedAt.toISOString(), code: 'QUIET_HOURS_HOLD' });
       const mock = makeMock({
         customers: [{ id: 'dc-4', first_name: 'Mae', last_name: 'R', phone: '+19410000135', nearest_location_id: 'venice' }],
         review_sequences: [{
@@ -735,6 +735,78 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const d = parse(sent.decision);
       expect(d.reason).toBe('follow_up_scheduled');
       expect(new Date(d.plannedAt).getTime()).toBe(sent.next_run_at.getTime());
+    });
+
+    test('a provider blip with a synthesized retry time is a re-check, not a send-window hold (codex #4140 r1)', async () => {
+      mockGates.reviewSequences = true;
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deferred: true, retryable: true, nextAllowedAt: new Date(Date.now() + 5 * 60000).toISOString(), code: 'PROVIDER_FAILURE' });
+      const mock = makeMock({
+        customers: [{ id: 'dc-6', first_name: 'Mae', last_name: 'R', phone: '+19410000136', nearest_location_id: 'venice' }],
+        review_sequences: [{
+          id: 'seq-dc6', customer_id: 'dc-6', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.processReviewSequences();
+      const d = parse(mock.__state.rows.review_sequences[0].decision);
+      expect(d.reason).not.toBe('send_window');
+      expect(d.plannedAt).toBeNull();
+      expect(d.nextEvalAt).toBeTruthy();
+    });
+
+    test('a stale send claim reads as stranded, a fresh one as sending (codex #4140 r1)', async () => {
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-dc7', customer_id: 'dc-7', status: 'active', current_step: 0, plan: JSON.stringify([{ day: 0 }]), next_run_at: null, updated_at: new Date(Date.now() - 20 * 60000) },
+          { id: 'seq-dc8', customer_id: 'dc-8', status: 'active', current_step: 0, plan: JSON.stringify([{ day: 0 }]), next_run_at: null, updated_at: new Date() },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      const map = await ReviewService.getActiveSequencesForCustomers(['dc-7', 'dc-8']);
+      expect(map['dc-7']).toMatchObject({ sending: false, stranded: true });
+      expect(map['dc-8']).toMatchObject({ sending: true, stranded: false });
+    });
+
+    test('"Customer asked for the link" survives a parked series final and its redemption (codex #4140 r1)', async () => {
+      mockGates.reviewSequences = true;
+      const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+      const mock = makeMock({
+        customers: [{ id: 'pk2', first_name: 'Ann', last_name: 'Q', phone: '+19410000168', nearest_location_id: 'bradenton' }],
+        service_records: [{ id: 'sr-pk2', customer_id: 'pk2', scheduled_service_id: 'pk2-2' }],
+        scheduled_services: [
+          { id: 'pk2-1', customer_id: 'pk2', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+          { id: 'pk2-2', customer_id: 'pk2', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+        ],
+        review_sequences: [{ id: 'seq-stuck2', customer_id: 'pk2', scheduled_service_id: 'pk2-1', status: 'active', current_step: 0, next_run_at: null, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
+      });
+      db.mockImplementation(mock);
+      const prev = ReviewService._SUPERSEDE_RETRY_DELAY_MS;
+      ReviewService._SUPERSEDE_RETRY_DELAY_MS = 1;
+      const requested = { by: 'tech-1', byName: 'Adam', at: new Date().toISOString(), source: 'completion_panel' };
+      let res;
+      try {
+        res = await ReviewService.enrollPostService({ customerId: 'pk2', serviceRecordId: 'sr-pk2', completedAt: new Date(), delayMinutes: 0, customerRequested: requested });
+      } finally {
+        ReviewService._SUPERSEDE_RETRY_DELAY_MS = prev;
+      }
+      expect(res.reason).toBe('deferred_inflight');
+      const parked = mock.__state.rows.review_sequences.find((r) => r.status === 'deferred');
+      expect(parse(parked.customer_requested)).toMatchObject({ by: 'tech-1', source: 'completion_panel' });
+      expect(parse(parked.decision)).toMatchObject({ reason: 'opener_in_flight', enrollmentReason: 'customer_requested' });
+
+      mock.__state.rows.review_sequences.find((r) => r.id === 'seq-stuck2').status = 'completed';
+      parked.next_run_at = new Date(Date.now() - 1000);
+      const out = await ReviewService.processReviewSequences();
+      expect(out.redeemed).toBe(1);
+      const active = mock.__state.rows.review_sequences.find((r) => r.status === 'active');
+      expect(parse(active.customer_requested)).toMatchObject({ by: 'tech-1', source: 'completion_panel' });
+      // The redeemed Day-0 was already due, so the runner may have sent it in
+      // the same sweep and moved the decision on — never to operator_timing.
+      expect(['customer_requested', 'follow_up_scheduled']).toContain(parse(active.decision).reason);
     });
 
     test('getActiveSequencesForCustomers exposes the parsed decision and the request capture', async () => {

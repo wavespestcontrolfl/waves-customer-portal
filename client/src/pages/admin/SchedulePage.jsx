@@ -38,7 +38,7 @@ import CompletionPricingCard from "../../components/schedule/CompletionPricingCa
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
-import { addETDays, etDateString, formatETDateTime } from "../../lib/timezone";
+import { addETDays, etDateString, etDatetimeLocalToISO, formatETDateTime } from "../../lib/timezone";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -348,8 +348,11 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview }) {
   }
   if (reviewTiming === "tomorrow_8") return "Review text goes out separately tomorrow at 8:00 AM.";
   if (reviewTiming === "custom") {
-    const t = reviewCustomAt ? new Date(reviewCustomAt) : null;
-    return t && !Number.isNaN(t.getTime()) ? `Review text goes out separately ${fmt(t)}.` : "Choose a time for the review text.";
+    // The datetime-local value is an ET wall clock (the server parses it with
+    // parseETDateTime) — never `new Date(value)`, which reads it in the
+    // browser's zone (codex #4140 r1).
+    const iso = etDatetimeLocalToISO(reviewCustomAt);
+    return iso ? `Review text goes out separately ${fmt(iso)}.` : "Choose a time for the review text.";
   }
   return "";
 }
@@ -11900,13 +11903,19 @@ export function CompletionPanel({
     if (!willReview || oneTimeRecapOnly) return undefined;
     let cancelled = false;
     const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
-    fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => { if (!cancelled && data) setReviewSendPreview(data); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    const load = () =>
+      fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => { if (!cancelled && data) setReviewSendPreview(data); })
+        .catch(() => {});
+    load();
+    // The smart window is bucketed by time of day, so a panel left open
+    // across a boundary (2:59 → 3:00 PM) must not keep showing the old
+    // answer (codex #4140 r1).
+    const timer = setInterval(load, 60 * 1000);
+    return () => { cancelled = true; clearInterval(timer); };
   }, [service?.id, service?.serviceType, willReview, oneTimeRecapOnly]);
   const recapStatusText = recapLoading
     ? "Drafting customer recap..."

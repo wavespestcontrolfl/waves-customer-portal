@@ -312,9 +312,9 @@ const DECISION_LABELS = {
   operator_timing: "Day-0 ask at the time chosen on the completion panel",
   customer_requested: "Customer asked for the link — next cadence tick",
   immediate: "First touch sending now",
-  follow_up_scheduled: "Follow-up scheduled (3-day spacing after the last ask)",
+  opener_in_flight: "Series final parked until the opener's send settles",
+  follow_up_scheduled: "Follow-up scheduled",
   send_window: "Held for the 8 AM–8 PM send window",
-  spacing: "Waiting for the 3-day spacing after the last ask",
   provider_retry: "Provider retry",
   send_error_retry: "Send error — retrying",
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
@@ -323,6 +323,7 @@ const DECISION_LABELS = {
 function decisionLine(seq) {
   if (!seq) return null;
   if (seq.sending) return "Sending now · Owner action: none";
+  if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
   const d = seq.decision || {};
   const label = DECISION_LABELS[d.reason] || (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
   const when = seq.nextRunAt || d.plannedAt || d.nextEvalAt;

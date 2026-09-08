@@ -409,8 +409,8 @@ function parseCompletionReviewDelayMinutes(body = {}) {
     Object.prototype.hasOwnProperty.call(body, 'reviewScheduledFor');
   if (!hasExplicitTiming) return undefined;
 
-  // "Automatic (recommended)" = no operator override: legacy 120-min default,
-  // cadence smart send window (calculateReviewSendTime).
+  // "Automatic (recommended)" = no operator override: legacy 120-min separate
+  // ask (never bundled), cadence smart send window (calculateReviewSendTime).
   if (body.reviewTiming === 'auto') return undefined;
   // 'now' is the legacy value (still posted by the one-time recap path);
   // 'customer_requested' is the panel's "Customer asked for the link" — same
@@ -10212,7 +10212,12 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
-      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0) &&
+      // Only an operator-chosen immediate ask rides inside the completion
+      // text. No timing ("Automatic", or a client that sent none) is the
+      // legacy 120-minute separate ask that enrollPostService schedules
+      // below — bundling it instantly contradicted both that schedule and
+      // the panel's preview (codex #4140 r1).
+      completionReviewDelayMinutes === 0 &&
       // Cadence mode owns the ask: the review link is its own Day-0 message at
       // the smart send window, never bundled into the completion/receipt SMS
       // (bundling would also dodge the sequence's cap/cooldown bookkeeping).
@@ -10247,9 +10252,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     const bundledReviewRetryAt = (sendResult = {}) => {
       const explicit = sendResult.nextAllowedAt ? new Date(sendResult.nextAllowedAt) : null;
       if (explicit && !Number.isNaN(explicit.getTime())) return explicit;
-      const delayMinutes = completionReviewDelayMinutes === undefined
-        ? 120
-        : Math.max(5, Number(completionReviewDelayMinutes) || 5);
+      // A bundled ask only exists for an explicit immediate timing, so the
+      // retry is a short back-off, never the legacy 120-minute schedule.
+      const delayMinutes = Math.max(5, Number(completionReviewDelayMinutes) || 5);
       return new Date(Date.now() + delayMinutes * 60000);
     };
     const markBundledReviewFailed = async (sendResult = {}) => {
@@ -11529,7 +11534,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           // it wins in both modes (Codex P2, r2). Untouched selector =
           // undefined = legacy 120-min default / cadence smart window.
           delayMinutes: completionReviewDelayMinutes,
-          legacyDelayMinutes: 120,
+          legacyDelayMinutes: ReviewService.LEGACY_REVIEW_DELAY_MINUTES,
           customerRequested: customerRequestedReview,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
