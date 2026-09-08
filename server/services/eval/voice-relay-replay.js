@@ -246,10 +246,22 @@ function lintExpectation(e, i, knownTools) {
 
 // Scenario-level rules, each [problem-when-true, message], in two tables:
 // the scenario's shape, and its fixtures.
+// Every key a scenario may carry — a misspelled optional key (`allowedToolInput`)
+// would otherwise be ignored and grade a replay without the restriction the
+// author wrote.
+const SCENARIO_KEYS = new Set(['id', 'description', 'language', 'gates', 'allowedTools', 'allowedToolInputs', 'caller', 'fixtures', 'turns', 'spec', 'expect']);
+const FIXTURE_KEYS = new Set(['officeHours', 'toolResponses', 'resume', 'modelFailures']);
+
 function scenarioShapeRules(s) {
   const turns = Array.isArray(s.turns) ? s.turns : [];
   const spec = s.spec && typeof s.spec === 'object' ? s.spec : null;
+  const fx = s.fixtures && typeof s.fixtures === 'object' ? s.fixtures : {};
   return [
+    ...Object.keys(s).filter((k) => !SCENARIO_KEYS.has(k)).map((k) => [true, `unknown scenario key "${k}"`]),
+    ...Object.keys(fx).filter((k) => !FIXTURE_KEYS.has(k)).map((k) => [true, `fixtures: unknown key "${k}"`]),
+    // Live recovery releases an earlier segment only behind the recovery gate
+    // and a verified session; a resume outside both is a call that never happens.
+    [fx.resume != null && !(s.gates && s.gates.recovery === true && s.caller && s.caller.verified === true), 'fixtures.resume requires gates.recovery: true and caller.verified: true'],
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
     [!s.caller || typeof s.caller.from !== 'string' || !/^\+1\d{10}$/.test(s.caller.from), 'caller.from must be an E.164 US number'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
@@ -515,7 +527,7 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
 // missing piece completes the request. The fixture matcher sees that same
 // view — this call's non-empty fields, then the latest earlier answered
 // capture's, and so on back; a call the tool refused never accumulated.
-const ESTIMATE_FIELDS = Object.freeze(['first_name', 'last_name', 'email', 'address_line1']);
+const ESTIMATE_FIELDS = Object.freeze(['first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'requested_service', 'pain_points']); // relay-tools' estimateFields, every key
 function matcherInput(record, event, name, input) {
   if (name !== 'capture_lead') return input;
   const { isValidEmail } = require('../../utils/internal-email-recipients');
@@ -1240,7 +1252,7 @@ module.exports = {
   summaryLine,
   isFailedVoiceRun,
   _internals: {
-    PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, allowedToolsCheck, validCallNames,
+    PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, ESTIMATE_FIELDS, allowedToolsCheck, validCallNames,
     makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, scenarioStatus, qualityScore, summarize,
   },
