@@ -661,12 +661,17 @@ export default function ReviewVelocityEngine() {
     async (customer, opts = {}) => {
       const svcType = customer.lastSvc;
       try {
+        // `techName` is sent as-is (null when the candidates feed carries no
+        // technician): the route coalesces null to "no tech" and resolves the
+        // sender from the record. Keep this request expression byte-identical
+        // to main — the IB coverage gate fingerprints it, and its operation
+        // has not changed.
         const res = await adminFetch("/admin/reviews/send-request", {
           method: "POST",
           body: JSON.stringify({
             customerId: customer.id,
             serviceType: svcType,
-            ...(customer.lastTech ? { techName: customer.lastTech } : {}),
+            techName: customer.lastTech,
             ...(opts.templateId ? { templateId: opts.templateId } : {}),
             ...(opts.body ? { body: opts.body } : {}),
           }),
