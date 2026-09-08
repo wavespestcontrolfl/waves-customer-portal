@@ -89,18 +89,24 @@ test('every supported action verb supplies name evidence against a stale selecti
 });
 
 test('field nouns after an action are not person names', async () => {
-  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency']) {
+  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency', 'Update customer city', 'Set waveguard tier', "Let's update this customer", 'Update customer first name']) {
     const task = await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } });
     expect(task.target).toMatchObject({ customer_id: A, provenance: 'operator_selection' });
   }
 });
 
 test('quantifier spellings are normalized and contact literals are ignored', async () => {
-  for (const prompt of ['Update all of those customers using this customer', 'Update these  customers Synthetic Person and Synthetic Second', 'Update those customers']) {
+  for (const prompt of ['Update all of those customers using this customer', 'Update these  customers Synthetic Person and Synthetic Second', 'Update those customers', 'Update all customers', 'Text each customer', 'Remind every customer']) {
     expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
   }
   const emailed = await Context.resolve({ prompt: 'Reply to both@example.invalid', pageData: {} });
   expect(emailed).toMatchObject({ ambiguous: false, explicitEmails: ['both@example.invalid'] });
+  expect(await Context.resolve({ prompt: 'Update all customers', pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  lookupRows = [rows.customers[0]];
+  const localPart = await Context.resolve({ prompt: 'Reply to synthetic.person@example.invalid', pageData: {} });
+  expect(localPart).toMatchObject({ candidates: [], target: null, explicitEmails: ['synthetic.person@example.invalid'] });
+  const nullSelection = await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: A }, selectedTarget: null });
+  expect(nullSelection.target.customer_id).toBe(A);
 });
 
 test('a broken page hint fails closed for a page-referencing request even with a selection', async () => {

@@ -199,6 +199,11 @@ non-names so "Update customer status" keeps a selected customer, and took the
 resolver under the structural threshold by making a broken page hint fail
 closed for a page-referencing request even when a selection is supplied.
 
+The second round added the ordinary set spellings (`all customers`,
+`each`/`every customer`), stripped contact literals before the full-name
+lookup as well, listed every `update_customer` field and the opening
+contractions as non-names, and reads a `null` selection as absent.
+
 Validation: 157 target cases pass (133 unit and 24 rollback-only isolated
 PostgreSQL cases). No model, provider, production query, migration, merge or
 gate change occurred.

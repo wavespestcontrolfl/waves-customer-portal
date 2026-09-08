@@ -30,11 +30,14 @@ const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
-const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'status', 'billing', 'type', 'plan', 'frequency', 'autopay', 'balance', 'schedule', 'tags', 'tag', 'preferences', 'details', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
+const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'status', 'billing', 'type', 'plan', 'frequency', 'autopay', 'balance', 'schedule', 'tags', 'tag', 'preferences', 'details',
+  // every update_customer field (tools.js) and the contractions a request may open with
+  'first', 'last', 'city', 'state', 'zip', 'waveguard', 'tier', 'pipeline', 'stage', 'source', 'monthly', 'rate', 'mode', 'membership',
+  'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
 // A set quantifier ("both A and B", "these customers …", "all of these …") is
 // never a target: one target per request, so the request asks to clarify.
 // Owner decision 2026-09-08: fail closed rather than parse cohorts.
-const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those) customers|all of (?:these|those))\b/;
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all) customers|all of (?:these|those)|(?:each|every) customer)\b/;
 const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
 // An explicit email or phone recipient is a contact, never a name or a quantifier.
 const withoutContacts = clause => clause.replace(CONTACT_LITERAL_RE, ' ');
@@ -117,7 +120,7 @@ function namesTargetCustomer(clause, customer) {
 }
 
 async function namedCustomers(prompt) {
-  const normalized = normalizeName(targetClause(prompt));
+  const normalized = normalizeName(withoutContacts(targetClause(prompt)));
   const words = normalized.split(' ').slice(0, 300);
   const phrases = [];
   for (let length = 2; length <= 5; length++) {
@@ -233,7 +236,9 @@ function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort
   return { target: target || null, targets: target ? [target] : [], ambiguous: false };
 }
 
-async function resolve({ prompt, pageData, selectedTarget = {} }) {
+async function resolve({ prompt, pageData, selectedTarget }) {
+  // Object(null) is {} — an absent or null selection reads as no customer id.
+  const selectedId = Object(selectedTarget).customer_id;
   const [page, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
   const named = namedResult.matches;
   // A stale page hint cannot block an unrelated task or an explicitly named
@@ -242,8 +247,8 @@ async function resolve({ prompt, pageData, selectedTarget = {} }) {
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
   const cohort = setQuantified(prompt);
   let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort);
-  if (selectedTarget.customer_id) {
-    const selected = await customerById(selectedTarget.customer_id);
+  if (selectedId) {
+    const selected = await customerById(selectedId);
     // A selection never overrides current-request evidence: an explicit name
     // that matched nothing, a capped lookup, or a set quantifier all refuse
     // it. Duplicate-name ambiguity is the one case a selection resolves.
