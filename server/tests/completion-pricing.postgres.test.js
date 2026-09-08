@@ -1,18 +1,23 @@
 /** Real PostgreSQL verification; run with COMPLETION_PRICING_TEST_DATABASE_URL
- * pointing to a disposable, schema-only local database. Every fixture rolls back. */
+ * pointing to a disposable local, managed worktree QA, or isolated CI database. Every fixture rolls back. */
 jest.setTimeout(60000);
 const { randomUUID } = require('crypto');
 const testUrl = process.env.COMPLETION_PRICING_TEST_DATABASE_URL;
 const local = testUrl && ['localhost', '127.0.0.1'].includes(new URL(testUrl).hostname)
   && new URL(testUrl).pathname.includes('completion_qa');
-if (testUrl && !local) throw new Error('Completion pricing tests require a dedicated local completion_qa database.');
-const suite = local ? describe : describe.skip;
+const managed = testUrl && process.env.WAVES_LOCAL_DEV === '1' && process.env.WAVES_WORKTREE_ID
+  && testUrl === process.env.DATABASE_URL
+  && new URL(testUrl).pathname === `/waves_qa_${process.env.WAVES_WORKTREE_ID.replaceAll('-', '')}`;
+const ci = testUrl && process.env.CI === 'true' && testUrl === process.env.DATABASE_URL
+  && ['localhost', '127.0.0.1'].includes(new URL(testUrl).hostname) && new URL(testUrl).pathname === '/waves_test';
+if (testUrl && !local && !managed && !ci) throw new Error('Completion pricing tests require a dedicated local completion_qa, managed worktree QA, or isolated CI database.');
+const suite = local || managed || ci ? describe : describe.skip;
 suite('completion pricing PostgreSQL and invoice replay', () => {
   let db;
   const pricing = require('../services/completion-pricing');
   const Invoice = require('../services/invoice');
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
-  afterAll(async () => { await db?.destroy(); });
+  afterAll(async () => { await db?.destroy(); await require('../models/db').destroy(); });
   async function fixture(trx, { net = 85, jobPrice = 100, parent = false } = {}) {
     const customerId = randomUUID(); const serviceId = randomUUID(); const estimateId = randomUUID(); const jobId = randomUUID();
     await trx('customers').insert({ id: customerId, first_name: 'Synthetic pricing fixture', phone: `qa-${customerId.slice(0, 8)}`,
@@ -29,7 +34,8 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     const parentId = randomUUID();
     if (!parent) await trx('scheduled_services').insert({ ...fields, id: parentId });
     await trx('scheduled_services').insert({ ...fields, id: jobId, recurring_parent_id: parent ? null : parentId });
-    await trx('pricing_config').insert({ config_key: 'waveguard_tiers', name: 'Synthetic tiers', category: 'test', data: { gold: { discount: .15 } } });
+    // Fresh minimal schemas need a tier fixture; migrated QA uses its real configuration.
+    await trx('pricing_config').insert({ config_key: 'waveguard_tiers', name: 'Synthetic tiers', category: 'test', data: { gold: { discount: .15 } } }).onConflict('config_key').ignore();
     return { jobId, customerId, estimateId, soldLine, serviceId, parentId };
   }
   async function rollbackTest(fn) { const trx = await db.transaction(); try { await fn(trx); } finally { await trx.rollback(); } }
@@ -94,11 +100,14 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     ['rodent_bait_quarterly', 'Rodent Bait', 'rodent', true], ['commercial_lawn_care', 'Commercial Lawn Care', 'lawn', false]])(
     'name-only accepted line uses catalog family %s for eligibility', (key, name, category, eligible) => rollbackTest(async (trx) => {
       const { jobId, estimateId, serviceId, soldLine } = await fixture(trx, { net: 100 });
-      await trx('services').where({ id: serviceId }).update({ service_key: key, name, category });
-      await trx('scheduled_services').where({ id: jobId }).update({ service_key_snapshot: key, service_category_snapshot: category, service_type: name });
+      const catalog = await trx('services').where({ service_key: key }).first();
+      if (!catalog) await trx('services').where({ id: serviceId }).update({ service_key: key, name, category });
+      const catalogName = catalog?.name || name;
+      const cadence = catalog?.frequency || soldLine.frequency;
+      await trx('scheduled_services').where({ id: jobId }).update({ service_id: catalog?.id || serviceId, service_key_snapshot: key, service_category_snapshot: category, service_type: catalogName, recurring_pattern: cadence });
       const { service: _service, ...nameOnly } = soldLine;
       await trx('estimates').where({ id: estimateId }).update({ estimate_data: {
-        result: { recurring: { services: [{ ...nameOnly, name, perApplicationBilled: true }] } },
+        result: { recurring: { services: [{ ...nameOnly, name: catalogName, frequency: cadence, visitsPerYear: catalog?.visits_per_year || soldLine.visitsPerYear, perApplicationBilled: true }] } },
       } });
       const view = (await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view;
       expect(view.lines[0].status).toBe('matched');
@@ -109,7 +118,7 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     [null, null, false], [null, 'pest_control_quarterly', false]])(
     'null service IDs require matching non-null parent/child keys %p/%p', (parentKey, childKey, linked) => rollbackTest(async (trx) => {
       const { jobId, parentId, estimateId, soldLine } = await fixture(trx);
-      await trx('services').insert({ service_key: 'lawn_care_recurring', name: 'Lawn Care', category: 'lawn', frequency: 'quarterly', billing_type: 'recurring', visits_per_year: 4 });
+      await trx('services').insert({ service_key: 'lawn_care_recurring', name: 'Lawn Care', category: 'lawn', frequency: 'quarterly', billing_type: 'recurring', visits_per_year: 4 }).onConflict('service_key').ignore();
       await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { services: [soldLine,
         { ...soldLine, service: 'lawn_care', name: 'Lawn Care' }] } } } });
       await trx('scheduled_services').where({ id: parentId }).update({ service_id: null, service_key_snapshot: parentKey });
@@ -211,8 +220,9 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
   }));
   test('grouped services use their own sold lines and invoice the combined net', () => rollbackTest(async (trx) => {
     const { jobId, estimateId, soldLine } = await fixture(trx);
-    const addonServiceId = randomUUID();
-    await trx('services').insert({ id: addonServiceId, service_key: 'mosquito_monthly', name: 'Mosquito Control', category: 'mosquito', frequency: 'monthly', billing_type: 'recurring', visits_per_year: 12 });
+    const catalog = await trx('services').where({ service_key: 'mosquito_monthly' }).first();
+    const addonServiceId = catalog?.id || randomUUID();
+    if (!catalog) await trx('services').insert({ id: addonServiceId, service_key: 'mosquito_monthly', name: 'Mosquito Control', category: 'mosquito', frequency: 'monthly', billing_type: 'recurring', visits_per_year: 12 });
     await trx('scheduled_service_addons').insert({ scheduled_service_id: jobId, service_id: addonServiceId, service_name: 'Mosquito Control',
       service_key_snapshot: 'mosquito_monthly', service_category_snapshot: 'mosquito', recurring_pattern: 'monthly', base_price: 200, estimated_price: 200 });
     await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 300 });
@@ -237,8 +247,9 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     const { jobId, estimateId, serviceId, soldLine } = await fixture(trx, { net: 100 });
     await trx('services').where({ id: serviceId }).update({ service_key: 'lawn_care_enhanced', name: 'Lawn Care', category: 'lawn' });
     await trx('scheduled_services').where({ id: jobId }).update({ service_key_snapshot: 'lawn_care_enhanced', service_category_snapshot: 'lawn', service_type: 'Lawn Care' });
-    await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { services: [{ ...soldLine, service: 'lawn_care', name: 'Lawn Care' }] } } } });
-    expect((await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view).toMatchObject({ canApply: true, proposedAmount: 85 });
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { services: [{ ...soldLine, service: 'lawn_care', serviceKey: 'lawn_care_enhanced', name: 'Lawn Care' }] } } } });
+    const lawn = (await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view;
+    expect(lawn).toMatchObject({ canApply: true, proposedAmount: 85 });
   }));
 
 });
