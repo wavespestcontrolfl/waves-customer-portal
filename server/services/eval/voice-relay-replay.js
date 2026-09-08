@@ -82,19 +82,39 @@ const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?
 // promise in ITS clause ("I cannot access your schedule, so we will call you
 // back" still commits), and a trailing offer condition ("… if you would
 // like") makes the clause an offer, not a commitment.
-const COMMITMENT_CLAUSE_SPLIT_RE = /[.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b/i;
+const COMMITMENT_CLAUSE_SPLIT_RE = /([.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b)/i;
+// The subject + modal a coordinated fragment inherits: "I'll check with the
+// office and get back to you" promises the callback even though the second
+// fragment has no subject of its own.
+const SUBJECT_MODAL_RE = /\b((?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)))\b/i;
+const COORDINATOR_RE = /^(?:and|then)$/i;
 // A Spanish bare "no" negates only the verb it precedes ("No le llamaremos"),
 // so it counts at the end of the prefix alone — "No worries, we will call
 // you" keeps its promise.
 const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos|nunca|jamás|no(?=\s*$))\b/i;
 const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
 function isCommitment(text) {
-  return String(text).split(COMMITMENT_CLAUSE_SPLIT_RE).some((clause) => {
+  const parts = String(text).split(COMMITMENT_CLAUSE_SPLIT_RE); // clause, separator, clause, …
+  const commits = (clause) => {
     const match = PROMISE_RE.exec(clause);
     if (!match) return false;
     return !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index))
       && !CONDITIONAL_OFFER_SUFFIX_RE.test(clause.slice(match.index + match[0].length));
-  });
+  };
+  let carried = null; // the previous clause's affirmative subject + modal
+  for (let i = 0; i < parts.length; i += 2) {
+    const clause = parts[i];
+    const separator = i > 0 ? parts[i - 1] : '';
+    const own = SUBJECT_MODAL_RE.exec(clause);
+    const coordinated = COORDINATOR_RE.test(separator.trim());
+    if (commits(clause)) return true;
+    if (!own && carried && coordinated && commits(`${carried} ${clause.trim()}`)) return true;
+    // A fragment with its own subject resets the carry; a coordinated fragment
+    // without one ("… and then reach out") keeps it; any other break drops it.
+    if (own) carried = NON_COMMITMENT_PREFIX_RE.test(clause) ? null : own[1];
+    else if (!coordinated) carried = null;
+  }
+  return false;
 }
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
 const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. Do NOT try again and do not confirm or deny '
@@ -251,13 +271,36 @@ function lintExpectation(e, i, knownTools) {
 
 // Scenario-level rules, each [problem-when-true, message], in two tables:
 // the scenario's shape, and its fixtures.
+// Every key a scenario may carry — a misspelled optional key (`allowedToolInput`)
+// would otherwise be ignored and grade a replay without the restriction the
+// author wrote.
+const SCENARIO_KEYS = new Set(['id', 'description', 'language', 'gates', 'allowedTools', 'allowedToolInputs', 'caller', 'fixtures', 'turns', 'spec', 'expect', 'judge']);
+const FIXTURE_KEYS = new Set(['officeHours', 'toolResponses', 'resume', 'modelFailures']);
+
+// The exact key sets, and the live release condition for an earlier segment:
+// recovery releases it only behind the recovery gate on a verified session, so
+// a resume outside both is a call that never happens.
+function scenarioKeyRules(s) {
+  const fx = s.fixtures && typeof s.fixtures === 'object' ? s.fixtures : {};
+  const resumeAllowed = !!(s.gates && s.gates.recovery === true && s.caller && s.caller.verified === true);
+  return [
+    ...Object.keys(s).filter((k) => !SCENARIO_KEYS.has(k)).map((k) => [true, `unknown scenario key "${k}"`]),
+    ...Object.keys(fx).filter((k) => !FIXTURE_KEYS.has(k)).map((k) => [true, `fixtures: unknown key "${k}"`]),
+    [fx.resume != null && !resumeAllowed, 'fixtures.resume requires gates.recovery: true and caller.verified: true'],
+  ];
+}
+
 function scenarioShapeRules(s) {
   const turns = Array.isArray(s.turns) ? s.turns : [];
   const spec = s.spec && typeof s.spec === 'object' ? s.spec : null;
   return [
+    ...scenarioKeyRules(s),
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
     [!s.caller || typeof s.caller.from !== 'string' || !/^\+1\d{10}$/.test(s.caller.from), 'caller.from must be an E.164 US number'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
+    // Live resolveCallerContext returns null whenever verification fails, so a
+    // context on an unverified caller is a call production can never produce.
+    [s.caller && s.caller.context != null && s.caller.verified !== true, 'caller.context requires caller.verified: true (an unverified live caller gets no context)'],
     ...Object.entries(s.gates || {}).map(([key, v]) => [!GATE_ENV[key] || typeof v !== 'boolean', GATE_ENV[key] ? `gate "${key}" must be boolean` : `unknown gate "${key}"`]),
     [!turns.length, 'needs at least one caller turn'],
     ...turns.map((t, i) => { const { error } = TURN_SCHEMA.validate(t, { convert: false }); return [!!error, `turns[${i}]: ${error ? error.message : ''}`]; }),
@@ -520,7 +563,7 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
 // missing piece completes the request. The fixture matcher sees that same
 // view — this call's non-empty fields, then the latest earlier answered
 // capture's, and so on back; a call the tool refused never accumulated.
-const ESTIMATE_FIELDS = Object.freeze(['first_name', 'last_name', 'email', 'address_line1']);
+const ESTIMATE_FIELDS = Object.freeze(['first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'requested_service', 'pain_points']); // relay-tools' estimateFields, every key
 function matcherInput(record, event, name, input) {
   if (name !== 'capture_lead') return input;
   const { isValidEmail } = require('../../utils/internal-email-recipients');
@@ -712,8 +755,17 @@ function installHarness() {
         // Model telemetry per scenario: a completed round vs a REAL provider
         // error. Without it a keyless or outage run would read green — Sandy's
         // "could you say that again?" fallback speaks nothing forbidden.
-        const stream = realStream.apply(this, args);
         const record = state.record;
+        let stream;
+        try {
+          stream = realStream.apply(this, args);
+        } catch (err) {
+          // A throw during request construction never reaches the
+          // finalMessage wrapper below; the relay speaks its fallback and the
+          // round would otherwise grade as completed.
+          if (record) record.modelErrors.push(err && err.message ? err.message : String(err));
+          throw err;
+        }
         if (record && stream && typeof stream.finalMessage === 'function') {
           const finalMessage = stream.finalMessage.bind(stream);
           stream.finalMessage = () => finalMessage().then(
@@ -1156,6 +1208,11 @@ async function runScenario(scenario, { judge = false, judgeFn = null } = {}) {
     const convo = newConversation(h, scenario, record);
     applyResumeFixture(convo, scenario, record);
     await driveTurns(convo, scenario, record);
+    // Every injected failure must have been consumed, or the handoff the
+    // fixture asked for (a second failure) was never exercised.
+    if (h.state.modelFailuresLeft > 0) {
+      throw Object.assign(new Error(`fixtures.modelFailures: ${h.state.modelFailuresLeft} injected failure(s) never reached the model — the turns ended first`), { code: 'EVAL_MODEL_FAILURES_UNUSED' });
+    }
     record.toolsAvailable = (convo._tools || []).map((t) => t.name);
     record.promptSha = convo._promptSha || null;
     // Judge grounding, not a result: non-enumerable so the run's JSON does
@@ -1345,7 +1402,7 @@ module.exports = {
   summaryLine,
   isFailedVoiceRun,
   _internals: {
-    JUDGE_CONCURRENCY, judgeChecks, judgeRecord, mapPool, PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, allowedToolsCheck, validCallNames,
+    JUDGE_CONCURRENCY, judgeChecks, judgeRecord, mapPool, PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, ESTIMATE_FIELDS, allowedToolsCheck, validCallNames,
     makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, scenarioStatus, qualityScore, summarize,
   },
