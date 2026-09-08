@@ -442,6 +442,22 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(supplies.mock.calls.every(([, args]) => args.isInternalOnlyCompletion === frozenInternalOnly)).toBe(true);
   });
 
+  test('a specialty lane cut over after the records commit does not re-judge the committed observations', async () => {
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'Bed Bug Treatment' });
+    await mockPg('services').where({ id: fixture.catalogId }).update({ service_key: 'bed_bug' });
+    const input = submission();
+    for (const item of input.items) item.body.structuredObservations = ['Initial inspection'];
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+    // The catalog key now resolves to no specialty lane: the same observation
+    // would be refused at intake, but these records are committed.
+    await mockPg('services').where({ id: fixture.catalogId }).update({ service_key: `fixture_${fixture.catalogId}` });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+  });
+
   test('a member another runner finished first is accepted instead of failing the packet', async () => {
     const saved = await saveVisitCompletionPacket(submission());
     const completion = require('../services/complete-scheduled-service');
