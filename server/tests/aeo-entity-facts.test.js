@@ -990,3 +990,22 @@ test('a continuation is current, "used to operate" is former, topic objects and 
   expect(score('E6', 'Waves tents homes starting next year.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves tents homes.').forbidden.fumigation_offered).toBe(true);
 });
+
+test('the pest is the treatment verb\'s own object, and an ended franchise relationship is not current (#4155 r6)', () => {
+  expect(score('E6', 'Waves prevents technicians from eliminating termites.').expected.termite).toBe(false);
+  for (const text of ['Waves manages the termite portion of its website.', 'Waves controls termite-related search terms.', 'Waves handles termite-related search terms.', 'Waves manages termite information on its website.']) {
+    expect(score('E6', text).expected.termite).toBe(false);
+  }
+  expect(score('E6', 'Waves treats termites, ants and roaches.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves controls ants, roaches and termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves eliminates subterranean and drywood termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves eliminates termites in Sarasota homes.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves offers termite control and mosquito treatments.')).toMatchObject({ expected: { termite: true, mosquito: true } });
+  expect(score('E6', 'Waves offers termite and rodent control.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves removes rats and mice from attics.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves controls rodents other than mice.').expected.rodent).toBe(true);
+  for (const text of ['Waves stopped operating as a franchise.', 'Waves ceased operating as a franchise.', 'Waves operated as a franchise until 2024.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(false);
+  }
+  expect(score('E8', 'Waves has operated as a franchise since 2020.').forbidden.franchise).toBe(true);
+});
