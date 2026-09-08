@@ -190,6 +190,15 @@ longer accepts a name after `both` or `and`, and the
 resolver keeps page errors in the page shape and anchors its recipient/review
 matches, so its structural warning falls below the pre-split level.
 
-Validation: 153 target cases pass (129 unit and 24 rollback-only isolated
+The first remote round on the rebuilt head added `set`/`edit`/`mark`/`make`
+to the selector verbs (a stale selection could survive "Set Alice Owner
+inactive"), normalized the quantifier spellings (`those customers`, `all of
+those`, repeated whitespace) on a contact-free clause so `both@example.invalid`
+is a recipient, listed the common field nouns (`status`, `billing`, …) as
+non-names so "Update customer status" keeps a selected customer, and took the
+resolver under the structural threshold by making a broken page hint fail
+closed for a page-referencing request even when a selection is supplied.
+
+Validation: 157 target cases pass (133 unit and 24 rollback-only isolated
 PostgreSQL cases). No model, provider, production query, migration, merge or
 gate change occurred.

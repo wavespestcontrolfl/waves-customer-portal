@@ -79,6 +79,34 @@ test.each(['both', 'these customers', 'all of these'])('a "%s" cohort asks for c
   const cohort = await Context.resolve({ prompt, pageData: {} });
   expect((await Context.validateRecordTarget({ customer_ids: [A, B] }, cohort, { toolName: 'move_stops_to_day' })).code).toBe('target_clarification_required');
 });
+
+test('every supported action verb supplies name evidence against a stale selection', async () => {
+  for (const prompt of ['Set Synthetiic Owner inactive', 'Mark Synthetiic Owner inactive', 'Edit Synthetiic Owner', 'Make Synthetiic Owner active']) {
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  }
+  lookupRows = [rows.customers[0]];
+  expect((await Context.resolve({ prompt: 'Set Synthetic Person inactive', pageData: {} })).target.customer_id).toBe(A);
+});
+
+test('field nouns after an action are not person names', async () => {
+  for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency']) {
+    const task = await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } });
+    expect(task.target).toMatchObject({ customer_id: A, provenance: 'operator_selection' });
+  }
+});
+
+test('quantifier spellings are normalized and contact literals are ignored', async () => {
+  for (const prompt of ['Update all of those customers using this customer', 'Update these  customers Synthetic Person and Synthetic Second', 'Update those customers']) {
+    expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
+  }
+  const emailed = await Context.resolve({ prompt: 'Reply to both@example.invalid', pageData: {} });
+  expect(emailed).toMatchObject({ ambiguous: false, explicitEmails: ['both@example.invalid'] });
+});
+
+test('a broken page hint fails closed for a page-referencing request even with a selection', async () => {
+  expect(await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: 'not-a-uuid' }, selectedTarget: { customer_id: A } }))
+    .toMatchObject({ code: 'invalid_page_context' });
+});
 const context = (customerId = A) => ({ targets: customerId ? [{ customer_id: customerId }] : [], page: { ids: {} } });
 
 test('explicit child identifiers constrain same-customer choices and exclude message content', async () => {

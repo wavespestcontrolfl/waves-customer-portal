@@ -24,17 +24,21 @@ const normalizeName = value => String(value || '').toLowerCase().replace(/[’']
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
 // Overlapping selectors matter: "update customer Jhon" must still inspect
 // "customer Jhon" after seeing "update customer".
-const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update';
+const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update|set|edit|mark|make';
 const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named`;
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
-const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
+const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'status', 'billing', 'type', 'plan', 'frequency', 'autopay', 'balance', 'schedule', 'tags', 'tag', 'preferences', 'details', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
 // A set quantifier ("both A and B", "these customers …", "all of these …") is
 // never a target: one target per request, so the request asks to clarify.
 // Owner decision 2026-09-08: fail closed rather than parse cohorts.
-const SET_QUANTIFIER_RE = /\b(?:both|these customers|all of these)\b/i;
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those) customers|all of (?:these|those))\b/;
+const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
+// An explicit email or phone recipient is a contact, never a name or a quantifier.
+const withoutContacts = clause => clause.replace(CONTACT_LITERAL_RE, ' ');
+const setQuantified = prompt => SET_QUANTIFIER_RE.test(normalizeName(withoutContacts(targetClause(prompt))));
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
 const CUSTOMER_LOOKUP_LIMIT = 10;
 
@@ -58,9 +62,7 @@ function targetClause(prompt, retainRecordConstraints = false) {
 }
 
 function explicitSingleNames(prompt) {
-  // An explicit email or phone recipient is a contact, never a person's name.
-  const clause = targetClause(prompt).replace(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi, ' ')
-    .replace(/(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/g, ' ');
+  const clause = withoutContacts(targetClause(prompt));
   const normalized = normalizeName(clause);
   return [...new Set([
     ...[...normalized.matchAll(PERSON_REFERENCE)]
@@ -231,16 +233,16 @@ function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort
   return { target: target || null, targets: target ? [target] : [], ambiguous: false };
 }
 
-async function resolve({ prompt, pageData, selectedTarget }) {
+async function resolve({ prompt, pageData, selectedTarget = {} }) {
   const [page, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
   const named = namedResult.matches;
   // A stale page hint cannot block an unrelated task or an explicitly named
   // customer. A request relying on the unavailable viewed record still stops.
-  if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length && !selectedTarget?.customer_id) return page;
+  if (page.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length) return page;
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  const cohort = SET_QUANTIFIER_RE.test(targetClause(prompt));
+  const cohort = setQuantified(prompt);
   let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort);
-  if (selectedTarget?.customer_id) {
+  if (selectedTarget.customer_id) {
     const selected = await customerById(selectedTarget.customer_id);
     // A selection never overrides current-request evidence: an explicit name
     // that matched nothing, a capped lookup, or a set quantifier all refuse
@@ -274,7 +276,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     (explicitRecords[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());
   }
   for (const [kind, ids] of Object.entries(explicitRecords)) {
-    requestedRecords[kind] = Object.hasOwn(requestedRecords, kind) ? ids.filter(id => id === requestedRecords[kind]) : ids;
+    requestedRecords[kind] = ids.filter(id => !Object.hasOwn(requestedRecords, kind) || id === requestedRecords[kind]);
   }
   return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)), namesRequested: namesRequested(prompt),
     reviewReference: reviewReference || null,
