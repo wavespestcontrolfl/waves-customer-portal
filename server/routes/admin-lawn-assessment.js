@@ -640,20 +640,19 @@ router.post('/assess', async (req, res, next) => {
     // (See mergePhotoComposites — majority vote replaced first-valid-wins so a
     // fungicide/dethatch gate can't unlock on photo 0 alone.)
     // Gate on: the one call over every photo of the visit. Its per-photo
-    // quality read replaces the placeholder rows above for the storage loop.
+    // quality read replaces the placeholder rows above for the storage loop;
+    // its scores are derived once the seasonal factor is known (scoreVisit).
     let visitAnalysis = null;
+    let mergedComposite;
+    let displayScores;
     if (visitAssessmentEnabled) {
       visitAnalysis = await visitAssessment.analyzeVisit({ photos, photoZones: visitPhotos.zones, visionContext });
       ({ qualityResults, resultByPhotoIndex } = visitAssessment.photoRowInputs(visitAnalysis));
+    } else {
+      mergedComposite = mergePhotoComposites(validResults);
+      // Convert to display scores
+      displayScores = lawnAssessment.mapToDisplayScores(mergedComposite);
     }
-    const mergedComposite = visitAssessmentEnabled ? visitAssessment.compositeFor(visitAnalysis) : mergePhotoComposites(validResults);
-
-    // Convert to display scores. Gate on: the legacy columns derive from the
-    // run's scores and severities — NULL where the model could not determine
-    // a value (never the "missing = healthy" default), null when unavailable.
-    const displayScores = visitAssessmentEnabled
-      ? visitAssessment.deriveLegacyScores(visitAnalysis)
-      : lawnAssessment.mapToDisplayScores(mergedComposite);
 
     // Determine season and apply adjustment. Prefer a WEATHER-driven normalization —
     // St. Augustine slows by actual cold, not the calendar — using the customer's
@@ -680,11 +679,6 @@ router.post('/assess', async (req, res, next) => {
     const seasonAdjust = (scores) => (Number.isFinite(recentMinTempF)
       ? seasonAwareAdjustment(scores, { month, recentMinTempF })
       : lawnAssessment.applySeasonalAdjustment(scores, month));
-    // Gate on: a NULL score stays NULL through the seasonal factor (the
-    // adjusters read a missing value as 0).
-    const adjustedScores = visitAssessmentEnabled
-      ? visitAssessment.adjustAvailableScores(displayScores, seasonAdjust)
-      : seasonAdjust(displayScores);
 
     // Check if this is the first assessment (baseline)
     let isBaseline;
@@ -706,11 +700,19 @@ router.post('/assess', async (req, res, next) => {
     // Collect divergence flags from all photo analyses
     const allDivergences = validResults.flatMap(r => r.divergenceFlags || []);
 
-    // Gate on: no overall score until every input exists — a partial average
-    // would be a claim the photos did not support.
-    const overallScore = visitAssessmentEnabled && !visitAssessment.scoresComplete(adjustedScores)
-      ? null
-      : calculateOverallScore(adjustedScores);
+    // Gate on: the legacy columns derive from the run's scores and severities
+    // — NULL where the model could not determine a value (never the "missing
+    // = healthy" default), NULL through the seasonal factor, and no overall
+    // score until every input exists; nothing at all when unavailable.
+    let adjustedScores;
+    let overallScore;
+    let analyzedCount = validResults.length;
+    if (visitAssessmentEnabled) {
+      ({ mergedComposite, displayScores, adjustedScores, overallScore, analyzedCount } = visitAssessment.scoreVisit(visitAnalysis, { seasonAdjust, calculateOverallScore }));
+    } else {
+      adjustedScores = seasonAdjust(displayScores);
+      overallScore = calculateOverallScore(adjustedScores);
+    }
 
     // Build photo metadata (always stored even without S3 for backward compat)
     const photoMeta = photos.map((p, i) => ({
@@ -808,6 +810,11 @@ router.post('/assess', async (req, res, next) => {
     }
 
     // ── Upload photos to S3 + create lawn_assessment_photos records ──
+    // Photo type per row. Gate on: the technician's zone label is the type
+    // and the only recorded zone (the report pairs before/after photos by it).
+    const photoFieldsAt = visitAssessmentEnabled
+      ? (i) => visitAssessment.photoFieldsFor(visitPhotos.zones[i])
+      : (i) => ({ photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') });
     const photoRecords = [];
     let bestPhotoId = null;
     let bestQuality = -1;
@@ -880,12 +887,7 @@ router.post('/assess', async (req, res, next) => {
           filename: photoMeta[i].filename,
           mime_type: mimeType,
           file_size_bytes: Math.round((photo.data.length * 3) / 4), // approx base64 → bytes
-          // Gate on: the technician's zone label is the type — and the only
-          // recorded zone (the report pairs before/after photos by zone).
-          photo_type: visitAssessmentEnabled
-            ? visitAssessment.photoTypeForZone(visitPhotos.zones[i])
-            : (photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot')),
-          ...(visitAssessmentEnabled && visitPhotos.zones[i] ? { zone: visitPhotos.zones[i] } : {}),
+          ...photoFieldsAt(i),
           photo_order: i,
           turf_density: result?.composite?.turf_density ?? null,
           weed_coverage: result?.composite?.weed_coverage ?? null,
@@ -944,7 +946,7 @@ router.post('/assess', async (req, res, next) => {
       isBaseline,
       divergenceFlags: allDivergences,
       photoCount: photos.length,
-      analyzedCount: visitAssessmentEnabled ? (visitAnalysis.status === 'complete' ? photos.length : 0) : validResults.length,
+      analyzedCount,
       photosStored: photoRecords.length,
       bestPhotoId,
       ...(visitAssessmentEnabled ? {
@@ -1047,16 +1049,25 @@ router.post('/confirm', async (req, res, next) => {
     }
     const reviewedRun = !!visitRun;
 
-    // Gate on: a NULL column (the model could not determine it and the
+    // Run-backed row: a NULL column (the model could not determine it and the
     // technician did not enter it) stays NULL — the legacy fallback below
-    // would read it as 0.
-    const finalScores = reviewedRun ? visitAssessment.resolveConfirmScores(assessment, adjustedScores, scoreValue) : {
-      turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
-      weed_suppression: scoreValue(adjustedScores?.weed_suppression, assessment.weed_suppression),
-      color_health: scoreValue(adjustedScores?.color_health, assessment.color_health),
-      fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
-      thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
-    };
+    // would read it as 0 — the overall score waits for every input, and the
+    // customer-facing steps + calibration are held accordingly. Legacy rows
+    // compute exactly as before (both holds open).
+    let finalScores;
+    let overallScore;
+    let customerOutputEligible = true;
+    let calibrationEligible = true;
+    if (reviewedRun) {
+      ({ finalScores, overallScore, customerOutputEligible, calibrationEligible } = visitAssessment.confirmScores(assessment, visitRun, adjustedScores, { scoreValue, calculateOverallScore }));
+    } else {
+      finalScores = {
+        turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
+        weed_suppression: scoreValue(adjustedScores?.weed_suppression, assessment.weed_suppression),
+        color_health: scoreValue(adjustedScores?.color_health, assessment.color_health),
+        fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
+        thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
+      };
     // Stress/Damage. The tech now corrects a single "Stress" score directly on
     // the completion screen, so honor an explicit adjustedScores.stress_damage
     // when sent. When it isn't (older clients, or a prefill re-confirm that only
@@ -1064,9 +1075,7 @@ router.post('/confirm', async (req, res, next) => {
     // fungus + thatch scores and the AI worst-spot floor stored at /assess (which
     // already folds in insect/drought/mechanical and the worst per-photo
     // disease/thatch). Pre-stress_damage rows (null floor) fall back to
-    // worst-of(fungus, thatch) — never 0. (A reviewed run derived its stress
-    // above, from the KNOWN values only.)
-    if (!reviewedRun) {
+    // worst-of(fungus, thatch) — never 0.
       const aiFloor = Number.isFinite(Number(assessment.stress_damage))
         ? Number(assessment.stress_damage)
         : 95;
@@ -1076,6 +1085,7 @@ router.post('/confirm', async (req, res, next) => {
         aiFloor,
       );
       finalScores.stress_damage = scoreValue(adjustedScores?.stress_damage, derivedStress);
+      overallScore = calculateOverallScore(finalScores);
     }
 
     const updateData = {
@@ -1083,7 +1093,7 @@ router.post('/confirm', async (req, res, next) => {
       confirmed_at: new Date(),
       updated_at: new Date(),
       ...finalScores,
-      overall_score: reviewedRun && !visitAssessment.scoresComplete(finalScores) ? null : calculateOverallScore(finalScores),
+      overall_score: overallScore,
     };
 
     // If tech provided adjusted scores, apply them
@@ -1103,8 +1113,23 @@ router.post('/confirm', async (req, res, next) => {
       updateData.stress_flags = JSON.stringify(normalizedStressFlags);
     }
 
+    // Run-backed row whose confirm carries a review: the confirm and the
+    // review (kept findings reconciled against the products the technician
+    // confirmed) commit TOGETHER — a lost review can never ride a successful
+    // confirm. A score-only confirm from a client that never showed the
+    // findings is not a finding review and stamps nothing; a pre-gate row has
+    // no run and confirms exactly as before.
     let updated;
-    if (propertyHistoryEnabled) {
+    let reviewedVisitRun = null;
+    if (reviewedRun && visitReview.provided) {
+      ({ updated, reviewedVisitRun } = await db.transaction(async (trx) => {
+        const row = propertyHistoryEnabled
+          ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: trx })
+          : (await trx('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
+        const run = await visitAssessment.reviewRun({ run: visitRun, review: visitReview, technicianId: req.technicianId }, trx);
+        return { updated: row, reviewedVisitRun: run };
+      }));
+    } else if (propertyHistoryEnabled) {
       updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
     } else {
       [updated] = await db('lawn_assessments')
@@ -1116,28 +1141,6 @@ router.post('/confirm', async (req, res, next) => {
       await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
       Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
     }
-
-    // Run-backed row: apply the review to the run and reconcile the kept
-    // findings against the products the technician confirmed — only when the
-    // confirm actually carried a review (a score-only confirm from a client
-    // that never showed the findings is not a finding review and stamps
-    // nothing). Best-effort after the confirm itself — the assessment is
-    // confirmed either way; a lost review is logged, re-confirming writes it.
-    let reviewedVisitRun = null;
-    if (reviewedRun && visitReview.provided) {
-      try {
-        reviewedVisitRun = await visitAssessment.reviewRun({ run: visitRun, review: visitReview, technicianId: req.technicianId }, db);
-      } catch (reviewErr) {
-        logger.error(`[lawn-assessment] visit run review write failed: ${reviewErr.message}`);
-      }
-    }
-    // An unavailable run has no AI scores to calibrate against, and nothing
-    // customer-facing (recommendations, the health signal, the standalone
-    // report-ready text, the auto-generated report) may be built from its
-    // NULLs — a provider outage never becomes a lawn result. Both resume once
-    // the technician has supplied a complete set of scores.
-    const calibrationEligible = !reviewedRun || visitRun.status !== 'unavailable';
-    const customerOutputEligible = calibrationEligible || visitAssessment.scoresComplete(finalScores);
 
     // Agronomic Wiki: link only when a durable service_record exists.
     // Assessments captured inside Complete Service are back-linked after
@@ -1166,9 +1169,6 @@ router.post('/confirm', async (req, res, next) => {
         // 1. FAWN weather context
         await LawnIntel.attachWeather(assessmentId);
 
-        // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
-        if (customerOutputEligible) await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
-
         // 3. Tech calibration — record AI vs tech score differences
         if (adjustedScores && calibrationEligible) {
           const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
@@ -1188,23 +1188,30 @@ router.post('/confirm', async (req, res, next) => {
           await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
         }
 
-        // 4. Lawn health → customer health signal
-        if (customerOutputEligible) await LawnIntel.emitHealthSignal(updated.customer_id);
+        // Customer-facing steps — held while a run-backed row has any score
+        // missing (see customerOutputEligible above); order within unchanged.
+        if (customerOutputEligible) {
+          // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
+          await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
 
-        // 5. Standalone lawn assessments (fallback customer picker, no
-        //    scheduled service — service_id is null) have no later completion
-        //    SMS at all, so they still get the standalone "lawn health report
-        //    ready" notification. Assessments linked to a service do NOT: that
-        //    visit's completion text is a short link to the report, and the
-        //    score lives on the report (owner ruling 2026-08-01 retired the
-        //    score fold-in). This step runs after recommendation generation
-        //    (step 2) so the standalone notification's tip is populated.
-        if (!updated.service_id && customerOutputEligible) {
-          await LawnIntel.sendAssessmentNotification(assessmentId);
+          // 4. Lawn health → customer health signal
+          await LawnIntel.emitHealthSignal(updated.customer_id);
+
+          // 5. Standalone lawn assessments (fallback customer picker, no
+          //    scheduled service — service_id is null) have no later completion
+          //    SMS at all, so they still get the standalone "lawn health report
+          //    ready" notification. Assessments linked to a service do NOT: that
+          //    visit's completion text is a short link to the report, and the
+          //    score lives on the report (owner ruling 2026-08-01 retired the
+          //    score fold-in). This step runs after recommendation generation
+          //    (step 2) so the standalone notification's tip is populated.
+          if (!updated.service_id) {
+            await LawnIntel.sendAssessmentNotification(assessmentId);
+          }
+
+          // 6. Auto-generate service report
+          await LawnIntel.generateServiceReport(assessmentId);
         }
-
-        // 6. Auto-generate service report
-        if (customerOutputEligible) await LawnIntel.generateServiceReport(assessmentId);
 
         // 7. Track assessment completion
         await LawnIntel.trackAssessmentCompletion(updated.service_date);

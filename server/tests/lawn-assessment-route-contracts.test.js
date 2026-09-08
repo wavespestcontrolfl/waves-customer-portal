@@ -116,8 +116,9 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/mergePhotoComposites\(validResults\)/);
       expect(assess).toMatch(/lawnAssessment\.mapToDisplayScores\(mergedComposite\)/);
       expect(assess).toMatch(/visitAssessment\.analyzeVisit\(\{ photos, photoZones: visitPhotos\.zones, visionContext \}\)/);
-      expect(assess).toMatch(/visitAssessment\.deriveLegacyScores\(visitAnalysis\)/);
-      expect(assess).toMatch(/visitAssessment\.adjustAvailableScores\(displayScores, seasonAdjust\)/);
+      // One gate branch derives composite, display, adjusted and overall scores together.
+      expect(assess).toMatch(/visitAssessment\.scoreVisit\(visitAnalysis, \{ seasonAdjust, calculateOverallScore \}\)/);
+      expect(assess).toMatch(/\? \(i\) => visitAssessment\.photoFieldsFor\(visitPhotos\.zones\[i\]\)/);
       // The run is written in the assessment's transaction — both or neither.
       expect(assess).toMatch(/db\.transaction\(async \(trx\) => \{[\s\S]{0,400}visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis \}, trx\)/);
       expect(assess).toMatch(/visitAssessment\.attachRunPhotos\(/);
@@ -129,16 +130,19 @@ describe('lawn assessment route contracts', () => {
 
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and holds customer output on an unavailable run', () => {
       expect(confirm.indexOf('visitAssessment.validateReview(')).toBeLessThan(confirm.indexOf('installConfirmedBaseline('));
-      expect(confirm).toMatch(/reviewedRun \? visitAssessment\.resolveConfirmScores\(assessment, adjustedScores, scoreValue\)/);
-      expect(confirm).toMatch(/reviewedRun && !visitAssessment\.scoresComplete\(finalScores\) \? null : calculateOverallScore\(finalScores\)/);
-      expect(confirm).toMatch(/if \(reviewedRun && visitReview\.provided\)/);
+      // One branch: the run-backed row's scores, overall and holds come from the module; the legacy block is untouched.
+      expect(confirm).toMatch(/if \(reviewedRun\) \{\s*\(\{ finalScores, overallScore, customerOutputEligible, calibrationEligible \} = visitAssessment\.confirmScores\(assessment, visitRun, adjustedScores, \{ scoreValue, calculateOverallScore \}\)\);/);
+      expect(confirm).toMatch(/overall_score: overallScore,/);
+      // Confirm + review commit together when a review was sent; a score-only confirm stamps nothing.
+      expect(confirm).toMatch(/if \(reviewedRun && visitReview\.provided\) \{\s*\(\{ updated, reviewedVisitRun \} = await db\.transaction\(async \(trx\) => \{[\s\S]{0,600}visitAssessment\.reviewRun\(\{ run: visitRun, review: visitReview, technicianId: req\.technicianId \}, trx\)/);
+      expect(confirm).not.toMatch(/reviewRun\([\s\S]{0,120}, db\)/);
       expect(confirm).toMatch(/if \(adjustedScores && calibrationEligible\)/);
-      expect(confirm).toMatch(/const customerOutputEligible = calibrationEligible \|\| visitAssessment\.scoresComplete\(finalScores\);/);
-      for (const call of ['KnowledgeBridge.generateAssessmentRecommendations(assessmentId)', 'LawnIntel.emitHealthSignal(updated.customer_id)', 'LawnIntel.generateServiceReport(assessmentId)']) {
-        expect(confirm).toContain(`if (customerOutputEligible) await ${call}`);
+      // Every customer-facing step sits inside the one hold; any missing score on a run-backed row keeps it closed (confirmScores).
+      const hold = confirm.slice(confirm.indexOf('if (customerOutputEligible) {'), confirm.indexOf('// 7. Track assessment completion'));
+      for (const call of ['KnowledgeBridge.generateAssessmentRecommendations(assessmentId)', 'LawnIntel.emitHealthSignal(updated.customer_id)', 'LawnIntel.sendAssessmentNotification(assessmentId)', 'LawnIntel.generateServiceReport(assessmentId)']) {
+        expect(hold).toContain(call);
+        expect(confirm.split(call)).toHaveLength(2); // the call exists only inside the hold
       }
-      expect(confirm).toMatch(/if \(!updated\.service_id && customerOutputEligible\) \{/);
-      expect(confirm).toMatch(/visitAssessment\.reviewRun\(/);
     });
   });
 });
