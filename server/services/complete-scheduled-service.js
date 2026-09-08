@@ -7149,7 +7149,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Only operate on photos that ACTUALLY uploaded — the assessment must never
       // reference an image the report can't show, and scores must reflect the photos
       // it displays. submitted = photos with data; scorable = those with an S3 row.
-      const submitted = completionPhotos.filter((p) => p && p.data);
+      // A packet's effects phase replays the saved form, which strips photo
+      // bytes (#4011's upload rule) — the committed 'after' rows are then the
+      // submitted set and the vision input loads from S3 by key. A signed
+      // preview review cannot be re-verified without the bytes, so that
+      // replay re-scores the durable set instead of skipping the assessment.
+      const durableReplay = packetEffects && completionPhotos.every((p) => !(p && p.data));
+      const submitted = completionPhotos.filter((p) => p && (p.data || durableReplay));
       const scorable = submitted
         .map((p, i) => ({ p, row: rowFor(p, i) }))
         .filter((x) => x.row);
@@ -7166,7 +7172,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // same count, or edited the observation copy) can't forge the HMAC, so it falls
       // back to re-scoring rather than persisting arbitrary client-supplied content.
       const reviewPhotosHash = treeShrubPhotosHash(submitted.map((p) => p.data));
-      const reviewSigned = review && review.signature
+      const reviewSigned = !durableReplay && review && review.signature
         && review.signature === treeShrubReviewSignature(review.scores, review.scoredCount, svc.id, reviewPhotosHash, review.observations);
       let scoringPromise = null;
       if (review && review.scores && typeof review.scores === 'object' && allUploaded && previewCoveredAll && reviewSigned) {
@@ -7191,9 +7197,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const runScore = () => scoreAndStoreTreeShrubAssessment({
             service: assessService,
             photos: scorePhotos,
-            loadImage: (ph) => {
+            loadImage: async (ph) => {
               const m = String(ph.data || '').match(/^data:([^;,]+)?(?:;base64)?,(.*)$/);
-              return m && m[2] ? { base64: m[2], mimeType: m[1] || 'image/jpeg' } : null;
+              if (m && m[2]) return { base64: m[2], mimeType: m[1] || 'image/jpeg' };
+              if (!ph.s3Key) return null;
+              const stored = await require('./photos').getPhotoBase64(ph.s3Key);
+              return { base64: stored.data, mimeType: stored.mimeType || 'image/jpeg' };
             },
           });
           // One bounded background retry when the first attempt stores
