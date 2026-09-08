@@ -34,6 +34,7 @@ const path = require('path');
 const Joi = require('joi');
 const Ajv = require('ajv');
 const logger = require('../logger');
+const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES } = require('./voice-relay-spoken-checks');
 
 const SCHEMA_VERSION = 'voice-relay-scenarios.v1';
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'voice-relay-eval', 'scenarios.json');
@@ -58,6 +59,9 @@ const CHECKS = Object.freeze([
   'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
   'end_session_called', 'no_model_text_before_tool',
   'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of',
+  // The named spoken-content checks (voice-relay-spoken-checks): one
+  // implementation per prohibition, shared by every scenario that carries it.
+  ...Object.keys(SPOKEN_CHECK_RUNNERS),
 ]);
 // The registered write tools and the ONE ctx effect each performs live
 // (relay-tools / relay-booking / relay-reservice / relay-transfer). A fixture
@@ -255,6 +259,7 @@ const CHECK_VALUE_RULES = Object.freeze({
   end_session_called: () => (v) => (END_SESSION_SCHEMA.validate(v, { convert: false }).error ? 'value must be boolean or exactly { reason: "<non-empty>" }' : null),
   no_model_text_before_tool: (knownTools) => (v) => (v === true || (Array.isArray(v) && v.length && v.every((n) => WRITE_TOOLS.includes(n) || knownTools.has(n))) ? null : 'value must be true or a tool list'),
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
+  ...SPOKEN_CHECK_VALUE_RULES,
 });
 
 const EXPECT_KEYS = Object.freeze(['check', 'value', 'severity', 'adjudicated']);
@@ -534,6 +539,51 @@ function validateToolInput(name, input = {}, record) {
   return null;
 }
 
+// The live executeTool authorization boundaries (relay-tools), mirrored
+// BEFORE any fixture answer so a custom fixture cannot hand sensitive data to
+// a call production refuses: the four carrier-vouched reads need attestation
+// from a caller the session recognised, and history, invoices and reports
+// are the ANI-matched caller's own account only — never a looked-up ref,
+// never a stranger. Same refusal copy as relay-tools, no oracle.
+const ATTESTATION_WITHHELD_TEXT = 'That detail is not available on this call. Tell the caller you can see their account but cannot go '
+  + 'through invoice amounts, past messages, call notes or report details over the phone, and that a Waves '
+  + 'team member will follow up — they can also see all of it signed in to their portal. Do not explain why.';
+const HISTORY_REFUSALS = Object.freeze({
+  lookedUp: 'Call and text history are only available for the account the caller\'s own phone number '
+    + 'matches — never for a looked-up account. Do not share, summarize, or hint at any past call '
+    + 'or text on this account.',
+  unmatched: 'No customer account matches the number this call is coming from, so there is no call or '
+    + 'text history to read. Do NOT guess at past calls or texts. Offer to have the office follow up, '
+    + 'and capture the lead.',
+});
+const MATCHED_ONLY_REFUSALS = Object.freeze({
+  get_call_history: HISTORY_REFUSALS,
+  get_message_history: HISTORY_REFUSALS,
+  get_invoice_history: {
+    lookedUp: 'Invoice detail is only available for the account the caller\'s own phone number matches. '
+      + 'For a looked-up account you can say only whether a balance is open, never amounts.',
+    unmatched: 'No customer account matches the number this call is coming from, so there are no invoices '
+      + 'to read. Do NOT guess at amounts owed. Offer to have the office follow up, and capture the lead.',
+  },
+  get_service_report: {
+    lookedUp: 'Visit reports are only available for the account the caller\'s own phone number matches. '
+      + 'For a looked-up account you can confirm visit dates and service names, nothing further.',
+    unmatched: 'No customer account matches the number this call is coming from, so there is no visit report '
+      + 'to read. Do NOT describe any visit. Offer to have the office follow up, and capture the lead.',
+  },
+});
+function liveAuthorizationRefusal(name, input = {}, ctx = {}) {
+  const { ATTESTATION_ONLY_TOOLS, matchedCallerTier } = require('../voice-agent/relay-tools');
+  const scope = ATTESTATION_ONLY_TOOLS[name];
+  const recognised = !!ctx.customerId && (scope === 'any-tier' || matchedCallerTier(ctx) === 'full');
+  if (scope && recognised && ctx.callerAttested !== true) return ATTESTATION_WITHHELD_TEXT;
+  const refusals = MATCHED_ONLY_REFUSALS[name];
+  if (!refusals) return null;
+  if (String(input.customer_ref || '').trim()) return refusals.lookedUp;
+  if (!ctx.customerId) return refusals.unmatched;
+  return null;
+}
+
 // The live capture_lead's phone gate (relay-tools): a spam capture is
 // suppressed before any number is read; otherwise the number the caller gave
 // (callback_phone) is preferred over the caller ID WITHOUT falling back to it,
@@ -669,6 +719,8 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   // enum, an invented ref — before any fixture answer, hanging or not.
   const invalid = validateToolInput(name, input, record) || noCallbackNumber(name, input, scenario);
   if (invalid) { event.invalid = true; return answer(invalid, false); }
+  const refused = liveAuthorizationRefusal(name, input, ctx);
+  if (refused) { event.invalid = true; event.refused = true; return answer(refused, false); }
   const picked = pickToolResponse(scenario, name, record.toolUse[name], matcherInput(record, event, name, input), record.toolResponseUse);
   if (!picked) {
     event.unexpected = true;
@@ -1020,6 +1072,7 @@ const CHECK_RUNNERS = Object.freeze({
     if (unbacked) return ['fail', `promised "${clip(unbacked.text, 120)}" with no write receipt before it`];
     return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : ''}`))].join(', ')})`];
   },
+  ...SPOKEN_CHECK_RUNNERS,
 });
 
 function firstRegexHit(sources, spoken) {
@@ -1104,7 +1157,7 @@ function qualityScore(checks) {
 
 function newRecord(scenario, h) {
   return {
-    id: scenario.id, language: scenario.language || 'en', turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
+    id: scenario.id, language: scenario.language || 'en', from: (scenario.caller && scenario.caller.from) || null, turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
     endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL,
     modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0, interruptInFlight: false, toolResponseUse: {},
   };
