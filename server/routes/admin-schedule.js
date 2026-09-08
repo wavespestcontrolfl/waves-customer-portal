@@ -6427,11 +6427,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const estimateRefusedAcceptance = !!(linkedEstimate
           && linkedEstimate.status !== 'accepted'
           && !estimateAutoAccepted);
+        // A Waves Assessment is not a closed deal either (owner ruling
+        // 2026-09-08): the converter judges that from the booked row itself
+        // (`booking: svc` below — name or catalog FK, never the client's
+        // label alone) and reports converted:false, so the promotion below
+        // stays off too. The lead stays open and the customer row keeps its
+        // lead stage until the quote is accepted.
         if (!estimateRefusedAcceptance) {
           try {
             const { convertLeadFromEvent } = require('../services/lead-estimate-link');
             const conversion = await convertLeadFromEvent({
               source: isRecurring ? 'recurring_service_booked' : 'appointment_booked',
+              booking: svc,
               // The estimate this booking rode in on: passing it lets the
               // authoritative estimate-link tier (leads.estimate_id) resolve
               // the exact FK-linked lead before the customer/contact

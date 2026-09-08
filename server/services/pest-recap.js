@@ -1148,7 +1148,7 @@ async function submitRecap({
     // only matches never-converted leads.
     try {
       const { convertLeadFromEvent } = require('./lead-estimate-link');
-      await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
+      await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id, booking: svc });
     } catch (leadErr) {
       logger.warn(`[pest-recap] lead conversion failed for customer=${svc.customer_id}: ${leadErr.message}`);
     }
