@@ -14,6 +14,7 @@ const { validate: isUuid } = require('uuid');
 const db = require('../models/db');
 const { hashCompletionRequest, withoutPhotoBytes } = require('./completion-attempts');
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
+const { parseETDateTime } = require('../utils/datetime-et');
 const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
 
@@ -308,24 +309,33 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
       });
   }
   const delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
-  const performed = await database('visit_completion_packet_items as i')
+  // Canonical completion gives these two effects different eligibility: a
+  // card mints for every performed, non-internal-only completion (a backfill
+  // mints silently), while a referral credit excludes backfills but not an
+  // internal-only report posture. Both helpers own their single-use guards.
+  const recorded = await database('visit_completion_packet_items as i')
     .join('service_records as r', 'r.id', 'i.service_record_id')
     .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
     .where('i.packet_id', packet.id).where('r.status', 'completed')
-    .whereRaw("COALESCE(r.structured_notes->>'backfill', 'false') = 'false'")
-    .whereRaw("COALESCE(r.structured_notes->>'visitOutcome', 'completed') NOT IN ('inspection_only', 'customer_declined', 'incomplete')")
-    .whereRaw("COALESCE(r.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'")
     .orderBy('s.window_start').orderBy('s.id')
-    .select('s.id', 's.customer_id', 's.is_recurring', 's.recurring_pattern', 'r.id as record_id');
-  if (performed.length) {
-    const first = performed[0];
-    // These existing helpers own their customer-level single-use guards.
-    // A retry cannot issue a second card or referral credit.
+    .select('s.id', 's.customer_id', 's.is_recurring', 's.recurring_pattern', 'r.id as record_id', 'r.structured_notes', 'r.service_date');
+  const notesOf = (member) => (typeof member.structured_notes === 'string'
+    ? JSON.parse(member.structured_notes) : member.structured_notes) || {};
+  const performed = (member) => !['inspection_only', 'customer_declined', 'incomplete'].includes(notesOf(member).visitOutcome || 'completed');
+  const backfill = (member) => notesOf(member).backfill === true;
+  const internalOnly = (member) => notesOf(member).internalOnlyCompletion === true
+    || (notesOf(member).internalOnlyCompletion === undefined && notesOf(member).typedReportDelivery === 'disabled');
+  const cardMember = recorded.find((member) => performed(member) && !internalOnly(member));
+  if (cardMember) {
     await require('./customer-card').ensureCardForCompletion({
-      customerId: first.customer_id, serviceRecordId: first.record_id, scheduledServiceId: first.id,
+      customerId: cardMember.customer_id, serviceRecordId: cardMember.record_id, scheduledServiceId: cardMember.id,
+      suppressIssuedEmail: backfill(cardMember),
+      firstVisitAt: backfill(cardMember) ? parseETDateTime(`${dateOnly(cardMember.service_date)}T12:00`) : null,
     });
-    const recurring = performed.find((member) => member.is_recurring || member.recurring_pattern);
-    if (recurring) await require('./referral-engine').creditReferralOnFirstService({ customerId: recurring.customer_id, serviceId: recurring.id });
+  }
+  const referralMember = recorded.find((member) => performed(member) && !backfill(member) && (member.is_recurring || member.recurring_pattern));
+  if (referralMember) {
+    await require('./referral-engine').creditReferralOnFirstService({ customerId: referralMember.customer_id, serviceId: referralMember.id });
   }
   const reviewEnrollment = await enrollVisitCompletionReview(packet.id, database);
   const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
@@ -361,7 +371,22 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
 }
 
 /** Completion and a later paid webhook share the same representative record. */
+// A paid webhook or manual settlement reaches this once for a packet that
+// already closed awaiting payment. Any failure along the way, not only the
+// final enrollment call, must put the packet back on the recovery queue or
+// the requested review is lost with that one-shot signal.
 async function enrollVisitCompletionReview(packetId, database = db) {
+  try {
+    return await enrollVisitCompletionReviewOnce(packetId, database);
+  } catch (err) {
+    await database('visit_completion_packets').where({ id: packetId }).update({
+      status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now(),
+    });
+    return { enrolled: false, retryable: true, reason: 'error', error: err.message };
+  }
+}
+
+async function enrollVisitCompletionReviewOnce(packetId, database = db) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   if (!packet) return { enrolled: false, reason: 'packet_missing' };
   const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
@@ -376,7 +401,8 @@ async function enrollVisitCompletionReview(packetId, database = db) {
     .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
     .where('i.packet_id', packet.id).orderBy('s.window_start').orderBy('s.id')
     .select('i.status', 's.id', 'r.id as record_id', 'r.structured_notes', 'r.service_type');
-  if (members.length < 2 || members.some((member) => member.status !== 'done'
+  // A frozen visit that retained a terminal sibling legitimately records one member.
+  if (!members.length || members.some((member) => member.status !== 'done'
       || member.structured_notes?.visitOutcome !== 'completed'
       || member.structured_notes?.requestReview !== true
       || (member.structured_notes?.reviewSuppression && member.structured_notes.reviewSuppression !== 'invoice_created')

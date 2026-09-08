@@ -143,9 +143,21 @@ async function recheckDeferredSummarySms(meta, database = db) {
   return { eligible: effect?.status === 'pending', reason: 'visit_summary_claim_unavailable' };
 }
 
-// The recipient check and the dispatch claim commit together while the
-// customer row is held, so a contact edit that lands between the queue's
-// recheck and the provider handoff cannot leave the former number eligible.
+// Recipient authorization and the dispatch claim commit together while the
+// customer row is held, so a contact edit after recipient resolution cannot
+// hand the bearer link to the former destination. `authorized` re-resolves
+// the recipient from the locked row and says whether it still matches.
+async function claimDispatchForRecipient({ visitId, customerId, kind, token, authorized }) {
+  return db.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forShare().first('id');
+    const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(), { db: trx });
+    if (!(await authorized(customer, trx))) return false;
+    return VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { database: trx });
+  });
+}
+
+// The deferred replay's recheck (visit, recipient, claim state) and its
+// dispatch claim commit together the same way.
 async function beginDeferredSummarySms(meta) {
   return db.transaction(async (trx) => {
     await trx('customers').where({ id: meta.customer_id }).forShare().first('id');
@@ -194,7 +206,8 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
         // A claim that cannot be read is not a lost claim: no provider
         // handoff happened, so the requested SMS stays retryable.
         try {
-          dispatched = await VisitGroups.beginVisitNotificationDispatch(visit.id, 'completion_sms', claim.token);
+          dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_sms',
+            token: claim.token, authorized: (current) => getServiceContactSmsRecipient(current).phone === recipient.phone });
         } catch { return { ok: false, code: 'VISIT_SUMMARY_CLAIM_UNAVAILABLE', retryable: true }; }
         return { ok: dispatched, code: 'VISIT_SUMMARY_CLAIM_LOST' };
       },
@@ -260,7 +273,12 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
             // recovery has claimed the visit. A thrown callback is advisory in
             // the library, so convert it to an explicit dispatch refusal.
             try {
-              dispatched = await VisitGroups.beginVisitNotificationDispatch(visit.id, 'completion_email', claim.token);
+              dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_email',
+                token: claim.token, authorized: async (current, trx) => {
+                  const currentPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first() || {};
+                  return getServiceReportEmailRecipients(current, currentPrefs)
+                    .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase());
+                } });
               return dispatched;
             } catch { return false; }
           },
@@ -306,12 +324,39 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');
   const member = await database('scheduled_services').where({ visit_id: visitId }).orderBy('id').first('id', 'technician_id');
   if (packet && member) {
+    // Same transaction as the effect flip: a webhook that fails after this
+    // point rolls both back, and SendGrid's redelivery cannot leave an alert
+    // for an effect that never changed.
     await require('./dispatch-alerts').createAlert({
       type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id,
-      payload: { visitId, packetId: packet.id, delivery: 'delivery_review', reason: 'summary_email_bounced' },
+      payload: { visitId, packetId: packet.id, delivery: 'delivery_review', reason: 'summary_email_bounced' }, trx: database,
     });
   }
   return { reconciled: true };
+}
+
+// The provider-retry rail can resend a blocked summary recipient later. When
+// the ledger proves an accepted send again, the effect a bounce reopened
+// returns to sent and the bounce alert it raised is resolved.
+async function reconcileSummaryEmailRecovery(message, database = db) {
+  const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
+  if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
+  const visitId = match[1];
+  return database.transaction(async (trx) => {
+    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email',
+      status: 'unknown_delivery', last_error: 'provider_bounce' }).forUpdate().first('id');
+    if (!effect) return { reconciled: false };
+    const messages = await trx('email_messages').where({ trigger_event_id: message.trigger_event_id,
+      template_key: 'service.visit_summary', recipient_id: message.recipient_id })
+      .select('status', 'sent_at', 'provider_message_id', 'error_message');
+    if (!messages.map(summaryEmailState).includes('sent')) return { reconciled: false };
+    await trx('visit_effects').where({ id: effect.id })
+      .update({ status: 'sent', sent_at: trx.fn.now(), last_error: null, updated_at: trx.fn.now() });
+    const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+      .whereRaw("payload->>'visitId' = ?", [visitId]).whereRaw("payload->>'reason' = 'summary_email_bounced'").select('id');
+    for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
+    return { reconciled: true };
+  });
 }
 
 async function deliverVisitCompletionSummary(packetId, token, database = db) {
@@ -345,5 +390,5 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 }
 
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
-  deliverVisitCompletionSummary, reconcileSummaryEmailBounce,
+  deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms };
