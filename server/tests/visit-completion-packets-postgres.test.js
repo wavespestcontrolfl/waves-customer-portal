@@ -437,7 +437,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     if (frozenInternalOnly) await mockPg('service_completion_profiles').where({ service_key: profile.service_key }).del();
     else await mockPg('service_completion_profiles').insert(profile);
     const supplies = jest.spyOn(require('../services/supplies-consumption'), 'consumeCompletionSupplies').mockResolvedValue(undefined);
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(supplies).toHaveBeenCalledTimes(2);
     expect(supplies.mock.calls.every(([, args]) => args.isInternalOnlyCompletion === frozenInternalOnly)).toBe(true);
   });
@@ -456,7 +456,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       }
       return real(input, context);
     });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(raced).toBe(true);
     expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
     expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
@@ -490,7 +490,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       saved = await saveVisitCompletionPacket(input);
       expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
       expect(score).not.toHaveBeenCalled();
-      expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+      expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     } finally {
       config.s3.bucket = priorBucket;
     }
