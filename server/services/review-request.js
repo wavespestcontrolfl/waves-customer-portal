@@ -880,13 +880,6 @@ const ReviewService = {
 
     if (shouldSendImmediately) {
       const outcome = await this.sendSMS(request.id, { expectedPhone });
-      // Not delivered — held by the 3-day rule, its lookup, the send window
-      // or a provider retry. The row stays queued for the retry owner, and
-      // the caller learns that it was NOT sent (codex #4141 r3 P2: the tech
-      // app was told sent:true for a text that could be 72 h out).
-      if (outcome && outcome.deferred) {
-        request.sendOutcome = { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
-      }
       if (outcome && outcome.refused === "approved_phone_drift") {
         // Remove the row this very call created (pre-push r15 P1): left in
         // place it would later be sent by the scheduler to the unapproved
@@ -3992,7 +3985,7 @@ const ReviewService = {
         return { outcome: "deferred", nextAllowedAt: touch.nextAllowedAt, requestId: touch.requestId };
       }
       if (touch.blocked || touch.terminal) {
-        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null, ...(touch.nextAllowedAt ? { nextAllowedAt: touch.nextAllowedAt } : {}) };
+        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null };
       }
       // 'send_failed' is a QUEUED outcome to callers (the satisfaction route
       // hides its fallback link on it), so only report it when a durable
