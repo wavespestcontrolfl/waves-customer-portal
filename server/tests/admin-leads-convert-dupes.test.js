@@ -1233,6 +1233,21 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
     });
   });
 
+  it('a retry of a first-time assessment booking dedupes on the same visit → 409 DUPLICATE_VISIT, no second insert', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({
+      preLead: baseLead({ customer_id: 'cust-linked', converted_at: null }),
+      lockedLead: { customer_id: 'cust-linked', converted_at: null, status: 'new' },
+      existingVisits: [{ id: 'appt-first', customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', window_end: '11:00', status: 'pending' }],
+    }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { serviceType: 'Waves Assessment' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('DUPLICATE_VISIT');
+      expect(calls.filter((c) => c.table === 'scheduled_services' && c.op === 'insert')).toHaveLength(0);
+    });
+  });
+
   it('a churned linked customer booking an assessment: no customer write at all (stage and churn history untouched)', async () => {
     const calls = [];
     install(makeKnex(makeResolver({

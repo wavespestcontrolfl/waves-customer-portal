@@ -1617,7 +1617,10 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // same-slot predicate exists in services/scheduling (occupancy.js is
       // tech/day-scoped), so this is a tight inline lookup using occupancy's
       // own active-visit status exclusion — no new columns.
-      if (rebook) {
+      // An assessment booking leaves converted_at NULL by design, so a retry
+      // or double-submit of one passes the converted-lead rejection above
+      // exactly like a rebook does — it needs the same dedupe.
+      if (rebook || assessmentVisit) {
         const { DEFAULT_EXCLUDE_STATUSES } = require('../services/scheduling/occupancy');
         const sameVisit = await trx('scheduled_services')
           .where({ customer_id: customerId, scheduled_date: date, window_start: windowStart, service_type: svcType })

@@ -3668,10 +3668,17 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // booking txn would leave it aborted after a SQL error and doom the COMMIT,
 // rolling back the booking. The savepoint contains a conversion failure to
 // the conversion alone; the booking still commits.
-async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, keepOpenForAssessment = false }) {
+// `booking` — the scheduled_services row this conversion is about. Assessment
+// identity is derived HERE from the row (name or catalog FK via the shared
+// services/assessment-booking predicate), never supplied by callers, so every
+// entry point — the four in-file booking paths and the outbound-review
+// confirm hook — agrees on what an assessment is.
+async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, booking = null }) {
   if (!leadId) return false;
   try {
     return await trx.transaction(async (inner) => {
+      const keepOpenForAssessment = !!booking
+        && await require('./assessment-booking').isAssessmentBooking(booking, inner);
       // Quote still owed (the agent promised to send an estimate after the
       // call), or the booked visit is a Waves Assessment (an assessment is
       // not a win — owner ruling 2026-09-08): the booked appointment does NOT
@@ -4088,16 +4095,6 @@ function isReServiceBookingRow(row) {
 // lead must still convert. Only an actually-free callback suppresses.
 function isFreeReServiceBookingRow(row) {
   return isReServiceBookingRow(row) && !(Number(row?.estimated_price) > 0);
-}
-
-// A Waves Assessment is NOT a win either (owner ruling 2026-09-08,
-// services/assessment-booking.js): the booking claims the lead and keeps it
-// OPEN — same shape as the quote-promised claim — because the owner is going
-// out to look and quote, and the deal closes on the quote. Judged from the
-// booked row's own denormalized service_type (the resolver's opinion may
-// differ from what was actually booked, codex #3231).
-function isAssessmentBookingRow(row) {
-  return require('./assessment-booking').isAssessmentServiceType(row?.service_type);
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
@@ -13242,7 +13239,7 @@ const CallRecordingProcessor = {
                       scheduledServiceId: primaryRow.id,
                       callSid,
                       keepOpenForQuote: callQuotePromised,
-                      keepOpenForAssessment: isAssessmentBookingRow(primaryRow),
+                      booking: primaryRow,
                     });
                   }
                   if (isAttachedManualBooking) {
@@ -13379,7 +13376,7 @@ const CallRecordingProcessor = {
                       scheduledServiceId: primaryRow.id,
                       callSid,
                       keepOpenForQuote: callQuotePromised,
-                      keepOpenForAssessment: isAssessmentBookingRow(primaryRow),
+                      booking: primaryRow,
                     });
                   }
                   // Deliberately NO ensureCallFollowUpVisit on an attached
@@ -13719,7 +13716,7 @@ const CallRecordingProcessor = {
                       scheduledServiceId: created.id,
                       callSid,
                       keepOpenForQuote: callQuotePromised,
-                      keepOpenForAssessment: isAssessmentBookingRow(created),
+                      booking: created,
                     });
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
@@ -13763,7 +13760,7 @@ const CallRecordingProcessor = {
                       scheduledServiceId: existingByKey.id,
                       callSid,
                       keepOpenForQuote: callQuotePromised,
-                      keepOpenForAssessment: isAssessmentBookingRow(existingByKey),
+                      booking: existingByKey,
                     });
                   }
                   // This is exactly the retry whose first attempt may have

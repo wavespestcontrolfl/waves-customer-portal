@@ -87,11 +87,11 @@ const ARGS = {
 beforeEach(() => jest.clearAllMocks());
 
 describe('convertCallLeadOnPhoneBooking', () => {
-  test('keepOpenForAssessment: claims the lead, keeps it open, never promotes the customer (an assessment is not a win)', async () => {
+  test('an assessment booking row: claims the lead, keeps it open, never promotes the customer (an assessment is not a win)', async () => {
     const inner = makeInner({ convertible: { id: 'lead-1', status: 'new' } });
     const trx = makeTrx(inner);
 
-    const converted = await convertCallLeadOnPhoneBooking(trx, { ...ARGS, keepOpenForAssessment: true });
+    const converted = await convertCallLeadOnPhoneBooking(trx, { ...ARGS, booking: { id: 'svc-1', service_type: 'Waves Assessment', service_id: null } });
 
     expect(converted).toBe(false);
     const leadUpdate = inner._writes.updates.find((w) => w.table === 'leads');
