@@ -1448,12 +1448,11 @@ const ReviewService = {
     try {
       // Webhooks pass a narrow projection. Resolve omitted ownership before
       // considering the representative service record's review preferences.
-      const packetId = invoice?.id && invoice.visit_completion_packet_id === undefined
-        ? (await db('invoices').where({ id: invoice.id }).first('visit_completion_packet_id'))?.visit_completion_packet_id
-        : invoice?.visit_completion_packet_id;
-      if (packetId) {
-        return await require('./visit-completion-packets').enrollVisitCompletionReview(packetId);
-      }
+      const Packets = require('./visit-completion-packets');
+      const packetResult = invoice?.id && invoice.visit_completion_packet_id === undefined
+        ? await Packets.enrollVisitCompletionReviewForInvoice(invoice.id)
+        : (invoice?.visit_completion_packet_id ? await Packets.enrollVisitCompletionReview(invoice.visit_completion_packet_id) : null);
+      if (packetResult) return packetResult;
       if (!invoice?.customer_id || !invoice?.service_record_id) {
         return { enrolled: false, reason: "not_completion_invoice" };
       }
