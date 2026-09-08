@@ -58,7 +58,7 @@ describe("CustomersPageV2 new-customer route", () => {
     expect(screen.getByTestId("location")).toHaveTextContent("/admin/customers");
   });
 
-  it("keeps customer profile selection and close state in the URL", async () => {
+  it("keeps the explicit overlay fallback selection and close state in the URL", async () => {
     fetch.mockImplementation(async () => ({
       ok: true,
       json: async () => ({
@@ -80,7 +80,7 @@ describe("CustomersPageV2 new-customer route", () => {
     }));
 
     render(
-      <MemoryRouter initialEntries={["/admin/customers"]}>
+      <MemoryRouter initialEntries={["/admin/customers?customer360=overlay"]}>
         <Routes>
           <Route
             path="/admin/customers"
@@ -107,7 +107,7 @@ describe("CustomersPageV2 new-customer route", () => {
     fireEvent.click(profileButton);
     await waitFor(() => {
       expect(screen.getByTestId("location")).toHaveTextContent(
-        "/admin/customers?customerId=cust-1",
+        "/admin/customers?customer360=overlay&customerId=cust-1",
       );
     });
 

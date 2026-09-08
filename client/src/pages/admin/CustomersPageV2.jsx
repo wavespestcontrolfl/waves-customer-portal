@@ -1046,9 +1046,9 @@ export default function CustomersPageV2() {
     const id = searchParams.get("customerId");
     return id || null;
   });
-  // Query-gated rollout: opt in with ?customer360=workspace. Existing deep
-  // links and profile sheets on other surfaces keep their current presentation.
-  const workspaceMode = searchParams.get("customer360") === "workspace";
+  // Customers defaults to the workspace; ?customer360=overlay is the rollback.
+  // Profile sheets on other surfaces keep their current presentation.
+  const workspaceMode = searchParams.get("customer360") !== "overlay";
   const workspaceOpen = workspaceMode && !!selected360Id;
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
