@@ -167,6 +167,7 @@ const BillingCron = {
 
     const todayDay = etParts(now).day;
     let charged = 0;
+    let processing = 0;
     let skipped = 0;
     let failed = 0;
 
@@ -296,10 +297,12 @@ const BillingCron = {
 
         // Charge
         const paymentResult = await service.chargeMonthly(customer.id);
-        charged++;
+        const settled = paymentResult?.status === 'paid';
+        if (settled) charged++;
+        else processing++;
 
-        // Log success + update next_charge_date (next month, same billing_day)
-        await logAutopay(customer.id, 'charge_success', {
+        // Log settlement state + update next_charge_date (next month, same billing_day)
+        await logAutopay(customer.id, settled ? 'charge_success' : 'charge_processing', {
           // Below monthly_rate when a retention offer slot applied this month — log the charged amount.
           amountCents: Math.round(parseFloat(paymentResult?.amount ?? customer.monthly_rate) * 100),
           paymentMethodId: customer.autopay_payment_method_id || null,
@@ -317,6 +320,9 @@ const BillingCron = {
         const nextChargeDate = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
         await db('customers').where({ id: customer.id })
           .update({ next_charge_date: nextChargeDate });
+
+        // Async settlement owns the terminal webhook/receipt; do not send a paid SMS now.
+        if (!settled) continue;
 
         // Extract receipt URL and include in confirmation SMS
         let receiptUrl = null;
@@ -348,7 +354,7 @@ const BillingCron = {
           logger.error(`[billing-cron] Payment confirmation SMS failed: ${smsErr.message}`);
         }
 
-        logger.info(`[billing-cron] Charged $${customer.monthly_rate} for customer id=${customer.id}`);
+        logger.info(`[billing-cron] Charged $${paymentResult.amount} for customer id=${customer.id}`);
       } catch (err) {
         failed++;
         logger.error(`[billing-cron] Failed to charge customer id=${customer.id}: ${err.message}`);
@@ -552,9 +558,9 @@ const BillingCron = {
       }
     }
 
-    logger.info(`[billing-cron] Monthly billing complete: ${charged} charged, ${skipped} skipped, ${failed} failed out of ${customers.length} customers`);
+    logger.info(`[billing-cron] Monthly billing complete: ${charged} charged, ${processing} processing, ${skipped} skipped, ${failed} failed out of ${customers.length} customers`);
 
-    return { charged, skipped, failed, total: customers.length };
+    return { charged, processing, skipped, failed, total: customers.length };
   },
 
   // =========================================================================
@@ -609,6 +615,7 @@ const BillingCron = {
 
     let retried = 0;
     let succeeded = 0;
+    let processing = 0;
     let failedAgain = 0;
 
     for (const payment of failedPayments) {
@@ -1345,17 +1352,22 @@ const BillingCron = {
         }
       }
 
-      succeeded++;
+      const settled = newPayment?.status === 'paid';
+      if (settled) succeeded++;
+      else processing++;
 
       // Log what was ACTUALLY collected — the retry recomputes the
       // total for the customer's current tender (a credit-card failure
       // retried on ACH/debit collects less than the old surcharged
       // gross), and autopay_log is the billing-dispute audit trail.
-      await logAutopay(payment.customer_id, 'retry_success', {
+      await logAutopay(payment.customer_id, settled ? 'retry_success' : 'retry_processing', {
         amountCents: Math.round(parseFloat(newPayment?.amount ?? baseAmount) * 100),
         paymentId: newPayment?.id || null,
         details: { source: 'autopay', retry_count: payment.retry_count + 1, original_payment_id: payment.id, original_amount: payment.amount },
       }).catch((logErr) => logger.error(`[billing-cron] retry_success log failed: ${logErr.message}`));
+
+      // Async retries remain disarmed above; the webhook handles settlement or bounce.
+      if (!settled) continue;
 
       // Send success SMS with receipt
       let retryReceiptUrl = null;
@@ -1389,9 +1401,9 @@ const BillingCron = {
       logger.info(`[billing-cron] Retry succeeded for customer id=${customer.id}: $${newPayment?.amount ?? baseAmount}`);
     }
 
-    logger.info(`[billing-cron] Retries complete: ${retried} attempted, ${succeeded} succeeded, ${failedAgain} failed again`);
+    logger.info(`[billing-cron] Retries complete: ${retried} attempted, ${succeeded} succeeded, ${processing} processing, ${failedAgain} failed again`);
 
-    return { retried, succeeded, failed: failedAgain };
+    return { retried, succeeded, processing, failed: failedAgain };
   },
 };
 
