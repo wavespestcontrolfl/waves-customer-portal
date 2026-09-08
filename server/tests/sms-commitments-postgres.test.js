@@ -697,6 +697,22 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(record.text.includes('moved after the request')).toBe(admissible);
   });
 
+  test.each(['send_report', 'send_paperwork'])('%s keeps its empty witness allowlist: a delivered staff text is no proof', async (kind) => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'I sent the report and paperwork',
+      message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after }).returning('id');
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
+    const commitment = { kind, evidence: [{ quote: 'Please send the report and paperwork' }],
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const witness = evidence.records.find((r) => r.id === reply.id);
+    expect(admissibleWitness(witness, commitment, evidence.records)).toBe(false);
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'I sent the report' }, evidence, commitment))
+      .toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'I sent the report' },
+      { ...evidence, failures: ['sms_truncated'] }, commitment)).toMatchObject({ verdict: 'uncertain' });
+  });
+
   test('a recipient-specific estimate request treats estimate-delivery email truncation as fatal', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);

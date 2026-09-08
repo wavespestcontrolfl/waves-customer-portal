@@ -225,7 +225,9 @@ const ORDERING_TIME = {
 };
 function witnessTypes(commitment) {
   if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
-  return REQUIRED_TYPES[commitment.kind]?.length ? REQUIRED_TYPES[commitment.kind] : ANSWER_TYPES;
+  // An EMPTY allowlist (reports, paperwork) is deliberate: no channel is a
+  // witness until the artifact/recipient proof exists.
+  return REQUIRED_TYPES[commitment.kind] ?? ANSWER_TYPES;
 }
 // The estimate an estimate-delivery email names, when that estimate is
 // itself admissible post-request evidence for the requested property.
