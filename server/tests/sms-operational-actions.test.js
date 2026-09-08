@@ -155,7 +155,7 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.dropped).toBe(1);
   });
 
-  test.each(["9 o'clock", '9 o’clock', "nine o'clock"])("unsupported clock %s requires review without inventing AM/PM", (clock) => {
+  test.each(["9 o'clock", '9 o’clock', "nine o'clock", '9', 'nine'])("unsupported clock %s requires review without inventing AM/PM", (clock) => {
     const message = source(`Please call tomorrow at ${clock}`);
     for (const due_text of [null, `tomorrow at ${clock}`]) {
       const result = groundExtraction(extracted([obligation(message.message_body, {
@@ -339,6 +339,22 @@ describe('SMS operational evidence and ownership', () => {
       quote: 'only text', value: 'text' })]), { message: source('Do not only text'), properties });
     expect(result.facts).toEqual([]);
   });
+
+  test.each([['Please send the estimate by September 10 at 3', 'send_estimate'], ['Please call before 5 tomorrow', 'callback']])(
+    'a bare hour after a clock preposition is stated timing that needs review: %s', (body, kind) => {
+      const message = source(body);
+      const result = groundExtraction(extracted([obligation(message.message_body, { kind })]), { message, properties });
+      expect(result.obligations[0]).toMatchObject({ due_at: null, timing_unverified: true });
+      expect(result.dropped).toBe(1);
+    });
+
+  test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate']])(
+    'a number that is not a clock hour stays undated without review: %s', (body, kind) => {
+      const message = source(body);
+      const result = groundExtraction(extracted([obligation(message.message_body, { kind })]), { message, properties });
+      expect(result.obligations[0]).toMatchObject({ due_at: null, timing_unverified: false });
+      expect(result.dropped).toBe(0);
+    });
 
   test.each([
     ['2040-09-10T15:00:00-04:00', '2040-09-10T19:00:00.000Z', false],

@@ -171,7 +171,11 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     // An omitted timing field (or shortened quote) cannot silently discard
     // a clock stated in the source. Ambiguous association needs review;
     // only a grounded due_text can establish an automatic deadline.
-    const clockStated = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|o['’]?clock|noon|midnight)(?=\s|[,.!?;]|$)/i.test(body);
+    // A bare hour after a clock preposition ("tomorrow at 9", "September 10
+    // at 3", "before five") is stated timing the parser cannot resolve
+    // without AM/PM, so it must reach review rather than stay undated.
+    const clockStated = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|o['’]?clock|noon|midnight)(?=\s|[,.!?;]|$)/i.test(body)
+      || /\b(?:at|by|around|before|after|until|till)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?=\s|[,.!?;]|$)/i.test(body);
     const resolved = timingGrounded && clockStated ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
     const proposed = item.due_at ? parseDueAt(item.due_at) : resolved;
     const due = resolved && proposed instanceof Date && proposed.getTime() === resolved.getTime() ? resolved : null;
