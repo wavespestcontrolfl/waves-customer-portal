@@ -598,8 +598,53 @@ describe('retireRecurringCardIntent ("use a different payment method")', () => {
 });
 
 describe('createRecurringCardSetupIntentForEstimate', () => {
+  // The mint re-reads every created intent LIVE by id (an idempotent replay
+  // returns the original create body). Default: the live object IS the
+  // create body — tests that need drift override retrieve explicitly.
+  let liveById;
+  beforeEach(() => {
+    liveById = new Map();
+    mockRetrieveSetupIntent.mockImplementation(async (id) => {
+      if (liveById.has(id)) return liveById.get(id);
+      // Latest create wins (a test may re-mint the same id with new state).
+      for (const r of [...mockCreateRecurringCardSetupIntent.mock.results].reverse()) {
+        const created = await r.value;
+        if (created?.id === id) return created;
+      }
+      return null;
+    });
+  });
+
   it('returns null when Stripe is not configured', async () => {
     mockCreateRecurringCardSetupIntent.mockResolvedValue(null);
+    expect(await createRecurringCardSetupIntentForEstimate(EST)).toBeNull();
+  });
+
+  // Pre-push Codex P1 on this PR: Stripe's idempotent replay returns the
+  // ORIGINAL create response, so a capture that has since succeeded (or
+  // been retired) still reads requires_payment_method from the create — the
+  // live read is what every judgement below must run on.
+  it('judges the LIVE intent, not the cached create body (idempotent replay)', async () => {
+    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'requires_payment_method' });
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'succeeded', payment_method: { id: 'pm_1', type: 'card' }, metadata: {} });
+    expect(await createRecurringCardSetupIntentForEstimate(EST))
+      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1', paymentMethodTypes: ['card'], capturedMethodType: 'card' });
+    expect(mockRetrieveSetupIntent).toHaveBeenCalledWith('seti_1', { expand: ['payment_method'] });
+  });
+
+  it('walks past a replay the cached body shows open but the live object shows retired', async () => {
+    mockCreateRecurringCardSetupIntent
+      .mockResolvedValueOnce({ id: 'seti_old', client_secret: 'cs_old', status: 'requires_payment_method' })
+      .mockResolvedValueOnce({ id: 'seti_2', client_secret: 'cs_2', status: 'requires_payment_method' });
+    liveById.set('seti_old', { id: 'seti_old', client_secret: 'cs_old', status: 'succeeded', payment_method: 'pm_old', metadata: { retired: 'true' } });
+    expect(await createRecurringCardSetupIntentForEstimate(EST))
+      .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2', paymentMethodTypes: ['card'], capturedMethodType: null });
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(2, { estimateId: 'est-1', generation: 1, paymentMethodType: 'card' });
+  });
+
+  it('fails closed (no capture offered) when the live read fails', async () => {
+    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'requires_payment_method' });
+    mockRetrieveSetupIntent.mockRejectedValue(new Error('stripe down'));
     expect(await createRecurringCardSetupIntentForEstimate(EST)).toBeNull();
   });
 

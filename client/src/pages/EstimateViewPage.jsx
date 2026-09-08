@@ -5276,6 +5276,13 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // leaving the 'review' phase (leaving it would unmount the Payment
   // Element mid-confirm). Ref = synchronous double-tap latch.
   const [inlineConfirmBusy, setInlineConfirmBusy] = useState(false);
+  // "Use a different payment method" in flight (pre-push Codex P1 on this
+  // PR): the ref is the SYNCHRONOUS latch every confirm gesture checks, the
+  // state disables the checkout controls until the swap settles — a confirm
+  // racing the retirement would otherwise accept the old method or fail
+  // against its retired id.
+  const replacingPaymentMethodRef = useRef(false);
+  const [replacingPaymentMethod, setReplacingPaymentMethod] = useState(false);
   const inlineConfirmBusyRef = useRef(false);
   // Server said DEPOSIT_REQUIRED while our refs say the card lane owns the
   // accept — the lane lost (flag kill / exemption change); force the
@@ -6279,6 +6286,9 @@ function EstimateViewPageInner({ websiteMode = false }) {
     // a double-tap on Confirm must not double-enter the flow — the second
     // entry would re-mint a deposit/card-hold intent and re-PUT /accept.
     if (ctaPhaseRef.current === 'submitting') return;
+    // A payment-method replacement is retiring the captured intent — no
+    // confirm may run against it until the fresh intent is in hand.
+    if (replacingPaymentMethodRef.current) return;
     // A fresh 409 exemption from a card/hold intent endpoint that does NOT
     // itself supersede the deposit (feature_disabled after a kill-switch
     // flip, payer_check_uncertain during a lookup outage, …) means the
@@ -6519,6 +6529,19 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // re-quotes. Returns true on success; the caller shows the failure copy.
   const handleReplacePaymentMethod = useCallback(async (setupIntentId) => {
     if (!setupIntentId) return false;
+    if (replacingPaymentMethodRef.current || ctaPhaseRef.current === 'submitting') return false;
+    replacingPaymentMethodRef.current = true;
+    setReplacingPaymentMethod(true);
+    // Drop the captured id and the quote/ack priced for it BEFORE the
+    // request: from here the old capture is being retired, and nothing may
+    // ride an accept on it whether or not the swap lands (a retired id
+    // 402s at the accept gate and re-mints; an un-retired one is simply
+    // re-captured through the replay panel).
+    recurringCardSetupIntentIdRef.current = null;
+    prepayChargeAckRef.current = null;
+    setPrepayChargeQuote(null);
+    setPrepayConsentChecked(false);
+    setError(null);
     try {
       const r = await fetch(`${API_BASE}/public/estimates/${token}/recurring-card-intent`, {
         method: 'POST',
@@ -6527,11 +6550,6 @@ function EstimateViewPageInner({ websiteMode = false }) {
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || !body?.clientSecret) return false;
-      recurringCardSetupIntentIdRef.current = null;
-      prepayChargeAckRef.current = null;
-      setPrepayChargeQuote(null);
-      setPrepayConsentChecked(false);
-      setError(null);
       if (recurringCardIntentOpenRef.current) {
         setRecurringCardIntent(body);
       } else if (inlineCardIntent) {
@@ -6545,6 +6563,9 @@ function EstimateViewPageInner({ websiteMode = false }) {
       return true;
     } catch {
       return false;
+    } finally {
+      replacingPaymentMethodRef.current = false;
+      setReplacingPaymentMethod(false);
     }
   }, [token, serviceMode, paymentPreference, inlineCardIntent]);
 
@@ -7799,7 +7820,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
               ) : null}
               <button
                 type="button"
-                disabled={ctaPhase === 'submitting' || !consentSatisfied}
+                disabled={ctaPhase === 'submitting' || replacingPaymentMethod || !consentSatisfied}
                 onClick={() => {
                   prepayChargeAckRef.current = {
                     totalCents: prepayChargeQuote.totalCents,
@@ -7820,13 +7841,13 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 <div style={{ marginTop: 12 }}>
                   <button
                     type="button"
-                    disabled={ctaPhase === 'submitting'}
+                    disabled={ctaPhase === 'submitting' || replacingPaymentMethod}
                     onClick={async () => {
                       const swapped = await handleReplacePaymentMethod(recurringCardSetupIntentIdRef.current);
                       if (!swapped) setError('We could not switch your payment method. Please refresh this page and try again.');
                     }}
                     style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
-                  >Use a different payment method</button>
+                  >{replacingPaymentMethod ? 'Switching…' : 'Use a different payment method'}</button>
                 </div>
               ) : null}
             </div>
@@ -7841,7 +7862,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
             secondsRemaining={countdownSeconds}
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
-            submitting={ctaPhase === 'submitting' || inlineConfirmBusy}
+            submitting={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
             invoiceMode={!!estimate.billByInvoice}
             invoiceOnly={invoiceOnlyAccept}
             siteConfirmationHold={!!estimate.siteConfirmationHold}
@@ -7893,7 +7914,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 glassActive={!websiteMode && !!glassContent}
                 bodyColor={websiteMode ? '#1b2c5b' : undefined}
                 borderColor={websiteMode ? '#e2e8f0' : undefined}
-                busy={ctaPhase === 'submitting' || inlineConfirmBusy}
+                busy={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
                 onStateChange={handleInlineCardState}
                 onReplace={handleReplacePaymentMethod}
                 prepay={paymentPreference === 'prepay_annual'}

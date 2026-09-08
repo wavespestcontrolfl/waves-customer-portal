@@ -286,6 +286,32 @@ describe('annual prepay confirmation', () => {
     expect(acceptBodies.at(-1).prepayChargeAcknowledgedTotalCents).toBeUndefined();
   });
 
+  it('locks checkout while the replacement is in flight (pre-push Codex P1: a confirm must not race the retirement)', async () => {
+    const fetchMock = await reachPrepayQuote();
+    let releaseReplace;
+    const gate = new Promise((resolve) => { releaseReplace = resolve; });
+    const base = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (url, opts) => {
+      if (String(url).includes('/recurring-card-intent') && opts?.body && JSON.parse(opts.body).replaceSetupIntentId) {
+        await gate;
+      }
+      return base(url, opts);
+    });
+    const acceptCallsBefore = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/accept')).length;
+    fireEvent.click(screen.getByRole('button', { name: 'Use a different payment method' }));
+    // The quote (priced for the retired card) is gone at once, and every
+    // confirm control is locked until the fresh intent lands.
+    await waitFor(() => expect(screen.queryByText('Confirm your annual prepay total')).not.toBeInTheDocument());
+    // The review CTA reads as busy and is disabled — a tap does nothing.
+    const confirm = await screen.findByRole('button', { name: /Booking your visit|Confirm/ });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/accept'))).toHaveLength(acceptCallsBefore);
+    releaseReplace();
+    await waitFor(() => expect(screen.getByRole('checkbox')).not.toBeChecked());
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/accept'))).toHaveLength(acceptCallsBefore);
+  });
+
   it('clears the annual quote when switching back to per application', async () => {
     await reachPrepayQuote();
     fireEvent.click(screen.getByRole('button', {

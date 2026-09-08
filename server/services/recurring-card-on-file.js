@@ -345,7 +345,21 @@ async function resolveRecurringCaptureTender(estimate) {
 async function createRecurringCardSetupIntentForEstimate(estimate) {
   const paymentMethodType = await resolveRecurringCaptureTender(estimate);
   for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
-    const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
+    const created = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation, paymentMethodType });
+    if (!created) return null;
+    // An idempotent replay returns the ORIGINAL create response — the
+    // status and metadata as they were at mint, never what has happened to
+    // the intent since (pre-push Codex P1 on this PR). Every terminal /
+    // succeeded / retired judgement below needs the LIVE object, so
+    // re-read it by id. A failed read fails closed (no capture offered)
+    // rather than judging a stale body.
+    let setupIntent;
+    try {
+      setupIntent = await StripeService.retrieveSetupIntent(created.id, { expand: ['payment_method'] });
+    } catch (err) {
+      logger.warn(`[recurring-cof] live SetupIntent read failed after mint ${created.id}: ${err.message}`);
+      return null;
+    }
     if (!setupIntent) return null;
     // A RETIRED replay is walked past exactly like a canceled one: the
     // customer chose to replace that capture (retireRecurringCardIntent),
@@ -369,7 +383,7 @@ async function createRecurringCardSetupIntentForEstimate(estimate) {
       }
     }
     return {
-      clientSecret: setupIntent.client_secret,
+      clientSecret: setupIntent.client_secret || created.client_secret,
       setupIntentId: setupIntent.id,
       // The capture UI keys its heading/consent copy on this — the Payment
       // Element only shows a bank tab when the intent allows it.

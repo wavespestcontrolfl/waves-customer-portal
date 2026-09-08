@@ -169,7 +169,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   };
 
   useImperativeHandle(ref, () => ({
-    isReady: () => ready && agreed,
+    // Not ready while a replacement is in flight: the intent this capture
+    // holds is being retired.
+    isReady: () => ready && agreed && !replacing,
     /**
      * Confirm the SetupIntent with what the customer entered. Returns
      * { ok, setupIntentId } or { ok: false, error } — never throws into
@@ -177,6 +179,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
      * including the succeeded-replay short-circuit.
      */
     async confirmSetup() {
+      if (replacing) {
+        return { ok: false, error: 'Switching your payment method — one moment.' };
+      }
       // The consent must still be ticked for the tender on screen at the
       // moment of confirm — a tender switch re-arms it (see the effect
       // above), and this closure reads the live value.
@@ -233,7 +238,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         return fail(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
       }
     },
-  }), [ready, agreed, intent, bank, replay]);
+  }), [ready, agreed, intent, bank, replay, replacing]);
 
   return (
     <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${borderColor}`, textAlign: 'left' }}>
