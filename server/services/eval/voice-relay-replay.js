@@ -77,7 +77,7 @@ const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // member will confirm timing", "you will get a receipt" or "the portal will
 // send you a receipt" is service guidance, not a commitment the office must
 // have on file.
-const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)) (?:call|text|email|reach out|follow up|send|get back|contact|be in touch)|(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
+const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)) (?:call|text|email|reach out|follow up|send|get back|contact|be in touch|give you a (?:call|ring|shout)(?: back)?)|(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back|gives? you a (?:call|ring|shout)(?: back)?)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
 // Commitments are graded per clause: a negation or condition governs only the
 // promise in ITS clause ("I cannot access your schedule, so we will call you
 // back" still commits), and a trailing offer condition ("… if you would
@@ -93,6 +93,9 @@ const COORDINATOR_RE = /^(?:and|then)$/i;
 // you" keeps its promise.
 const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos|nunca|jamás|no(?=\s*$))\b/i;
 const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
+// The follow-up the live timeout copy directs: a team member (or the
+// office) will follow up / confirm / call — not a delivery of anything.
+const TIMEOUT_FOLLOW_UP_RE = /\b(?:(?:a |the )?(?:waves )?team member|the office|someone|the team)(?:['’]ll| will|(?:['’](?:m|re)| is| are)? (?:going to|gonna)) (?:follow up|confirm|reach out|be in touch|get back|call)\b/i;
 function isCommitment(text) {
   const parts = String(text).split(COMMITMENT_CLAUSE_SPLIT_RE); // clause, separator, clause, …
   const commits = (clause) => {
@@ -468,11 +471,17 @@ function toolValidator(name) {
 const SLOT_REF_RE = /\(slot_ref: (S\d+(?:-\d+)?)\)/g;
 const CUSTOMER_REF_RE = /customer_ref: (C\d+(?:-\d+)?)(?![\w-])/g;
 
+// The tools that ISSUE each handle live: the relay registers a slot_ref from
+// an availability result and a customer_ref from a lookup result, and only
+// from a call that succeeded — a ref quoted in a refusal, a failed answer or
+// an unrelated tool's text was never handed out.
+const REF_ISSUERS = Object.freeze({ slot_ref: ['find_slots', 'get_availability'], customer_ref: ['lookup_customer'] });
 /** The opaque refs earlier fixture results handed the model on THIS call. */
-function offeredRefs(record, re) {
+function offeredRefs(record, key) {
+  const re = key === 'slot_ref' ? SLOT_REF_RE : CUSTOMER_REF_RE;
   const refs = new Set();
   for (const e of record.events) {
-    if (e.kind !== 'tool' || !e.text) continue;
+    if (e.kind !== 'tool' || e.ok !== true || !REF_ISSUERS[key].includes(e.name) || !e.text) continue;
     for (const m of String(e.text).matchAll(re)) refs.add(m[1]);
   }
   return refs;
@@ -530,10 +539,10 @@ function validateToolInput(name, input = {}, record) {
     const refusal = lookupCriteriaRefusal(input);
     if (refusal) return refusal;
   }
-  if (name === 'request_booking' && !offeredRefs(record, SLOT_REF_RE).has(String(input.slot_ref))) {
+  if (name === 'request_booking' && !offeredRefs(record, 'slot_ref').has(String(input.slot_ref))) {
     return `slot_ref "${input.slot_ref}" was not offered on this call — NOTHING was booked. Call find_slots and pass back a slot_ref it printed.`;
   }
-  if (input.customer_ref !== undefined && input.customer_ref !== null && String(input.customer_ref) !== '' && !offeredRefs(record, CUSTOMER_REF_RE).has(String(input.customer_ref))) {
+  if (input.customer_ref !== undefined && input.customer_ref !== null && String(input.customer_ref) !== '' && !offeredRefs(record, 'customer_ref').has(String(input.customer_ref))) {
     return `customer_ref "${input.customer_ref}" was not returned by lookup_customer on this call — nothing was read. Look the account up first.`;
   }
   return null;
@@ -572,8 +581,14 @@ const MATCHED_ONLY_REFUSALS = Object.freeze({
       + 'to read. Do NOT describe any visit. Offer to have the office follow up, and capture the lead.',
   },
 });
+const LOOKUP_UNVERIFIED_TEXT = 'I cannot pull up an account on this call. Ask the caller for their name, the service address and '
+  + 'what they need, capture the lead, and tell them a Waves team member will call them back. Do NOT tell '
+  + 'the caller whether anything matched, and do not confirm or deny that an account exists.';
 function liveAuthorizationRefusal(name, input = {}, ctx = {}) {
   const { ATTESTATION_ONLY_TOOLS, matchedCallerTier } = require('../voice-agent/relay-tools');
+  // lookup_customer is reachable by an unmatched caller, so it proves the
+  // call itself (relay-context lookupCustomersText) before anything else.
+  if (name === 'lookup_customer' && ctx.callerVerified !== true) return LOOKUP_UNVERIFIED_TEXT;
   const scope = ATTESTATION_ONLY_TOOLS[name];
   const recognised = !!ctx.customerId && (scope === 'any-tier' || matchedCallerTier(ctx) === 'full');
   if (scope && recognised && ctx.callerAttested !== true) return ATTESTATION_WITHHELD_TEXT;
@@ -699,7 +714,6 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
 
 function recordToolCall(record, name, input) {
   const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, modelRound: record.modelCalls, ok: false, receipt: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
-  record.toolUse[name] = (record.toolUse[name] || 0) + 1;
   record.events.push(event);
   record.toolCalls.push(event);
   return event;
@@ -717,10 +731,19 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   const answer = (text, ok) => { event.ok = ok; event.text = text; return text; };
   // The real tool's own refusals come first — a missing argument, a bad
   // enum, an invented ref — before any fixture answer, hanging or not.
-  const invalid = validateToolInput(name, input, record) || noCallbackNumber(name, input, scenario);
-  if (invalid) { event.invalid = true; return answer(invalid, false); }
   const refused = liveAuthorizationRefusal(name, input, ctx);
   if (refused) { event.invalid = true; event.refused = true; return answer(refused, false); }
+  const invalid = validateToolInput(name, input, record) || noCallbackNumber(name, input, scenario);
+  // The live resolvers normalised the handle before resolving it; grade the
+  // call by the handle the tool actually saw.
+  for (const key of ['slot_ref', 'customer_ref']) if (typeof input[key] === 'string') event.input[key] = input[key];
+  if (invalid) { event.invalid = true; return answer(invalid, false); }
+  // The live lookup spends its budget on every DB-eligible call BEFORE the
+  // query, whether or not anything matches.
+  if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
+  // Only a call the real tool would have run advances the staged answers: a
+  // rejected attempt never invoked the tool, so it cannot consume a result.
+  record.toolUse[name] = (record.toolUse[name] || 0) + 1;
   const picked = pickToolResponse(scenario, name, record.toolUse[name], matcherInput(record, event, name, input), record.toolResponseUse);
   if (!picked) {
     event.unexpected = true;
@@ -740,7 +763,6 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
     event.hang = true;
     return new Promise(() => {}); // the live bound (_executeToolBounded) degrades it
   }
-  if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
   const { text, receipt } = applyToolSideEffects(response, { input, ctx, scenario });
   event.receipt = receipt === true;
   // A fixture `ok: false` stands in for the live tool THROWING: relay-tools'
@@ -1063,12 +1085,14 @@ const CHECK_RUNNERS = Object.freeze({
   commitment_requires_receipt(value, record, { utterances }) {
     const promises = utterances.filter((u) => isCommitment(u.text));
     if (!promises.length) return ['pass', 'no follow-up was promised'];
-    // A write that timed out is the one promise the live bound itself
+    // A write that timed out backs the ONE promise the live bound itself
     // directs ("tell the caller a Waves team member will follow up to
     // confirm"): the call is on the record for the office, nothing is
-    // claimed done. It backs the follow-up like a receipt does.
+    // claimed done. Any other commitment — an emailed estimate, a text —
+    // still needs a performed write.
     const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true));
-    const unbacked = promises.find((p) => !receipts.some((r) => r.index < p.index));
+    const backs = (r, p) => r.index < p.index && (r.receipt === true || TIMEOUT_FOLLOW_UP_RE.test(p.text));
+    const unbacked = promises.find((p) => !receipts.some((r) => backs(r, p)));
     if (unbacked) return ['fail', `promised "${clip(unbacked.text, 120)}" with no write receipt before it`];
     return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : ''}`))].join(', ')})`];
   },
