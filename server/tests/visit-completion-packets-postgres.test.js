@@ -275,18 +275,21 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ technician_id: fixture.techId });
     const assignedMember = await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).first();
     const { addETDays, etDateString } = require('../utils/datetime-et');
-    for (const patch of [{ scheduled_date: etDateString(addETDays(new Date(), -8)) }, { status: 'cancelled' }]) {
-      await mockPg('scheduled_services').where({ id: assignedMember.id }).update(patch);
-      expect((await request(path, { auth })).status).toBe(404);
-      expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).status).toBe(404);
-      expect((await request(`${path}/resume`, { method: 'POST', auth, body: {} })).status).toBe(404);
-      await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'admin' });
-      expect((await request(path, { auth })).status).toBe(200);
-      await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'technician' });
-      await mockPg('scheduled_services').where({ id: assignedMember.id }).update({
-        scheduled_date: assignedMember.scheduled_date, status: assignedMember.status,
-      });
-    }
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ scheduled_date: etDateString(addETDays(new Date(), -8)) });
+    expect((await request(path, { auth })).status).toBe(404);
+    expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).status).toBe(404);
+    expect((await request(`${path}/resume`, { method: 'POST', auth, body: {} })).status).toBe(404);
+    await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'admin' });
+    expect((await request(path, { auth })).status).toBe(200);
+    await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'technician' });
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ scheduled_date: assignedMember.scheduled_date });
+    // A retained cancelled sibling is history, not a gate: the technician
+    // still reaches the closeout for the live member, and a form for the
+    // retained child is refused by the saver's own membership rule.
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: 'cancelled', technician_id: null });
+    expect((await request(path, { auth })).status).toBe(200);
+    expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).body.code).toBe('visit_members_changed');
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: assignedMember.status, technician_id: fixture.techId });
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
     if (fullBehavior) {
       expect((await request(`/api/admin/dispatch/${fixture.serviceIds[0]}/completion-status`, { auth })).status).toBe(409);

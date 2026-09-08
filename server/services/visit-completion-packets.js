@@ -121,13 +121,15 @@ async function saveVisitCompletionPacket(input, database = db) {
         .forUpdate().first();
       if (!visit) return failure(409, 'visit_changed', 'The visit moved. Refresh before closing it.');
       const members = await trx('scheduled_services').where({ visit_id: visit.id }).orderBy('id').forUpdate();
-      const ownership = members.map((member) => completionOwnershipError({
-        role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
-      })).find(Boolean);
-      if (ownership) return { status: ownership.status, body: ownership.payload };
       const existing = await trx('visit_completion_packets').where({ visit_id: visit.id }).first();
       const snapshot = packetSnapshot(request, actor, members, existing);
       const retainedIds = new Set(snapshot.retainedMembers.map((member) => member.serviceId));
+      // Retained history (a cancelled child, its assignment cleared) is not
+      // the technician's work; ownership is judged on the members recorded.
+      const ownership = members.filter((member) => !retainedIds.has(member.id)).map((member) => completionOwnershipError({
+        role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
+      })).find(Boolean);
+      if (ownership) return { status: ownership.status, body: ownership.payload };
       // Frozen visits retain terminal children as history. Only live children
       // need forms on the first submit. Replays use saved form membership,
       // since recording those services has already made them terminal too.

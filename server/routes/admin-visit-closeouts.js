@@ -10,6 +10,12 @@ const { completionOwnershipError } = require('../services/complete-scheduled-ser
 const { saveVisitCompletionPacket, runVisitCompletionPacketEffects } = require('../services/visit-completion-packets');
 const { dateOnly } = require('../services/visit-groups');
 const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
+const { TERMINAL_ROW_STATUSES } = require('../services/visit-context/statuses');
+
+// A frozen visit retains cancelled / skipped / no-show children as history;
+// the closeout works on its live and recorded members (the saver's own
+// retainedMembers rule), so those rows never gate access to it.
+const RETAINED_HISTORY_STATUSES = TERMINAL_ROW_STATUSES.filter((status) => status !== 'completed');
 
 const router = express.Router();
 router.use(adminAuthenticate, requireTechOrAdmin, noStore);
@@ -24,13 +30,15 @@ router.use('/:visitId', async (req, res, next) => {
     const members = await db('scheduled_services').where({ visit_id: visit.id }).orderBy('window_start').orderBy('id')
       .select('id', 'technician_id', 'service_type', 'status');
     if (members.length < 2) return res.status(409).json({ error: 'Refresh the schedule. This visit no longer contains multiple services.' });
-    const ownership = members.map((member) => completionOwnershipError({
+    const current = members.filter((member) => !RETAINED_HISTORY_STATUSES.includes(member.status));
+    if (!current.length) return res.status(404).json({ error: 'Visit not found.' });
+    const ownership = current.map((member) => completionOwnershipError({
       role: req.techRole, actorTechnicianId: req.technicianId, assignedTechnicianId: member.technician_id,
     })).find(Boolean);
     if (ownership) return res.status(ownership.status).json(ownership.payload);
-    const accessible = await technicianCurrentVisitFilter(req,
-      db('scheduled_services').where({ visit_id: visit.id })).select('id');
-    if (accessible.length !== members.length) return res.status(404).json({ error: 'Visit not found.' });
+    const accessible = new Set((await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ visit_id: visit.id })).select('id')).map((row) => row.id));
+    if (!current.every((member) => accessible.has(member.id))) return res.status(404).json({ error: 'Visit not found.' });
     const packet = await db('visit_completion_packets').where({ visit_id: visit.id }).first('id', 'status', 'error');
     if (!packet && Number(visit.behavior_version) < 2 && !isEnabled('visitCloseout')) return res.status(404).json({ error: 'Visit closeout is unavailable.' });
     req.visitCloseout = { visit, members, packet };
