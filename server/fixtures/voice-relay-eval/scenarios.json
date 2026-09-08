@@ -669,7 +669,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(discount|knock (a little |something )?off|per visit)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(discount|knock (a little |something )?off|per visit)\\b"
           ],
           "severity": "major"
         }
@@ -899,8 +899,8 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(we|waves) (do|offer|handle|can (do|handle|remove|take care of)) (bee|hive|the hive)",
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(remove|relocate) the (hive|bees)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(we|waves) (do|offer|handle|can (do|handle|remove|take care of)) (bee|hive|the hive)",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(remove|relocate) the (hive|bees)\\b"
           ],
           "severity": "major"
         },
@@ -1913,7 +1913,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\bmaintenance mode\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\bmaintenance mode\\b"
           ],
           "severity": "major"
         }
@@ -2646,8 +2646,8 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(saved|booked|filed|in the system|all set|got you down|you'?re (all )?(set|in)|got (all )?(of )?your (details|info|information) (down|noted|in))\\b",
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(went|gone) through\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(saved|booked|filed|in the system|all set|got you down|you'?re (all )?(set|in)|got (all )?(of )?your (details|info|information) (down|noted|in))\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(went|gone) through\\b"
           ],
           "severity": "critical"
         },
