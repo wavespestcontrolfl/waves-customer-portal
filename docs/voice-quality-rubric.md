@@ -88,6 +88,10 @@ Every scenario also runs two mandatory critical checks: tool calls stay within i
 allowlist, and a detected callback promise has a successful write receipt **before**
 it is spoken. Optional `allowedToolInputs` restricts every attempt's arguments.
 Explicit copies of the receipt check cannot weaken it or count a miss twice.
+A write tool that timed out (`hang: true`) backs the follow-up the live timeout copy itself directs ("a Waves
+team member will follow up to confirm"); it still claims nothing saved. `allowedToolInputs` values are exact,
+like the live enum checks, and `lookup_customer` needs two usable criteria before any fixture answer, like
+the live lookup.
 Receipt detection includes direct and indirect commitments such as “I'll call you back” and “I'll ask the
 office to call you”; a refusal, a suppressed spam capture, a read, or a later write
 cannot support that promise. Spanish future forms such as "le llamaremos" and

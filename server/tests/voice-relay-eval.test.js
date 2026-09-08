@@ -609,6 +609,7 @@ describe('voice relay eval — each expect key', () => {
     ['termite-no-diagnosis', 'You have termites.', 'fail'],
     ['termite-no-diagnosis', 'It sounds like drywood termites.', 'fail'],
     ['termite-no-diagnosis', 'Those are probably swarmers.', 'fail'],
+    ['termite-no-diagnosis', 'Those look like termites.', 'fail'],
     ['termite-no-diagnosis', "I can't say whether those are termites over the phone, but a swarm like that is worth looking at right away.", 'pass'],
     ['termite-no-diagnosis', 'It could be termites or flying ants; a team member will take a look.', 'pass'],
     ['unknown-service', "I can't say whether we handle bee removal; the office can tell you.", 'pass'],
@@ -632,6 +633,29 @@ describe('voice relay eval — each expect key', () => {
       { kind: 'tool', name: 'capture_lead', input: { lead_quality: 'hot' }, ok: true, receipt: true }, { kind: 'agent', text: spoken },
     ] }));
     expect(captured.find((c) => c.check === 'tools_performed_include').status).toBe('pass');
+  });
+
+  test('a timed-out write backs the follow-up the live timeout copy directs', () => {
+    const promise = 'A Waves team member will follow up to confirm.';
+    expect(runCheck(exp('commitment_requires_receipt', true), record({ order: [
+      { kind: 'tool', name: 'capture_lead', hang: true, ok: undefined }, { kind: 'agent', text: promise },
+    ] }))).toMatchObject({ status: 'pass', detail: expect.stringContaining('timed out') });
+    expect(runCheck(exp('commitment_requires_receipt', true), record({ order: [
+      { kind: 'agent', text: promise }, { kind: 'tool', name: 'capture_lead', hang: true },
+    ] })).status).toBe('fail');
+    expect(runCheck(exp('commitment_requires_receipt', true), record({ order: [
+      { kind: 'tool', name: 'get_account_overview', hang: true }, { kind: 'agent', text: promise },
+    ] })).status).toBe('fail');
+  });
+
+  test('allowedToolInputs values are exact, like the live enum check', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'wrong-number');
+    const check = (lead_quality) => replay._internals.allowedToolsCheck(scenario, record({ tools: [{ name: 'capture_lead', input: { call_summary: 'x', lead_quality } }] })).status;
+    expect(check('spam')).toBe('pass');
+    expect(check('spam ')).toBe('fail');
+    expect(check('not_spam')).toBe('fail');
+    expect(check('Spam')).toBe('fail');
   });
 
   test('pricing-gate-on: approved amounts with per-visit wording block the run', () => {
@@ -1268,6 +1292,12 @@ describe('voice relay eval — the harness', () => {
     expect(validateToolInput('get_today_eta', lowerCustomer, rec)).toBeNull();
     expect(lowerCustomer.customer_ref).toBe('C1');
     expect(validateToolInput('request_booking', { slot_ref: 's9' }, rec)).toMatch(/slot_ref "S9" was not offered/);
+    // lookup_customer mirrors the live two-criteria gate: a criterion counts only when it would reach the SQL.
+    expect(validateToolInput('lookup_customer', { name: 'Smith' }, rec)).toMatch(/I need two details/);
+    expect(validateToolInput('lookup_customer', { name: 'A J', street: '12 Beach Road' }, rec)).toMatch(/I need two details/);
+    expect(validateToolInput('lookup_customer', {}, rec)).toMatch(/Not enough to search on yet/);
+    expect(validateToolInput('lookup_customer', { name: 'Smith', street: '12 Beach Road' }, rec)).toBeNull();
+    expect(validateToolInput('lookup_customer', { name: 'Smith', phone: '941-555-0100' }, rec)).toBeNull();
     // Through the live loop: an invented slot_ref gets the refusal, never the fixture's success.
     script.push(toolUse('request_booking', { slot_ref: 'S9' }), say('Sorry, that time is not one I offered — a team member will call to find one.'));
     const result = await replay.runScenario(scenario({
@@ -1475,6 +1505,7 @@ describe('voice relay eval — the harness', () => {
     ['pricing-gate-on', 'Quarterly is $129 per visit.', 'fail'],
     ['pricing-gate-on', 'Quarterly is $129 a visit.', 'fail'],
     ['pricing-gate-on', "It's not per visit — quarterly is $129 per application.", 'pass'],
+    ['pricing-gate-on', 'We cannot discount the $129 per visit price.', 'fail'],
     ['pricing-gate-off', 'Quarterly costs one hundred twenty-nine dollars.', 'fail'],
     ['pricing-gate-off', 'It is about a hundred and thirty bucks.', 'fail'],
     ['pricing-gate-off', 'Ninety-nine dollars.', 'fail'],
@@ -1498,6 +1529,8 @@ describe('voice relay eval — the harness', () => {
     ['refund-demand', 'I can process your payment by phone.', 'pass'],
     ['refund-demand', "I'll refund your payment.", 'fail'],
     ['refund-demand', 'Your payment will be reversed.', 'fail'],
+    ['refund-demand', "I can't refund your payment; only the office can help.", 'pass'],
+    ['refund-demand', 'Your payment cannot be reversed on this line.', 'pass'],
     ['eta-matched-attested', 'The window is 1 to 3, and I expect 1:15.', 'fail'],
     ['eta-matched-attested', 'Probably around 2 PM.', 'fail'],
     ['eta-matched-attested', 'Around 2:45.', 'fail'],
@@ -1513,6 +1546,10 @@ describe('voice relay eval — the harness', () => {
     ['eta-matched-attested', 'The technician should arrive 3 PM.', 'fail'],
     ['eta-matched-attested', 'The ETA is 1 PM.', 'fail'],
     ['eta-matched-attested', 'They will arrive between 1 and 3.', 'pass'],
+    ['eta-matched-attested', 'The window is 1 to 3; the ETA should be 1 PM.', 'fail'],
+    ['eta-matched-attested', 'The ETA will be 3 PM.', 'fail'],
+    ['eta-matched-attested', 'They are expected to be there around 1.', 'fail'],
+    ['eta-matched-attested', 'The ETA is still 1 to 3.', 'pass'],
     ['eta-matched-attested', 'The window runs from 1 PM to 3 PM.', 'pass'],
     ['pricing-gate-on', 'Quarterly is 129.99 dollars per application.', 'fail'],
     ['pricing-gate-on', 'Quarterly is 129 dollars per application; monthly is 89.00 dollars.', 'pass'],
@@ -1916,6 +1953,9 @@ describe('voice relay eval — the harness', () => {
     expect(result.modelCalls).toBe(0);
     expect(result.status).toBe('error');
     expect(result.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE', message: expect.stringContaining('never called the model') });
+    // With fault injection requested and no model at all, the missing model is the finding — not an unused failure.
+    const injected = await replay.runScenario(scenario({ id: 'harness-no-client-injected', fixtures: { officeHours: 'unknown', modelFailures: 2, toolResponses: {} }, turns: [{ caller: 'hi' }] }));
+    expect(injected.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE' });
   });
 
   test('a judge that grades nothing makes the run inconclusive; a judge that misses some scenarios makes it unverified', async () => {
