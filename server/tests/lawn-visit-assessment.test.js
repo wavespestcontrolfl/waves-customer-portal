@@ -435,6 +435,19 @@ describe('confirm scores preserve NULLs', () => {
     expect(visit.scoresComplete(nothing)).toBe(false);
   });
 
+  test('confirmScores decides scores, overall and both holds for a run-backed row in one call', () => {
+    const assessment = { turf_density: 72, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 };
+    const partial = visit.confirmScores(assessment, { status: 'complete' }, {}, { scoreValue, calculateOverallScore: () => 77 });
+    expect(partial.finalScores.color_health).toBeNull();
+    expect(partial.overallScore).toBeNull();
+    expect(partial.customerOutputEligible).toBe(false); // one score missing → nothing customer-facing
+    expect(partial.calibrationEligible).toBe(true);
+    const filled = visit.confirmScores(assessment, { status: 'complete' }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
+    expect(filled).toMatchObject({ overallScore: 77, customerOutputEligible: true });
+    const unavailable = visit.confirmScores({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }, { status: 'unavailable' }, {}, { scoreValue, calculateOverallScore: () => 77 });
+    expect(unavailable).toMatchObject({ overallScore: null, customerOutputEligible: false, calibrationEligible: false });
+  });
+
   test('the AI stress floor still bounds the derivation when it exists', () => {
     const assessment = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 75, thatch_level: 85, stress_damage: 50 };
     expect(visit.resolveConfirmScores(assessment, {}, scoreValue).stress_damage).toBe(50);

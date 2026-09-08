@@ -889,6 +889,21 @@ function overallScoreFor(finalScores, calculateOverallScore) {
   return scoresComplete(finalScores) ? calculateOverallScore(finalScores) : null;
 }
 
+// Everything /confirm decides for a run-backed row, in one place: the final
+// scores with NULLs preserved, the overall score only when complete, whether
+// customer-facing output may be built (every score present — an unavailable
+// run or a partial answer never becomes a lawn result until the technician
+// fills the gaps), and whether calibration has AI scores to compare against.
+function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
+  const finalScores = resolveConfirmScores(assessment, adjustedScores, scoreValue);
+  return {
+    finalScores,
+    overallScore: overallScoreFor(finalScores, calculateOverallScore),
+    customerOutputEligible: scoresComplete(finalScores),
+    calibrationEligible: run.status !== 'unavailable',
+  };
+}
+
 // ── Response shapes ───────────────────────────────────────────────────
 function responseFor(analysis, run) {
   return {
@@ -967,6 +982,7 @@ module.exports = {
   scoreVisit,
   photoFieldsFor,
   overallScoreFor,
+  confirmScores,
   responseFor,
   responseForRun,
 };
