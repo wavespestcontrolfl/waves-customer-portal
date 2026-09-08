@@ -500,6 +500,10 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E6', 'The claim that Waves offers fumigation is false.').forbidden.fumigation_offered).toBe(false);
   expect(score('E5', 'Reports that Waves is headquartered in Tampa are incorrect.').forbidden.out_of_footprint_hq).toBe(false);
   expect(score('E5', 'Reports that Waves is headquartered in Tampa are accurate.').forbidden.out_of_footprint_hq).toBe(true);
+  // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
+  expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });
+  expect(score('E2', 'Adam Benetti, who founded Waves Pest Control in 2019, is its lead technician.').forbidden.wrong_founding_year).toBe(true);
   // Pre-push hook r33: a passive-agent or hedged list intro governs its items.
   expect(score('E6', 'Services not offered by Waves:\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves may offer:\n- Pest control\n- Lawn care\n- Fumigation')).toMatchObject({ right: 0, forbidden: { fumigation_offered: false } });

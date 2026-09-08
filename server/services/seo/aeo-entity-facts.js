@@ -205,7 +205,11 @@ function normalizeAnswer(text, keepUrls = false) {
     .replace(URL_RE, inline);
   const lines = [];
   let governed = false;
-  for (const raw of flat.split('\n')) {
+  const rawLines = flat.split('\n');
+  // A heading governs the items under it even without a colon ("Services
+  // not offered" + bullets): the intro qualifies when a list item follows.
+  const itemFollows = i => { let j = i + 1; while (j < rawLines.length && !rawLines[j].trim()) j++; return j < rawLines.length && LIST_MARKER_RE.test(rawLines[j]); };
+  for (const [i, raw] of rawLines.entries()) {
     // Detect the list marker BEFORE stripping emphasis: "* item" is a bullet.
     const isItem = LIST_MARKER_RE.test(raw);
     const line = stripEmphasis(TABLE_ROW_RE.test(raw) ? tableRowToLabelValue(raw) : raw.replace(LIST_MARKER_RE, '')).trim();
@@ -217,7 +221,7 @@ function normalizeAnswer(text, keepUrls = false) {
     if (isItem && governed) { lines[lines.length - 1] += `, ${line.replace(/[.;!?]+$/, '')}`; continue; }
     if (!isItem) {
       const intro = line.replace(/:\s*$/, '');
-      governed = /:\s*$/.test(line) && qualifiedIntro(intro);
+      governed = (/:\s*$/.test(line) || itemFollows(i)) && qualifiedIntro(intro);
       lines.push(governed ? `${intro}:` : line);
       continue;
     }
