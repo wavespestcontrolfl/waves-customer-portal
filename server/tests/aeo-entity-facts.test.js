@@ -551,6 +551,12 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E7', 'The bond does not cover repairs or provide free retreatment.')).toMatchObject({ forbidden: { damage_repair_coverage: false, free_retreat_guarantee: false } });
   expect(score('E6', 'Waves does not sell insulation and offers fumigation.').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Waves does not offer fumigation and provides pest control.')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: false } });
+  // Pre-push hook r41: the founder relation must point at Waves.
+  expect(score('E2', 'Adam Benetti founded Orkin, not Waves Pest Control.')).toMatchObject({ expected: { founder: false }, missing: 1 });
+  expect(score('E2', 'Adam Benetti, founder of Sunshine Pest Control.').expected.founder).toBe(false);
+  expect(score('E2', 'Adam Benetti founded Waves Pest Control in 2024.').expected.founder).toBe(true);
+  expect(score('E2', 'Adam Benetti, founder of Waves Pest Control.').expected.founder).toBe(true);
+  expect(score('E2', 'Adam Benetti founded the company in 2024.').expected.founder).toBe(true);
   // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
   expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });
