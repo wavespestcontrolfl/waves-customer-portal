@@ -97,11 +97,14 @@ export function reconcileLawnPlanSelections(current, defaults, removedIds = []) 
   return rows;
 }
 
+// The option's product keeps the protocol row's application mode (server
+// `completionDefaults.options`): addProduct builds an added optional product
+// from that mode, not from the catalog category's default.
 export function lawnPlanActionOptions(items = []) {
   return items.filter(item => item.product?.id).map(item => ({
     id: `lawn-plan-${item.product.id}`,
     label: item.product.name, note: item.product.name,
-    product: { id: item.product.id, name: item.product.name },
+    product: { id: item.product.id, name: item.product.name, ...(item.applicationMethod ? { applicationMethod: item.applicationMethod } : {}) },
     scope: 'exterior', treatmentApplied: true,
   }));
 }

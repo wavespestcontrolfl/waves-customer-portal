@@ -13855,14 +13855,19 @@ export function CompletionPanel({
     // untouched draft the same way a typed edit does (codex r28).
     invalidateGeneratedReportOnTypedEdit();
     lawnDefaultMixSeededRef.current = true;
-    // An "Additional work" option carries only { id, name } (lawnPlanActionOptions)
-    // and an optional protocol row is not among the defaults, so the row is
-    // built from the catalog product: a bare id/name read Hydretain's fl_oz as
-    // oz and broke the inventory conversion (Codex r6 P1).
+    // An "Additional work" option carries { id, name, applicationMethod }
+    // (lawnPlanActionOptions) and an optional protocol row is not among the
+    // defaults, so the row is built from the catalog product — a bare id/name
+    // read Hydretain's fl_oz as oz and broke the inventory conversion (Codex
+    // r6 P1) — under the protocol row's application mode: the catalog
+    // category alone reads a broadcast herbicide (SpeedZone) as spot work, and
+    // method, area requirement and rate prefill all follow the mode (r7 P1).
     const catalogProduct = lawnDefaultsEnabled
       ? products.find((row) => String(row.id) === String(product.id)) || product
       : product;
-    let row = buildSelectedProduct(catalogProduct);
+    let row = buildSelectedProduct(lawnDefaultsEnabled && product.applicationMethod
+      ? { ...catalogProduct, application_method: product.applicationMethod }
+      : catalogProduct);
     if (lawnDefaultsEnabled) {
       const item = lawnCompletionDefaults.items.find(item => String(item.product.id) === String(product.id));
       const planned = item && lawnPlanSelections([item], buildSelectedProduct, products, { areas: areasServiced, governed: true })[0];

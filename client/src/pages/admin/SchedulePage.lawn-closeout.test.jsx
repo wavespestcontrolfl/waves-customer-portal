@@ -57,7 +57,7 @@ beforeEach(async () => {
         data.plan.mixCalculator.items = items;
         data.plan.completionDefaults = { enabled: true, serviceId: visitId, propertyId: 'property-a', lawnSqft: sqft,
           // Optional protocol rows reach the client as id/name only (server options), never as defaults.
-          items, options: [...items, ...optionalOptions.map((product) => ({ product: { id: product.id, name: product.name } }))], propertyMatchesProfile: true,
+          items, options: [...items, ...optionalOptions.map(({ applicationMethod, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod }))], propertyMatchesProfile: true,
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
@@ -425,4 +425,24 @@ it('an "Additional work" protocol option is built from the catalog product, not 
   expect(selects.slice(0, 3).map((select) => select.value)).toEqual(['fl_oz', 'fl_oz', 'broadcast_spray']);
   expect(totals()[2].value).toBe('');
   expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
+});
+
+it.each([
+  ['broadcast_spray', 'broadcast_spray'],
+  [undefined, 'spot_treatment'],
+])('an added herbicide records the protocol row\'s application mode (%s → %s), not the catalog category\'s spot default', async (applicationMethod, expected) => {
+  enableDefaults();
+  const optional = { id: 'test-speedzone', name: 'SpeedZone', category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1.5, applicationMethod };
+  optionalOptions = [optional];
+  const { applicationMethod: _mode, ...catalogRow } = optional;
+  render(<CompletionPanel service={service} products={[...catalog, catalogRow]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: `lawn-plan-${optional.id}` } });
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  const selects = within(totals()[2].parentElement).getAllByRole('combobox');
+  // The option's mode governs the row (Codex r7 P1): SpeedZone is a broadcast
+  // herbicide in its window while the catalog category alone reads it as spot
+  // work. Without a mode on the option the catalog default still applies.
+  expect(selects[2].value).toBe(expected);
+  expect(totals()[2].value).toBe('');
 });

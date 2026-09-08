@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lawnPlanSelections, previousLawnAssessment, reconcileLawnPlanSelections, LAWN_FIELD_ACTIONS } from './lawn-completion';
+import { lawnPlanActionOptions, lawnPlanSelections, previousLawnAssessment, reconcileLawnPlanSelections, LAWN_FIELD_ACTIONS } from './lawn-completion';
 
 it('uses the engine mix instead of catalog defaults and skips unselected optional rows', () => {
   const build = (product) => ({ productId: product.id, rate: 99, areaValue: 5000, totalAmount: 999 });
@@ -101,4 +101,17 @@ it('refresh preserves an entered amount in its original unit while updating unto
   const row = { productId: 'product', totalAmount: 7, amountUnit: 'lb', areaValue: 1000, lawnPlanDefaults: {}, lawnPlanManualFields: ['totalAmount'], totalAmountManual: true };
   const fresh = { ...row, totalAmount: 80, amountUnit: 'oz', areaValue: 2000 };
   expect(reconcileLawnPlanSelections([row], [fresh])[0]).toMatchObject({ totalAmount: 7, amountUnit: 'lb', areaValue: 2000 });
+});
+
+it('an "Additional work" option keeps the protocol row\'s application mode on its product', () => {
+  const options = lawnPlanActionOptions([
+    { product: { id: 'speedzone', name: 'SpeedZone' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'legacy', name: 'No mode' } },
+    { product: {} },
+  ]);
+  expect(options.map((option) => option.product)).toEqual([
+    { id: 'speedzone', name: 'SpeedZone', applicationMethod: 'broadcast_spray' },
+    { id: 'legacy', name: 'No mode' },
+  ]);
+  expect(options[0]).toMatchObject({ id: 'lawn-plan-speedzone', label: 'SpeedZone', scope: 'exterior', treatmentApplied: true });
 });

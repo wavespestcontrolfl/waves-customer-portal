@@ -68,6 +68,24 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
 });
 
+test('every option carries the protocol row\'s application mode, so an added herbicide records the prescribed broadcast, not the catalog\'s spot default', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push(
+    { productId: 'speedzone', defaultInPlan: false, gates: { weeds_present: true }, applicationMode: 'broadcast' },
+    { productId: 'celsius', defaultInPlan: false, gates: {}, applicationMode: 'spot' },
+  );
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, product: { id: 'speedzone', name: 'SpeedZone', category: 'herbicide', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'celsius', name: 'Celsius WG', category: 'herbicide', formulation: 'Water-dispersible granule (WG)', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'unlisted', name: 'Not in this protocol', active: true } },
+  ];
+  expect(buildLawnCompletionDefaults(plan, context).options).toEqual([
+    { product: { id: 'product', name: 'Fixture product' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'speedzone', name: 'SpeedZone' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'celsius', name: 'Celsius WG' }, applicationMethod: 'spot_treatment' },
+  ]);
+});
+
 test('a nonmember can use an explicitly assigned window; a spot default stays spot work', () => {
   const { plan, context } = fixture();
   plan.propertyGate.serviceTier = null;
