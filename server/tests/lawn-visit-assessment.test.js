@@ -206,6 +206,8 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(visit.deriveLegacyScores(result)).toBeNull();
     // Unrated photos are kept for audit but never pass the customer gate.
     expect(visit.photoRowInputs(result).qualityResults.map((q) => q.passed)).toEqual([false, false]);
+    // …but an unavailable run is not an all-poor answer: the visit still closes.
+    expect(visit.photoRowInputs(result).allPoor).toBe(false);
   });
 
   test('the chain validator rejects a malformed, finding-less or partly-rated answer so the fallback leg runs', () => {
@@ -333,6 +335,14 @@ describe('legacy column derivation — missing is not healthy', () => {
     ] });
     expect(qualityResults).toEqual([{ passed: true, issues: [] }, { passed: false, issues: ['blurred'] }, { passed: true, issues: ['glare'] }, { passed: false, issues: ['not rated by the model'] }]);
     expect(resultByPhotoIndex).toEqual({ 0: { qualityScore: 80 }, 1: { qualityScore: 20 }, 2: { qualityScore: 55 }, 3: { qualityScore: 0 } });
+  });
+
+  test('a complete answer that rates every photo poor is all-poor — the legacy retake hold — one usable photo is not', () => {
+    const poor = (n) => Array.from({ length: n }, (_, i) => ({ photo: i + 1, quality: 'poor', issue: 'blurred' }));
+    expect(visit.photoRowInputs({ status: 'complete', photoQuality: poor(3) }).allPoor).toBe(true);
+    expect(visit.photoRowInputs({ status: 'complete', photoQuality: [...poor(2), { photo: 3, quality: 'limited', issue: '' }] }).allPoor).toBe(false);
+    expect(visit.photoRowInputs({ status: 'complete', photoQuality: [] }).allPoor).toBe(false);
+    expect(visit.photoRowInputs({ status: 'unavailable', photoQuality: [{ photo: 1, quality: 'unrated', issue: 'not rated by the model' }] }).allPoor).toBe(false);
   });
 
   test('the composite the route reads carries the grass read and the signal levels', () => {
