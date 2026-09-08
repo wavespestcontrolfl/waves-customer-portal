@@ -500,6 +500,24 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E6', 'The claim that Waves offers fumigation is false.').forbidden.fumigation_offered).toBe(false);
   expect(score('E5', 'Reports that Waves is headquartered in Tampa are incorrect.').forbidden.out_of_footprint_hq).toBe(false);
   expect(score('E5', 'Reports that Waves is headquartered in Tampa are accurate.').forbidden.out_of_footprint_hq).toBe(true);
+  // GitHub review r7: service launches are not founding dates; "does not only" asserts; Waves as an object is not the subject; a bare link keeps its period; one-word owners; websites attributed elsewhere.
+  expect(score('E4', 'Waves launched mosquito service in 2019, but the company was founded in 2024.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false } });
+  expect(score('E4', 'Waves opened a Venice route in 2019.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E4', 'Waves opened its doors in 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'Waves began operations in 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E6', "Waves doesn't only offer fumigation; it also provides pest control.")).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });
+  expect(score('E6', 'Waves does not only offer pest control; it also provides lawn care.')).toMatchObject({ expected: { pest_control: true, lawn_care: true } });
+  expect(score('E6', 'Orkin competes with Waves. It offers fumigation services.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Orkin competes with Waves. Waves offers fumigation services.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Adam Benetti founded Waves in 2024. It offers pest control.').expected.pest_control).toBe(true);
+  expect(score('E6', 'Do not use https://example.com. Waves offers fumigation services.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E10', 'Visit https://www.wavespestcontrol.com. Call (941) 297-5749.')).toMatchObject({ right: 2 });
+  expect(score('E1', 'Waves is owned by Acme.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Acme owns Waves.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'He owns Waves.').forbidden.wrong_founder).toBe(false);
+  expect(score('E1', 'Who owns Waves? Adam Benetti.').forbidden.wrong_founder).toBe(false);
+  expect(score('E10', 'wavespestcontrol.com belongs to Orkin, not Waves.').expected.website).toBe(false);
+  expect(score('E10', 'wavespestcontrol.com is registered to Waves.').expected.website).toBe(true);
   // Pre-push hook r34: a negated heading without a colon governs its items; "who founded Waves in 2019" is a founding claim.
   expect(score('E6', 'Services not offered\n- Insulation\n- Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '## Services offered\n- Pest control\n- Fumigation')).toMatchObject({ expected: { pest_control: true }, forbidden: { fumigation_offered: true } });

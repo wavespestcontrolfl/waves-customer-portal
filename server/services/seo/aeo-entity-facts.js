@@ -58,7 +58,7 @@ function compile(def) {
 // sentence punctuation or a contrastive conjunction, so "not a franchise, but
 // it offers fumigation" still flags fumigation. "no-contract" and "not only"
 // are not negations.
-const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
+const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|(?:doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not)(?!\s+only\b)|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
 // An exclusion preposition denies only the phrase it governs: "except
 // fumigation" and "without fumigation" deny, but "pest control without
 // contracts, including lawn care" does not reach lawn care. "As an
@@ -202,7 +202,9 @@ function normalizeAnswer(text, keepUrls = false) {
     .replace(BRAND_NAME_AND_RE, 'Waves')
     .replace(BRAND_NAME_RE, 'Waves')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, href) => `${label}${inline(href)}`)
-    .replace(URL_RE, inline);
+    // A bare link keeps the sentence punctuation that followed it, so "Do
+    // not use https://example.com. Waves offers …" still ends its clause.
+    .replace(URL_RE, url => { const trail = url.match(/[.,;:!?)]+$/); return trail ? `${inline(url.slice(0, -trail[0].length))}${trail[0]}` : inline(url); });
   const lines = [];
   let governed = false;
   const rawLines = flat.split('\n');
@@ -267,9 +269,9 @@ function lastIndexOfMatch(re, text) {
   return last;
 }
 
-// A competitor named as an OBJECT ("not affiliated with Orkin", "owned by
-// Orkin", "rather than Orkin") is not the subject a later pronoun inherits;
-// only a competitor in subject position is.
+// A party named as an OBJECT ("not affiliated with Orkin", "owned by
+// Orkin", "competes with Waves") is not the subject a later pronoun inherits;
+// only a party in subject position is — Waves included.
 const OBJECT_INTRO_RE = /\b(?:with|by|to|from|of|than|against|as|under|not|nor|or|and|including|includes?|versus|vs\.?)\s+(?:the\s+|a\s+|an\s+)?$/i;
 // A passive agent that describes the clause's own subject ("Services offered
 // by Orkin include …") IS that clause's party: the head noun has no verb of
@@ -290,7 +292,7 @@ function lastSubjectIndex(re, text) {
 function aboutAnotherEntity(beforeClause, answerPrefix) {
   if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
   const named = answerPrefix.replace(COMPARISON_PHRASE_RE, ' ');
-  return Math.max(lastSubjectIndex(OTHER_ENTITY_RE, named), lastSubjectIndex(GOV_SUBJECT_RE, named)) > lastIndexOfMatch(WAVES_NAMED_RE, named);
+  return Math.max(lastSubjectIndex(OTHER_ENTITY_RE, named), lastSubjectIndex(GOV_SUBJECT_RE, named)) > lastSubjectIndex(WAVES_NAMED_RE, named);
 }
 
 // A claim that captures a value ("founded in 2019", "based in Tampa") is
