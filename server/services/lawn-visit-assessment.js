@@ -666,10 +666,13 @@ function billedUsage(analysis) {
   return { input_tokens: sum('input_tokens'), output_tokens: sum('output_tokens'), reasoning_tokens: sum('reasoning_tokens') };
 }
 
-function runRowFor({ assessment, analysis, photoRecords = [] }) {
+function runRowFor({ assessment, analysis, adjustedScores = null, photoRecords = [] }) {
   const usage = billedUsage(analysis);
   const complete = analysis.status === 'complete';
   const whenComplete = (value) => (complete && value ? JSON.stringify(value) : null);
+  // The scores the technician was shown, minus the text column (the run keeps
+  // its own raw observation).
+  const presented = adjustedScores ? Object.fromEntries(SCORE_KEYS.map((key) => [key, adjustedScores[key] ?? null])) : null;
   return {
     assessment_id: assessment.id,
     customer_id: assessment.customer_id,
@@ -687,6 +690,7 @@ function runRowFor({ assessment, analysis, photoRecords = [] }) {
     findings: JSON.stringify(analysis.findings || []),
     severities: whenComplete(analysis.severities),
     scores_raw: whenComplete(analysis.scores),
+    scores_adjusted: whenComplete(presented),
     observations: analysis.observations || null,
     raw_response: analysis.raw == null ? null : JSON.stringify(analysis.raw),
     tokens_in: usage.input_tokens,
@@ -699,8 +703,8 @@ function runRowFor({ assessment, analysis, photoRecords = [] }) {
 // Written in the same transaction as the assessment row (the run IS the
 // provenance and the review target — never optional bookkeeping); the photo
 // row ids are attached once the photos are stored.
-async function recordRun({ assessment, analysis, photoRecords = [] }, knex) {
-  const [row] = await knex('lawn_assessment_runs').insert(runRowFor({ assessment, analysis, photoRecords })).returning('*');
+async function recordRun({ assessment, analysis, adjustedScores = null, photoRecords = [] }, knex) {
+  const [row] = await knex('lawn_assessment_runs').insert(runRowFor({ assessment, analysis, adjustedScores, photoRecords })).returning('*');
   return row;
 }
 
@@ -708,6 +712,17 @@ async function attachRunPhotos(runId, photoIds, knex) {
   const [row] = await knex('lawn_assessment_runs').where({ id: runId })
     .update({ photo_ids: JSON.stringify(photoIds), updated_at: knex.fn.now() }).returning('*');
   return row;
+}
+
+// Legacy (property history OFF) baseline: the customer's first assessment
+// row is the baseline. A run-backed row is inserted pending (is_baseline
+// false — /assess never stamps it) and becomes the baseline on the confirm
+// that completes it, when the customer still has none; a property-history
+// confirm installs its baseline itself. Returns the update fields to spread.
+async function legacyBaselineFields({ assessment, run, confirmed, propertyHistoryEnabled }, knex) {
+  if (!run || !confirmed || propertyHistoryEnabled) return {};
+  const existing = await knex('lawn_assessments').where({ customer_id: assessment.customer_id, is_baseline: true }).whereNot({ id: assessment.id }).first('id');
+  return existing ? {} : { is_baseline: true };
 }
 
 // The run row's existence — not the gate — says how an assessment row was
@@ -800,7 +815,26 @@ function validateReview(body = {}, run) {
     });
   }
 
-  return { errors, review: { provided, reviewedFindings, addedDetails, appliedProducts } };
+  // Which fields the payload actually carried: a follow-up confirm on a
+  // pending row may send one of them — the others come from the stored review.
+  const sent = Object.fromEntries(REVIEW_FIELDS.map((field) => [field, source[field] != null]));
+  return { errors, review: { provided, sent, reviewedFindings, addedDetails, appliedProducts } };
+}
+
+// The review to build from: every field the payload sent, and for each it
+// did not, the stored review of an earlier (pending) confirm — so a follow-up
+// that only fills a score, or only names the applied products, never
+// restores rejected findings, drops technician-added details or forgets
+// the products it reconciled against. A first review starts from nothing.
+function mergedReviewInputs(run, review = {}) {
+  const sent = review.sent || {};
+  const stored = {
+    reviewedFindings: parseJsonArray(run?.reviewed_findings).map((row) => ({ finding_id: String(row.finding_id), keep: row.keep !== false, name: row.label || null, tech_note: row.tech_note || null })),
+    addedDetails: parseJsonArray(run?.added_details).map((row) => ({ text: row.name, zone: row.zone ?? null })),
+    appliedProducts: parseJsonObject(run?.reconciliation)?.products || [],
+  };
+  const pick = (field) => (sent[field] || review[field]?.length ? review[field] || [] : stored[field]);
+  return { reviewedFindings: pick('reviewedFindings'), addedDetails: pick('addedDetails'), appliedProducts: pick('appliedProducts') };
 }
 
 // A technician-added detail becomes a finding of its own: moderate at most
@@ -837,8 +871,9 @@ function technicianFinding(detail, index) {
  * tool's own builders. Products absent → every finding reads untreated, which
  * is the honest state until the completion records what was applied.
  */
-function buildReview(run, review = {}) {
-  const byId = new Map((review.reviewedFindings || []).map((entry) => [entry.finding_id, entry]));
+function buildReview(run, rawReview = {}) {
+  const review = mergedReviewInputs(run, rawReview);
+  const byId = new Map(review.reviewedFindings.map((entry) => [entry.finding_id, entry]));
   const reviewed = parseJsonArray(run?.findings).map((finding) => {
     const entry = byId.get(String(finding.finding_id));
     // A technician rename is already a canonical allowlisted label
@@ -858,7 +893,7 @@ function buildReview(run, review = {}) {
       source: finding.source || 'model',
     };
   });
-  const added = (review.addedDetails || []).map(technicianFinding);
+  const added = review.addedDetails.map(technicianFinding);
   // The reconciliation builders interpolate finding NAMES into customer-facing
   // copy (customer_explanation, watch items, flag wording), so they only ever
   // see the allowlisted label — never the model's or the technician's raw
@@ -867,7 +902,7 @@ function buildReview(run, review = {}) {
   const reconcilable = [...reviewed.filter((finding) => finding.keep), ...added]
     .filter((finding) => finding.label !== NO_STRESS_LABEL)
     .map((finding) => ({ ...finding, name: finding.label, confirmation_step: safeConfirmationStep(finding.confirmation_step) }));
-  const products = normalizeProducts(review.appliedProducts || []);
+  const products = normalizeProducts(review.appliedProducts);
   const treatmentRationale = buildTreatmentRationale({ products, findings: reconcilable });
   const flags = buildReconciliationFlags({ findings: reconcilable, products, treatmentRationale });
   return {
@@ -996,16 +1031,22 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
   };
 }
 
-// The AI scores a technician's confirm is calibrated against: the run's own
-// answer in the legacy units (never the assessment row, which a pending
-// confirm may already have overwritten with the technician's entries). An
+// The AI scores a technician's confirm is calibrated against: the run's
+// scores_adjusted snapshot — the seasonally adjusted legacy-unit values the
+// technician was actually shown, so an unchanged confirm records no delta —
+// never the assessment row, which a pending confirm may already have
+// overwritten with the technician's entries. A run written before the
+// snapshot column derives the unadjusted values from its raw answer. An
 // unavailable run, or an answer that could determine nothing, has no score
 // to compare — calibration then records nothing, rather than a row of NULL
 // AI values whose avg_delta of 0 would read as perfect agreement.
 function runAiScores(run) {
-  const scores = parseJsonObject(run?.scores_raw);
-  const severities = parseJsonObject(run?.severities);
-  if (run?.status !== 'complete' || !scores) return {};
+  if (run?.status !== 'complete') return {};
+  const presented = parseJsonObject(run.scores_adjusted);
+  if (presented) return Object.fromEntries(SCORE_KEYS.map((key) => [key, known(presented[key]) ? presented[key] : null]));
+  const scores = parseJsonObject(run.scores_raw);
+  const severities = parseJsonObject(run.severities);
+  if (!scores) return {};
   const legacy = deriveLegacyScores({ status: 'complete', scores, severities: severities || {}, observations: '' });
   return Object.fromEntries(SCORE_KEYS.map((key) => [key, legacy[key]]));
 }
@@ -1060,6 +1101,8 @@ module.exports = {
   runAiScores,
   billedUsage,
   safeConfirmationStep,
+  mergedReviewInputs,
+  legacyBaselineFields,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
   SYSTEM_PROMPT,
