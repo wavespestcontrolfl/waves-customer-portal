@@ -616,9 +616,12 @@ postgres('SMS commitments on PostgreSQL', () => {
     const base = { customer_id: message.customer_id, property_id: context.properties[0].id,
       service_type: 'Quarterly Lawn', scheduled_date: etDateString(after), window_start: '09:00:00',
       status: 'confirmed', created_at: before, updated_at: after };
-    const [moved, touched, sameDate, earlyMove] = await mockPg('scheduled_services').insert([base, base, base, base]).returning('id');
+    const [moved, touched, sameDate, earlyMove, noShow] = await mockPg('scheduled_services').insert([base, base, base, base, base]).returning('id');
     const nextWeek = etDateString(new Date(after.getTime() + 7 * 86400000));
     await mockPg('reschedule_log').insert([
+      // A no-show entry records the missed date with no new date: not a move.
+      { scheduled_service_id: noShow.id, customer_id: message.customer_id, original_date: etDateString(after),
+        new_date: null, reason_code: 'customer_noshow', initiated_by: 'system', created_at: after },
       { scheduled_service_id: moved.id, customer_id: message.customer_id, original_date: etDateString(after),
         new_date: nextWeek, initiated_by: 'admin', created_at: after },
       { scheduled_service_id: sameDate.id, customer_id: message.customer_id, original_date: etDateString(after),
@@ -631,6 +634,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const ids = evidence.records.filter((r) => r.type === 'visit').map((r) => r.id);
     expect(ids).toEqual([moved.id]);
     expect(ids).not.toContain(touched.id);
+    expect(ids).not.toContain(noShow.id);
     const record = evidence.records.find((r) => r.id === moved.id);
     expect(record.text).toContain('moved after the request');
     const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString() };
@@ -667,6 +671,22 @@ postgres('SMS commitments on PostgreSQL', () => {
     const verdict = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'lawn estimate' }, evidence, commitment);
     expect(verdict.verdict).toBe(admissible ? 'fulfilled' : 'uncertain');
     if (admissible) expect(verdict).toMatchObject({ record_type: 'email_delivery', record_id: email.id });
+  });
+
+  test('estimate and visit truncation stays fatal because those queries are not activity-ordered', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [call] = await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
+      transcription: 'Returned your call about the gate code', created_at: new Date(after.getTime() + 120000) }).returning('id');
+    await mockPg('scheduled_services').insert(Array.from({ length: 51 }, (_, i) => ({ customer_id: message.customer_id,
+      property_id: context.properties[0].id, service_type: 'Quarterly Lawn', status: 'confirmed', window_start: '09:00:00',
+      scheduled_date: etDateString(new Date(after.getTime() + i * 86400000)), created_at: new Date(after.getTime() + i * 1000) })));
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 240000));
+    expect(evidence.failures).toEqual(['visit_truncated']);
+    const commitment = { kind: 'callback', evidence: [{ quote: 'Please call me back' }],
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: `call:${call.id}`, quote: 'Returned your call' }, evidence, commitment))
+      .toMatchObject({ verdict: 'uncertain', reason: 'incomplete_sources', failures: ['visit_truncated'] });
   });
 
   test.each([

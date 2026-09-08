@@ -75,7 +75,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           // holds the authoritative before/after dates for it.
           .orWhereExists(conn('reschedule_log as r').select(conn.raw('1'))
             .whereRaw('r.scheduled_service_id = scheduled_services.id')
-            .whereRaw('r.new_date IS DISTINCT FROM r.original_date')
+            .whereRaw('r.original_date IS NOT NULL AND r.new_date IS NOT NULL AND r.new_date <> r.original_date')
             .where('r.created_at', '>', after).where('r.created_at', '<=', now));
       })
       .orderBy('scheduled_date', 'desc').limit(LIMIT + 1)
@@ -85,7 +85,8 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           WHERE h.job_id = scheduled_services.id AND h.to_status IN ('confirmed', 'rescheduled')
             AND h.transitioned_at > ? AND h.transitioned_at <= ?) as booked_at`, [after, now]),
         conn.raw(`(SELECT MIN(r.created_at) FROM reschedule_log r
-          WHERE r.scheduled_service_id = scheduled_services.id AND r.new_date IS DISTINCT FROM r.original_date
+          WHERE r.scheduled_service_id = scheduled_services.id
+            AND r.original_date IS NOT NULL AND r.new_date IS NOT NULL AND r.new_date <> r.original_date
             AND r.created_at > ? AND r.created_at <= ?) as moved_at`, [after, now]),
         conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
           WHERE h.job_id = scheduled_services.id AND h.to_status = scheduled_services.status
@@ -184,26 +185,30 @@ function admissibleWitness(record, commitment, records = []) {
   return witnesses[record.type]?.() === true;
 }
 
-// Evidence queries are newest-first, so a truncated channel lost only its
-// OLDEST rows. Every witness type for the kind must be complete; a
-// supporting channel may be truncated only when its retained window still
-// reaches back to the witness time, so nothing said after the witness
-// (a retraction, a correction) can be hidden by the cut.
-const ORDERING_FIELD = { sms: 'created_at', call: 'created_at', email: 'received_at', invoice: 'sent_at' };
+// The message channels are queried newest-first by one activity timestamp,
+// so a truncated channel lost only its OLDEST rows. Every witness type for
+// the kind must be complete; a supporting message channel may be truncated
+// only when its retained window still reaches back to the witness time, so
+// nothing said after the witness (a retraction, a correction) can hide in
+// the cut. Estimates and visits are ordered by handoff and scheduled date,
+// not activity, so their truncation is always fatal.
+const ORDERING_TIME = {
+  sms: (row) => row.created_at, call: (row) => row.created_at, email: (row) => row.received_at,
+  email_delivery: (row) => row.delivered_at || row.sent_at, invoice: (row) => row.sent_at,
+};
 function witnessTypes(kind) {
   return REQUIRED_TYPES[kind]?.length ? REQUIRED_TYPES[kind] : ANSWER_TYPES;
 }
-function rowTime(row) {
-  const field = ORDERING_FIELD[row.type];
-  return new Date(field ? row[field] : row.delivered_at || row.sent_at || row.created_at);
+function relaxableTruncation(failure, kind) {
+  const type = /^(\w+)_truncated$/.exec(failure)?.[1];
+  return !!type && !failure.endsWith('_body_truncated') && !!ORDERING_TIME[type] && !witnessTypes(kind).includes(type) ? type : null;
 }
 function fatalFailures(evidence, commitment, witness) {
   return evidence.failures.filter((failure) => {
-    const truncated = /^(\w+)_truncated$/.exec(failure);
-    if (!truncated || failure.endsWith('_body_truncated')) return true;
-    const type = truncated[1];
-    if (witnessTypes(commitment.kind).includes(type) || type === witness?.type) return true;
-    const retained = evidence.records.filter((r) => r.type === type).map(rowTime).filter((d) => !Number.isNaN(d.getTime()));
+    const type = relaxableTruncation(failure, commitment.kind);
+    if (!type || type === witness?.type) return true;
+    const retained = evidence.records.filter((r) => r.type === type).map((r) => new Date(ORDERING_TIME[type](r)))
+      .filter((d) => !Number.isNaN(d.getTime()));
     return !retained.length || !witness?.matched_at || Math.min(...retained.map((d) => d.getTime())) > witness.matched_at.getTime();
   });
 }
@@ -271,9 +276,7 @@ async function verifySmsFulfillment(commitment, evidence, { now = new Date() } =
 async function checkSmsFulfillment(commitment, evidence) {
   // Only a supporting channel's truncation may wait for the witness; every
   // other failure is settled before a provider sees the evidence.
-  const settled = fatalFailures(evidence, commitment, null)
-    .filter((failure) => !/_truncated$/.test(failure) || failure.endsWith('_body_truncated')
-      || witnessTypes(commitment.kind).includes(failure.replace(/_truncated$/, '')));
+  const settled = evidence.failures.filter((failure) => !relaxableTruncation(failure, commitment.kind));
   if (settled.length) return { verdict: 'uncertain', reason: 'incomplete_sources', failures: settled };
   if (!evidence.records.length) return { verdict: 'open' };
   const sms = evidence.records.filter((row) => row.type === 'sms')
