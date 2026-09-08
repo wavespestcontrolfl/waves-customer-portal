@@ -2404,7 +2404,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // routine completion never sweeps unrelated leads.
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
+        await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id, booking: svc });
       } catch (leadErr) {
         logger.warn(`[lead-trigger] status-complete conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
       }

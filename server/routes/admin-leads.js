@@ -1563,7 +1563,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           city: lockedLead.city || '',
           state: 'FL',
           zip: lockedLead.zip || '',
-          member_since: etDateString(),
+          // member_since is the became-a-customer date — an assessment
+          // provisions a PROSPECT, so it stays NULL until a real sale.
+          ...(assessmentVisit ? {} : { member_since: etDateString() }),
           referral_code: code,
           lead_source: 'lead_pipeline',
           pipeline_stage: assessmentVisit ? 'new_lead' : 'won',
@@ -1572,19 +1574,19 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         })).returning('*');
         await createDefaultCustomerRows(trx, created.id);
         customerId = created.id;
-      } else if (existingCustomer) {
+      } else if (existingCustomer && !assessmentVisit) {
         // Reused an existing customer. Booking always means an ACTIVE customer,
-        // so split two concerns:
+        // so split two concerns (an assessment is neither — it writes nothing
+        // to the customer row, exactly like promoteCustomerOnBooking: no
+        // stage promotion, and no reactivation that would erase a churned
+        // row's history over a visit that sold nothing):
         //  1) stage promotion — only when they're still in a lead/churned stage
         //     (the create branch above inserts 'won'); without it a booked
         //     customer stays stuck at new_lead and is under-counted.
         //  2) reactivation — always flip a deactivated or churn-stamped row back
         //     to active and clear churn, even one already in a customer stage
         //     (a deactivated active_customer who books should be live again).
-        // An assessment never promotes the stage (see assessmentVisit above);
-        // reactivation of a deactivated row still applies, as for any booking.
-        const inCustomerStage = assessmentVisit
-          || ['active_customer', 'won', 'at_risk'].includes(existingCustomer.pipeline_stage);
+        const inCustomerStage = ['active_customer', 'won', 'at_risk'].includes(existingCustomer.pipeline_stage);
         const customerUpdates = {};
         if (!inCustomerStage) {
           customerUpdates.pipeline_stage = 'won';

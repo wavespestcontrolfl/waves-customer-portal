@@ -129,7 +129,7 @@ function occupancyConflicts(state, existingVisits) {
     && v.window_start < windowEnd && (v.window_end || '23:59') > windowStart);
 }
 
-function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1, existingVisits = [] }) {
+function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1, existingVisits = [], linkedCustomer = existingLinked }) {
   return (table, state) => {
     const t = state.terminal;
     if (table === 'scheduled_services' && !t && isOccupancyProbe(state)) return occupancyConflicts(state, existingVisits);
@@ -150,7 +150,7 @@ function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 
       return existingVisits.find((v) => v.customer_id === w.customer_id && v.scheduled_date === w.scheduled_date && v.window_start === w.window_start) || null;
     }
     if (table === 'customers' && t.op === 'first') {
-      if (opsOf(state, 'where').some((o) => o.args[0]?.id === 'cust-linked')) return existingLinked;
+      if (opsOf(state, 'where').some((o) => o.args[0]?.id === 'cust-linked')) return linkedCustomer;
       return null;
     }
     if (table === 'customer_accounts' && t.op === 'insert') return [{ id: 'acct-new', ...t.args[0] }];
@@ -1206,6 +1206,8 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
       expect(res.status).toBe(200);
       const custInsert = calls.find((c) => c.table === 'customers' && c.op === 'insert');
       expect(custInsert.args[0].pipeline_stage).toBe('new_lead');
+      // A prospect, not a customer: no became-a-customer date.
+      expect(custInsert.args[0]).not.toHaveProperty('member_since');
       const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
       expect(leadUpdate.args[0]).toMatchObject({ customer_id: 'cust-new', is_qualified: true });
       expect(leadUpdate.args[0]).not.toHaveProperty('status');
@@ -1228,6 +1230,24 @@ describe('POST /admin/leads/:id/schedule-appointment — Waves Assessment does n
       const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
       expect(leadUpdate.args[0]).toMatchObject({ status: 'new', customer_id: 'cust-new' });
       expect(leadUpdate.args[0]).not.toHaveProperty('converted_at');
+    });
+  });
+
+  it('a churned linked customer booking an assessment: no customer write at all (stage and churn history untouched)', async () => {
+    const calls = [];
+    install(makeKnex(makeResolver({
+      preLead: baseLead({ customer_id: 'cust-linked', converted_at: null }),
+      lockedLead: { customer_id: 'cust-linked', converted_at: null, status: 'unresponsive' },
+      linkedCustomer: { id: 'cust-linked', account_id: 'acct-linked', pipeline_stage: 'churned', active: false, churned_at: new Date('2026-06-01T00:00:00Z') },
+    }), calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { serviceType: 'Waves Assessment' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).customerId).toBe('cust-linked');
+      expect(calls.filter((c) => c.table === 'customers' && (c.op === 'update' || c.op === 'insert'))).toHaveLength(0);
+      const leadUpdate = calls.find((c) => c.table === 'leads' && c.op === 'update');
+      expect(leadUpdate.args[0]).toMatchObject({ status: 'new', customer_id: 'cust-linked' });
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
     });
   });
 
