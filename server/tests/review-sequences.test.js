@@ -20,7 +20,13 @@ jest.mock('../services/review-ask-drafter', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The per-customer send lock needs a real pool; its own suite covers it.
-jest.mock('../utils/cron-lock', () => ({ runExclusive: async (_key, fn) => fn() }));
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: async (key, fn) => {
+    (global.__reviewLockKeys = global.__reviewLockKeys || []).push(key);
+    if (global.__reviewLockHeld && global.__reviewLockHeld.has(key)) return { skipped: true, reason: 'lease_held' };
+    return fn();
+  },
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
@@ -627,6 +633,15 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(ask.getTime()).toBe(now.getTime() + 72 * 3600000);
   });
 
+  test('an ask that follows a private check-in is not pushed 72 h past the check-in; after an ask it still is (codex #4141 r4 P2)', () => {
+    const startedAt = new Date('2026-05-26T14:00:00Z');
+    const now = new Date('2026-05-27T14:00:00Z');
+    const afterCheckIn = nextTouchRunAt({ startedAt, step: { day: 2, channel: 'sms', templateKey: 'soft_reminder' }, previousStep: { day: 1, channel: 'sms', templateKey: 'resolution_check' }, now });
+    expect(afterCheckIn.getTime()).toBe(startedAt.getTime() + 2 * 86400000);
+    const afterAsk = nextTouchRunAt({ startedAt, step: { day: 2, channel: 'sms', templateKey: 'soft_reminder' }, previousStep: { day: 0, channel: 'sms', templateKey: 'day0_ask' }, now });
+    expect(afterAsk.getTime()).toBe(now.getTime() + 72 * 3600000);
+  });
+
   test('a future step is scheduled exactly at started_at + day offset', () => {
     const at = nextTouchRunAt({ startedAt: WED, step: { day: 3, channel: 'sms' }, now: WED });
     expect(at.getTime()).toBe(WED.getTime() + 3 * 86400000);
@@ -1068,6 +1083,77 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(row.status).toBe('pending');
       expect(new Date(row.scheduled_for).getTime()).toBe(new Date(request.sendOutcome.nextAllowedAt).getTime());
+    });
+
+    test('the pinned-recipient check runs before the spacing hold: a drifted number is refused, never left queued (codex #4141 r4 P1)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'pd-1', first_name: 'Ida', last_name: 'V', phone: '+19410000159', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-pd1', customer_id: 'pd-1', status: 'pending', channel: 'sms', token: 'tpd1', created_at: new Date() }],
+        sms_log: [{ id: 'sms-pd1', customer_id: 'pd-1', direction: 'outbound', status: 'delivered', message_body: 'Here is our Google review link https://g.page/r/waves/review', created_at: new Date(Date.now() - 3 * 3600000) }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-pd1', { expectedPhone: '+15550001111' });
+
+      expect(out).toEqual({ refused: 'approved_phone_drift' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.scheduled_for == null).toBe(true); // not rescheduled for a number the operator never approved
+      expect(row.status).toBe('pending');
+    });
+
+    test('a due step runs under the per-customer review-send lock; a held lock leaves the row due for the next tick (codex #4141 r4 P1)', async () => {
+      const dueAt = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'lk-c', first_name: 'Ana', last_name: 'M', phone: '+19410000160', nearest_location_id: 'sarasota' }],
+        review_sequences: [{
+          id: 'seq-lk', customer_id: 'lk-c', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }]),
+          started_at: new Date(Date.now() - 600000), next_run_at: dueAt,
+        }],
+      });
+      db.mockImplementation(mock);
+      global.__reviewLockKeys = [];
+      global.__reviewLockHeld = new Set(['review-send:lk-c']);
+      try {
+        const out = await ReviewService.processReviewSequences();
+        expect(global.__reviewLockKeys).toContain('review-send:lk-c');
+        expect(out).toMatchObject({ sent: 0, deferred: 1 });
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+        expect(mock.__state.rows.review_sequences[0].next_run_at).toBe(dueAt);
+      } finally {
+        global.__reviewLockHeld = null;
+      }
+      const again = await ReviewService.processReviewSequences();
+      expect(again.sent).toBe(1);
+    });
+
+    test('a failed staff-sent-ask lookup defers an ask step instead of sending inside 72h (codex #4141 r4 P1)', async () => {
+      const mock = makeMock(fixture('seq-sl', { lastAskAgoMs: 100 * 3600000 }), { throwSelectWhen: (q) => q.table === 'sms_log' });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(out).toMatchObject({ sent: 0, deferred: 1 });
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.status).toBe('active');
+      expect(parse(seq.decision)).toMatchObject({ reason: 'spacing_lookup_unavailable' });
+    });
+
+    test('a tech-triggered RESEND of a pending row held by the 3-day rule also reports itself as NOT sent (codex #4141 r4 P2)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'ct-2', first_name: 'Sam', last_name: 'R', phone: '+19410000161', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-ex', customer_id: 'ct-2', service_record_id: 'sr-2', status: 'pending', channel: 'sms', token: 'tex', triggered_by: 'tech', created_at: new Date(Date.now() - 600000) }],
+        sms_log: [{ id: 'sms-ct2', customer_id: 'ct-2', direction: 'outbound', status: 'delivered', message_body: 'Here is our Google review link https://g.page/r/waves/review', created_at: new Date(Date.now() - 3 * 3600000) }],
+      });
+      db.mockImplementation(mock);
+
+      const request = await ReviewService.create({ customerId: 'ct-2', serviceRecordId: 'sr-2', triggeredBy: 'tech' });
+
+      expect(request.id).toBe('rr-ex');
+      expect(request.sendOutcome).toMatchObject({ sent: false, deferred: 'spacing' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     });
 
     test('the first ask has no timing gate: a Day-0 step with no prior ask sends at its scheduled time', async () => {

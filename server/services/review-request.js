@@ -403,13 +403,17 @@ const ASK_SPACING_MS = 72 * 3600000;
  *    touch that just went out (`now` is the send moment);
  *  - weekdaysOnly steps land Mon-Fri (ET) — Sat/Sun shifts to Monday 10 AM.
  */
-function nextTouchRunAt({ startedAt, step, now = new Date() }) {
+function nextTouchRunAt({ startedAt, step, previousStep = null, now = new Date() }) {
   const dayOffset = Number(step?.day) || 0;
   let at = new Date(new Date(startedAt).getTime() + dayOffset * 86400000);
   if (at <= now) at = new Date(now.getTime() + 60000);
-  // The 3-day rule spaces ASKS; a private no-link check-in an admin plan
-  // places on a later day keeps its own day (codex #4141 r2).
-  if (dayOffset > 0 && OUTREACH.isAskTemplate(step?.templateKey)) {
+  // The 3-day rule spaces ASKS from the last ASK: a private no-link check-in
+  // an admin plan places on a later day keeps its own day (codex #4141 r2),
+  // and an ask that follows a check-in is not pushed 72 h past the check-in
+  // (codex #4141 r4 P2) — the runner's delivered-ask re-check is the
+  // authority at dispatch. No previousStep = the step just sent was an ask.
+  const previousWasAsk = previousStep == null || OUTREACH.isAskTemplate(previousStep.templateKey);
+  if (dayOffset > 0 && previousWasAsk && OUTREACH.isAskTemplate(step?.templateKey)) {
     const minAt = new Date(now.getTime() + ASK_SPACING_MS);
     if (at < minAt) at = minAt;
   }
@@ -778,10 +782,13 @@ const ReviewService = {
           { statusCode: 409, code: "approved_phone_drift" },
         );
       }
-      return (
-        (await db("review_requests").where({ id: existing.id }).first()) ||
-        existing
-      );
+      const fresh = (await db("review_requests").where({ id: existing.id }).first()) || existing;
+      // Same truth as the fresh-row path (codex #4141 r4 P2): a resend held
+      // by the 3-day rule / send window / provider retry is queued, not sent.
+      if (resendOutcome && resendOutcome.deferred) {
+        fresh.sendOutcome = { sent: false, deferred: resendOutcome.deferred, nextAllowedAt: resendOutcome.nextAllowedAt || null };
+      }
+      return fresh;
     }
 
     if (!gate.allowed) throw gateError(gate);
@@ -1719,6 +1726,29 @@ const ReviewService = {
       );
       return;
     }
+    // Route to the service beneficiary (see services/customer-contact.js) —
+    // falls back to the billing phone when no service contact is configured.
+    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    const contact = getServiceContactSmsRecipient(customer);
+    // W0B pinned recipient at the FINAL recipient read (GH r14 P1): an
+    // operator-confirmed card promised a specific number, and this reload
+    // re-resolves the recipient — a phone changed between the card's
+    // preflight and here must suppress, never send the irreversible SMS to
+    // a number the operator did not approve. Only in-process confirmed
+    // sends pass expectedPhone; the scheduler's deferred batch does not.
+    if (expectedPhone && contact.phone && String(contact.phone) !== String(expectedPhone)) {
+      // No row mutation here (pre-push r15 P1): the caller decides — the
+      // fresh-create path DELETES its just-created row (so the scheduler
+      // can never later send it to the unapproved number and the 30-day
+      // cooldown reads never count a request that never happened); the
+      // pending-unsent resend path leaves the pre-existing row exactly as
+      // it was.
+      logger.info(`[review] Refused send (requestId=${requestId} reason=approved-phone-drift)`);
+      return { refused: "approved_phone_drift" };
+    }
+    // The pinned-recipient check above runs BEFORE any branch that leaves the
+    // row queued (codex #4141 r4 P1): a spacing hold that returned first left a
+    // drifted number for processScheduled to text without the pin.
     // The 3-day rule at the shared sender (codex #4141 r2): a legacy queued
     // ask (two completions for one customer create separate pending rows)
     // or a retried row must not land inside 72 h of another delivered ask —
@@ -1748,26 +1778,6 @@ const ReviewService = {
       }
     }
 
-    // Route to the service beneficiary (see services/customer-contact.js) —
-    // falls back to the billing phone when no service contact is configured.
-    const { getServiceContactSmsRecipient } = require("./customer-contact");
-    const contact = getServiceContactSmsRecipient(customer);
-    // W0B pinned recipient at the FINAL recipient read (GH r14 P1): an
-    // operator-confirmed card promised a specific number, and this reload
-    // re-resolves the recipient — a phone changed between the card's
-    // preflight and here must suppress, never send the irreversible SMS to
-    // a number the operator did not approve. Only in-process confirmed
-    // sends pass expectedPhone; the scheduler's deferred batch does not.
-    if (expectedPhone && contact.phone && String(contact.phone) !== String(expectedPhone)) {
-      // No row mutation here (pre-push r15 P1): the caller decides — the
-      // fresh-create path DELETES its just-created row (so the scheduler
-      // can never later send it to the unapproved number and the 30-day
-      // cooldown reads never count a request that never happened); the
-      // pending-unsent resend path leaves the pre-existing row exactly as
-      // it was.
-      logger.info(`[review] Refused send (requestId=${requestId} reason=approved-phone-drift)`);
-      return { refused: "approved_phone_drift" };
-    }
     if (!contact.phone) {
       // No consented SMS recipient (e.g. unstamped contact phone and no
       // primary phone): mark the row so the scheduler's 20-row batch can't
@@ -2855,6 +2865,93 @@ const ReviewService = {
   },
 
   /**
+   * The 3-day rule against ANY newer ask to this customer — a cadence touch, a
+   * manual one-off, or a staff-sent link with no request row (sms_log, codex
+   * #4141 r2): true leaves the row for a later run — the selector re-picks it
+   * once 72 h have passed. A failed lookup holds too (fail closed).
+   */
+  async _followupIsSpaced(request) {
+    try {
+      const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: request.id });
+      const manualAt = await this.manualReviewAskSentRecently(request.customer_id, {
+        since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
+      });
+      const anchorMs = Math.max(lastAsk ? lastAsk.getTime() : 0, manualAt ? manualAt.getTime() : 0);
+      return !!anchorMs && Date.now() - anchorMs < ASK_SPACING_MS;
+    } catch {
+      return true;
+    }
+  },
+
+  /** { customer, contact } for the follow-up text, or "suppressed" once the row is marked handled. */
+  async _followupRecipient(request) {
+    const customer = await db("customers").where({ id: request.customer_id }).first();
+    // Dedup #3: CSR flagged the customer as already-reviewed (Customer 360 toggle).
+    if (customer && customer.has_left_google_review) {
+      await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
+      return "suppressed";
+    }
+    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    const contact = getServiceContactSmsRecipient(customer);
+    if (!contact.phone) {
+      // No consented SMS recipient — mark handled so this row can't sit in the
+      // 20-row follow-up batch every run and starve later customers (#2955 r4).
+      await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() }).catch(() => {});
+      return "suppressed";
+    }
+    return { customer, contact };
+  },
+
+  /** Renders and sends the follow-up; "sent" | "suppressed" (terminal block, row marked) | "skipped" (retry later). */
+  async _deliverFollowup(request, customer, contact) {
+    // Followup points straight at the GBP review form — they ignored the
+    // tokenized rate page once, so reduce friction the second time. The ask's
+    // stamped office rides along as the last-resort stored id so the Day-3
+    // follow-up can never target a different profile than the ask it chases
+    // (codex #3285 r2).
+    const location = resolveReviewLocationId(customer || {}, {
+      storedLocationId: request.location_id || customer?.nearest_location_id || null,
+    });
+    const googleReviewUrl = REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
+    const body = await renderSmsTemplate(
+      "review_request_followup",
+      { first_name: firstNameFrom(contact.name) || customer.first_name || "", google_review_url: googleReviewUrl },
+      { workflow: "review_request_followup", entity_type: "review_request", entity_id: request.id },
+    );
+    if (!body) {
+      logger.warn(`[review] review_request_followup template missing/disabled (customerId=${customer.id} requestId=${request.id})`);
+      return "skipped";
+    }
+    try {
+      const result = await sendCustomerMessage({
+        to: contact.phone,
+        body,
+        channel: "sms",
+        audience: "customer",
+        purpose: "review_request",
+        customerId: customer.id,
+        identityTrustLevel: "phone_matches_customer",
+        entryPoint: "review_request_followup",
+        metadata: { original_message_type: "review_followup", review_request_id: request.id },
+      });
+      if (result.sent) {
+        await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
+        return "sent";
+      }
+      logger.warn(
+        `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
+      );
+      const terminal = result.blocked && result.code !== "CONSENT_LOOKUP_FAILED" && !result.retryable && !result.deferred;
+      if (!terminal) return "skipped";
+      await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
+      return "suppressed";
+    } catch (err) {
+      logger.error(`[review] Follow-up SMS failed: ${err.message}`);
+      return "skipped";
+    }
+  },
+
+  /**
    * Cron: send the single follow-up reminder, on Day 3 after the initial
    * review request. Only sends ONE follow-up, only to people who haven't
    * opened OR opened but didn't rate.
@@ -3033,117 +3130,10 @@ const ReviewService = {
       // The lock is try-only — when the other path holds it this row is left
       // for the next run, which the selector re-picks.
       const outcome = await runExclusive(`review-send:${request.customer_id}`, async () => {
-        // The 3-day rule against ANY newer ask to this customer — a cadence
-        // touch, a manual one-off, or a staff-sent link with no request row
-        // (sms_log, codex #4141 r2): leave the row for a later run — the
-        // selector re-picks it once 72 h have passed. A failed lookup holds
-        // too (fail closed).
-        let newerAsk = false;
-        try {
-          const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: request.id });
-          const manualAt = await this.manualReviewAskSentRecently(request.customer_id, {
-            since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
-          });
-          const anchorMs = Math.max(lastAsk ? lastAsk.getTime() : 0, manualAt ? manualAt.getTime() : 0);
-          newerAsk = !!anchorMs && Date.now() - anchorMs < ASK_SPACING_MS;
-        } catch {
-          newerAsk = true;
-        }
-        if (newerAsk) return "suppressed";
-
-        const customer = await db("customers")
-          .where({ id: request.customer_id })
-          .first();
-        // Dedup #3: CSR flagged the customer as already-reviewed (Customer 360 toggle).
-        if (customer && customer.has_left_google_review) {
-          await db("review_requests").where({ id: request.id }).update({
-            followup_sent: true,
-            followup_sent_at: new Date(),
-          });
-          return "suppressed";
-        }
-        const contact = getServiceContactSmsRecipient(customer);
-        if (!contact.phone) {
-          // No consented SMS recipient — mark handled so this row can't sit
-          // in the 20-row follow-up batch every run and starve later
-          // customers (#2955 r4). Mirrors the scheduled-send suppression.
-          await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() }).catch(() => {});
-          return "suppressed";
-        }
-
-        // Followup points straight at the GBP review form — they ignored the
-        // tokenized rate page once, so reduce friction the second time. The
-        // ask's stamped office rides along as the last-resort stored id so the
-        // Day-3 follow-up can never target a different profile than the ask it
-        // chases (codex #3285 r2).
-        const location = resolveReviewLocationId(customer || {}, {
-          storedLocationId: request.location_id || customer?.nearest_location_id || null,
-        });
-        const googleReviewUrl =
-          REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
-
-        const body = await renderSmsTemplate(
-          "review_request_followup",
-          {
-            first_name: firstNameFrom(contact.name) || customer.first_name || "",
-            google_review_url: googleReviewUrl,
-          },
-          {
-            workflow: "review_request_followup",
-            entity_type: "review_request",
-            entity_id: request.id,
-          },
-        );
-        if (!body) {
-          logger.warn(
-            `[review] review_request_followup template missing/disabled (customerId=${customer.id} requestId=${request.id})`,
-          );
-          return "skipped";
-        }
-
-        try {
-          const result = await sendCustomerMessage({
-            to: contact.phone,
-            body,
-            channel: "sms",
-            audience: "customer",
-            purpose: "review_request",
-            customerId: customer.id,
-            identityTrustLevel: "phone_matches_customer",
-            entryPoint: "review_request_followup",
-            metadata: {
-              original_message_type: "review_followup",
-              review_request_id: request.id,
-            },
-          });
-          if (!result.sent) {
-            logger.warn(
-              `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
-            );
-            if (
-              result.blocked &&
-              result.code !== "CONSENT_LOOKUP_FAILED" &&
-              !result.retryable &&
-              !result.deferred
-            ) {
-              await db("review_requests").where({ id: request.id }).update({
-                followup_sent: true,
-                followup_sent_at: new Date(),
-              });
-              return "suppressed";
-            }
-            return "skipped";
-          }
-
-          await db("review_requests").where({ id: request.id }).update({
-            followup_sent: true,
-            followup_sent_at: new Date(),
-          });
-          return "sent";
-        } catch (err) {
-          logger.error(`[review] Follow-up SMS failed: ${err.message}`);
-          return "skipped";
-        }
+        if (await this._followupIsSpaced(request)) return "suppressed";
+        const target = await this._followupRecipient(request);
+        if (typeof target === "string") return target;
+        return this._deliverFollowup(request, target.customer, target.contact);
       }, { recordHealth: false });
       if (outcome && outcome.skipped) continue;
       if (outcome === "sent") {
@@ -4542,7 +4532,20 @@ const ReviewService = {
   },
 
   /** Run the current step of one sequence (send + advance, or stop). */
+  // A due step runs under the same per-customer try-lock scheduled and one-off
+  // ask dispatch take (codex #4141 r4 P1): the 'review-sequences' and
+  // 'review-requests-scheduled' job locks are distinct, so two paths could read
+  // no recent delivery and both text inside 72 h. A held lock leaves the row
+  // due; the next tick re-picks it.
   async _runSequenceStep(sequenceId) {
+    const seq = await db("review_sequences").where({ id: sequenceId }).first();
+    if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
+    const result = await runExclusive(`review-send:${seq.customer_id}`, () => this._runSequenceStepUnlocked(sequenceId), { recordHealth: false });
+    if (result && result.skipped) return { ran: false, deferred: true, reason: "customer_lock_held" };
+    return result;
+  },
+
+  async _runSequenceStepUnlocked(sequenceId) {
     const seq = await db("review_sequences").where({ id: sequenceId }).first();
     if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
     let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
@@ -4782,8 +4785,23 @@ const ReviewService = {
     // between Day 0 and Day 4). Scoped to evidence since the sequence
     // started — pre-enrollment asks were already screened at enrollment, and
     // an operator-started sequence keeps its deliberate override.
-    if (seq.started_at && await this.manualReviewAskSentRecently(seq.customer_id, { since: seq.started_at })) {
-      return stop("manual_ask_recent");
+    if (seq.started_at) {
+      let manualAskRecent = false;
+      try {
+        manualAskRecent = await this.manualReviewAskSentRecently(seq.customer_id, { since: seq.started_at, failClosed: true });
+      } catch (err) {
+        // No evidence is not "no ask" (codex #4141 r4 P1): an ask step defers
+        // like the review_requests lookup above; a no-link check-in proceeds.
+        if (stepIsAsk) {
+          const nextEvalAt = new Date(Date.now() + 30 * 60 * 1000);
+          await db("review_sequences")
+            .where({ id: seq.id, status: "active" })
+            .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "spacing_lookup_unavailable", nextEvalAt }), updated_at: new Date() });
+          logger.warn(`[review] staff-ask lookup failed, deferring sequence step (sequenceId=${seq.id}): ${err.message}`);
+          return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
+        }
+      }
+      if (manualAskRecent) return stop("manual_ask_recent");
     }
 
     const step = plan[seq.current_step] || {};
@@ -4852,7 +4870,7 @@ const ReviewService = {
         });
         return { ran: true, sent: true, completed: true, step: seq.current_step };
       }
-      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep] });
+      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[seq.current_step] || null });
       await db("review_sequences").where({ id: seq.id, status: "active" }).update({
         current_step: nextStep,
         touches_sent: seq.touches_sent + 1,
