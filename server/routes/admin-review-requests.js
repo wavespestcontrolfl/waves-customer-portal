@@ -115,8 +115,13 @@ router.post('/tech-trigger', async (req, res, next) => {
       triggeredBy: 'tech',
     });
 
+    // `sent` is the truth (codex #4141 r3 P2): an immediate ask held by the
+    // 3-day rule, the send window or a provider retry is queued, not sent —
+    // the tech app must not tell the customer it went. Additive fields.
+    const held = request.sendOutcome && request.sendOutcome.sent === false ? request.sendOutcome : null;
     res.json({
-      sent: true,
+      sent: !held,
+      ...(held ? { deferred: held.deferred, nextAllowedAt: held.nextAllowedAt, message: 'The review text is queued and will go out automatically' } : {}),
       // The gate-respecting tokenized link — same helper the SMS paths use
       // (/go behind GATE_REVIEW_DIRECT_LINK; with the gate off /go is a rate-
       // page alias, so main's hardcoded /go form and this resolve identically

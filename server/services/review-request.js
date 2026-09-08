@@ -455,6 +455,7 @@ async function lastDeliveredAskAt(customerId, { excludeRequestId = null } = {}) 
  * whether the owner has anything to do — a routine deferral is
  * ownerAction 'none', never a send/drop question.
  */
+
 function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null }) {
   return JSON.stringify({
     reason,
@@ -782,10 +783,13 @@ const ReviewService = {
           { statusCode: 409, code: "approved_phone_drift" },
         );
       }
-      return (
-        (await db("review_requests").where({ id: existing.id }).first()) ||
-        existing
-      );
+      const fresh = (await db("review_requests").where({ id: existing.id }).first()) || existing;
+      // Same truth as the fresh-row path (codex #4141 r4 P2): a resend held
+      // by the 3-day rule / send window / provider retry is queued, not sent.
+      if (resendOutcome && resendOutcome.deferred) {
+        fresh.sendOutcome = { sent: false, deferred: resendOutcome.deferred, nextAllowedAt: resendOutcome.nextAllowedAt || null };
+      }
+      return fresh;
     }
 
     if (!gate.allowed) throw gateError(gate);
@@ -880,6 +884,13 @@ const ReviewService = {
 
     if (shouldSendImmediately) {
       const outcome = await this.sendSMS(request.id, { expectedPhone });
+      // Not delivered — held by the 3-day rule, its lookup, the send window
+      // or a provider retry. The row stays queued for the retry owner, and
+      // the caller learns that it was NOT sent (codex #4141 r3 P2: the tech
+      // app was told sent:true for a text that could be 72 h out).
+      if (outcome && outcome.deferred) {
+        request.sendOutcome = { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
+      }
       if (outcome && outcome.refused === "approved_phone_drift") {
         // Remove the row this very call created (pre-push r15 P1): left in
         // place it would later be sent by the scheduler to the unapproved
@@ -1000,6 +1011,7 @@ const ReviewService = {
       return false;
     }
   },
+
 
 
   /**
@@ -1737,6 +1749,43 @@ const ReviewService = {
       logger.info(`[review] Refused send (requestId=${requestId} reason=approved-phone-drift)`);
       return { refused: "approved_phone_drift" };
     }
+    // The pinned-recipient check above runs BEFORE any branch that leaves the
+    // row queued (codex #4141 r4 P1): a spacing hold that returned first left a
+    // drifted number for processScheduled to text without the pin.
+    // The 3-day rule at the shared sender (codex #4141 r2): a legacy queued
+    // ask (two completions for one customer create separate pending rows)
+    // or a retried row must not land inside 72 h of another delivered ask —
+    // including a staff-sent one with no request row. Held rows stay
+    // pending with scheduled_for pushed out; an unavailable lookup holds
+    // 30 min (fail closed).
+    // Asks only: a private no-link check-in (resolution_check /
+    // satisfaction_confirm) retrying through here is a support message.
+    if (OUTREACH.isAskTemplate(request.template_key)) {
+      try {
+      const lastAsk = await lastDeliveredAskAt(request.customer_id, { excludeRequestId: requestId });
+      const manualAt = await this.manualReviewAskSentRecently(request.customer_id, {
+        since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
+      });
+      const anchorMs = Math.max(lastAsk ? lastAsk.getTime() : 0, manualAt ? manualAt.getTime() : 0);
+      const holdUntil = anchorMs && Date.now() - anchorMs < ASK_SPACING_MS ? new Date(anchorMs + ASK_SPACING_MS) : null;
+      if (holdUntil) {
+        await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: holdUntil });
+        logger.info(`[review] Held request for the 3-day rule (requestId=${requestId} until=${holdUntil.toISOString()})`);
+        return { deferred: "spacing", nextAllowedAt: holdUntil };
+      }
+    } catch (err) {
+      // The hold is only real once scheduled_for is stored (codex #4141 r5
+      // P1): an immediate row has scheduled_for = null, and processScheduled
+      // never selects a null schedule. A failed write propagates instead of
+      // reporting a queued send that no job would ever pick up.
+      const retryAt = new Date(Date.now() + 30 * 60 * 1000);
+      const stored = await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: retryAt });
+      if (!stored) throw new Error(`3-day rule lookup failed and the retry could not be stored (requestId=${requestId})`);
+      logger.warn(`[review] 3-day rule lookup failed, holding request (requestId=${requestId}): ${err.message}`);
+      return { deferred: "spacing_lookup_unavailable", nextAllowedAt: retryAt };
+      }
+    }
+
     if (!contact.phone) {
       // No consented SMS recipient (e.g. unstamped contact phone and no
       // primary phone): mark the row so the scheduler's 20-row batch can't
@@ -1823,7 +1872,7 @@ const ReviewService = {
       logger.info(
         `[review] review_request template missing/disabled — requestId=${requestId} requeued for ${retryAt.toISOString()}`,
       );
-      return;
+      return { deferred: "template_retry", nextAllowedAt: retryAt };
     }
 
     // Routed through the customer-message middleware so consent /
@@ -1869,6 +1918,10 @@ const ReviewService = {
           logger.info(
             `[review] SMS DEFERRED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${deferredRetryAt.toISOString()})`,
           );
+          // Callers (create() → /tech-trigger) report a queued text as not
+          // sent — every retry-scheduling branch returns this shape
+          // (codex #4141 r3 P2, r5 P2).
+          return { deferred: result.code === "QUIET_HOURS_HOLD" ? "send_window" : "provider_retry", nextAllowedAt: deferredRetryAt };
         } else if (result.blocked && result.code === "CONSENT_LOOKUP_FAILED") {
           // Transient lookup failure inside the wrapper (DB error during
           // consent validation). Distinct code from NO_CONSENT_RECORD;
@@ -1888,6 +1941,7 @@ const ReviewService = {
           logger.error(
             `[review] SMS WRAPPER LOOKUP FAILED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${retryAt.toISOString()})`,
           );
+          return { deferred: "provider_retry", nextAllowedAt: retryAt };
         } else if (result.blocked) {
           // True wrapper-policy block (opt-out, suppression, emoji, price
           // leak, segment cap, identity, NO_CONSENT_RECORD). Mark
@@ -1902,6 +1956,7 @@ const ReviewService = {
           logger.warn(
             `[review] SMS BLOCKED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code})`,
           );
+          return { blocked: true, code: result.code || null };
         } else {
           // Provider failure (Twilio/network). Mark for retry: keep
           // status='pending' AND set scheduled_for=now+5min so
@@ -1925,6 +1980,7 @@ const ReviewService = {
           logger.error(
             `[review] SMS PROVIDER FAILURE (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${retryAt.toISOString()})`,
           );
+          return { deferred: "provider_retry", nextAllowedAt: retryAt };
         }
       }
     } catch (err) {
@@ -1942,14 +1998,18 @@ const ReviewService = {
         logger.error(
           `[review] SMS dispatch threw — queued for retry at ${retryAt.toISOString()} (requestId=${requestId} errType=${err?.name || "Error"})`,
         );
+        return { deferred: "provider_retry", nextAllowedAt: retryAt };
       } catch (dbErr) {
         // Last resort — couldn't even update the row. Log error classes
-        // only for both failures (same PII reasoning).
+        // only for both failures (same PII reasoning). Reported as not
+        // sent AND not queued so no caller claims it will go automatically.
         logger.error(
           `[review] SMS failed AND retry-queue update failed (requestId=${requestId} sendErrType=${err?.name || "Error"} dbErrType=${dbErr?.name || "Error"})`,
         );
+        return { deferred: "send_failed_unqueued", nextAllowedAt: null };
       }
     }
+    return { sent: true };
   },
 
   /**
