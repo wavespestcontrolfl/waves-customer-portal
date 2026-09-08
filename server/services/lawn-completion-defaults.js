@@ -7,6 +7,7 @@ const history = require('./lawn-assessment-history');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { calculateLawnOverallScore, resolveStressDamage } = require('../../shared/lawn-scores.cjs');
 const { detectServiceLine } = require('./service-report/service-line-configs');
+const { normalizeInventoryUnit } = require('./inventory-units');
 
 function lawnCompletionDefaultsEnabled() {
   return gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS') && gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
@@ -94,7 +95,10 @@ function targetRange(text) {
 
 function archivedRateMatches(product, mix) {
   if (product.ratePer1000 != null) {
-    return Number(product.ratePer1000) > 0 && Number(product.ratePer1000) === mix?.ratePer1000 && product.rateUnit === mix?.rateUnit;
+    // Protocol rows and the catalog spell the same unit differently ('fl oz'
+    // vs 'fl_oz'); only a different physical unit is recipe drift.
+    return Number(product.ratePer1000) > 0 && Number(product.ratePer1000) === mix?.ratePer1000
+      && normalizeInventoryUnit(product.rateUnit) === normalizeInventoryUnit(mix?.rateUnit);
   }
   const unit = String(product.rateUnit || '').toLowerCase();
   const nutrient = unit === 'lb_n' ? ['target_n_analysis', 'targetN', 'targetNPer1000']
@@ -154,6 +158,13 @@ function buildLawnCompletionDefaults(plan, context) {
     // the planner's blocks still withhold any unavailable suggested quantity.
     return item.selected === true && item.product?.active !== false && product?.defaultInPlan;
   }).map((item) => completionItem(item, protocolProductFor(item), amountsAllowed)) : [];
+  // The planner's recipe comes from the field reference (protocols.json);
+  // the defaults list is the owner-edited operating layer. When a live
+  // window registers none of the recipe's selected products as defaults,
+  // an unexplained empty prefill would read as "nothing to apply" — say
+  // why instead (Codex P1 #4126 r4). The data alignment is the owner's.
+  const recipeUnregistered = eligible && items.length === 0
+    && plan.mixCalculator.items.some(item => item.selected === true && item.product?.active !== false);
   return {
     enabled: true, serviceId: plan.serviceId, propertyId: context.propertyId,
     lawnSqft: context.propertyMatchesProfile ? plan.mixCalculator.lawnSqft : null,
@@ -168,7 +179,8 @@ function buildLawnCompletionDefaults(plan, context) {
     message: !context.propertyMatchesProfile ? 'The saved turf profile could not be matched to this property. Enter the actual work.'
       : !programApplies ? 'No assigned lawn plan for this visit. Add the products actually applied.'
         : !protocolMatches ? 'The appointment protocol could not be resolved. Enter the actual work.'
-          : plan.propertyGate.blocks.find(block => block.code === 'lawn_archived_recipe_unavailable')?.message || null,
+          : plan.propertyGate.blocks.find(block => block.code === 'lawn_archived_recipe_unavailable')?.message
+            || (recipeUnregistered ? 'The assigned protocol window lists none of this recipe\'s products as defaults. Enter the actual work.' : null),
   };
 }
 

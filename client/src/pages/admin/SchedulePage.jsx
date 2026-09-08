@@ -4988,6 +4988,9 @@ function JobCardProduct({ p, D }) {
 
 function JobCardTank({ tank, serviceId, D }) {
   const [gallons, setGallons] = useState(110);
+  // A rig row picked in place of the 110 / 1 gal presets: a full tank of
+  // that rig, dosed on its own carrier and volume.
+  const [rigId, setRigId] = useState(null);
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [picked, setPicked] = useState(null);
@@ -5015,6 +5018,10 @@ function JobCardTank({ tank, serviceId, D }) {
     };
   }, [q]);
 
+  const rigs = tank?.rigs || [];
+  const rig = rigs.find((r) => r.equipmentSystemId === rigId) || null;
+  const pickedRigId = rig?.equipmentSystemId || null;
+
   useEffect(() => {
     if (!picked) {
       setMix(null);
@@ -5024,25 +5031,39 @@ function JobCardTank({ tank, serviceId, D }) {
     setBusy(true);
     // Never show the previous product's verdict beside the new one.
     setMix(null);
-    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
+    const volume = pickedRigId ? `rig=${encodeURIComponent(pickedRigId)}` : `gallons=${gallons}`;
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [picked, gallons, serviceId]);
+  }, [picked, gallons, pickedRigId, serviceId]);
 
-  const pill = (g) => ({
+  const pill = (selected) => ({
     flex: 1,
     minHeight: 44,
     borderRadius: 2,
-    border: `1px solid ${gallons === g ? D.heading : D.inputBorder}`,
-    background: gallons === g ? D.heading : D.card,
-    color: gallons === g ? D.white : D.text,
+    border: `1px solid ${selected ? D.heading : D.inputBorder}`,
+    background: selected ? D.heading : D.card,
+    color: selected ? D.white : D.text,
     fontSize: 12,
     fontWeight: 500,
     textTransform: "uppercase",
     letterSpacing: "0.06em",
     cursor: "pointer",
+  });
+  // A rig row carries the rig's full name, so it reads in sentence case.
+  const rigRow = (selected) => ({
+    ...pill(selected),
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    padding: "0 12px",
+    fontSize: 14,
+    textTransform: "none",
+    letterSpacing: 0,
+    textAlign: "left",
   });
 
   return (
@@ -5057,9 +5078,20 @@ function JobCardTank({ tank, serviceId, D }) {
           <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld until a rig calibration or protocol carrier is on file; per-gallon dilutions still mix.</div>
         )}
         <div style={{ display: "flex", gap: 8 }}>
-          <button type="button" style={pill(110)} onClick={() => setGallons(110)}>110 gal</button>
-          <button type="button" style={pill(1)} onClick={() => setGallons(1)}>1 gal</button>
+          <button type="button" style={pill(!rig && gallons === 110)} onClick={() => { setGallons(110); setRigId(null); }}>110 gal</button>
+          <button type="button" style={pill(!rig && gallons === 1)} onClick={() => { setGallons(1); setRigId(null); }}>1 gal</button>
         </div>
+        {rigs.length > 0 && (
+          <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 14, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Rigs · full tank</div>
+            {rigs.map((r) => (
+              <button key={r.equipmentSystemId} type="button" style={rigRow(r.equipmentSystemId === pickedRigId)} onClick={() => setRigId(r.equipmentSystemId)}>
+                <span>{r.name}</span>
+                <span style={{ fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{r.tankCapacityGal} gal</span>
+              </button>
+            ))}
+          </div>
+        )}
         <input
           value={q}
           onChange={(e) => { setQ(e.target.value); setPicked(null); }}
@@ -5116,7 +5148,7 @@ function JobCardTank({ tank, serviceId, D }) {
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {gallons} gal{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>

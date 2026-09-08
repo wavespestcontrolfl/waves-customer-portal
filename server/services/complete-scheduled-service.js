@@ -2362,12 +2362,14 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     } = completionInput.body;
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
+    // The rejection itself is deferred to the fresh-execution block below:
+    // a completion committed before this validation existed may carry a
+    // value the old writer number-coerced (e.g. 2500.5), and its retry must
+    // reach the replay/resume claim instead of 400-ing (Codex P0 #4126 r4).
     const lawnDefaultsEnabled = lawnCompletionDefaultsEnabled();
-    const { value: lawnCompletionArea, error: lawnCompletionAreaError } = Joi.number().integer().min(1).max(10000000).allow(null)
+    const { value: lawnCompletionAreaValue, error: lawnCompletionAreaError } = Joi.number().integer().min(1).max(10000000).allow(null)
       .validate(lawnDefaultsEnabled ? lawnProtocolCompletion?.treatedSqft : undefined);
-    if (lawnCompletionAreaError) {
-      return { status: 400, body: { error: 'treatedSqft must be a positive whole number, or null to clear the visit area.', code: 'lawn_completion_area_invalid' } };
-    }
+    const lawnCompletionArea = lawnCompletionAreaError ? undefined : lawnCompletionAreaValue;
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return ({ status: 400, body: { error: 'offerInspectionCredit must be a boolean' } });
     }
@@ -3637,6 +3639,10 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           db,
         );
         return ({ status: typedValidationError.status, body: typedValidationError.body });
+      }
+      if (lawnCompletionAreaError) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_completion_area_invalid'), db);
+        return { status: 400, body: { error: 'treatedSqft must be a positive whole number, or null to clear the visit area.', code: 'lawn_completion_area_invalid' } };
       }
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {
