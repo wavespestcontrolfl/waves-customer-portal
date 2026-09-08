@@ -102,6 +102,7 @@ function makeMock(initial = {}, opts = {}) {
       count() { return { first: async () => ({ count: String(filtered(this).length), c: String(filtered(this).length) }) }; },
       insert(row) {
         if (!state.rows[this.table]) state.rows[this.table] = [];
+        if (opts.onInsert) { const veto = opts.onInsert(this.table, row, state); if (veto) return { returning: async () => { throw veto; } }; }
         const inserted = { id: row.id || `${this.table}-${state.rows[this.table].length + 1}`, ...row };
         state.rows[this.table].push(inserted);
         return { returning: async () => [inserted] };
@@ -842,6 +843,30 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(active.next_run_at).toBe(nextRun);
     expect(parse(active.decision)).toMatchObject({ reason: 'follow_up_scheduled' });
     expect(active.updated_at.getTime()).toBeLessThan(Date.now() - 3000000);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a request capture survives the enrollment race — a unique-index loss records it on the WINNING cadence (codex #4140 r9 P2)', async () => {
+    mockGates.reviewSequences = true;
+    const requested = { by: 'tech-2', byName: 'Bea', at: new Date().toISOString(), source: 'completion_panel' };
+    // No active row at the up-front lookup; another enrollment wins the
+    // unique index between that lookup and this insert.
+    const mock = makeMock({
+      customers: [{ id: 'rc-1', first_name: 'Ray', last_name: 'C', phone: '+19410000146', nearest_location_id: 'venice' }],
+    }, {
+      onInsert: (table, row, state) => {
+        if (table !== 'review_sequences' || row.customer_id !== 'rc-1') return null;
+        state.rows.review_sequences.push({ id: 'seq-winner', customer_id: 'rc-1', status: 'active', current_step: 0, touches_sent: 0, plan: '[{"day":0}]', started_at: new Date(), next_run_at: new Date(Date.now() + 3600000) });
+        return Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'rc-1', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, decision: { reason: 'customer_requested' } });
+
+    expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: true });
+    const winner = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-winner');
+    expect(JSON.parse(winner.customer_requested)).toEqual(requested);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 

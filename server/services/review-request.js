@@ -4056,6 +4056,25 @@ const ReviewService = {
   // In-flight supersession re-check spacing — a knob so tests don't wait
   // real provider-settle seconds.
   _SUPERSEDE_RETRY_DELAY_MS: 1500,
+  /**
+   * The already_active outcome of startReviewSequence — every path that
+   * finds another active cadence (the up-front lookup, and the two
+   * unique-index race recoveries) returns through here so a "customer asked
+   * for the link" capture is never lost (codex #4140 r4 P2, r9 P2). Only
+   * customer_requested is written: the schedule is not moved (a second ask
+   * inside the window is what the 3-day rule spaces) and updated_at is the
+   * runner's claim stamp (claimIsStale) and must not be refreshed. A race
+   * that left NO active row (the winner already completed) records nothing.
+   */
+  async _alreadyActive(active, customerRequested) {
+    let requestRecorded = false;
+    if (customerRequested && active?.id) {
+      await db("review_sequences").where({ id: active.id }).update({ customer_requested: JSON.stringify(customerRequested) });
+      requestRecorded = true;
+    }
+    return { started: false, reason: "already_active", sequence: active, requestRecorded };
+  },
+
 
   async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null }) {
     const customer = await db("customers").where({ id: customerId }).first();
@@ -4139,12 +4158,7 @@ const ReviewService = {
         // second ask inside the window is what the 3-day rule (PR 3) spaces.
         // Only customer_requested is written: updated_at is the runner's
         // claim stamp (claimIsStale) and must not be refreshed here.
-        let requestRecorded = false;
-        if (customerRequested) {
-          await db("review_sequences").where({ id: active.id }).update({ customer_requested: JSON.stringify(customerRequested) });
-          requestRecorded = true;
-        }
-        return { started: false, reason: "already_active", sequence: active, requestRecorded };
+        return this._alreadyActive(active, customerRequested);
       }
     }
 
@@ -4330,20 +4344,20 @@ const ReviewService = {
           await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested, decision });
           return { started: false, reason: "deferred_inflight", deferred: true };
         }
-        if (existing) return { started: false, reason: "already_active", sequence: existing };
+        if (existing) return this._alreadyActive(existing, customerRequested);
         supersedeOpenerId = null;
         try {
           [sequence] = await insertReplacement();
         } catch (retryErr) {
           if (retryErr?.code === "23505") {
             const raced = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-            return { started: false, reason: "already_active", sequence: raced };
+            return this._alreadyActive(raced, customerRequested);
           }
           throw retryErr;
         }
       } else if (err?.code === "23505") {
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-        return { started: false, reason: "already_active", sequence: existing };
+        return this._alreadyActive(existing, customerRequested);
       } else {
         throw err;
       }
