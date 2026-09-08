@@ -1179,7 +1179,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       const out = await ReviewService.processScheduled();
 
-      expect(out).toEqual({ sent: 1, held: 1 });
+      expect(out).toEqual({ sent: 1, held: 1, refused: 0 });
       expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     });
 
@@ -1257,6 +1257,13 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const retry = await ReviewService.sendSMS('rr-pp1');
 
       expect(retry).toEqual({ refused: 'approved_phone_drift' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+
+      // The scheduler parks a refused row so it is not re-selected every tick
+      // and cannot send under the stale approval later (codex #4156 r4 P1).
+      const out = await ReviewService.processScheduled();
+      expect(out).toEqual({ sent: 0, held: 0, refused: 1 });
+      expect(row.status).toBe('suppressed');
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     });
 

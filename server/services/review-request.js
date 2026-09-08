@@ -2939,6 +2939,7 @@ const ReviewService = {
 
     let sent = 0;
     let held = 0;
+    let refused = 0;
     for (const request of pending) {
       // Serialize each send under the SAME per-customer lock the manual send and
       // cadence-start paths take. Without this, a cadence start can suppress this
@@ -2952,12 +2953,23 @@ const ReviewService = {
       // Only a delivered send counts (codex #4156 r1 P2): a 3-day-rule or
       // send-window hold, a lookup deferral, a suppression or a skipped
       // lock left the customer without a message.
-      if (out && out.sent === true) sent++;
-      else held++;
+      if (out && out.sent === true) { sent++; continue; }
+      if (out && out.refused === "approved_phone_drift") {
+        // A pinned row whose recipient changed during its hold (codex #4156
+        // r4 P1): sendSMS refuses without touching the row, so with no
+        // caller to park it the due row would be re-selected every tick and
+        // could send under the stale approval if the old number came back.
+        // Park it terminally (suppress; verified) and say so.
+        const parked = await this._parkRequestVerified(request.id);
+        logger.warn(`[review] Scheduled request refused for recipient drift (requestId=${request.id} parked=${parked})`);
+        refused++;
+        continue;
+      }
+      held++;
     }
-    if (sent > 0 || held > 0)
-      logger.info(`[review] Processed scheduled review requests (sent=${sent} held=${held})`);
-    return { sent, held };
+    if (sent > 0 || held > 0 || refused > 0)
+      logger.info(`[review] Processed scheduled review requests (sent=${sent} held=${held} refused=${refused})`);
+    return { sent, held, refused };
   },
 
   /**
