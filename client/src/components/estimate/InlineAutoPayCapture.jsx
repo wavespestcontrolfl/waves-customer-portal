@@ -59,7 +59,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // customer can continue with it or replace it. Before this, a re-tap on
   // the element was a dead end (customer report 2026-09-08: a credit card
   // saved, then no way to switch to a bank account).
-  const replay = !!intent?.capturedMethodType;
+  // Only when the caller also names the intent (the confirm returns that id
+  // without touching Stripe); a caller that omits it keeps the element path.
+  const replay = !!intent?.capturedMethodType && !!intent?.setupIntentId;
   // Stale replay: the element's own retrieve found the intent succeeded but
   // this intent object predates it (no capturedMethodType) — the consent on
   // screen may not match the saved tender, so only replacement is offered.

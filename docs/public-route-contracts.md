@@ -283,11 +283,16 @@ off or the customer's ACH state is unhealthy, so a previously minted
 bank-capable intent cannot outlive the kill switch. Optional body
 `replaceSetupIntentId` ("use a different payment method" after a capture
 already succeeded): the named intent must be THIS estimate's own
-`estimate_recurring_card` capture (else 400); a succeeded one is stamped
-`metadata.retired='true'` in Stripe, the deterministic-idempotency mint
-walks past it (same as a canceled replay) and returns a fresh intent, and
-the accept-time verify refuses the retired id from then on (402
-RECURRING_CARD_REQUIRED). A succeeded replay's response carries
+`estimate_recurring_card` capture (else 400). The replacement is minted
+FIRST (idempotency key salted by the retired id — unbounded, no
+generation consumed), then the succeeded intent is stamped
+`metadata.retired='true'` + `replaced_by=<new id>` in Stripe; a mint
+failure leaves the saved method untouched (503). From then on the
+accept-time verify refuses the retired id (402 RECURRING_CARD_REQUIRED)
+and the deterministic mint follows `replaced_by` to the live capture, so
+a refresh lands on the replacement. Every minted/replayed intent is
+re-read live before it is judged (an idempotent replay returns the
+original create body). A succeeded replay's response carries
 `capturedMethodType`, and the capture UIs render it as a saved-method
 panel with a continue/replace choice instead of a Payment Element. The
 one-time card-hold-intent route above stays card-only regardless).

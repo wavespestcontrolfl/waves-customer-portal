@@ -2821,7 +2821,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel, onReplace, prepay = f
   // the finished intent — the customer continues with what is saved or
   // replaces it. Before this, a re-tap here was a dead end (customer report
   // 2026-09-08: a credit card saved, then no way to switch to a bank account).
-  const replay = !!intent?.capturedMethodType;
+  const replay = !!intent?.capturedMethodType && !!intent?.setupIntentId;
   // Stale replay: the element's own retrieve found the intent succeeded but
   // this intent object predates it (no capturedMethodType), so the consent
   // on screen may not match the saved tender — only replacement is offered.

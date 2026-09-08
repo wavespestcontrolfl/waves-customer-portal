@@ -75,7 +75,7 @@ const {
 } = require('../services/estimate-card-holds');
 const {
   createRecurringCardSetupIntentForEstimate,
-  retireRecurringCardIntent,
+  replaceRecurringCardIntent,
   resolveRecurringCardPolicyForEstimate,
 } = require('../services/recurring-card-on-file');
 const { recordCheckoutStepReached, CHECKOUT_KIND } = require('../services/estimate-checkout-events');
@@ -781,23 +781,26 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     }
 
     // "Use a different payment method": the customer already saved one on
-    // this estimate's succeeded intent and wants to replace it. Retire it in
-    // Stripe first so the mint below walks past it instead of replaying it
-    // (and the accept gate refuses it from here on). Fails closed on an id
-    // that is not this estimate's own capture.
+    // this estimate's succeeded intent and wants to replace it. The service
+    // mints the replacement first, then retires the old intent in Stripe
+    // (the accept gate refuses it from here on; the deterministic mint
+    // follows it to the replacement). Fails closed on an id that is not
+    // this estimate's own capture.
     const replaceSetupIntentId = typeof req.body?.replaceSetupIntentId === 'string'
       ? req.body.replaceSetupIntentId.trim()
       : '';
+    let intent = null;
     if (replaceSetupIntentId) {
-      const retired = await retireRecurringCardIntent({ estimate, setupIntentId: replaceSetupIntentId });
-      if (!retired.ok) {
-        return res.status(retired.reason === 'intent_mismatch' ? 400 : 503).json({
+      const replaced = await replaceRecurringCardIntent({ estimate, setupIntentId: replaceSetupIntentId });
+      if (!replaced.ok) {
+        return res.status(replaced.reason === 'intent_mismatch' ? 400 : 503).json({
           error: 'We could not switch your payment method. Please refresh this page and try again.',
         });
       }
+      intent = replaced.intent;
+    } else {
+      intent = await createRecurringCardSetupIntentForEstimate(estimate);
     }
-
-    const intent = await createRecurringCardSetupIntentForEstimate(estimate);
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }

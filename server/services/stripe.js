@@ -1064,17 +1064,22 @@ const StripeService = {
 
   /**
    * Retire a SUCCEEDED SetupIntent the customer chose to replace (a succeeded
-   * intent cannot be canceled, so the retirement rides its metadata). The
-   * accept gate and the deterministic-idempotency mint both read the stamp
-   * from Stripe — the same source they already re-derive trust from — so a
-   * retired capture is never enrolled and never replayed.
+   * intent cannot be canceled, so the retirement rides its metadata), and
+   * link it to its replacement. The accept gate and the deterministic-
+   * idempotency mint both read the stamps from Stripe — the same source they
+   * already re-derive trust from — so a retired capture is never enrolled,
+   * and a mint that replays it follows `replaced_by` to the live capture.
    */
-  async retireSetupIntent(setupIntentId) {
+  async retireSetupIntent(setupIntentId, { replacedBy = null } = {}) {
     if (!setupIntentId) return null;
     const stripe = getStripe();
     if (!stripe) return null;
     return stripe.setupIntents.update(setupIntentId, {
-      metadata: { retired: 'true', retired_at: new Date().toISOString() },
+      metadata: {
+        retired: 'true',
+        retired_at: new Date().toISOString(),
+        ...(replacedBy ? { replaced_by: String(replacedBy) } : {}),
+      },
     });
   },
 
@@ -1149,10 +1154,17 @@ const StripeService = {
    * tender family's parameters (Stripe rejects a key reuse with different
    * params).
    */
-  async createRecurringCardSetupIntent({ estimateId, generation = 0, paymentMethodType = 'card' }) {
+  async createRecurringCardSetupIntent({ estimateId, generation = 0, paymentMethodType = 'card', replacing = null }) {
     const stripe = getStripe();
     if (!stripe) return null;
     const withBank = paymentMethodType === 'card_or_bank';
+    // A replacement ("use a different payment method") is keyed on the
+    // intent it replaces instead of a generation: unbounded replacements
+    // without a durable counter, and re-requesting the same replacement
+    // replays the same fresh intent.
+    const salt = replacing
+      ? `_after_${replacing}`
+      : (Number(generation) > 0 ? `_g${Number(generation)}` : '');
     return stripe.setupIntents.create({
       payment_method_types: withBank ? ['card', 'us_bank_account'] : ['card'],
       usage: 'off_session',
@@ -1171,7 +1183,7 @@ const StripeService = {
         purpose: 'estimate_recurring_card',
         estimate_id: String(estimateId),
       },
-    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${withBank ? '_cb' : ''}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${withBank ? '_cb' : ''}${salt}` });
   },
 
   // "Secure your appointment" card capture (appointment-card-request funnel)

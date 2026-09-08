@@ -236,6 +236,21 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
       expect(getByText('Use a different payment method')).not.toBeDisabled();
     });
 
+    // A caller that resolves the tender but does not name the intent (the
+    // /secure page shape before #4144) must keep the Payment Element path —
+    // the replay panel can only hand back an id it was given (pre-push
+    // Codex P1 r2).
+    it('keeps the element path when the caller omits setupIntentId', async () => {
+      const { StripeCtor, calls } = makeStripeStub();
+      const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+      const { queryByText } = render(
+        <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'card' }} loadStripeSdk={loadStripeSdk} onReplace={vi.fn()} />,
+      );
+      await flush();
+      expect(calls.mounts).toBe(1);
+      expect(queryByText(/already saved for this plan/)).toBeNull();
+    });
+
     it('hides the replace action when the parent offers none', async () => {
       const { StripeCtor } = makeStripeStub();
       const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
