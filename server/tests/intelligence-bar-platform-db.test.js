@@ -832,6 +832,30 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(await db('ib_pending_actions').where('task_id', proposed.body.taskId).count('* as count').first()).toEqual({ count: '1' });
   }, 30000);
 
+  test('a task that renamed its own customer continues on the saved target by id', async () => {
+    const customerC = crypto.randomUUID();
+    const lastName = `Cedar${customerC.slice(0, 8)}`;
+    const renamed = `Renamed${customerC.slice(0, 4).replace(/[0-9]/g, digit => 'ghijklmnop'[Number(digit)])}`;
+    await db('customers').insert({ id: customerC, first_name: firstName, last_name: lastName, phone: `+155503${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`, address_line1: '300 Example Grove', city: 'Sarasota' });
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover'))
+      .mockResolvedValueOnce(tools('update_customer', { customer_id: customerC, updates: { first_name: renamed } }, 'rename'))
+      .mockResolvedValueOnce(answer('The rename is awaiting confirmation.'));
+    const proposed = await api('/query', request(`Update ${firstName} ${lastName}: first name ${renamed}`));
+    expect(proposed.body.taskTarget.customer_id).toBe(customerC);
+    const card = proposed.body.pendingActions[0];
+    expect((await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash })).body.success).toBe(true);
+    expect((await db('customers').where('id', customerC).first('first_name')).first_name).toBe(renamed);
+    mockModel.mockClear();
+    mockModel.mockResolvedValueOnce(answer('The rename is complete.'));
+    const resumed = await api(`/tasks/${proposed.body.taskId}/resume`, { session_id: sessionId });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.taskState).not.toBe('needs_information');
+    expect(resumed.body.taskTarget).toMatchObject({ customer_id: customerC, label: `${renamed} ${lastName}` });
+    expect(resumed.body.receipts).toEqual([expect.objectContaining({ id: card.id, outcome: 'completed' })]);
+    expect(mockModel).toHaveBeenCalledTimes(1);
+    expect((await db('ib_tasks').where('id', proposed.body.taskId).first('target')).target.target.customer_id).toBe(customerC);
+  }, 30000);
+
   test('an explicitly addressed inbox sender can receive a reply preview without a customer link', async () => {
     const vendorEmail = crypto.randomUUID(), otherEmail = crypto.randomUUID();
     const vendorAddress = `fixture-${vendorEmail}@vendor.example`;

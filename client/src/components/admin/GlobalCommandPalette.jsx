@@ -435,9 +435,11 @@ function GlobalCommandPalette({ user }, ref) {
     // the thread itself is discarded.
     if (!threadsAvailableRef.current) setResponse(null);
     // Legacy threaded approvals have no task recovery. Keep their bound cards
-    // until resolved; task-backed cards can be reopened from Saved requests.
+    // until resolved. A task-backed card belongs to the task it came from
+    // (activeTask is cleared just above) and is dropped here regardless of
+    // whether the task-list probe has answered yet; the saved task keeps it.
     if (!threadsAvailableRef.current) setPendingActions([]);
-    else if (tasksAvailableRef.current) setPendingActions(previous => previous.filter(action => !action.taskId));
+    else setPendingActions(previous => previous.filter(action => !action.taskId));
     setToolActivity([]);
     if (!threadsAvailableRef.current) {
       // Unlike New chat/submit (deliberate detach — no re-resume), a

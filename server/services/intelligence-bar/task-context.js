@@ -401,6 +401,16 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     const target = customerTarget(selected, 'operator_selection');
     selection = { target, targets: [target], ambiguous: false };
   }
+  // A lookup at its cap has more rows than it can list, and no listed row can
+  // be selected (the selection check above requires a complete lookup), so
+  // the rows are never presented as choices. The request is answered and
+  // closed with the way to identify the customer instead of parked behind
+  // buttons that all conflict.
+  if (!namedResult.complete && !cohort && !selectedId) {
+    return { page, candidates: [], target: null, targets: [], ambiguous: false,
+      error: 'More customers share this name than one lookup can list, so none can be selected here. Identify the customer by phone or email, or start the request from their customer page.',
+      code: 'target_clarification_required', requestPhrase: normalizeName(targetClause(prompt)), namesRequested: nameHint };
+  }
   // Only the leading recipient expression establishes a raw contact. A later
   // "text <number>" inside a note or an unresolved person's message is data.
   const recipient = [...targetClause(prompt).matchAll(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/gi)].map(match => match[1]).join('');
@@ -577,6 +587,9 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
   'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging', 'get_blocked_senders',
   'get_my_route', 'get_payout_details', 'export_payouts',
+  // The open-closeout sweep walks every completed visit of the day and
+  // returns other customers' ids and closeout facts; it takes no selector.
+  'list_open_closeouts',
 ]);
 
 // Readers that confine themselves to the task's read scope (readCustomerIds).
@@ -618,6 +631,12 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   if (context.namesRequested && !context.targets?.length
     && (SCOPED_CUSTOMER_ROW_READERS.has(toolName) || (schema.properties?.customer_id && !hasOwnSelector(params)))) {
     return { error: 'The named customer did not match anyone on file, so this lookup has no customer scope. Correct the name before reading that customer\'s records.', code: 'customer_scope_required' };
+  }
+  // Keyed readers bind their phone or email to a task customer. A request
+  // about a customer who did not resolve has nobody to bind the key to, so a
+  // model-supplied key cannot read another party's history or suppression.
+  if (customerSpecific && !context.targets?.length && (PHONE_KEYED_READERS.has(toolName) || EMAIL_KEYED_READERS.has(toolName))) {
+    return { error: 'The named customer did not match anyone on file, so this lookup has no customer to verify its phone or email against. Correct the name before reading by contact.', code: 'customer_scope_required' };
   }
   // Phone-keyed readers without a customer selector: the phone must belong to
   // a task customer, so a model-supplied number cannot read another party.

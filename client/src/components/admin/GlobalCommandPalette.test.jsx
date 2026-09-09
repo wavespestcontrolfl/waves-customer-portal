@@ -137,6 +137,24 @@ it('a new selected appointment on the same route invalidates a late response', a
   expect(bodies[1].pageData.appointment_id).toBe('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
 });
 
+it('drops a task-backed card on navigation while the task-list probe is still pending', async () => {
+  fetchMock.mockImplementation((url) => {
+    if (url.endsWith('/query')) return new Promise(resolve => queryResolvers.push(resolve));
+    if (url.includes('/threads/latest')) return Promise.resolve(ok({ thread: null }));
+    if (url.includes('/tasks?')) return new Promise(() => {});
+    return Promise.resolve(ok({ actions: [], threads: [] }));
+  });
+  await mount();
+  submit('Update this customer');
+  await waitFor(() => expect(queryResolvers).toHaveLength(1));
+  await act(async () => queryResolvers[0](ok({ response: 'Prepared.', taskId: 'probe-pending-task', taskState: 'awaiting_approval',
+    pendingActions: [{ id: 'probe-card', tool: 'update_customer', summary: 'Change fixture note', expiresInMs: 600000 }] })));
+  expect(await screen.findByRole('button', { name: 'Confirm', exact: true })).toBeInTheDocument();
+  act(() => navigate('/admin/customers?customerId=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'));
+  expect(screen.queryByRole('button', { name: 'Confirm', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByText('Change fixture note')).not.toBeInTheDocument();
+});
+
 it.each(['navigation', 'clear'])('a late confirmation cannot restore its old task after %s', async change => {
   await mount();
   submit('Update this customer');

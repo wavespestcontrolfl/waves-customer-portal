@@ -557,13 +557,39 @@ test('route-wide writers are refused inside a customer-scoped task', async () =>
   }
 });
 
-test('payout details and exports list other customers\' transactions and are refused inside a customer-scoped task', async () => {
+test('payout details, payout exports and the open-closeout sweep list other customers and are refused inside a customer-scoped task', async () => {
   const schema = { properties: { payout_id: { type: 'string' } } };
-  for (const toolName of ['get_payout_details', 'export_payouts']) {
+  for (const toolName of ['get_payout_details', 'export_payouts', 'list_open_closeouts']) {
     expect(await Context.prepareReadInput({}, context(), { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
     expect(await Context.prepareReadInput({}, { targets: [], namesRequested: true, page: { ids: {} } }, { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
     expect(await Context.prepareReadInput({}, { targets: [], page: { ids: {} } }, { toolName, schema })).toEqual({ input: {} });
   }
+});
+
+test('keyed readers fail closed for a customer-specific request whose customer did not resolve', async () => {
+  const schema = { properties: { phone: { type: 'string' }, email: { type: 'string' } } };
+  for (const [toolName, params] of [['get_partner_call_history', { phone: '5550001234' }], ['check_email_suppression', { email: 'someone@example.test' }]]) {
+    expect(await Context.prepareReadInput(params, { targets: [], namesRequested: true, page: { ids: {} } }, { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
+    expect(await Context.prepareReadInput(params, { targets: [], contactRequested: true, page: { ids: {} } }, { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
+    // A request that names nobody keeps the reader; a resolved task customer still owns the key.
+    expect(await Context.prepareReadInput(params, { targets: [], page: { ids: {} } }, { toolName, schema })).toEqual({ input: params });
+    expect((await Context.prepareReadInput(params, context(), { toolName, schema })).code).toBe('target_clarification_required');
+  }
+});
+
+test('a name lookup at its cap is answered without selectable candidates', async () => {
+  lookupRows = Array.from({ length: 10 }, (_, i) => ({ id: `50000000-0000-4000-8000-${String(i).padStart(12, '0')}`, first_name: 'Synthetic', last_name: `Cohort${i}` }));
+  for (const prompt of ['Update Synthetic', 'Show Synthetic details']) {
+    const capped = await Context.resolve({ prompt, pageData: {} });
+    expect(capped).toMatchObject({ code: 'target_clarification_required', candidates: [], targets: [], target: null, ambiguous: false });
+    expect(capped.selectable).toBeUndefined();
+  }
+  // One row under the cap keeps the duplicate-name choice.
+  lookupRows = lookupRows.slice(0, 9);
+  const open = await Context.resolve({ prompt: 'Update Synthetic', pageData: {} });
+  expect(open.ambiguous).toBe(true);
+  expect(open.candidates).toHaveLength(9);
+  expect(open.error).toBeUndefined();
 });
 
 test('a phone or email literal keeps a request customer-specific for broad readers', async () => {

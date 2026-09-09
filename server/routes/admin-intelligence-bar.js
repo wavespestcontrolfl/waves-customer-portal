@@ -2238,6 +2238,20 @@ async function runQuery(req, res, next) {
       if (!started.created) return res.status(activeTask.state === 'running' ? 202 : 200)
         .json(await IbTasks.snapshot(activeTask, getAdminActorId(req)));
       taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target });
+      // A task that already wrote may have changed its own target's identity
+      // (a confirmed update_customer renaming the customer), so the original
+      // prompt no longer resolves to the saved customer. Post-receipt, the
+      // saved target was validated when its write was confirmed: it is
+      // revalidated by id rather than by re-resolving its pre-write name.
+      const savedTarget = req.ibResumeReceipts?.length ? req.ibResumedTask?.target?.target : null;
+      if (taskContext.error && taskContext.selectable && savedTarget?.customer_id
+          && String(req.body.selected_target?.customer_id || '').toLowerCase() === String(savedTarget.customer_id).toLowerCase()) {
+        const current = await TaskContext.customerById(savedTarget.customer_id);
+        if (current) {
+          const refreshed = TaskContext.customerTarget(current, savedTarget.provenance);
+          taskContext = { ...req.ibResumedTask.target, error: undefined, code: undefined, selectable: undefined, target: refreshed, targets: [refreshed], ambiguous: false };
+        }
+      }
       if (taskContext.error || taskContext.ambiguous) {
         // A customer choice is the only clarification the task card can
         // supply. A hard resolution error (stale or mismatched page record)
