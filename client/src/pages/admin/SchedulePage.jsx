@@ -336,10 +336,32 @@ function normalizeReviewTiming(value) {
 }
 // What the chosen timing means, from the server preview (never a client
 // approximation of the smart window).
-function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
-  const fmt = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
+function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
+  // An unpaid completion invoice holds the ask until payment lands (the
+  // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
+  // relative timing is re-derived from the payment time; an absolute one is
+  // kept if it is still ahead (codex #4140 r10 P2).
+  // The master cron gate is dark: nothing automated sends at all — not the
+  // cadence ticks, not the legacy 15-minute scheduler (codex #4140 r15 P1).
+  // Only a link bundled into the completion text itself still goes.
+  if (preview?.schedulerEnabled === false && !(reviewTiming === "customer_requested" && bundled)) {
+    return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
+  }
+  if (awaitsPayment && reviewTiming === "auto") return "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment.";
+  if (awaitsPayment && reviewTiming === "customer_requested") return "Review text waits for the invoice to be paid, then goes out at the next cadence tick the send window allows. The request is recorded.";
+  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
+  return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
+}
+function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
   if (reviewTiming === "auto") {
-    return preview?.at ? `Review text goes out separately, about ${fmt(preview.at)}.` : "Review text goes out separately at the smart send window.";
+    if (!preview?.at) return "Review text goes out separately at the smart send window.";
+    // In cadence mode `at` is a jitter-free eligibility time: enrollment
+    // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
+    // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
+    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, preview.cadenceTickMinutesOfHour) : null;
+    const hi = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.latestAt || preview.at, preview.cadenceTickMinutesOfHour, { after: true }) : null;
+    if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
+    return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
   }
   if (reviewTiming === "customer_requested") {
     // `bundled` is the panel's own bundling condition (legacy path, completion
@@ -348,42 +370,67 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     // 8 AM–8 PM send window (codex #4140 r2).
     return bundled
       ? "Review link is included in the completion text."
-      : "Review text goes out separately as soon as the send window allows. The request is recorded.";
+      : "Review text goes out separately as soon as the send window allows. The request is recorded on this visit.";
   }
   if (reviewTiming === "tomorrow_8") {
     // In cadence mode 8:00 is the eligibility time; the worker's first tick
     // after it is 8:14 (codex #4140 r6).
-    const eightISO = etDatetimeLocalToISO(`${etDateString(addETDays(new Date(), 1))}T08:00`);
-    const tick = preview?.reviewSequencesEnabled && eightISO ? nextCadenceTickISO(eightISO, preview.cadenceTickMinutesOfHour, { after: true }) : null;
-    return tick ? `Review text goes out separately tomorrow at the first cadence tick after 8:00 AM — about ${fmt(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
+    const tick = windowOpenTickISO(addETDays(new Date(), 1), preview, { after: true });
+    return tick ? `Review text goes out separately tomorrow at the first cadence tick after 8:00 AM — about ${fmtReviewTime(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
   }
-  if (reviewTiming === "custom") {
-    // The datetime-local value is an ET wall clock (the server parses it with
-    // parseETDateTime) — never `new Date(value)`, which reads it in the
-    // browser's zone (codex #4140 r1).
-    const iso = etDatetimeLocalToISO(reviewCustomAt);
-    if (!iso) return "Choose a time for the review text.";
-    // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
-    // outside it is held to the next window (codex #4140 r3) — but only
-    // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
-    // checkSendWindow passes everything, so the copy must not promise a
-    // hold it will not get (codex #4140 r4 P2). The preview says which.
-    const { hour } = etParts(new Date(iso));
-    if ((hour < 8 || hour >= 20) && preview?.smsSendWindowEnabled === true) {
-      return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmt(iso)}.`;
-    }
-    // In cadence mode the custom time is when the row becomes ELIGIBLE; the
-    // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
-    // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
-    // `after: true`: the server turns the chosen time into a whole-minute delay
-    // and rebuilds the eligibility instant from a later Date.now(), so the row
-    // becomes eligible just AFTER the chosen minute — a time typed exactly on
-    // :14 goes out at :44 (codex #4140 r6).
-    const tick = preview?.reviewSequencesEnabled ? nextCadenceTickISO(iso, preview.cadenceTickMinutesOfHour, { after: true }) : null;
-    if (tick && tick !== iso) return `Review text goes out separately at the next cadence tick after ${fmt(iso)} — about ${fmt(tick)}.`;
-    return `Review text goes out separately ${fmt(iso)}.`;
-  }
+  if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
   return "";
+}
+const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
+// The server's MAX_REVIEW_DELAY_MINUTES (complete-scheduled-service.js).
+const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60000;
+// The first cadence tick after the 8 AM send window opens on `day` (an ET
+// date); null with cadences off or when the server did not name the ticks.
+function windowOpenTickISO(day, preview, opts) {
+  const openISO = etDatetimeLocalToISO(`${etDateString(day)}T08:00`);
+  return preview?.reviewSequencesEnabled && openISO ? nextCadenceTickISO(openISO, preview.cadenceTickMinutesOfHour, opts) : null;
+}
+// The custom-time mode: the one whose hint parses operator input and has to
+// reconcile it with the send window and the worker's ticks.
+function customReviewTimingHint(reviewCustomAt, preview) {
+  // The datetime-local value is an ET wall clock (the server parses it with
+  // parseETDateTime) — never `new Date(value)`, which reads it in the
+  // browser's zone (codex #4140 r1).
+  const iso = etDatetimeLocalToISO(reviewCustomAt);
+  if (!iso) return "Choose a time for the review text.";
+  // The server clamps every review delay to 30 days after completion
+  // (MAX_REVIEW_DELAY_MINUTES): a later date would send ~30 days out, not
+  // on the chosen day. Say so instead of promising the date (codex #4140 r10 P2).
+  if (new Date(iso).getTime() > Date.now() + MAX_REVIEW_DELAY_MS) return `Review times can be at most 30 days after completion (by ${fmtReviewTime(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}) — choose an earlier time.`;
+  // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
+  // outside it is held to the next window (codex #4140 r3) — but only
+  // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
+  // checkSendWindow passes everything, so the copy must not promise a
+  // hold it will not get (codex #4140 r4 P2). The preview says which.
+  const windowOn = preview?.smsSendWindowEnabled === true;
+  const { hour } = etParts(new Date(iso));
+  // In cadence mode the custom time is when the row becomes ELIGIBLE; the
+  // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
+  // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
+  // `after: true`: the server turns the chosen time into a whole-minute delay
+  // and rebuilds the eligibility instant from a later Date.now(), so the row
+  // becomes eligible just AFTER the chosen minute — a time typed exactly on
+  // :14 goes out at :44 (codex #4140 r6).
+  const tick = preview?.reviewSequencesEnabled ? nextCadenceTickISO(iso, preview.cadenceTickMinutesOfHour, { after: true }) : null;
+  // The window is checked on the TICK when there is one: 7:50 PM is inside
+  // the window but its 8:14 PM tick is not, and the validator holds that
+  // send to the next morning (codex #4140 r8). 8:00 PM is exclusive.
+  const sendHour = tick ? etParts(new Date(tick)).hour : hour;
+  if (windowOn && (sendHour < 8 || sendHour >= 20)) {
+    // The window opens at 8:00; in cadence mode the worker's first tick
+    // after that is 8:14 (codex #4140 r7).
+    const openTick = windowOpenTickISO(addETDays(new Date(iso), sendHour >= 20 ? 1 : 0), preview);
+    return openTick
+      ? `Review text is held for the 8 AM–8 PM window — it goes out at the first cadence tick after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
+      : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmtReviewTime(iso)}.`;
+  }
+  if (tick && tick !== iso) return `Review text goes out separately at the next cadence tick after ${fmtReviewTime(iso)} — about ${fmtReviewTime(tick)}.`;
+  return `Review text goes out separately ${fmtReviewTime(iso)}.`;
 }
 
 // The first worker tick on or after `iso` (ticks are minutes of the hour; every
@@ -404,14 +451,9 @@ function nextCadenceTickISO(iso, tickMinutes, { after = false } = {}) {
   return t.toISOString();
 }
 
-// The key two "Automatic" previews are compared by: the server's `bucket`
-// (the rule behind the time), or the minute of `at` from a server that
-// predates it.
-function reviewPreviewBucket(preview) {
-  if (!preview) return null;
-  if (preview.bucket) return preview.bucket;
-  return typeof preview.at === "string" ? preview.at.slice(0, 16) : null;
-}
+// The key two "Automatic" previews are compared by: the server's `bucket`,
+// the rule behind the time (a relative answer's instant moves every request).
+const reviewPreviewBucket = (preview) => preview?.bucket ?? null;
 
 const CUSTOMER_INTERACTION_ALIASES = {
   spoke: "tech_home_spoke_with_them",
@@ -10721,6 +10763,10 @@ export function CompletionPanel({
   const [recapLoading, setRecapLoading] = useState(false);
   const [recapError, setRecapError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Synchronous re-entry guard for the pre-submit "Automatic" preview
+  // re-check: it awaits a request before setSubmitting(true) engages, so a
+  // double-click could otherwise start two completion POSTs (codex #4140 r7).
+  const previewRecheckRef = useRef(false);
   const [generating, setGenerating] = useState(false);
   // F2 (ratified Q13): windowed comms context on the AI report draft — default CHECKED.
   const [aiReportIncludeComms, setAiReportIncludeComms] = useState(true);
@@ -11882,9 +11928,11 @@ export function CompletionPanel({
     service.prepaidAmount != null &&
     Number(service.prepaidAmount) > 0 &&
     Number(service.prepaidAmount) >= invoiceAmount;
+  // paid and prepaid are both settled to the server (invoiceBlocksReview,
+  // report-only completion) — codex #4140 r15 P2.
   const invoiceAlreadyPaid =
-    service.checkoutInvoiceStatus === "paid" ||
-    service.invoiceStatus === "paid";
+    ["paid", "prepaid"].includes(service.checkoutInvoiceStatus) ||
+    ["paid", "prepaid"].includes(service.invoiceStatus);
   const reportOnlyCompletion =
     prepaidCovered ||
     invoiceAlreadyPaid ||
@@ -11956,8 +12004,13 @@ export function CompletionPanel({
     effectiveSendSms &&
     (oneTimeRecapOnly ||
       (reviewTiming === "customer_requested" && reviewSendPreview?.bundlesImmediateAsk === true));
+  // The server's invoiceBlocksReview: an UNPAID invoice after completion —
+  // one minted now (willInvoice) or one already sent from dispatch and still
+  // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
+  // paid invoices never hold the ask.
+  const reviewAwaitsPayment = willInvoice || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
   const reviewTimingHintText = willReview && !oneTimeRecapOnly
-    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms })
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms, awaitsPayment: reviewAwaitsPayment })
     : "";
   const smsPreview = [
     smsRecapPreview(customerRecap),
@@ -14737,7 +14790,14 @@ export function CompletionPanel({
     // boundary (2:59 → 3:00 PM) just invalidated (codex #4140 r3). Skipped
     // for a committed chain retry (immutable body).
     if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && reviewTiming === "auto") {
-      const fresh = await fetchReviewSendPreview();
+      if (previewRecheckRef.current) return;
+      previewRecheckRef.current = true;
+      let fresh;
+      try {
+        fresh = await fetchReviewSendPreview();
+      } finally {
+        previewRecheckRef.current = false;
+      }
       const shown = reviewSendPreviewRef.current;
       // Compare the scheduling BUCKET the server names, never the instant
       // (codex #4140 r4 P1): a relative answer ("90 minutes after
@@ -14746,9 +14806,23 @@ export function CompletionPanel({
       // comparison alerted on every submit. Only a rule change — a
       // different day, an anchored hour, relative → anchored — needs a
       // second look from the operator.
+      // A successful refresh is always applied — a same-bucket answer can
+      // still carry a later tick range after a tick boundary (codex #4140
+      // r15 P2); only a bucket change needs the operator's confirmation.
+      if (fresh) setReviewSendPreview(fresh);
       if (fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
-        setReviewSendPreview(fresh);
         alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
+        return;
+      }
+      // The re-check itself failed while a time was on screen (codex #4140
+      // r13 P2): the promise can no longer be vouched for, so drop it — the
+      // hint falls back to "at the smart send window" — and stop once. A
+      // second submit proceeds with no shown time to compare against; the
+      // server computes the window itself. Completion is never blocked by
+      // the preview endpoint for more than one click.
+      if (!fresh && shown) {
+        setReviewSendPreview(null);
+        alert("The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue.");
         return;
       }
     }
@@ -14764,13 +14838,22 @@ export function CompletionPanel({
       willReview &&
       reviewTiming === "custom"
     ) {
-      const target = new Date(reviewCustomAt);
+      // The datetime-local value is an ET wall clock, as the server parses
+      // it (parseCompletionReviewDelayMinutes) — never `new Date(value)`,
+      // which reads it in the browser's zone (codex #4140 r13 P1).
+      const targetISO = etDatetimeLocalToISO(reviewCustomAt);
+      const target = new Date(targetISO || NaN);
       if (
         !reviewCustomAt ||
         Number.isNaN(target.getTime()) ||
         target.getTime() <= Date.now()
       ) {
         alert("Choose a future review request time.");
+        return;
+      }
+      // The server clamps to 30 days; a later time would silently move (codex #4140 r10 P2).
+      if (target.getTime() > Date.now() + MAX_REVIEW_DELAY_MS) {
+        alert("The review request time can be at most 30 days after completion.");
         return;
       }
     }
@@ -18084,6 +18167,7 @@ export function CompletionPanel({
                     <input
                       type="datetime-local"
                       value={reviewCustomAt}
+                      max={`${etDateString(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}T23:59`}
                       onChange={(e) => setReviewCustomAt(e.target.value)}
                       style={mInput}
                     />

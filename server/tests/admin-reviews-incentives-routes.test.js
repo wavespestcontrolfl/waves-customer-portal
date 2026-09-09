@@ -63,5 +63,9 @@ describe('GET /api/admin/reviews/send-time-preview — staff-scoped', () => {
     expect(handler).toContain('bundlesImmediateAsk: !reviewSequencesEnabled && serviceReportV1Delivery === false');
     // The panel rounds a custom time to the worker tick the server names (r5 P2).
     expect(handler).toContain('cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES');
+    // Cadence mode is the EFFECTIVE worker state — both gates (codex #4140 r15 P1).
+    expect(handler).toContain("const schedulerEnabled = isEnabled('cronJobs');");
+    expect(handler).toContain("const reviewSequencesEnabled = isEnabled('reviewSequences') && schedulerEnabled;");
+    expect(handler).toContain('schedulerEnabled,');
   });
 });

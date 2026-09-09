@@ -117,6 +117,7 @@ function makeMock(initial = {}, opts = {}) {
       count() { return { first: async () => ({ count: String(filtered(this).length), c: String(filtered(this).length) }) }; },
       insert(row) {
         if (!state.rows[this.table]) state.rows[this.table] = [];
+        if (opts.onInsert) { const veto = opts.onInsert(this.table, row, state); if (veto) return { returning: async () => { throw veto; } }; }
         const inserted = { id: row.id || `${this.table}-${state.rows[this.table].length + 1}`, ...row };
         state.rows[this.table].push(inserted);
         return { returning: async () => [inserted] };
@@ -1379,6 +1380,30 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a request capture survives the enrollment race — a unique-index loss records it on the WINNING cadence (codex #4140 r9 P2)', async () => {
+    mockGates.reviewSequences = true;
+    const requested = { by: 'tech-2', byName: 'Bea', at: new Date().toISOString(), source: 'completion_panel' };
+    // No active row at the up-front lookup; another enrollment wins the
+    // unique index between that lookup and this insert.
+    const mock = makeMock({
+      customers: [{ id: 'rc-1', first_name: 'Ray', last_name: 'C', phone: '+19410000146', nearest_location_id: 'venice' }],
+    }, {
+      onInsert: (table, row, state) => {
+        if (table !== 'review_sequences' || row.customer_id !== 'rc-1') return null;
+        state.rows.review_sequences.push({ id: 'seq-winner', customer_id: 'rc-1', status: 'active', current_step: 0, touches_sent: 0, plan: '[{"day":0}]', started_at: new Date(), next_run_at: new Date(Date.now() + 3600000) });
+        return Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'rc-1', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, decision: { reason: 'customer_requested' } });
+
+    expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: true });
+    const winner = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-winner');
+    expect(JSON.parse(winner.customer_requested)).toEqual(requested);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('an already_active result without a request leaves the cadence untouched and reports requestRecorded:false', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
@@ -1421,10 +1446,77 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
         ],
       });
       db.mockImplementation(mock);
+      // Pinned before the row's schedule: the tick is computed from the row.
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T20:00:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['t-1', 't-2']);
+        expect(map['t-1'].nextSendTickAt.toISOString()).toBe('2026-05-26T20:44:00.000Z');
+        expect(map['t-2']).toMatchObject({ nextSendTickAt: null, sending: true });
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
 
-      const map = await ReviewService.getActiveSequencesForCustomers(['t-1', 't-2']);
-      expect(map['t-1'].nextSendTickAt.toISOString()).toBe('2026-05-26T20:44:00.000Z');
-      expect(map['t-2']).toMatchObject({ nextSendTickAt: null, sending: true });
+    test('an SMS step whose tick falls outside the 8 AM–8 PM window shows the first tick after it reopens; an email ask step is not windowed (codex #4140 r11 P2)', async () => {
+      mockGates.smsSendWindow = true;
+      // 7:50 PM ET on 2026-05-26 (EDT, UTC-4) = 23:50Z; the 8:14 PM tick is outside the window.
+      const eveningRow = new Date('2026-05-26T23:50:00Z');
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-w1', customer_id: 'w-1', status: 'active', current_step: 0, plan: '[{"day":0,"channel":"sms","templateKey":"day0_ask"}]', next_run_at: eveningRow },
+          { id: 'seq-w2', customer_id: 'w-2', status: 'active', current_step: 0, plan: '[{"day":0,"channel":"email","templateKey":"day0_ask"}]', next_run_at: eveningRow },
+        ],
+      });
+      db.mockImplementation(mock);
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T23:00:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['w-1', 'w-2']);
+        // Next morning 8:00 AM EDT = 12:00Z; first tick after it is 8:14.
+        expect(map['w-1'].nextSendTickAt.toISOString()).toBe('2026-05-27T12:14:00.000Z');
+        // Either ask step can swap channel at send time (codex #4140 r14, r16 P2):
+        // the SMS step's email fallback escapes the window; the email step's SMS fallback meets it.
+        expect(map['w-1']).toMatchObject({ fallbackChannel: 'email', plannedChannel: 'text' });
+        expect(map['w-1'].fallbackTickAt.toISOString()).toBe('2026-05-27T00:14:00.000Z');
+        expect(map['w-2'].nextSendTickAt.toISOString()).toBe('2026-05-27T00:14:00.000Z');
+        expect(map['w-2']).toMatchObject({ fallbackChannel: 'text', plannedChannel: 'email' });
+        expect(map['w-2'].fallbackTickAt.toISOString()).toBe('2026-05-27T12:14:00.000Z');
+      } finally {
+        nowSpy.mockRestore();
+        mockGates.smsSendWindow = false;
+      }
+    });
+
+    test('a parked series final is a cadence in the candidate map (parked, next re-check), and an active row wins over it (codex #4140 r12 P2)', async () => {
+      const parkAt = new Date(Date.now() + 20 * 60000);
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-pk1', customer_id: 'pk-1', status: 'deferred', stop_reason: 'opener_in_flight', current_step: 0, plan: '[{"day":0},{"day":4}]', next_run_at: parkAt, decision: JSON.stringify({ reason: 'opener_in_flight', enrollmentReason: 'customer_requested' }) },
+          { id: 'seq-pk2a', customer_id: 'pk-2', status: 'active', current_step: 1, plan: '[{"day":0},{"day":4}]', next_run_at: new Date(Date.now() + 3600000) },
+          { id: 'seq-pk2d', customer_id: 'pk-2', status: 'redeeming', current_step: 0, plan: '[{"day":0}]', next_run_at: parkAt },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      const map = await ReviewService.getActiveSequencesForCustomers(['pk-1', 'pk-2']);
+      expect(map['pk-1']).toMatchObject({ id: 'seq-pk1', parked: true, sending: false, stranded: false, totalSteps: 2, decision: { reason: 'opener_in_flight' } });
+      expect(new Date(map['pk-1'].nextRunAt).getTime()).toBe(parkAt.getTime());
+      expect(map['pk-2']).toMatchObject({ id: 'seq-pk2a', parked: false, currentStep: 1 });
+    });
+
+    test('an overdue row (missed tick, gate re-enabled between ticks) shows the next tick from now, never one already past (codex #4140 r8)', async () => {
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-t3', customer_id: 't-3', status: 'active', current_step: 0, plan: '[{"day":0}]', next_run_at: new Date('2026-05-26T20:30:00Z') },
+        ],
+      });
+      db.mockImplementation(mock);
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T22:50:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['t-3']);
+        expect(map['t-3'].nextSendTickAt.toISOString()).toBe('2026-05-26T23:14:00.000Z');
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
   });
 
