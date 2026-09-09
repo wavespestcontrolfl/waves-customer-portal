@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { usePortalRefresh } from '../../hooks/usePortalRead';
+import { READ_TIMEOUT_MS, usePortalRefresh } from '../../hooks/usePortalRead';
 
 // Saved-property scope (GATE_APP_PROPERTY_SCOPE): every portal refresh —
 // pull-to-refresh, a return to the app, a reconnect — re-reads the property
@@ -14,7 +14,18 @@ export default function PropertySelectionRevalidator({ active, refresh }) {
   const register = portal?.enabled ? portal.register : null;
   useEffect(() => {
     if (!active || !register || typeof refresh !== 'function') return undefined;
-    return register(() => Promise.resolve(refresh()).catch(() => false));
+    // Bounded like every usePortalRead reader (uncapped codex r1p P1): the
+    // shared cycle awaits ALL readers, so an /auth/properties call that
+    // stalls would otherwise pin `refreshing` and block every later pull,
+    // focus and reconnect refresh. A timed-out re-read simply loses this
+    // cycle; the next one tries again.
+    return register(() => {
+      let timer;
+      return Promise.race([
+        Promise.resolve(refresh()),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), READ_TIMEOUT_MS); }),
+      ]).catch(() => false).finally(() => clearTimeout(timer));
+    });
   }, [active, register, refresh]);
   return null;
 }

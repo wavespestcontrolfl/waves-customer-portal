@@ -132,6 +132,15 @@ test('expectedPropertyId pins the house the customer saw: a mismatch with the re
   expect(JSON.parse(log.find((e) => e[0] === 'insert')[1].metadata).propertyId).toBe('prop-b');
 });
 
+test('a single-home session (gate on, scoped=false) pins its one property and still files (uncapped codex r1p P1)', async () => {
+  global.__SCOPE__ = { customerId: 'cust-1', enabled: true, multi: false, scoped: false, property: PRIMARY.property };
+  const ok = await post({ category: 'schedule_change', subject: 'Move Friday', description: 'Any day next week', expectedPropertyId: 'prop-a' });
+  expect(ok.status).toBe(201);
+  const insert = log.find((e) => e[0] === 'insert');
+  expect(insert).toBeTruthy();
+  expect(insert[1].metadata).toBeUndefined(); // unscoped: today's row shape
+});
+
 test('the same covered issue under the PRIMARY selection is still steered to the re-service picker', async () => {
   global.__SCOPE__ = PRIMARY;
   const res = await post({ category: 'pest_issue', subject: 'Ants in the kitchen' });

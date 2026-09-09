@@ -220,6 +220,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // Same fail-open posture as the eligibility check below.
     let secondarySelection = false;
     let requestProperty = null;
+    // The property the session RESOLVED to, whether or not a property
+    // predicate applies (single home: scoped=false, but the customer still
+    // sees — and pins — that one property; uncapped codex r1p P1).
+    let resolvedPropertyId = null;
     // The server-validated saved property this ticket is about (codex #4207
     // r1j): persisted on the row, part of the dedupe key, and shown to staff
     // — a secondary-house ticket must name its house.
@@ -233,6 +237,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     try {
       const scope = await resolveSessionScope(req);
       secondarySelection = isSecondarySelection(scope);
+      if (scope && scope.enabled && scope.property) resolvedPropertyId = String(scope.property.id);
       if (scope && scope.enabled && scope.scoped && scope.property) requestProperty = ticketProperty(scope.property);
     } catch (scopeErr) {
       logger.warn(`Property scope check failed for ${req.customer.id}: ${scopeErr.message}`);
@@ -244,6 +249,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // house. A claim-less session has no binding to keep — today's path.
       if (req.property && String(req.property.customer_id || req.customer.id) === String(req.customer.id)) {
         requestProperty = ticketProperty(req.property);
+        resolvedPropertyId = String(req.property.id);
         secondarySelection = req.property.is_primary !== true;
       }
     }
@@ -251,7 +257,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // (uncapped codex r1o P1). Fail CLOSED on a mismatch: a schedule-change
     // ticket stored and announced for the fallback address is worse than a
     // retry. 409 (not 4xx-validation) so the client refreshes its selection.
-    if (expectedPropertyId && String(expectedPropertyId) !== String(requestProperty ? requestProperty.id : '')) {
+    if (expectedPropertyId && String(expectedPropertyId) !== String(resolvedPropertyId || '')) {
       return res.status(409).json({
         error: 'Your property selection changed. Please check the property shown and try again.',
         code: 'property_selection_stale',
