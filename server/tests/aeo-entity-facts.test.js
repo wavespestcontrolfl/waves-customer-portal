@@ -1150,3 +1150,29 @@ test('editorial objects are not treatment, adjectival "former" is an ended statu
   expect(score('E6', 'Waves is a franchise with up to 2025 locations.').forbidden.franchise).toBe(true);
   expect(score('E5', 'Waves served Manatee County until 2025.').expected.manatee).toBe(false);
 });
+
+test('a wh-complement hands back to a Waves alias, `as` after the pest opens a classification, a trailing endpoint dates a record rather than the status, and `they` after a people subject is those people (#4155 r14)', () => {
+  expect(score('E5', 'Waves plans to explain why it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves plans to show how well it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves will describe where it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves plans to explain why it will serve Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves treats termites as a keyword.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves treats termites as pests.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves treats mosquitoes as a search term.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves targets termites as a keyword in its search ads.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves treats termites as well as rodents.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves treats termites as needed.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves treats termites as a core service.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves treats termites as part of its pest control program.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves is a franchise with financial records through 2024.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves is a franchise with revenue data from 2020 to 2024.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves operated as a franchise until 2024, per its records.').forbidden.franchise).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County with service records through 2024.').expected.manatee).toBe(true);
+  expect(score('E6', 'Homeowners call Waves. They remove rodents themselves.').expected.rodent).toBe(false);
+  expect(score('E6', 'Homeowners call Waves. They remove rodents.').expected.rodent).toBe(false);
+  expect(score('E6', 'Residents rely on Waves, and they control mosquitoes.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Many homeowners in Sarasota use Waves. They eliminate termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves serves homeowners. They eliminate termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Homeowners call Waves. Its technicians eliminate termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves technicians eliminate termites. They remove rodents too.').expected.rodent).toBe(true);
+});
