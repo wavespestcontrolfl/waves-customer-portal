@@ -192,14 +192,22 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   const ids = rows.map(row => row.id);
   const records = ids.length ? await conn('service_records').whereIn('scheduled_service_id', ids)
     .orderBy('created_at', 'desc').orderBy('id', 'desc')
-    .select('scheduled_service_id', 'customer_id', 'structured_notes') : [];
+    .select('id', 'scheduled_service_id', 'customer_id', 'structured_notes') : [];
+  const attempts = ids.length ? await conn('service_completion_attempts').whereIn('service_id', ids)
+    .where('status', 'succeeded').orderBy('updated_at', 'desc').orderBy('id', 'desc')
+    .select('service_id', 'service_record_id') : [];
   const events = ids.length ? await conn('job_status_history').whereIn('job_id', ids)
     .whereIn('to_status', ['on_site', 'completed'])
     .select('job_id', 'from_status', 'to_status', 'transitioned_at') : [];
-  const enriched = rows.map(row => ({ ...row,
-    completionNotes: records.find(record => record.scheduled_service_id === row.id && record.customer_id === row.customer_id)?.structured_notes,
-    statusHistory: events.filter(event => event.job_id === row.id),
-  }));
+  const enriched = rows.map(row => {
+    // Match closeout-status: the succeeded attempt's committed sibling wins
+    // over later recap/project records; otherwise use the newest sibling.
+    const siblings = records.filter(record => record.scheduled_service_id === row.id && record.customer_id === row.customer_id);
+    const pinnedId = attempts.find(attempt => attempt.service_id === row.id)?.service_record_id;
+    const record = siblings.find(sibling => sibling.id === pinnedId) || siblings[0];
+    return { ...row, completionNotes: record?.structured_notes,
+      statusHistory: events.filter(event => event.job_id === row.id) };
+  });
   const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
   const coveredRoutes = new Map(plans.map(plan => [routeKey(plan.date, plan.technician_id), new Set(plan.plannedStops.map(stop => stop.id))]));
   const today = etDateString(now);

@@ -70,6 +70,22 @@ postgres('recorded route evidence on isolated PostgreSQL', () => {
     expect(result.unbaselinedCompletedVisits).toBeGreaterThanOrEqual(1);
   });
 
+  test.each([false, true])('the committed record retains its timing evidence when backfill=%s and a newer recap exists', async backfill => {
+    const canonical = await trx('service_records').where('scheduled_service_id', jobId).first('id');
+    await trx('service_records').where('id', canonical.id).update({ structured_notes: JSON.stringify({ timeOnSite: '45:00', backfill }) });
+    await trx('service_completion_attempts').insert({ service_id: jobId, idempotency_key: randomUUID(),
+      status: 'succeeded', service_record_id: canonical.id });
+    await trx('service_records').insert({ customer_id: customerId, technician_id: technicianId,
+      scheduled_service_id: jobId, service_date: past, service_type: 'Quarterly Pest Control Service',
+      created_at: new Date(Date.now() + 1000), structured_notes: JSON.stringify({ timeOnSite: 1 }) });
+    const result = await getRoutePerformance({ from: past, to: past }, trx);
+    expect(result.plans.find(plan => plan.technicianId === technicianId)).toMatchObject({
+      knownArrivals: backfill ? 0 : 1,
+      stops: [expect.objectContaining({ recordedServiceMinutes: 45,
+        durationEvidence: backfill ? 'backfill_reported' : 'recorded_lifecycle_interval' })],
+    });
+  });
+
   test('a reassigned visit is unbaselined on its new technician route', async () => {
     const otherTech = randomUUID();
     await trx('technicians').insert({ id: otherTech, name: 'Synthetic second technician', active: true });
