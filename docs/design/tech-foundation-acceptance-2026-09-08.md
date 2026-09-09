@@ -31,7 +31,7 @@ A failed photo upload retains the selected File, type, capture time and caption 
 | Requests | No page errors or unmatched requests. Console errors are limited to the deliberately fulfilled 503 failures. External/socket traffic is blocked; no SMS, call or send request is made. |
 | Evidence | Remove stale output before each mode; require fonts; mark failures explicitly; close each browser and the preview server; write the current report even after startup or finalization failures. |
 
-The product-head run captured 36 screenshots across the two browser workflows. Desktop and phone photo, treatment and nested marking renders were visually inspected. A gallery is written only after a successful current run, and stale gallery output is removed before another run begins.
+The product-head run captured 36 screenshots across the two browser workflows. Desktop and phone photo, treatment and nested marking renders were visually inspected. A gallery is written only after a successful current run. Stale output is removed before another run begins, and a report-write failure deletes both the gallery and any partially written report. The fixture dispatcher uses exact method/path handlers; CommonJS scripts participate in changed-file ESLint coverage.
 
 The fixture tests the real UI's request and recovery behavior. It does not verify database transactions, S3, billing or provider delivery. Physical iPhone camera capture, keyboard/dictation, notch geometry, home-screen installation and background/OS termination remain device checks.
 
