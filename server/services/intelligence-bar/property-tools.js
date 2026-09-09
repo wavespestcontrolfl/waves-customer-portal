@@ -10,7 +10,7 @@ const PROPERTY_TOOLS = [
   {
     name: 'add_customer_property',
     description: 'Save an additional customer service property from any page. Look up the customer and saved properties first. Requires a complete address; never invent measurements. Returns a confirmation preview; saving creates no appointment, estimate or message.',
-    strict: true,
+    // Length bounds are enforced locally; Anthropic strict grammar rejects them.
     input_schema: { type: 'object', additionalProperties: false,
       properties: { customer_id: uuid,
         address_line1: { type: 'string', minLength: 1, maxLength: 200 },
