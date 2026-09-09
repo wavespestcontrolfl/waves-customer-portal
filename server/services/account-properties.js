@@ -253,10 +253,20 @@ function assignVisitsToEntries(entries, visits) {
   return next;
 }
 
+// The session's EFFECTIVE property selection — what the middleware actually
+// honored (a retired property, a foreign claim or the gate being off all
+// read as null), for GET /auth/me. The client trusts THIS, never the raw
+// token claim, when it cannot read the list (codex #4207 r1e).
+function sessionPropertyScopePayload(req) {
+  const enabled = appPropertyScopeEnabled() && req.customerInactive !== true;
+  return { enabled, propertyId: enabled && req.propertyId ? String(req.propertyId) : null };
+}
+
 module.exports = {
   accountPropertyIds,
   resolvePrimaryProfileId,
   appPropertyScopeEnabled,
+  sessionPropertyScopePayload,
   accountSavedProperties,
   resolveSessionScope,
   scopeVisitsToProperty,

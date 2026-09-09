@@ -18,6 +18,7 @@ const {
   applyPropertyPredicate,
   assignVisitsToEntries,
   appPropertyScopeEnabled,
+  sessionPropertyScopePayload,
 } = require('../services/account-properties');
 
 function chain(rows) {
@@ -275,5 +276,21 @@ describe('applyPropertyPredicate — the property half alone', () => {
     const secondary = rec();
     applyPropertyPredicate(secondary.qb, { customerId: 'c1', enabled: true, multi: true, property: { id: 'pb', is_primary: false } });
     expect(secondary.calls).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'pb']]]]);
+  });
+});
+
+describe('sessionPropertyScopePayload — the selection the middleware honored, for /auth/me', () => {
+  const originalGate = process.env.GATE_APP_PROPERTY_SCOPE;
+  afterEach(() => {
+    if (originalGate === undefined) delete process.env.GATE_APP_PROPERTY_SCOPE;
+    else process.env.GATE_APP_PROPERTY_SCOPE = originalGate;
+  });
+  test('honored claim → propertyId; ignored claim / gate off / cancelled session → null', () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    expect(sessionPropertyScopePayload({ propertyId: 'prop-b' })).toEqual({ enabled: true, propertyId: 'prop-b' });
+    expect(sessionPropertyScopePayload({ propertyId: null })).toEqual({ enabled: true, propertyId: null });
+    expect(sessionPropertyScopePayload({ propertyId: 'prop-b', customerInactive: true })).toEqual({ enabled: false, propertyId: null });
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
+    expect(sessionPropertyScopePayload({ propertyId: 'prop-b' })).toEqual({ enabled: false, propertyId: null });
   });
 });

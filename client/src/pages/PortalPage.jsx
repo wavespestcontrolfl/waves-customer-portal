@@ -15188,7 +15188,20 @@ function VisitsTab({ customer, properties = [], activePropertyId, subTab, onSubT
           </div>
         </div>
       </section>
-      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : <ServicesTab />}
+      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : (
+        <>
+          {/* Completed visits and reports read /services, which is
+              customer-wide (per-property history is PR 4 of the lane): under
+              the saved-property scope say so, so house B never appears to
+              own the other houses' reports (codex #4207 r1e). */}
+          {properties.length > 1 && properties.some((p) => p.key) && (
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }}>
+              Completed visits and reports cover every property on this profile.
+            </div>
+          )}
+          <ServicesTab />
+        </>
+      )}
     </div>
   );
 }

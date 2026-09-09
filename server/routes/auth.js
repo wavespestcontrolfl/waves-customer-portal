@@ -16,7 +16,7 @@ const {
   revokeRefreshSession,
   rotateRefreshSession,
 } = require('../middleware/auth');
-const { accountSavedProperties, appPropertyScopeEnabled } = require('../services/account-properties');
+const { accountSavedProperties, appPropertyScopeEnabled, sessionPropertyScopePayload } = require('../services/account-properties');
 const logger = require('../services/logger');
 
 // =========================================================================
@@ -474,6 +474,10 @@ router.get('/me', authenticate, async (req, res, next) => {
       smsEnabled: prefs.sms_enabled,
       emailEnabled: prefs.email_enabled,
     } : null,
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the selection the
+    // middleware HONORED for this session — null when the token's claim was
+    // ignored (retired / foreign property, gate off, cancelled session).
+    propertyScope: sessionPropertyScopePayload(req),
   });
   } catch (err) { next(err); }
 });

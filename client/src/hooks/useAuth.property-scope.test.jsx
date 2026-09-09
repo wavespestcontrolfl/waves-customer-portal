@@ -170,6 +170,7 @@ describe('cross-tab saved-property switch', () => {
 
     // ...another tab switches the SAME profile to prop-b (same family).
     const selectedB = { key: 'cust-1:prop-b', customerId: 'cust-1', propertyId: 'prop-b' };
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-b' } });
     api.getAuthProperties.mockResolvedValue({ ...SAVED, selected: selectedB });
     await act(async () => {
       store.waves_token = tokB;
@@ -183,7 +184,7 @@ describe('cross-tab saved-property switch', () => {
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
   });
 
-  it('a cross-tab property change resolves the selection from the token immediately, even when the follow-up list read fails', async () => {
+  it('a cross-tab property change adopts the selection the server honored (/auth/me), even when the follow-up list read fails', async () => {
     const tokA = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-a' });
     const tokB = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' });
     const store = { waves_token: tokA, waves_refresh_token: 'ref-a' };
@@ -192,7 +193,8 @@ describe('cross-tab saved-property switch', () => {
     api.getAuthProperties.mockResolvedValue(SAVED);
     await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-a');
-    // The re-read after the cross-tab switch fails (offline) — the selection must already say prop-b.
+    // The list re-read after the cross-tab switch fails (offline) — /auth/me's honored selection says prop-b.
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-b' } });
     api.getAuthProperties.mockRejectedValue(new Error('offline'));
     await act(async () => {
       store.waves_token = tokB;
@@ -203,15 +205,29 @@ describe('cross-tab saved-property switch', () => {
     api.getAuthProperties.mockResolvedValue(SAVED);
   });
 
-  it('a fresh tab whose saved-property list read fails still derives its selection from the token claim', async () => {
+  it('a fresh tab whose saved-property list read fails takes the selection the SERVER honored (/auth/me propertyScope), never the raw claim', async () => {
     const tokB = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' });
     stubLocalStorage({ waves_token: tokB, waves_refresh_token: 'ref-b' });
-    api.getMe.mockResolvedValue({ id: 'cust-1' });
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-b' } });
     api.getAuthProperties.mockRejectedValue(new Error('offline'));
     await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-1');
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
     api.getAuthProperties.mockResolvedValue(SAVED);
+  });
+
+  it('a claim the server IGNORED (retired house / gate off) never becomes the selection: /auth/me says null → the primary from retained entries', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-a' } });
+    api.getAuthProperties.mockResolvedValue(SAVED);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    // Office retires prop-b; the token still claims it but the server ignores it; the list read fails.
+    const tokRetired = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' });
+    api.setTokens(tokRetired, 'ref-a');
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: null } });
+    api.getAuthProperties.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => { await authApi.refreshCustomer(); });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-a');
   });
 
   it('logout clears the selection and scope; a new claim-less login whose list read fails does not resurrect the old house', async () => {
@@ -273,7 +289,9 @@ describe('cross-tab saved-property switch', () => {
     api.getAuthProperties.mockResolvedValue(SAVED);
     await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
     // Follow-up list read fails: the selection must still carry a key. The
-    // minted token carries the claim, as the real route's does.
+    // minted token carries the claim, as the real route's does, and /auth/me
+    // reports the selection the server honored.
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-b' } });
     api.selectAuthProperty.mockResolvedValue({ token: tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' }), refreshToken: 'ref-b', properties: [], selected: { customerId: 'cust-1', propertyId: 'prop-b' } });
     api.getAuthProperties.mockRejectedValueOnce(new Error('offline'));
     await act(async () => { await authApi.switchProperty({ customerId: 'cust-1', propertyId: 'prop-b' }); });

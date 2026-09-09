@@ -205,11 +205,12 @@ export function AuthProvider({ children }) {
         // (setLoading(false) below) while the previous customer's state is
         // still rendered under the new token.
         if (sessionEpochRef.current !== epoch) return;
-        // A saved-property token scopes every read to its claim even when the
-        // list cannot be read (codex #4207 r1 P1): derive the selection from
-        // the token so the page never presents that house's visits under the
-        // primary's identity. The entry details arrive with the next refresh.
-        const claimed = tokenPropertyId(api.token);
+        // A saved-property session scopes every read to the selection the
+        // SERVER honored even when the list cannot be read (codex #4207 r1 /
+        // r1e): take it from /auth/me's `propertyScope` — never the raw token
+        // claim, which the server ignores for a retired property or while
+        // the gate is off. The entry details arrive with the next refresh.
+        const claimed = data?.propertyScope?.propertyId ? String(data.propertyScope.propertyId) : null;
         if (claimed && data?.id) {
           setSelectedProperty((prev) => (prev && String(prev.propertyId) === claimed && String(prev.customerId) === String(data.id)
             ? prev
@@ -325,17 +326,13 @@ export function AuthProvider({ children }) {
       if (familyChanged || propertyChanged) setSessionEpoch(++sessionEpochRef.current);
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (propertyChanged && !identityChanged) {
-        // Resolve the new selection NOW from the token and the list we hold,
-        // so the label never lags the scope: if the follow-up list read
-        // fails, requests already run under property B and the page must not
-        // keep A's label over B's visits. loadCustomer below re-reads the
-        // authoritative selection.
-        const pid = tokenPropertyId(token);
-        const mine = (propertiesRef.current || []).filter((p) => String(p.customerId || p.id) === String(nextId));
-        const entry = pid ? mine.find((p) => String(p.propertyId) === pid) : mine.find((p) => p.isPrimaryProperty);
-        setSelectedProperty(entry
-          ? { key: entry.id, customerId: entry.customerId, propertyId: entry.propertyId }
-          : (pid ? { key: `${nextId}:${pid}`, customerId: nextId, propertyId: pid } : null));
+        // The previous selection is gone the moment the token changes, so
+        // the page never keeps house A's label over house B's visits — and
+        // the new one is NOT reconstructed from the raw claim (the server may
+        // ignore it: retired property, gate off). The picker reads "Select a
+        // property" until loadCustomer below adopts the selection the server
+        // honored (/auth/me propertyScope, then the list).
+        setSelectedProperty(null);
       }
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not
