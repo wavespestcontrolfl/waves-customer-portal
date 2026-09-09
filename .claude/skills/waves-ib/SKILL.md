@@ -127,13 +127,15 @@ CI against the migrated DB; warnings block):
 - Wrap uncertain tables/columns in try/catch and declare them
   `optionalTables` / `optionalColumns` — don't crash a tool module on one
   bad query (CLAUDE.md rule 6).
-- **Declare the tool's data `scope`** in
-  `server/services/intelligence-bar/action-policy.json` (reads: `none` /
-  `record` / `scoped` / `broad` / `actor_wide` / `phone_keyed` /
-  `email_keyed` / `address_keyed`; writes: `none` / `record` / `route_wide`).
-  A tool on the PII list (`pii-tools.js`) is never `none`. Classify from
-  what the executor returns, not its description; see
-  `docs/intelligence-bar-read-scope-catalog.md`. A tool without a valid
-  scope never joins the action registry, and any class other than `none`
-  must also be added to `SCOPE_SNAPSHOT` in
-  `server/tests/intelligence-bar-action-registry.test.js`.
+
+Separately from the contract gate, every tool must **declare its data
+`scope`** in `server/services/intelligence-bar/action-policy.json` (reads:
+`none` / `record` / `scoped` / `broad` / `actor_wide` / `phone_keyed` /
+`email_keyed` / `address_keyed`; writes: `none` / `record` / `route_wide`).
+This is enforced by the action registry at load time (an unscoped tool is
+unreachable) and by the jest suite
+`server/tests/intelligence-bar-action-registry.test.js`, not by
+`test:contracts`. A tool on the PII list (`pii-tools.js`) is never `none`.
+Classify from what the executor returns, not its description; see
+`docs/intelligence-bar-read-scope-catalog.md`. Any class other than `none`
+must also be added to `SCOPE_SNAPSHOT` in that jest suite.

@@ -503,7 +503,7 @@ function bulkLeadSelection(toolName, records, params) {
 // Per-tool data scope comes from action-policy.json (see scope-policy.js).
 // A tool whose scope is missing or invalid is refused here as well as by the
 // registry, so no caller can reach an unclassified reader or writer.
-const { scopeOf, UNCLASSIFIED } = require('./scope-policy');
+const { validScope, UNCLASSIFIED } = require('./scope-policy');
 
 // Street-line comparison for address-keyed readers: case, punctuation and
 // spacing are ignored; a supplied full address may continue past the saved
@@ -514,10 +514,10 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // A refused cohort or unresolved name stops here too; explicit record IDs
   // inside "both appointment A and appointment B" do not reopen it.
   if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
-  const policy = require('./action-policy.json')[toolName];
   // Every caller names the tool; a call without one has no reviewed scope
   // and is refused like an unclassified tool rather than admitted.
-  const scope = scopeOf(toolName);
+  const policy = toolName === undefined ? undefined : require('./action-policy.json')[toolName];
+  const scope = validScope(policy) ? policy.scope : null;
   if (!scope) return UNCLASSIFIED;
   // Route-wide writers act on every stop for a date or technician and carry no
   // record identifiers. A customer-scoped task cannot mint an approval for
@@ -584,25 +584,12 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
 // Resolve name/phone selectors to one of the task's known customers, then pass
 // the immutable ID to existing readers. Broad searches without a selector stay
 // broad. No fuzzy result or model-selected alternate contact becomes authority.
-// Read scope classes (declared per tool in action-policy.json, see
-// scope-policy.js):
-// - broad: readers that list customer rows (names, phones, addresses,
-//   balances, message bodies) without a customer selector and without
-//   consuming the task's read scope. Inside a customer-scoped task they would
-//   hand every matching customer to the model, so they are refused there.
-// - scoped: readers that confine themselves to the task's read scope
-//   (readCustomerIds). That scope is empty when an explicitly named customer
-//   did not resolve, so they would read every customer's rows; they fail
-//   closed until it resolves.
-// - record: readers with a customer or record selector. They fail closed the
-//   same way when the model supplies no selector at all (see hasOwnSelector).
-// - actor_wide: the operator's own past conversations quote every customer
-//   verbatim, and a stored thread carries no customer association to filter
-//   on, so the search is refused inside a customer-scoped task, not narrowed.
-// - phone_keyed / email_keyed: the supplied contact must belong to a task customer.
-// A customer selector or a record identifier: either one is checked against
-// the task's authority further down, so only a selector-free call is broad.
-const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone)
+// The read scope classes are defined once, in scope-policy.js; the guards
+// below enforce them. A customer selector or a record identifier is checked
+// against the task's authority further down, so only a selector-free call is
+// broad. `service_id` is the closeout readers' appointment identifier (mapped
+// in validateRecordTarget).
+const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone || params.service_id)
   || Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
 
 async function prepareReadInput(params, context, { toolName, schema }) {
@@ -610,7 +597,8 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   // explicit name is handled by the scope guards below, which still admit a
   // reader that carries its own selector or record identifier.
   if (context.ambiguous) return { error: 'Name one customer for this record lookup', code: 'target_clarification_required' };
-  const scope = scopeOf(toolName);
+  const policy = require('./action-policy.json')[toolName];
+  const scope = validScope(policy) ? policy.scope : null;
   if (!scope) return UNCLASSIFIED;
   const input = { ...params };
   // A request about one customer — a resolved target, an unresolved name, or
@@ -647,9 +635,9 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     }
   }
   if (context.targets?.length && scope === 'email_keyed') {
-    const email = String(params.email || '').trim().toLowerCase();
+    const email = normalizeEmail(params.email);
     const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('email');
-    if (!email || !owners.some(owner => String(owner.email || '').trim().toLowerCase() === email)) {
+    if (!email || !owners.some(owner => normalizeEmail(owner.email) === email)) {
       return { error: 'Use the task customer\'s own email address for this suppression check', code: 'target_clarification_required' };
     }
   }

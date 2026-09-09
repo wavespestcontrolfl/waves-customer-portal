@@ -264,22 +264,39 @@ test('a reader whose schema takes a customer selector is never scope none', () =
 test('a tool with a missing or invalid scope never joins the registry', () => {
   const policy = require('../services/intelligence-bar/action-policy.json');
   const { scope: _dropped, ...unscoped } = policy.query_products;
-  const cases = [
-    ['missing', unscoped],
-    ['unknown class', { ...policy.query_products, scope: 'everything' }],
-    ['write class on a read', { ...policy.query_products, scope: 'route_wide' }],
-    ['read class on a write', { ...policy.adjust_stock, scope: 'broad' }],
-  ];
-  for (const [label, entry] of cases) {
-    const name = entry.kind === 'read' ? 'query_products' : 'adjust_stock';
-    jest.isolateModules(() => {
-      jest.doMock('../services/intelligence-bar/action-policy.json', () => ({ ...policy, [name]: entry }));
-      const isolated = require('../services/intelligence-bar/action-registry');
-      expect({ label, errors: isolated.policyErrors }).toEqual({ label, errors: [name] });
+  // Each entry is validated independently in the registry loop, so one
+  // isolated load with four distinct broken tools proves every case.
+  const broken = {
+    query_products: unscoped, // missing
+    query_vendors: { ...policy.query_vendors, scope: 'everything' }, // unknown class
+    query_stock: { ...policy.query_stock, scope: 'route_wide' }, // write class on a read
+    adjust_stock: { ...policy.adjust_stock, scope: 'broad' }, // read class on a write
+  };
+  jest.isolateModules(() => {
+    jest.doMock('../services/intelligence-bar/action-policy.json', () => ({ ...policy, ...broken }));
+    const isolated = require('../services/intelligence-bar/action-registry');
+    expect([...isolated.policyErrors].sort()).toEqual(Object.keys(broken).sort());
+    for (const name of Object.keys(broken)) {
       expect(isolated.actions.has(name)).toBe(false);
       expect(isolated.validateInput(name, {}, { role: 'admin', context: 'procurement' })).toMatchObject({ code: 'capability_unimplemented' });
-      jest.dontMock('../services/intelligence-bar/action-policy.json');
-    });
+    }
+    expect(isolated.actions.size).toBe(Object.keys(policy).length - Object.keys(broken).length);
+    jest.dontMock('../services/intelligence-bar/action-policy.json');
+  });
+});
+
+test('every record reader carries a selector the task-context guards recognize', () => {
+  // prepareReadInput binds customer_name/phone and injects the task customer
+  // only through customer_id, and admits an unresolved-name call only through
+  // hasOwnSelector; a record reader without one of these params would hand a
+  // raw model-supplied selector to its executor.
+  const selectorKeys = ['customer_id', 'customer_name', 'phone', 'service_id', 'customer_ids', 'service_ids', 'lead_ids',
+    'customer_id', 'property_id', 'appointment_id', 'estimate_id', 'invoice_id', 'product_id', 'lead_id', 'email_id', 'call_id', 'review_id',
+    'customerId', 'propertyId', 'appointmentId', 'estimateId', 'invoiceId', 'productId', 'leadId', 'emailId', 'callId', 'reviewId'];
+  for (const action of registry.actions.values()) {
+    if (action.kind !== 'read' || action.scope !== 'record') continue;
+    const keys = Object.keys(action.schema.properties || {});
+    expect({ id: action.id, selector: keys.some(key => selectorKeys.includes(key)) }).toEqual({ id: action.id, selector: true });
   }
 });
 

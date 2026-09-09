@@ -652,6 +652,13 @@ test('scoped customer-row readers fail closed for an explicitly named customer w
   const call = '50000000-0000-4000-8000-000000000001';
   rows.call_log = [{ id: call, customer_id: B }];
   expect((await Context.prepareReadInput({ call_id: call }, unresolved, { toolName: 'get_call_log', schema: optional })).code).toBe('target_clarification_required');
+  // The closeout readers' service_id is an appointment selector: it passes the scope guard and reaches the record proof.
+  const appointment = '40000000-0000-4000-8000-000000000009';
+  rows.scheduled_services = [{ id: appointment, customer_id: B }];
+  const closeout = { properties: { service_id: { type: 'string' } } };
+  expect((await Context.prepareReadInput({ service_id: appointment }, unresolved, { toolName: 'get_closeout_status', schema: closeout })).code).toBe('target_clarification_required');
+  expect(await Context.prepareReadInput({ service_id: appointment }, context(B), { toolName: 'get_closeout_status', schema: closeout })).toEqual({ input: { service_id: appointment } });
+  expect((await Context.prepareReadInput({}, unresolved, { toolName: 'get_closeout_status', schema: closeout })).code).toBe('customer_scope_required');
 });
 
 test('calendar words after a selector are date filters, not customer names', async () => {
