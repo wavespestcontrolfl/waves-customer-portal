@@ -2805,7 +2805,7 @@ async function createSelfBooking(payload = {}) {
       if (!callbackVisit) {
         try {
           await trx.transaction(async (inner) => {
-            await promoteCustomerOnBooking(inner, custId);
+            await promoteCustomerOnBooking(inner, custId, { serviceType: resolvedServiceType });
           });
         } catch (e) {
         // Durable repair marker, committed WITH the booking (codex #3282 r3
@@ -4046,7 +4046,7 @@ async function createSelfBooking(payload = {}) {
       // never promotes (codex #3282 r3 P2).
       if (!callbackVisit) {
         try {
-          await promoteCustomerOnBooking(db, custId);
+          await promoteCustomerOnBooking(db, custId, { serviceType: resolvedServiceType });
         } catch (e) {
           logger.warn(`[booking:confirm] replay customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
         }

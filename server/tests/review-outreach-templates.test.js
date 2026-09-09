@@ -72,12 +72,13 @@ describe('review outreach templates', () => {
     const vars = {
       first: 'Christopher2',
       tech: 'Christopher',
+      sender: 'Christopher with Waves',
       service_type: 'pest control service',
       review_url: 'https://portal.wavespestcontrol.com/l/abcde',
     };
     // …and the no-name fallback ('Your tech', substituted when neither the
     // row's tech_name nor its technician_id resolves) must fit too.
-    const { tech: _named, ...noTech } = vars;
+    const { tech: _named, sender: _signed, ...noTech } = vars;
     for (const t of OUTREACH_TEMPLATES) {
       const requireLink = t.body.includes('{review_url}');
       for (const [label, v] of [['named', vars], ['fallback', noTech]]) {
@@ -101,6 +102,33 @@ describe('review outreach templates', () => {
   test('renderOutreachBody falls back to sensible defaults', () => {
     const out = renderOutreachBody('Hey {first}, {tech} here', {});
     expect(out).toBe('Hey there, Your tech here');
+  });
+
+  test('{sender} is the tech on the record, else the company — never the "Your tech" fallback', () => {
+    expect(renderOutreachBody('{sender}.', { tech: 'Adam' })).toBe('Adam with Waves.');
+    expect(renderOutreachBody('{sender}.', {})).toBe('Waves Pest Control.');
+    expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
+  });
+
+  test('the cadence Day-0 step is the controlled day0_ask (day-agnostic, uniform reply invite); legacy friendly_ask plans map onto it', () => {
+    const { DAY0_ASK_TEMPLATE_KEY, isDay0ControlledAsk } = require('../services/review-outreach-templates');
+    expect(DEFAULT_SEQUENCE_PLAN[0].templateKey).toBe(DAY0_ASK_TEMPLATE_KEY);
+    expect(RECURRING_SEQUENCE_PLAN[0].templateKey).toBe(DAY0_ASK_TEMPLATE_KEY);
+    const tpl = getOutreachTemplate(DAY0_ASK_TEMPLATE_KEY);
+    expect(tpl.body).not.toMatch(/\btoday\b|\btonight\b/i);
+    expect(tpl.body).toContain("Reply if anything's off.");
+    expect(tpl.body).toContain('{sender}');
+    expect(tpl.body).toContain('{review_url}');
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'friendly_ask' })).toBe(true);
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: null })).toBe(true);
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'first_treatment_ask' })).toBe(false);
+    expect(isDay0ControlledAsk({ sequenceStep: 1, channel: 'sms', templateId: 'friendly_ask' })).toBe(false);
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'email', templateId: 'friendly_ask' })).toBe(false);
+    // Any other link-bearing ask an admin's custom plan names at step 0 is
+    // controlled too (codex #4139 r2) — no-link check-ins are not asks.
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'post_service_hot' })).toBe(true);
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'service_specific_pest' })).toBe(true);
+    expect(isDay0ControlledAsk({ sequenceStep: 0, channel: 'sms', templateId: 'resolution_check' })).toBe(false);
   });
 
   test('requireLink appends the review URL when an edited body dropped it', () => {

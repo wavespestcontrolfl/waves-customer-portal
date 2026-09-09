@@ -38,7 +38,8 @@
  *
  * The feasibility simulation here mirrors violatesWindowFeasibility's
  * model path minute-for-minute (HQ depart 08:00, fallback leg minutes,
- * estimated_duration_minutes default 60, waiting for a window to open is
+ * the greater of stored work span and duration estimate, default 60;
+ * waiting for a window to open is
  * fine, starting past the arrival deadline is not). The mirror is only a
  * search heuristic — the caller-supplied production guard has the final
  * word on the returned order.
@@ -122,8 +123,11 @@ function sequenceCount(total, timed, groupSizes) {
   return count;
 }
 
-function stopDuration(stop) {
-  return Number(stop.estimated_duration_minutes) > 0 ? Number(stop.estimated_duration_minutes) : 60;
+function workDuration(stop, fallback = 60) {
+  const start = stop.window_start ? hhmmToMin(String(stop.window_start).slice(0, 5)) : null;
+  const end = stop.window_end ? hhmmToMin(String(stop.window_end).slice(0, 5)) : null;
+  const span = Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
+  return Math.max(span, Number(stop.estimated_duration_minutes) || 0) || fallback;
 }
 
 /**
@@ -133,7 +137,7 @@ function stopDuration(stop) {
  * making prefixes prunable: the clock only moves forward, so no suffix can
  * rescue a missed window.
  */
-function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop) {
+function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, reportLate = false) {
   const lat = parseFloat(stop.lat);
   const lng = parseFloat(stop.lng);
   let travel = 0;
@@ -147,10 +151,38 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop) {
   let startMin = state.clock + travel;
   const range = effectiveWindowRange(stop);
   if (range) {
-    if (startMin > range.endMin) return null;
+    if (startMin > range.endMin && !reportLate) return null;
     startMin = Math.max(startMin, range.startMin);
   }
-  return { clock: startMin + stopDuration(stop), prev, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+  return { clock: startMin + workDuration(stop), prev, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+}
+
+/** Repair the demonstrated null-position insertion defect. Keep the relative
+ * order of every already-positioned stop, including ties. Only a fully timed,
+ * ungrouped, unpinned route with a chronological backbone qualifies. A repair
+ * must turn an infeasible baseline into a feasible route; no distance saving
+ * is needed to correct that defect. The caller owns gates and fenced writes. */
+function computeChronologicalRepair(RouteOptimizer, stops) {
+  if (stops.some(stop => {
+    const duration = workDuration(stop, 0);
+    return stop.visit_id || stop.auto_dispatch_locked || stop.auto_dispatch_excluded
+      || !Number.isFinite(effectiveWindowRange(stop)?.startMin)
+      || !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
+      || !Number(stop.lat) || !Number(stop.lng) || !Number.isFinite(duration) || duration <= 0;
+  })) return null;
+  const ordered = currentOrder(stops);
+  const backbone = ordered.filter(stop => stop.route_order != null);
+  const additions = ordered.filter(stop => stop.route_order == null);
+  if (!backbone.length || !additions.length) return null;
+  if (backbone.some((stop, i) => i > 0 && effectiveWindowRange(stop).startMin < effectiveWindowRange(backbone[i - 1]).startMin)) return null;
+  if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered)) return null;
+  const candidate = [...backbone];
+  for (const stop of additions) {
+    const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > effectiveWindowRange(stop).startMin);
+    candidate.splice(index === -1 ? candidate.length : index, 0, stop);
+  }
+  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate);
+  return simulation ? { orderedStops: candidate, simulation } : null;
 }
 
 /** Simulate the complete route under the promised ARRIVAL windows. Work may
@@ -158,19 +190,21 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop) {
  * nightly reordering and staff picker/save checks. No scheduled times change.
  * null means at least one promise (or the requested day end) cannot be kept. */
 function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
-  startMin = 8 * 60, origin = RouteOptimizer.HQ, dayEndMin = Infinity,
+  startMin = 8 * 60, origin = RouteOptimizer.HQ, dayEndMin = Infinity, reportLate = false,
 } = {}) {
   let state = { clock: startMin, prev: origin, travelMin: 0, waitingMin: 0 };
   const arrivals = [];
   for (const stop of seq) {
-    state = advanceSim(RouteOptimizer, rangeForStop, state, stop);
+    state = advanceSim(RouteOptimizer, rangeForStop, state, stop, reportLate);
     if (!state || state.clock > dayEndMin) return null;
-    arrivals.push({ id: stop.id, arrivalMin: state.arrivalMin, departureMin: state.clock });
+    arrivals.push({ id: stop.id, arrivalMin: state.arrivalMin, departureMin: state.clock,
+      ...(reportLate ? { lateMinutes: Math.max(0, state.arrivalMin - (rangeForStop(stop)?.endMin ?? Infinity)) } : {}),
+    });
   }
   const returnMin = RouteOptimizer.fallbackLegMetrics(
     RouteOptimizer.haversine(state.prev.lat, state.prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng),
   ).minutes || 0;
-  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin, finishMin: state.clock };
+  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin, finishMin: state.clock, returnAtMin: state.clock + returnMin };
 }
 
 /** Exhaustive backbone-preserving interleaving search with prefix pruning.
@@ -345,5 +379,7 @@ module.exports = {
   effectiveWindowRange,
   currentOrder,
   simulateArrivalRoute,
+  computeChronologicalRepair,
+  workDuration,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

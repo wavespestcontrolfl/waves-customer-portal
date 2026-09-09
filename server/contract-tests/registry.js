@@ -121,7 +121,11 @@ function collectLeadResponseTools() {
     surface: 'lead-response-agent',
     module: 'lead-response-tools.js',
     sourcePath: file,
-    execute: (input) => mod.executeLeadTool(t.name, input),
+    execute: (input) => mod.executeLeadTool(t.name, input, {
+        // Fixed smoke subject: never derive authority from tool input.
+        leadId: '00000000-0000-0000-0000-000000000000',
+        customerId: '00000000-0000-0000-0000-000000000000',
+      }),
     overrideSurface: true,
   }));
 }

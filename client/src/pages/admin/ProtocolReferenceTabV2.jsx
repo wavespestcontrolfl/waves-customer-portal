@@ -187,7 +187,7 @@ function ProductLineRow({ line, muted }) {
           )}
         >
           {line.conditional && (
-            <span className="mr-1.5 inline-block align-middle rounded-xs border-hairline border-zinc-300 px-1 text-10 font-medium u-label text-ink-tertiary">
+            <span className="mr-1.5 inline-block align-middle rounded-xs border-hairline border-zinc-300 px-1 text-11 font-medium u-label text-ink-tertiary">
               IF
             </span>
           )}
@@ -207,7 +207,7 @@ function ProductLineRow({ line, muted }) {
       <div className="flex-shrink-0 text-12 font-mono u-nums text-ink-primary whitespace-nowrap">
         {line.cost != null ? `$${line.cost.toFixed(2)}` : "—"}
         {line.estimated && (
-          <span className="ml-0.5 text-10 text-ink-tertiary">est</span>
+          <span className="ml-0.5 text-11 text-ink-tertiary">est</span>
         )}
       </div>
     </div>
@@ -229,7 +229,7 @@ function CalendarLine({ line, muted }) {
     <div className="mb-1 last:mb-0 flex items-baseline gap-2">
       <div className="min-w-0 flex-1 leading-normal">
         {line.conditional && (
-          <span className="mr-1 inline-block align-middle rounded-xs border-hairline border-zinc-300 px-0.5 text-10 font-medium u-label text-ink-tertiary">
+          <span className="mr-1 inline-block align-middle rounded-xs border-hairline border-zinc-300 px-0.5 text-11 font-medium u-label text-ink-tertiary">
             IF
           </span>
         )}
@@ -246,7 +246,7 @@ function CalendarLine({ line, muted }) {
           <span className="text-ink-tertiary"> — {line.detail}</span>
         )}
         {line.description && (
-          <div className="text-10 text-ink-tertiary italic">
+          <div className="text-12 text-ink-tertiary italic">
             {line.description}
           </div>
         )}
@@ -255,7 +255,7 @@ function CalendarLine({ line, muted }) {
         <span className="flex-shrink-0 font-mono u-nums text-11 text-ink-primary whitespace-nowrap">
           ${line.cost.toFixed(2)}
           {line.estimated && (
-            <span className="ml-0.5 text-10 text-ink-tertiary">est</span>
+            <span className="ml-0.5 text-11 text-ink-tertiary">est</span>
           )}
         </span>
       )}
@@ -582,7 +582,7 @@ function ProtocolMixCard({
             {fmtNumber(areaMix.ratePer1000)} {areaMix.rateUnit || ""}/1K
           </div>
           {plannedOnly && (
-            <div className="text-10 text-ink-tertiary">if triggered</div>
+            <div className="text-11 text-ink-tertiary">if triggered</div>
           )}
         </>
       ) : (
@@ -592,7 +592,7 @@ function ProtocolMixCard({
         <>
           <div className={numClass}>{fmtMoney(areaMix?.materialCost)}</div>
           {areaMix?.materialCostSource && (
-            <div className="text-10 text-ink-tertiary">inventory</div>
+            <div className="text-11 text-ink-tertiary">inventory</div>
           )}
         </>
       ),
@@ -686,7 +686,7 @@ function ProtocolMixCard({
               <div className="u-nums text-16 font-medium text-zinc-900">
                 {fmtMoney(materialTotal)}
               </div>
-              <div className="text-10 text-ink-tertiary mt-0.5">
+              <div className="text-11 text-ink-tertiary mt-0.5">
                 {materialSummary.pricedLineCount || 0}/{materialSummary.selectedLineCount ?? selectedItems.length} lines priced
               </div>{" "}
             </div>{" "}
@@ -1397,7 +1397,7 @@ export default function ProtocolReferenceTabV2() {
                           <td className="px-2.5 py-2 text-12 font-medium text-ink-primary whitespace-nowrap align-top">
                             {v.month}
                             {isCurrentMonth && (
-                              <span className="ml-1.5 text-10 font-medium u-label text-ink-primary">
+                              <span className="ml-1.5 text-11 font-medium u-label text-ink-primary">
                                 NOW
                               </span>
                             )}
@@ -1417,7 +1417,7 @@ export default function ProtocolReferenceTabV2() {
                             {formatProtocolCost(v.material_cost)}
                             {Number.isFinite(parseFloat(v.conditional_cost)) &&
                               parseFloat(v.conditional_cost) > 0 && (
-                                <div className="text-10 text-ink-tertiary">
+                                <div className="text-11 text-ink-tertiary">
                                   {/* Lawn material_cost is the 10,000 sqft
                                       basis; conditional_cost reserves derive
                                       from the ~4,500 sqft inline line costs —

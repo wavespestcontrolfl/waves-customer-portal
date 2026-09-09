@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
-const PROMPT_VERSION = 'v5';
+const PROMPT_VERSION = 'v6';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -52,13 +52,18 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
       : `\nKNOWN CALLER: this number matches ${opts.knownCaller.name || 'a contact'} already in our pipeline as a PROSPECT (not yet a customer). A booking on this call is likely their FIRST visit — treat an agreed date+time as a real "confirmed" booking, NOT existing-appointment coordination.\n`)
     : '';
   const priorCallBlock = buildPriorCallBlock(opts.priorCall);
+  // Carrier caller-ID name (Twilio CNAM). A candidate, never a fact: it is
+  // often the account holder or a household member rather than the speaker.
+  const callerIdBlock = opts.callerIdName
+    ? `\nCALLER ID NAME (carrier record for this number, may be a household member or the account holder rather than the speaker): ${String(opts.callerIdName).trim()}\n`
+    : '';
   return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, Charlotte, and DeSoto counties).
 
 Analyze this phone call transcript and extract structured data matching the JSON OUTPUT CONTRACT appended at the end of this prompt. Every field must conform to the contract's type and enum constraints.
 
 Caller phone (from Twilio ANI): ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
-${knownCallerBlock}${priorCallBlock}
+${knownCallerBlock}${callerIdBlock}${priorCallBlock}
 
 Transcript:
 ${transcription}
@@ -88,7 +93,9 @@ CALLER NAME:
 - Set first_name and last_name separately when the caller clearly states both.
 - Set name_full to the full name as spoken.
 - If only one name is stated, put it in first_name; leave last_name null.
-- Do NOT invent names from caller ID, address, email, or context.
+- The caller's name may be spoken by EITHER side: when the agent greets the caller by name ("Hey Taylor", "Hi Sam, it's Adam") and the caller does not correct it, that IS the caller's name — extract it.
+- Name evidence, strongest first: (1) a name the caller SPELLS, (2) the KNOWN CALLER name on file when the caller answers to it or the context matches, (3) the CALLER ID NAME when it matches the spoken name closely (transcription variants: "Smith" vs SMYTHE, "Coal" vs Cole), (4) the transcribed spoken form. A stronger source overrides a weaker transcription of the same name.
+- Do NOT invent a name from caller ID, address, email, or context when nothing on the call supports it — a caller-ID name alone, with no spoken name at all, stays out of first_name/last_name.
 - Set name_confidence: 0.9+ when clearly stated, 0.5-0.8 when spelled out ambiguously, <0.5 when only partially heard.
 
 SPELLED-OUT INPUT IS AUTHORITATIVE (names + emails):
@@ -109,8 +116,10 @@ EMAIL:
 - A transcribed local part that looks like a URL fragment ("www.", "http") is a mis-hearing, never a real mailbox: reconstruct it from the spelled letters, and if you cannot reconstruct it confidently, set null.
 - ATTRIBUTION: an email the caller relays FOR another named person ("the buyer is Joseph — his email is ...", "her email is ...") is THAT person's email. It goes on that person's secondary-contact entry and NEVER into caller.email, even though the caller is the one speaking it. The same rule applies to phone numbers and caller.phone_e164.
 
-CALLER RELATIONSHIP (relationship_to_property):
+CALLER RELATIONSHIP (relationship_to_property) AND on_site_authorization:
 - A realtor / buyer's or seller's agent calling about a sale, closing, or inspection is "real_estate_agent". A lender, loan officer, or title/closing coordinator is "lender". Use "other" only when no enum value fits.
+- Most homeowners never say "it's my house". Someone arranging service for where they live ("my yard", "our kitchen", "come out to the house") is the owner or a household member: use "owner" when they speak as the resident, "spouse_partner" when they say so, and "unknown" ONLY when the call gives no signal either way. Never infer a non-owner relationship from a missing statement.
+- on_site_authorization is about whether THIS caller may authorize work at the property. It is true for an owner, a spouse/partner, and for any caller who says they can authorize it. Set it false ONLY when the caller is explicitly a third party (tenant, property manager, realtor, lender, employee, HOA, other) AND nothing on the call says they may authorize the work. An "unknown" relationship never justifies false on its own.
 
 UNIT BEDROOMS (property.bedroom_count):
 - When the caller states the size of their apartment/condo UNIT in bedrooms ("one-bedroom", "2 bed 2 bath", "studio" = 0), set property.bedroom_count to that integer. Only what was spoken — never infer it from square footage, rent, or the property type; null otherwise.
@@ -223,18 +232,19 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
 Each evidence entry: field_path (JSON pointer), quote (verbatim transcript), speaker (caller/agent), transcript_offset_ms (approximate, or null).
 
-CONFIDENCE SCORES — Per-section scores in [0, 1]:
+CONFIDENCE SCORES — Per-section scores in [0, 1]. Score FIDELITY, not completeness: how sure you are that the values you DID return match what was said.
 - 0.9+ = clearly stated in transcript
 - 0.7-0.9 = inferred with reasonable confidence
 - 0.5-0.7 = partial information, some guessing
-- <0.5 = very uncertain
-- overall = the MINIMUM of the routing-critical section scores (service_address, scheduling_window, caller_identity) — the gate must reflect the weakest link, not an average that hides it.
+- <0.5 = very uncertain (garbled audio, contradictory statements, a guess between similar-sounding values)
+- A field that is legitimately null because the caller never mentioned it does NOT lower its section's score. A short, clear call in which the caller states only their name and a callback request can score 0.9+ on caller_identity AND on service_address (nothing was heard, nothing was misheard). A section scores low only when something WAS said and you are unsure you captured it correctly.
+- overall = the MINIMUM of the routing-critical section scores (service_address, scheduling_window, caller_identity), each scored on the rule above — the gate must reflect the weakest link, not an average that hides it.
 
 TRIAGE FLAGS — Set flags for situations requiring human review:
 - out_of_service_area: Address/city is outside Manatee/Sarasota/Charlotte/DeSoto counties.
 - hoa_common_area_requires_approval: hoa_common_area_service is true.
 - commercial_requires_quote: Commercial property needing custom quote.
-- caller_not_authorized: Caller relationship != owner AND on_site_authorization is false.
+- caller_not_authorized: Caller is EXPLICITLY a third party (tenant, property_manager, real_estate_agent, lender, employee, hoa_board_member, other) AND on_site_authorization is false. Never for owner, spouse_partner, or unknown.
 - no_sms_consent_captured: No explicit SMS consent obtained.
 - address_unverifiable: Address is vague or incomplete.
 - prior_complaint_unresolved: Caller mentioned an unresolved complaint.
