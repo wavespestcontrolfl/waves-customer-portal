@@ -575,27 +575,41 @@ const TERMITE_INSTALL_DEFAULTS = Object.freeze({
   laborMaterial: 5.25,
   misc: 0.75,
   multiplier: 1.45,
+  minStations: 8,
 });
 let TERMITE_INSTALL = { ...TERMITE_INSTALL_DEFAULTS };
+const positiveNumber = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+const nonNegativeNumber = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+// One row per knob: the engine-effective key first, then the row aliases the
+// server bridge reads, then the in-code default (table-driven so the applier
+// carries no per-key branching — codex #4313 r5 P2).
+const TERMITE_INSTALL_KNOBS = [
+  { key: 'trelonaStationCost', effective: 'trelona_station_cost', row: ['trelona_bait', 'trelona_station_cost'], parse: positiveNumber },
+  { key: 'advanceStationCost', effective: 'advance_station_cost', row: ['advance_bait', 'advance_station_cost'], parse: positiveNumber },
+  { key: 'laborMaterial', effective: 'labor_material_per_station', row: ['labor_per_station', 'labor_material_per_station'], parse: nonNegativeNumber },
+  { key: 'misc', effective: 'misc_per_station', row: ['misc_per_station'], parse: nonNegativeNumber },
+  { key: 'multiplier', effective: 'install_multiplier', row: ['multiplier', 'install_multiplier'], parse: positiveNumber },
+  { key: 'minStations', effective: 'min_stations', row: ['min_stations', 'minStations'], parse: positiveNumber },
+];
+function firstParsed(parse, source, keys) {
+  for (const k of keys) {
+    const v = source ? parse(source[k]) : null;
+    if (v != null) return v;
+  }
+  return null;
+}
 
 export function applyServerTermiteInstallPricingConfig(config, effective = config?.effective) {
-  const pos = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
-  const nonNeg = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
   const eff = effective && typeof effective === 'object' ? effective : null;
   const row = config && typeof config === 'object' ? config : null;
-  const trelonaStationCost = pos(eff?.trelona_station_cost) ?? pos(row?.trelona_bait ?? row?.trelona_station_cost) ?? TERMITE_INSTALL_DEFAULTS.trelonaStationCost;
-  TERMITE_INSTALL = {
-    trelonaStationCost,
-    trelonaStationCostSource: eff?.trelona_station_cost_source === 'catalog' && pos(eff?.trelona_station_cost) != null ? 'catalog' : 'config',
-    // Provenance only (the client prices no cartridges): carried so a
-    // CLIENT_FALLBACK stamp says 'catalog' exactly when the server's link
-    // succeeded (codex r2 P2).
-    cartridgeCostSource: eff?.cartridge_cost_source === 'catalog' ? 'catalog' : 'config',
-    advanceStationCost: pos(eff?.advance_station_cost) ?? pos(row?.advance_bait ?? row?.advance_station_cost) ?? TERMITE_INSTALL_DEFAULTS.advanceStationCost,
-    laborMaterial: nonNeg(eff?.labor_material_per_station) ?? nonNeg(row?.labor_per_station ?? row?.labor_material_per_station) ?? TERMITE_INSTALL_DEFAULTS.laborMaterial,
-    misc: nonNeg(eff?.misc_per_station) ?? nonNeg(row?.misc_per_station) ?? TERMITE_INSTALL_DEFAULTS.misc,
-    multiplier: pos(eff?.install_multiplier) ?? pos(row?.multiplier ?? row?.install_multiplier) ?? TERMITE_INSTALL_DEFAULTS.multiplier,
-  };
+  const next = { ...TERMITE_INSTALL_DEFAULTS };
+  for (const knob of TERMITE_INSTALL_KNOBS) {
+    next[knob.key] = firstParsed(knob.parse, eff, [knob.effective]) ?? firstParsed(knob.parse, row, knob.row) ?? TERMITE_INSTALL_DEFAULTS[knob.key];
+  }
+  // Provenance rides only with an effective value (the row alone is 'config').
+  next.trelonaStationCostSource = eff?.trelona_station_cost_source === 'catalog' && firstParsed(positiveNumber, eff, ['trelona_station_cost']) != null ? 'catalog' : 'config';
+  next.cartridgeCostSource = eff?.cartridge_cost_source === 'catalog' ? 'catalog' : 'config';
+  TERMITE_INSTALL = next;
   return { ...TERMITE_INSTALL };
 }
 
@@ -2713,14 +2727,14 @@ export function calculateEstimate(inputs) {
       // station count. Menu is Trelona-only; Advance stays computable for
       // replaying old estimates.
       const tmSystem = termiteBaitSystem || 'trelona';
-      const staAdv = Math.max(8, Math.ceil(perim / 10));
-      const staTre = Math.max(8, Math.ceil(perim / 15));
-      const sta = tmSystem === 'advance' ? staAdv : staTre;
-      // Hardware cost basis from the live server config + catalog link
+      // Install basis from the live server config + catalog link
       // (applyServerTermiteInstallPricingConfig), never a baked literal —
       // this preview is a CLIENT_FALLBACK save candidate and must price and
       // stamp what the server prices (codex #4313 r1 P1).
       const TI = TERMITE_INSTALL;
+      const staAdv = Math.max(TI.minStations, Math.ceil(perim / 10));
+      const staTre = Math.max(TI.minStations, Math.ceil(perim / 15));
+      const sta = tmSystem === 'advance' ? staAdv : staTre;
       const ai = Math.round((staAdv * (TI.advanceStationCost + TI.laborMaterial + TI.misc)) * TI.multiplier);
       const ti = Math.round((staTre * (TI.trelonaStationCost + TI.laborMaterial + TI.misc)) * TI.multiplier);
       // Bracketed by the selected system's station count; the retired
@@ -2753,6 +2767,10 @@ export function calculateEstimate(inputs) {
           system: tmSystem,
           stationCost: tmSystem === 'advance' ? TI.advanceStationCost : TI.trelonaStationCost,
           stationCostSource: tmSystem === 'advance' ? 'config' : TI.trelonaStationCostSource,
+          laborMaterial: TI.laborMaterial,
+          misc: TI.misc,
+          installMultiplier: TI.multiplier,
+          minStations: TI.minStations,
         },
         materialCostSource: {
           station: tmSystem === 'advance' ? 'config' : TI.trelonaStationCostSource,

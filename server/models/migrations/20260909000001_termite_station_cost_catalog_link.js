@@ -75,50 +75,52 @@ function near(a, b) {
   return Number.isFinite(Number(a)) && Math.abs(Number(a) - b) < 0.005;
 }
 
-exports.up = async function up(knex) {
-  if (await knex.schema.hasTable('pricing_config')) {
-    const row = await knex('pricing_config').where({ config_key: 'termite_install' }).forUpdate().first();
-    if (row) {
-      const oldData = parseData(row);
-      const newData = { ...oldData };
-      // Both key shapes coexist in prod (short-key + long-key seeders);
-      // db-bridge reads trelona_bait ?? trelona_station_cost — move the
-      // retired value under BOTH, never an admin-tuned one.
-      for (const key of ['trelona_bait', 'trelona_station_cost']) {
-        if (key in newData && near(newData[key], OLD_STATION_COST)) newData[key] = NEW_STATION_COST;
-      }
-      for (const [key, value] of Object.entries(COST_INPUT_DEFAULTS)) {
-        if (newData[key] == null) newData[key] = value;
-      }
-      const changed = JSON.stringify(newData) !== JSON.stringify(oldData);
-      if (changed) {
-        await knex('pricing_config')
-          .where({ config_key: 'termite_install' })
-          .update({ data: JSON.stringify(newData), updated_at: knex.fn.now() });
-        if (await knex.schema.hasTable('pricing_config_audit')) {
-          await knex('pricing_config_audit').insert({
-            config_key: 'termite_install',
-            old_value: JSON.stringify(oldData),
-            new_value: JSON.stringify(newData),
-            changed_by: MIGRATION_TAG,
-            reason: UP_REASON,
-          });
-        }
-        if (await knex.schema.hasTable('pricing_changelog')) {
-          const existing = await knex('pricing_changelog').where(CHANGELOG_IDENTITY).first('id');
-          if (!existing) {
-            await knex('pricing_changelog').insert({
-              ...CHANGELOG_IDENTITY,
-              affected_services: JSON.stringify(['termite_bait', 'termite_station_rental']),
-              before_value: JSON.stringify({ termite_install: oldData }),
-              after_value: JSON.stringify({ termite_install: newData }),
-              rationale: 'Owner-verified supplier pricing (2026-09-02): the Trelona ATBS 16-station box is $384.00 = $24.00/station, not the April $352.80 = $22.05; the catalog row already carried $24 while the engine priced off the stale literal. Station and cartridge cost now follow the inventory catalog (approved vendor price, sanity-banded, kill switch link_station_costs_to_catalog) with $24.00 as the fresh-env fallback, so the next vendor change reaches quotes without a code deploy. Install moves $610 → $653 at 15 stations; the rental uplift, which amortizes that install, moves with it. Cartridge replacement (2 per station, 33% per annual service at the 25-pack rate) and an assumed 0.25 follow-up visit reserve enter the REPORT-ONLY cost model so monitoring margin is finally computed against real consumables — no monitoring price changes in this migration.',
-            });
-          }
-        }
-      }
-    }
+async function recordTermiteInstallChange(knex, oldData, newData) {
+  if (await knex.schema.hasTable('pricing_config_audit')) {
+    await knex('pricing_config_audit').insert({
+      config_key: 'termite_install',
+      old_value: JSON.stringify(oldData),
+      new_value: JSON.stringify(newData),
+      changed_by: MIGRATION_TAG,
+      reason: UP_REASON,
+    });
   }
+  if (!(await knex.schema.hasTable('pricing_changelog'))) return;
+  const existing = await knex('pricing_changelog').where(CHANGELOG_IDENTITY).first('id');
+  if (existing) return;
+  await knex('pricing_changelog').insert({
+    ...CHANGELOG_IDENTITY,
+    affected_services: JSON.stringify(['termite_bait', 'termite_station_rental']),
+    before_value: JSON.stringify({ termite_install: oldData }),
+    after_value: JSON.stringify({ termite_install: newData }),
+    rationale: 'Owner-verified supplier pricing (2026-09-02): the Trelona ATBS 16-station box is $384.00 = $24.00/station, not the April $352.80 = $22.05; the catalog row already carried $24 while the engine priced off the stale literal. Station and cartridge cost now follow the inventory catalog (approved vendor price, sanity-banded, kill switch link_station_costs_to_catalog) with $24.00 as the fresh-env fallback, so the next vendor change reaches quotes without a code deploy. Install moves $610 → $653 at 15 stations; the rental uplift, which amortizes that install, moves with it. Cartridge replacement (2 per station, 33% per annual service at the 25-pack rate) and an assumed 0.25 follow-up visit reserve enter the REPORT-ONLY cost model so monitoring margin is finally computed against real consumables — no monitoring price changes in this migration.',
+  });
+}
+
+async function applyTermiteInstallRow(knex) {
+  if (!(await knex.schema.hasTable('pricing_config'))) return;
+  const row = await knex('pricing_config').where({ config_key: 'termite_install' }).forUpdate().first();
+  if (!row) return;
+  const oldData = parseData(row);
+  const newData = { ...oldData };
+  // Both key shapes coexist in prod (short-key + long-key seeders);
+  // db-bridge reads trelona_bait ?? trelona_station_cost — move the
+  // retired value under BOTH, never an admin-tuned one.
+  for (const key of ['trelona_bait', 'trelona_station_cost']) {
+    if (key in newData && near(newData[key], OLD_STATION_COST)) newData[key] = NEW_STATION_COST;
+  }
+  for (const [key, value] of Object.entries(COST_INPUT_DEFAULTS)) {
+    if (newData[key] == null) newData[key] = value;
+  }
+  if (JSON.stringify(newData) === JSON.stringify(oldData)) return;
+  await knex('pricing_config')
+    .where({ config_key: 'termite_install' })
+    .update({ data: JSON.stringify(newData), updated_at: knex.fn.now() });
+  await recordTermiteInstallChange(knex, oldData, newData);
+}
+
+exports.up = async function up(knex) {
+  await applyTermiteInstallRow(knex);
 
   if (!(await knex.schema.hasTable('service_product_usage'))) return;
   // Every legacy Termite Bait usage row, whichever Trelona product it points
@@ -155,6 +157,12 @@ exports.down = async function down(knex) {
           changed_by: `${MIGRATION_TAG}:rollback`,
           reason: 'Rollback of the termite station cost basis migration',
         });
+        // The changelog row this migration owns must not advertise a change
+        // that was just undone, and a re-apply must be free to record the
+        // event again (codex #4313 r5 P2).
+        if (await knex.schema.hasTable('pricing_changelog')) {
+          await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
+        }
       }
     }
   }

@@ -109,19 +109,26 @@ const PLAUSIBLE_STATION_COST = Object.freeze({ min: 5, max: 80 });
 // engine's own deriveModifiers decides from the persisted profile (codex
 // #4313 r4 P1). With a modifier in play the inversion would be a fiction
 // that replays wrong, so those rows keep the default.
-function storedTermiteModifiersNeutral(estData = {}) {
+// The install modifiers the stored quote priced under, decided by the
+// engine's own deriveModifiers from the persisted inputs (engineInputs /
+// inputs / engineRequest.profile). null when no inputs are stored (no
+// evidence → never invert) or the stored shapes disagree (codex #4313 r5 P1
+// — with the modifiers known, a modified quote inverts as exactly as a
+// neutral one).
+function storedTermiteModifiers(estData = {}) {
   const { deriveModifiers } = require('./pricing-engine/modifiers');
   const profiles = [estData?.engineInputs, estData?.inputs, estData?.engineRequest?.profile]
     .filter((p) => p && typeof p === 'object');
-  // No stored inputs at all = no evidence either way → never invert.
-  if (!profiles.length) return false;
-  return profiles.every((profile) => {
+  if (!profiles.length) return null;
+  const seen = profiles.map((profile) => {
     const m = deriveModifiers(profile);
-    return Number(m.termiteConstructionMult) === 1 && Number(m.termiteFoundationAdj) === 0;
+    return { mult: Number(m.termiteConstructionMult) || 1, adj: Number(m.termiteFoundationAdj) || 0 };
   });
+  const agree = seen.every((m) => m.mult === seen[0].mult && m.adj === seen[0].adj);
+  return agree ? seen[0] : null;
 }
 
-function unstampedTermiteStationCost(system, stations, storedInstall, storedMaterialCost, modifiersNeutral) {
+function unstampedTermiteStationCost(system, stations, storedInstall, storedMaterialCost, modifiers) {
   const legacy = PRE_STAMP_TERMITE_STATION_COST[system];
   const current = A1_TERMITE_STATION_COST[system];
   if (!Number.isFinite(legacy)) return null;
@@ -129,7 +136,11 @@ function unstampedTermiteStationCost(system, stations, storedInstall, storedMate
   const install = Math.round(Number(storedInstall));
   if (!(n > 0) || !(install > 0) || !Number.isFinite(current) || current === legacy) return legacy;
   const buildup = TERMITE_INSTALL_BUILDUP.laborMaterial + TERMITE_INSTALL_BUILDUP.misc;
-  const priced = (cost) => Math.round(n * (cost + buildup) * TERMITE_INSTALL_BUILDUP.multiplier);
+  const mult = modifiers ? modifiers.mult : 1;
+  const adj = modifiers ? modifiers.adj : 0;
+  // The install formula under the stored modifiers (neutral when unknown —
+  // then only the two known costs can match exactly).
+  const priced = (cost) => Math.round(n * (cost + buildup) * TERMITE_INSTALL_BUILDUP.multiplier * mult + adj);
   const plausible = (cost) => cost >= PLAUSIBLE_STATION_COST.min && cost <= PLAUSIBLE_STATION_COST.max && priced(cost) === install;
   if (priced(legacy) === install) return legacy;
   if (priced(current) === install) return current;
@@ -138,8 +149,8 @@ function unstampedTermiteStationCost(system, stations, storedInstall, storedMate
     const derived = Math.round((material / n - buildup) * 100) / 100;
     if (plausible(derived)) return derived;
   }
-  if (modifiersNeutral === true) {
-    const inverted = Math.round((install / (n * TERMITE_INSTALL_BUILDUP.multiplier) - buildup) * 10000) / 10000;
+  if (modifiers) {
+    const inverted = Math.round(((install - adj) / (n * TERMITE_INSTALL_BUILDUP.multiplier * mult) - buildup) * 10000) / 10000;
     if (plausible(inverted)) return inverted;
   }
   return legacy;
@@ -181,21 +192,40 @@ function storedTermiteResult(estData = {}) {
     stations: firstDefined(m.sta, r.stations),
     install: firstDefined(m.ti, m.ai, install.retailValue, install.price),
     materialCost: install.materialCost,
-    modifiersNeutral: storedTermiteModifiersNeutral(estData),
+    modifiers: storedTermiteModifiers(estData),
   };
 }
 
 // Replay decision: stamped replays verbatim; unstamped is read against the
 // stored install (see unstampedTermiteStationCost); nothing stored → null.
+// Every install knob a stamped line carries replays verbatim (codex #4313
+// r5 P1: a later multiplier / buildup / floor edit must not move a sent
+// install either); an unstamped line replays the pre-stamp values of those
+// knobs, which never changed before the stamp existed.
+const PRE_STAMP_TERMITE_INSTALL_KNOBS = Object.freeze({
+  laborMaterial: TERMITE_INSTALL_BUILDUP.laborMaterial,
+  misc: TERMITE_INSTALL_BUILDUP.misc,
+  installMultiplier: TERMITE_INSTALL_BUILDUP.multiplier,
+  minStations: 8,
+});
 function termiteKnobSignalForReplay(estData = {}) {
   const stored = storedTermiteResult(estData);
   if (!stored) return null;
-  const stampedCost = stored.stamp && typeof stored.stamp === 'object' ? Number(stored.stamp.stationCost) : NaN;
+  const stamp = stored.stamp && typeof stored.stamp === 'object' ? stored.stamp : null;
+  const stampedCost = stamp ? Number(stamp.stationCost) : NaN;
   if (Number.isFinite(stampedCost) && stampedCost > 0) {
-    return { system: String(stored.stamp.system || stored.system).toLowerCase(), stationCost: stampedCost };
+    const knob = (key) => (Number.isFinite(Number(stamp[key])) ? Number(stamp[key]) : PRE_STAMP_TERMITE_INSTALL_KNOBS[key]);
+    return {
+      system: String(stamp.system || stored.system).toLowerCase(),
+      stationCost: stampedCost,
+      laborMaterial: knob('laborMaterial'),
+      misc: knob('misc'),
+      installMultiplier: knob('installMultiplier'),
+      minStations: knob('minStations'),
+    };
   }
-  const fallback = unstampedTermiteStationCost(stored.system, stored.stations, stored.install, stored.materialCost, stored.modifiersNeutral);
-  return Number.isFinite(fallback) ? { system: stored.system, stationCost: fallback } : null;
+  const fallback = unstampedTermiteStationCost(stored.system, stored.stations, stored.install, stored.materialCost, stored.modifiers);
+  return Number.isFinite(fallback) ? { system: stored.system, stationCost: fallback, ...PRE_STAMP_TERMITE_INSTALL_KNOBS } : null;
 }
 
 // Stored-result palm provenance for translator-based replays (v4.8, pre-push

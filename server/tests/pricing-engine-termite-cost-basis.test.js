@@ -194,10 +194,10 @@ describe('termite station cost replay (plan §A1 replay rule)', () => {
 
   test('every quote stamps the station cost it priced under', () => {
     const li = priceTermiteBait(HOME, { system: 'trelona' });
-    expect(li.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config' });
+    expect(li.pricingKnobs).toMatchObject({ system: 'trelona', stationCost: 24, stationCostSource: 'config' });
     constants.TERMITE.systems.trelona.stationCost = 25.5;
     constants.TERMITE.systems.trelona.stationCostSource = 'catalog';
-    expect(priceTermiteBait(HOME, { system: 'trelona' }).pricingKnobs).toEqual({ system: 'trelona', stationCost: 25.5, stationCostSource: 'catalog' });
+    expect(priceTermiteBait(HOME, { system: 'trelona' }).pricingKnobs).toMatchObject({ system: 'trelona', stationCost: 25.5, stationCostSource: 'catalog' });
   });
 
   test('a replayed snapshot beats a later cost move — the sent install survives, the rental uplift with it', () => {
@@ -210,7 +210,7 @@ describe('termite station cost replay (plan §A1 replay rule)', () => {
     expect(replayed.installation.price).toBe(610);
     expect(replayed.installation.retailValue).toBe(610);
     expect(replayed.materialCostSource.station).toBe('replay');
-    expect(replayed.pricingKnobs).toEqual({ system: 'trelona', stationCost: 22.05, stationCostSource: 'replay' });
+    expect(replayed.pricingKnobs).toMatchObject({ system: 'trelona', stationCost: 22.05, stationCostSource: 'replay' });
     // A stamp for another system never lends its hardware cost.
     const advance = priceTermiteBait(HOME, { system: 'advance', knobs: sent.pricingKnobs });
     expect(advance.installation.price).toBe(639);
@@ -231,31 +231,31 @@ describe('termite station cost replay (plan §A1 replay rule)', () => {
 
   test('the replay signal: stamped replays verbatim, unstamped termite replays the pre-stamp constant, no termite injects nothing', () => {
     expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait', system: 'trelona', pricingKnobs: { system: 'trelona', stationCost: 25.5 } }] } }))
-      .toEqual({ system: 'trelona', stationCost: 25.5 });
+      .toEqual({ system: 'trelona', stationCost: 25.5, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait', selectedSystem: 'trelona', installation: { price: 610 } }] } }))
-      .toEqual({ system: 'trelona', stationCost: 22.05 });
+      .toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait', system: 'advance' }] } }))
-      .toEqual({ system: 'advance', stationCost: 13.16 });
+      .toEqual({ system: 'advance', stationCost: 13.16, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'pest_control' }] } })).toBeNull();
     expect(replay.termiteKnobSignalForReplay({})).toBeNull();
     // The no-stamp default is the module's own constant, never the live one.
     constants.TERMITE.systems.trelona.stationCost = 99;
-    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait' }] } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait' }] } })).toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
   });
 
   test('the mapped admin envelope carries the stamp and the signal prefers it over a stale raw engineResult', () => {
     const estimate = generateEstimate({ homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family', services: { termite: { system: 'trelona' } } });
     const mapped = mapV1ToLegacyShape(estimate);
-    expect(mapped.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config' });
+    expect(mapped.results.tmBait.pricingKnobs).toMatchObject({ system: 'trelona', stationCost: 24, stationCostSource: 'config' });
     expect(mapped.results.tmBait.materialCostSource).toEqual({ station: 'config', cartridge: 'config' });
-    expect(replay.termiteKnobSignalForReplay({ result: mapped })).toEqual({ system: 'trelona', stationCost: 24 });
+    expect(replay.termiteKnobSignalForReplay({ result: mapped })).toEqual({ system: 'trelona', stationCost: 24, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     // Mapped envelope with no stamp (saved before A1) → pre-stamp constant.
-    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', ti: 610 } } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', ti: 610 } } } })).toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     // Mapped stamp wins over an older raw line.
     expect(replay.termiteKnobSignalForReplay({
       result: { results: { tmBait: { selectedSystem: 'trelona', pricingKnobs: { system: 'trelona', stationCost: 24 } } } },
       engineResult: { lineItems: [{ service: 'termite_bait', pricingKnobs: { system: 'trelona', stationCost: 22.05 } }] },
-    })).toEqual({ system: 'trelona', stationCost: 24 });
+    })).toEqual({ system: 'trelona', stationCost: 24, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
   });
 
   test('the replay signal has ONE home shared by both authoritative paths', () => {
@@ -385,19 +385,19 @@ describe('termite catalog link — codex round 1', () => {
 
   test('an unstamped result is read against the stored install: a post-A1 client-fallback save replays at $24, a pre-A1 row at $22.05', () => {
     // Post-A1 client fallback (Admin V1 without a stamp): 15 stations at $24 → $653.
-    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 653 } } } })).toEqual({ system: 'trelona', stationCost: 24 });
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 653 } } } })).toEqual({ system: 'trelona', stationCost: 24, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     // Pre-A1 row: 15 stations at $22.05 → $610.
-    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 610 } } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 610 } } } })).toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     // Raw line shape.
-    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait', system: 'trelona', stations: 15, installation: { price: 0, retailValue: 653 } }] } })).toEqual({ system: 'trelona', stationCost: 24 });
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait', system: 'trelona', stations: 15, installation: { price: 0, retailValue: 653 } }] } })).toEqual({ system: 'trelona', stationCost: 24, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     // Modifiers in play (neither reproduces) → the pre-stamp default.
-    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 700 } } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 700 } } } })).toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
   });
 
   test('an unstamped raw line from an admin-tuned pre-stamp environment replays at the cost its materialCost pins', () => {
     // 15 stations at an admin-tuned $23.50: material 15 × 29.50 = 442.5 → 443 (rounded by the pricer), install 15 × 29.50 × 1.45 = 641.6 → 642.
     const line = { service: 'termite_bait', system: 'trelona', stations: 15, installation: { price: 642, retailValue: 642, materialCost: 443 } };
-    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [line] } })).toEqual({ system: 'trelona', stationCost: 23.53 });
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [line] } })).toEqual({ system: 'trelona', stationCost: 23.53, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     // …and that replays to the stored install to the dollar.
     constants.TERMITE.systems.trelona.stationCost = 24;
     const replayed = priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'trelona', knobs: { system: 'trelona', stationCost: 23.53 } });
@@ -409,11 +409,42 @@ describe('termite catalog link — codex round 1', () => {
     expect(recovered.system).toBe('trelona');
     expect(recovered.stationCost).toBeCloseTo(23.5172, 3);
     expect(priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'trelona', knobs: recovered }).installation.price).toBe(642);
-    // …but a stored profile with an install modifier in play makes the inversion a fiction → the default.
-    expect(replay.termiteKnobSignalForReplay({ ...mapped, engineRequest: { profile: { homeSqFt: 2000, foundationType: 'CRAWLSPACE' } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
-    expect(replay.termiteKnobSignalForReplay({ ...mapped, inputs: { constructionMaterial: 'WOOD_FRAME' } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    // …and with a modifier in the stored profile the inversion uses it: 15 stations at $23.50 + $150 crawlspace = $792.
+    const crawl = { engineRequest: { profile: { homeSqFt: 2000, foundationType: 'CRAWLSPACE' } }, result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 792 } } } };
+    const crawlSignal = replay.termiteKnobSignalForReplay(crawl);
+    expect(crawlSignal.stationCost).toBeCloseTo(23.5172, 3);
+    expect(priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' }, foundationType: 'CRAWLSPACE' }, { system: 'trelona', knobs: crawlSignal, modifiers: { termiteFoundationAdj: 150, termiteConstructionMult: 1 } }).installation.price).toBe(792);
+    // Disagreeing stored shapes → no evidence → the default.
+    expect(replay.termiteKnobSignalForReplay({ ...mapped, inputs: { constructionMaterial: 'WOOD_FRAME' } }).stationCost).toBe(22.05);
     // An implausible derivation (a line whose materialCost is garbage) never wins.
-    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ ...line, installation: { ...line.installation, materialCost: 9000 } }] } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ ...line, installation: { ...line.installation, materialCost: 9000 } }] } })).toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
+  });
+});
+
+describe('termite install knobs — every price-driving knob replays (codex r5)', () => {
+  const HOME = { footprint: 2000, features: { complexity: 'standard' } };
+  afterEach(restoreTermite);
+
+  test('a later multiplier / buildup / floor edit does not move a sent install; the stamp carries them all', () => {
+    const sent = priceTermiteBait(HOME, { system: 'trelona' });
+    expect(sent.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config', laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
+    expect(sent.installation.price).toBe(653);
+    constants.TERMITE.installMultiplier = 1.5;
+    constants.TERMITE.systems.trelona.laborMaterial = 6;
+    constants.TERMITE.minStations = 20;
+    const live = priceTermiteBait(HOME, { system: 'trelona' });
+    expect(live.installation.price).not.toBe(653);
+    expect(live.stations).toBe(20);
+    const replayed = priceTermiteBait(HOME, { system: 'trelona', knobs: sent.pricingKnobs });
+    expect(replayed.stations).toBe(15);
+    expect(replayed.installation.price).toBe(653);
+  });
+
+  test('the engine input replays the full knob set and an unstamped row gets the pre-stamp knobs', () => {
+    const signal = replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 610, pricingKnobs: { system: 'trelona', stationCost: 22.05, installMultiplier: 1.4 } } } } });
+    expect(signal).toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.4, minStations: 8 });
+    const input = { homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family', services: { termite: { system: 'trelona' } }, termitePricingKnobs: signal };
+    expect(generateEstimate(input).lineItems.find((l) => l.service === 'termite_bait').installation.price).toBe(Math.round(15 * 28.05 * 1.4));
   });
 });
 

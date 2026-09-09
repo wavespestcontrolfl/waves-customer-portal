@@ -4700,6 +4700,23 @@ function priceTermiteStationRental(installPrice) {
 // are DB-tunable via pricing_config.termite_install; the station and
 // cartridge costs may come from the inventory catalog (db-bridge link),
 // which is what materialCostSource reports.
+// Install-price knobs for one quote: the replayed snapshot's values where
+// present and sane, else the live system/config values. See priceTermiteBait.
+function resolveTermiteInstallBasis(sys, selectedSystem, knobs) {
+  const snap = knobs && typeof knobs === 'object' && (!knobs.system || knobs.system === selectedSystem) ? knobs : null;
+  const positive = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  const nonNegative = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+  const replayedStationCost = snap ? positive(snap.stationCost) : null;
+  return {
+    stationCost: replayedStationCost ?? sys.stationCost,
+    stationCostSource: replayedStationCost != null ? 'replay' : (sys.stationCostSource === 'catalog' ? 'catalog' : 'config'),
+    laborMaterial: (snap && nonNegative(snap.laborMaterial)) ?? sys.laborMaterial,
+    misc: (snap && nonNegative(snap.misc)) ?? sys.misc,
+    installMultiplier: (snap && positive(snap.installMultiplier)) ?? TERMITE.installMultiplier,
+    minStations: (snap && positive(snap.minStations)) ?? TERMITE.minStations,
+  };
+}
+
 const TERMITE_SERVICE_MINUTES_PER_STATION = 5;
 function termiteProgramCostModel({ stations, installMaterialCost, installLabor, visitsPerYear, stationCost, system }) {
   // TERMITE.cartridges describes Trelona ATBS (two cartridges per station,
@@ -4870,29 +4887,27 @@ function priceTermiteBait(property, options = {}) {
   // 2026-07-28) wins over the legacy global; the DB termite_install row can
   // still tune the FALLBACK spacing but never a system's label spacing.
   const spacingFt = Number(sys.spacingFt) > 0 ? Number(sys.spacingFt) : TERMITE.stationSpacing;
-  const stations = Math.max(TERMITE.minStations, Math.ceil(perimeter / spacingFt));
+  // Every install-price knob this quote prices under, resolved ONCE: a
+  // replayed snapshot wins (only when it was stamped for THIS system — a
+  // stored Trelona quote must never lend its basis to an Advance replay),
+  // otherwise the live values (station cost possibly from the catalog). The
+  // full set is stamped back as pricingKnobs so a later change to ANY of
+  // them — station cost, per-station buildup, multiplier, station floor —
+  // cannot re-price an already-sent install on replay (codex #4313 r5 P1).
+  const basis = resolveTermiteInstallBasis(sys, selectedSystem, knobs);
+  const stations = Math.max(basis.minStations, Math.ceil(perimeter / spacingFt));
 
   const conMult = constructionMult.value;
   const foundAdj = foundationAdj.value;
-  // The station cost this quote prices under. A replayed snapshot wins
-  // (only when it was stamped for THIS system — a stored Trelona quote must
-  // never lend its hardware cost to an Advance replay); otherwise the live
-  // value, which the db-bridge may have taken from the inventory catalog.
-  const replayedStationCost = knobs && typeof knobs === 'object'
-    && (!knobs.system || knobs.system === selectedSystem)
-    && Number.isFinite(Number(knobs.stationCost)) && Number(knobs.stationCost) > 0
-    ? Number(knobs.stationCost)
-    : null;
-  const stationCost = replayedStationCost ?? sys.stationCost;
-  const stationCostSource = replayedStationCost != null ? 'replay' : (sys.stationCostSource === 'catalog' ? 'catalog' : 'config');
-  const installMaterialCost = stations * (stationCost + sys.laborMaterial + sys.misc);
+  const { stationCost, stationCostSource } = basis;
+  const installMaterialCost = stations * (stationCost + basis.laborMaterial + basis.misc);
   // 5 min per station — calibrated Apr 2026 against All U Need invoice
   // (21 Sentricon stations installed in 78 min by one tech = 3.7 min/sta).
   // Prior value was 0.25 hr (15 min/sta), ~4x the observed pace, which made
   // reported install margin look artificially negative under the 1.45x mult.
   const installLabor = stations * 0.083 * GLOBAL.LABOR_RATE;
   const installCost = installMaterialCost + installLabor;
-  const installPrice = Math.round(installMaterialCost * TERMITE.installMultiplier * conMult + foundAdj);
+  const installPrice = Math.round(installMaterialCost * basis.installMultiplier * conMult + foundAdj);
   const installMargin = installPrice > 0 ? (installPrice - installCost) / installPrice : 0;
   // Rental: the customer is charged nothing to install. The full install
   // price stays on the line as installation.retailValue so the options sheet
@@ -4988,11 +5003,14 @@ function priceTermiteBait(property, options = {}) {
     // authoritative replay paths inject it as options.knobs.
     pricingKnobs: {
       system: selectedSystem,
-      // The EXACT value, never rounded: the replay guarantee is
-      // "reprices to the cent", and a sub-cent config value rounded here
-      // would replay one dollar off at scale (codex #4313 r1 P2).
+      // EXACT values, never rounded: the replay guarantee is "reprices to
+      // the cent" (codex #4313 r1 P2).
       stationCost,
       stationCostSource,
+      laborMaterial: basis.laborMaterial,
+      misc: basis.misc,
+      installMultiplier: basis.installMultiplier,
+      minStations: basis.minStations,
     },
     // Report-only program cost model (LAB-006): install cost plus the
     // steady-state annual cost of servicing the stations — service labor per

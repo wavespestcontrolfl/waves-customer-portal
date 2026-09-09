@@ -3460,12 +3460,37 @@ async function recalcBestPrice(productId, dbc = db) {
   // transaction (legacy approval) take the lock on their own connection.
   if (dbc !== db) {
     await dbc.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productId)]);
-    return recalcBestPriceLocked(productId, dbc);
+    const result = await recalcBestPriceLocked(productId, dbc);
+    invalidatePricingCacheAfterCommit(dbc);
+    return result;
   }
-  return db.transaction(async (trx) => {
+  const result = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productId)]);
     return recalcBestPriceLocked(productId, trx);
   });
+  invalidatePricingCacheAfterCommit(null);
+  return result;
+}
+
+// The pricing engine's DB bridge caches pricing_config + the catalog-linked
+// material costs for 60 s and nothing in the inventory write paths told it a
+// best price moved, so an Admin V2 quote (property-lookup-v2's conditional
+// sync) or an admin save could stamp an obsolete catalog-linked station cost
+// into an estimate for up to a minute after an approval (codex #4313 r5 P1).
+// Every best-price recalc — the one choke point for catalog price changes —
+// invalidates the cache AFTER its transaction commits (an invalidation
+// before commit could be consumed by a sync that still reads the old row).
+function invalidatePricingCacheAfterCommit(trx) {
+  const invalidate = () => {
+    try {
+      require('../services/pricing-engine/db-bridge').invalidatePricingConfigCache();
+    } catch (_err) { /* the bridge is optional in some test harnesses */ }
+  };
+  if (trx && trx.executionPromise && typeof trx.executionPromise.then === 'function') {
+    trx.executionPromise.then(invalidate, () => {});
+    return;
+  }
+  invalidate();
 }
 
 async function recalcBestPriceLocked(productId, dbc) {

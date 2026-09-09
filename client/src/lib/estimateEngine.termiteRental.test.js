@@ -120,7 +120,7 @@ describe("termite station rental — client fallback engine", () => {
     // Quote-time stamp (plan §A1 replay rule): a CLIENT_FALLBACK save
     // carries the station cost it priced under, so the server reader never
     // mistakes a new $24 quote for a pre-A1 $22.05 one.
-    expect(own.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config' });
+    expect(own.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config', laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
     expect(own.results.tmBait.materialCostSource).toEqual({ station: 'config', cartridge: 'config' });
   });
 
@@ -134,7 +134,7 @@ describe("termite station rental — client fallback engine", () => {
       const own = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" }));
       const staTre = Math.max(8, Math.ceil(own.results.tmBait.perim / 15));
       expect(own.results.tmBait.ti).toBe(Math.round(staTre * (22.5 + 5.25 + 0.75) * 1.45));
-      expect(own.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 22.5, stationCostSource: 'catalog' });
+      expect(own.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 22.5, stationCostSource: 'catalog', laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
       expect(own.results.tmBait.materialCostSource).toEqual({ station: 'catalog', cartridge: 'catalog' });
       // Row-only (no effective block) reads the row; null resets the default.
       applyServerTermiteInstallPricingConfig({ multiplier: 1.45, trelona_bait: 23 }, null);
