@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import StaffDocumentLibrary from "../../components/staffDocuments/Library";
@@ -187,6 +188,7 @@ export default function TimeTrackingPage() {
   const activeGroup =
     TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
     TIMETRACKING_TAB_GROUPS[0];
+  useRenderedTabBeacon("/admin/timetracking", tab, [searchParams]);
   const [toast, setToast] = useState("");
   const showToast = (m) => {
     setToast(m);
