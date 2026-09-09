@@ -512,7 +512,12 @@ function CommercialProposalEditor() {
       const copy = {
         name: `${src.name || 'Building'} (copy)`,
         note: src.note,
-        lineItems: src.lineItems.map((l) => ({ ...l, id: crypto.randomUUID() })),
+        // With bid authoring gated off the server refuses a NEW line that
+        // carries a unit (no saved unit under its fresh id), and the unit
+        // selector is disabled, so the copy would be unsaveable. Copy the
+        // lines unit-less then; the original keeps its saved units
+        // (GH codex P2 r3 on #4305).
+        lineItems: src.lineItems.map((l) => ({ ...l, id: crypto.randomUUID(), ...(bidToolsEnabled ? {} : { unit: '' }) })),
       };
       return [...prev.slice(0, bi + 1), copy, ...prev.slice(bi + 1)];
     });

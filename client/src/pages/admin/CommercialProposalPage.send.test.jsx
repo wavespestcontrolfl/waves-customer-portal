@@ -124,3 +124,17 @@ it('keys the next save on the version its PUT committed and refuses to adopt a c
   const puts = calls.filter((call) => call.method === 'PUT').map((call) => JSON.parse(call.body).expectedEditVersion);
   expect(puts).toEqual(['loaded-version', 'saved-version']);
 });
+
+it('duplicates a unit-bearing building as a unit-less copy while the gate is off, so the copy can be saved', async () => {
+  saved.bidToolsEnabled = false;
+  saved.proposal.buildings[0].lineItems[0] = { ...saved.proposal.buildings[0].lineItems[0], id: 'saved-line', unit: 'acre' };
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.click(screen.getByTitle('Duplicate building'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await screen.findByRole('button', { name: 'Saved' });
+  const payload = JSON.parse(calls.find((call) => call.method === 'PUT').body);
+  expect(payload.proposal.buildings).toHaveLength(2);
+  expect(payload.proposal.buildings[0].lineItems[0]).toMatchObject({ id: 'saved-line', unit: 'acre' });
+  expect(payload.proposal.buildings[1].lineItems[0].unit).toBeFalsy();
+  expect(payload.proposal.buildings[1].lineItems[0].id).not.toBe('saved-line');
+});
