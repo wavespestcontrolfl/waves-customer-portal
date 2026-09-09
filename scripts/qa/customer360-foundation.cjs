@@ -70,8 +70,9 @@ const detail = {
   const report = [];
   const outcome = { ...evidence(root), passed: false, scenarios: report };
   fs.mkdirSync(output, { recursive: true });
-  const server = await previewServer(root, process.argv[2]);
+  let server;
   try {
+    server = await previewServer(root, process.argv[2]);
     for (const [device, width, height] of [
       ["desktop", 1440, 1000],
       ["mobile", 390, 844],
@@ -412,7 +413,7 @@ const detail = {
     outcome.failure = { name: error.name, message: error.message };
     throw error;
   } finally {
-    try { await server.close(); }
+    try { await server?.close(); }
     catch (error) {
       outcome.passed = false;
       outcome.cleanupFailure = { name: error.name, message: error.message };

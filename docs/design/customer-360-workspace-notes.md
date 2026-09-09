@@ -68,6 +68,8 @@ No customer messages, provider AI calls, or charges are performed during verific
 
 ### Shared foundation browser runner
 
+Provision Chromium and WebKit once with `npx playwright install --with-deps chromium webkit`; installing the npm dependencies does not install browser binaries.
+
 `node scripts/qa/customer360-foundation.cjs` runs the actual Customer 360 route with synthetic API fixtures in desktop Chromium and touch WebKit. It also accepts the URL of this worktree's managed frontend. Reports and screenshots are written to `.tmp/design-system/customer360/`; the report identifies its source checkout and records the run outcome. The shared font loader must succeed before captures. Failures retain a failed report while browser and preview-server cleanup are attempted.
 
 The foundation composition source `29193ab937e71caebb3081fc39e8045763ec667b` passed the production build and full browser flow: directory edit, workspace navigation, retained edit state, message drafts, Quick Links Escape/focus return, message-drawer focus return, and the overlay/payer forms. Its composition predecessor passed 162 affected tests; the integrated editor-copy correction passed 18 page tests. Browser fixtures made only synthetic read acknowledgments, with no page errors, unmatched requests or horizontal overflow. These are frontend results; final-head CI and the physical-device check are tracked separately.
