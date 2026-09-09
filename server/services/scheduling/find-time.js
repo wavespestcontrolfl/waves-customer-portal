@@ -20,7 +20,7 @@ const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable } = require('../technician-eligibility');
-const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement } = require('./arrival-route');
+const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements } = require('./arrival-route');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -29,6 +29,10 @@ const DEFAULT_SERVICE_MIN = 60;
 // driveMin is auto-dispatch/geo's — the one coordinate-glue over
 // route-optimizer's model, so this module and auto-dispatch score on the
 // same scale (a local copy lived here until the travel-gap lane).
+
+function hasCoords(stop) {
+  return stop != null && stop.lat != null && stop.lng != null;
+}
 
 function timeToMinutes(hhmm) {
   if (!hhmm) return null;
@@ -75,18 +79,19 @@ async function findArrivalWindowSlots(opts) {
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today) continue;
     for (const tech of techs) {
+      // `changes` is the caller's pending edit (duration, a re-picked
+      // service address) — the same shape the save probe hands the
+      // checker, so the ranking simulates the visit being saved, not the
+      // one stored.
       const context = await loadArrivalRouteContext({
         serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
-        excludeServiceIds: opts.excludeServiceIds, now,
+        excludeServiceIds: opts.excludeServiceIds, changes: opts.arrivalWindow.changes, now,
       });
       if (!context) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      for (let start = Math.ceil(floor / 60) * 60; start + durationMinutes <= ADMIN_DAY_END_MINUTES; start += 60) {
-        evaluated++;
-        const windowStart = minutesToTime(start);
-        const windowEnd = minutesToTime(start + durationMinutes);
-        const fit = evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes });
-        if (!fit.feasible) continue;
+      const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
+      evaluated += candidates.evaluated;
+      for (const { windowStart, windowEnd, fit } of candidates.placements) {
         const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
         slots.push({
           date, technician: { id: tech.id, name: tech.name },
@@ -96,7 +101,7 @@ async function findArrivalWindowSlots(opts) {
           waiting_minutes: fit.waitingMinutes, arrival_delay_minutes: fit.arrivalDelayMinutes,
           estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
           route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
-          latest_start_min: start,
+          latest_start_min: timeToMinutes(windowStart),
         });
       }
     }
@@ -280,7 +285,9 @@ async function findAvailableSlots(opts) {
         evaluated++;
 
         const baselineDrive = driveMin(prev, next);
-        const detourDrive = driveMin(prev, newStop) + driveMin(newStop, next);
+        const driveIn = driveMin(prev, newStop);
+        const driveOut = driveMin(newStop, next);
+        const detourDrive = driveIn + driveOut;
         const extraDrive = Math.max(0, detourDrive - baselineDrive);
 
         // Earliest the new job could start: after prev.endMin + drive from
@@ -289,7 +296,7 @@ async function findAvailableSlots(opts) {
         const nextIsStop = next.id !== 'HQ_END';
         const earliestStart = Math.max(
           dayOpen,
-          prev.endMin + driveMin(prev, newStop) + (prevIsStop ? stopBuffer : 0),
+          prev.endMin + driveIn + (prevIsStop ? stopBuffer : 0),
           date === todayEt ? todayFloorMin : 0,
           earliestStartMin, // honor a hard time-window lower bound (0 = no-op)
         );
@@ -301,7 +308,7 @@ async function findAvailableSlots(opts) {
           : earliestStart;
         const earliestEnd = startMin + durationMinutes;
         // Must allow drive from new → next before next.startMin
-        const latestEnd = next.startMin - driveMin(newStop, next) - (nextIsStop ? stopBuffer : 0);
+        const latestEnd = next.startMin - driveOut - (nextIsStop ? stopBuffer : 0);
 
         if (earliestEnd > latestEnd) continue; // doesn't fit
         if (earliestEnd > dayClose) continue;  // past end of day
@@ -323,6 +330,15 @@ async function findAvailableSlots(opts) {
           detour_minutes: extraDrive,
           baseline_drive_minutes: baselineDrive,
           total_drive_minutes: detourDrive,
+          // The two legs the detour is made of, so a picker can say what the
+          // van actually drives INTO this stop (from the previous anchor)
+          // separately from what the insertion adds to the route. A
+          // coordless anchor scores as zero drive above (so its gaps stay
+          // offered), but that zero is a sentinel, not a trip — report the
+          // leg as unknown (null) so a hint omits it rather than claiming
+          // "0 min drive" (Codex #4120 r2 P2).
+          drive_in_minutes: hasCoords(prev) ? driveIn : null,
+          drive_out_minutes: hasCoords(next) ? driveOut : null,
           score,
           // Last start this gap can hold (its end still clears the drive to
           // the next anchor). Availability surfaces that only offer clean
@@ -336,6 +352,8 @@ async function findAvailableSlots(opts) {
           insertion: {
             after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
             before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
+            // Bare name for labels ("from <previous stop>"); null = the home base.
+            after_name: prev.id === 'HQ_START' ? null : prev.customer,
             after_stop_id: prev.id === 'HQ_START' || prev.id === 'HQ_END' ? null : prev.id,
             before_stop_id: next.id === 'HQ_START' || next.id === 'HQ_END' ? null : next.id,
           },

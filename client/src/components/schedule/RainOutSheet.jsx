@@ -51,8 +51,9 @@ const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
 // GATE_QUICKMOVE_CUSTOM_REASON is on AND the template row is live): the
 // dispatcher's message opens the SMS and the templated move line +
 // reschedule link close it. Single stop only; the assembled text is capped
-// at 2 SMS segments — the live counter is SERVER-rendered via the
-// custom-preview endpoint (no client render mirrors), and commit()
+// at 2 SMS segments — the same cap a preset reason's notice + appended
+// note is held to. The live counter is SERVER-rendered via the
+// sms-preview endpoint (no client render mirrors), and commit()
 // re-renders and enforces fail-closed.
 const CUSTOM_REASON = 'custom';
 
@@ -70,6 +71,7 @@ const ERROR_COPY = {
   custom_requires_note: 'Write the message — it becomes the front of the text.',
   note_too_many_segments: 'That message would send as 3+ SMS segments — shorten it to fit 2.',
   custom_message_unavailable: 'The custom-message text template is turned off — use a preset reason.',
+  note_cap_unavailable: "Couldn't check the text's length just now — try again in a moment.",
 };
 
 // Mirrors of the server's note guards (rain-out.js sanitizeCustomerNote) —
@@ -433,46 +435,59 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     : noteGuard ? ERROR_COPY.note_guard_blocked
       : ERROR_COPY.note_compliance_blocked;
 
-  // Custom-reason state: the message is OPTIONAL (owner ruling 2026-08-24
-  // — a blank box sends the server's standard opener instead of blocking
-  // the move), and the assembled body must fit 2 segments. The count comes
-  // from the SERVER's own render
-  // (POST rain-out/custom-preview → previewCustomSms), debounced — the
+  // Message-box segment state. Custom reason: the message is OPTIONAL
+  // (owner ruling 2026-08-24 — a blank box sends the server's standard
+  // opener instead of blocking the move) and the assembled body must fit
+  // 2 segments. Preset reason: a typed note is appended to the notice and
+  // the notice + note must fit the same 2 segments (a blank note needs no
+  // counter). The count comes from the SERVER's own render
+  // (POST rain-out/sms-preview → previewMovedSms), debounced — the
   // client keeps no render mirrors (codex r9 P1: mirroring
   // gsm-normalize/segment-counter/sms-time-format/substitution meant any
   // server-side change could desync the counter at the boundary). The
   // preview is advisory; commit() re-renders and enforces fail-closed, so
-  // a preview fetch failure just hides the counter, never blocks Move.
+  // a preview fetch failure (or an uncapped rung) just hides the counter,
+  // never blocks Move.
   const isCustomReason = reason === CUSTOM_REASON;
   const customAvailable = !!options?.customCompose;
-  const [customSeg, setCustomSeg] = useState(null);
+  const [smsSeg, setSmsSeg] = useState(null);
   const selectedDate = selected?.date || null;
   const selectedStart = selected?.window?.start || null;
   const selectedEnd = selected?.window?.end || null;
+  // A preset note on a customer with no phone never sends (commit() skips
+  // the cap and moves the visit un-texted) — no counter, no Move lock.
+  const hasPhone = !!options?.service?.hasPhone;
+  const wantsCounter = isCustomReason ? customAvailable : (hasPhone && note.trim().length > 0);
   useEffect(() => {
-    if (!(isCustomReason && notify && customAvailable && selectedDate && selectedStart)) {
-      setCustomSeg(null);
+    if (!(wantsCounter && notify && selectedDate && selectedStart)) {
+      setSmsSeg(null);
       return undefined;
     }
     const controller = new AbortController();
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out/custom-preview`, {
+        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out/sms-preview`, {
           method: 'POST',
           headers: authHeaders(),
           signal: controller.signal,
           body: JSON.stringify({
+            reasonCode: reason,
             message: note,
             target: { date: selectedDate, window: { start: selectedStart, end: selectedEnd } },
           }),
         });
         const data = await res.json().catch(() => null);
-        if (!controller.signal.aborted) setCustomSeg(res.ok && data?.ok ? data : null);
-      } catch { /* advisory only — the server enforces at commit */ }
+        if (!controller.signal.aborted) setSmsSeg(res.ok && data?.ok ? data : null);
+      } catch {
+        // Advisory only — the server enforces at commit. A stale over-budget
+        // result must not outlive a failed refetch and keep Move locked on
+        // a note the server would accept (codex #4122 P2).
+        if (!controller.signal.aborted) setSmsSeg(null);
+      }
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [isCustomReason, notify, customAvailable, note, selectedDate, selectedStart, selectedEnd, service.id]);
-  const customOverBudget = !!(customSeg && !customSeg.withinCap);
+  }, [wantsCounter, reason, notify, note, selectedDate, selectedStart, selectedEnd, service.id]);
+  const overBudget = !!(smsSeg && !smsSeg.withinCap);
 
   // Overlap advisory (owner ask 2026-08-12): every selection change —
   // preset OR custom time — re-checks the target against the schedule
@@ -513,7 +528,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // On a rest-of-route move the hint advises the tapped visit only; that's
   // fine, it's advisory (commit still shifts siblings by the window delta).
   const landingDate = isCustom ? customDate : (selected?.date || null);
-  const { bestTimes } = useBestTimes({
+  const { bestTimes, picked, bestInRange } = useBestTimes({
     date: landingDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
@@ -527,13 +542,16 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     // Quick Move can't reassign, so an unassigned visit's all-tech
     // detours would be unactionable — no tech, no hint.
     enabled: !!landingDate && !!(service.technicianId || service.technician_id),
+    // What the chosen hour costs (preset window or the custom field), and
+    // the cheapest date+hour from the earliest day the move can land.
+    pickedStart: isCustom ? customStart : selected?.window?.start,
+    rangeFrom: todayStr,
+    // A same-day landing is floored at the next top-of-hour — raised
+    // further by running_late (server enforces target_not_later). The
+    // server applies it while choosing, so no chip ever advertises an
+    // hour that goes customElapsed the moment it's tapped.
+    sameDayFloorMin: minTodayStartMin,
   });
-  // A same-day landing is floored at the next top-of-hour — raised further
-  // by running_late (server enforces target_not_later). Never advertise an
-  // hour that goes customElapsed the moment it's tapped.
-  const floorBestTimes = landingDate === todayStr
-    ? bestTimes.filter((s) => (hhmmToMin(s.start) ?? 0) >= minTodayStartMin)
-    : bestTimes;
 
   // Two lists, one scope toggle (codex #3375 P2 ×2):
   //   conflicts      — what the ANCHOR's window hits. A route-scope push
@@ -564,7 +582,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   };
 
   const handleCommit = async () => {
-    if (!selected || busy || noteBlocked || customOverBudget) return;
+    if (!selected || busy || noteBlocked || overBudget) return;
     setBusy(true);
     setError('');
     try {
@@ -842,10 +860,14 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 active (they set the custom start); a preset target is fixed,
                 so the chips go display-only. */}
             <BestTimeHint
-              bestTimes={floorBestTimes}
+              bestTimes={bestTimes}
+              picked={picked}
+              bestInRange={bestInRange}
               currentStart={isCustom ? customStart : selected?.window?.start}
+              currentDate={landingDate}
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={isCustom ? (slot) => setCustomStart(slot.start) : undefined}
+              onPickDate={isCustom ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
             />
 
@@ -903,7 +925,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     : 'Add a note to the text (optional) — added to the end of the message'}
                   style={{
                     width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 10,
-                    fontSize: 14, border: `1px solid ${(noteBlocked || customOverBudget) ? '#DC2626' : '#D4D4D8'}`,
+                    fontSize: 14, border: `1px solid ${(noteBlocked || overBudget) ? '#DC2626' : '#D4D4D8'}`,
                     background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit', resize: 'vertical',
                   }}
                 />
@@ -911,7 +933,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   <span>
                     {noteBlocked
                       ? <span style={{ color: '#B91C1C' }}>{noteBlockedCopy}</span>
-                      : customOverBudget
+                      : overBudget
                         ? <span style={{ color: '#B91C1C' }}>{ERROR_COPY.note_too_many_segments}</span>
                         : isCustomReason
                           ? 'Sent as: your message, then the new time + reschedule link.'
@@ -919,10 +941,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                             ? "Note goes to this stop's customer only — the rest of the route gets the standard text."
                             : '')}
                   </span>
-                  {customSeg
+                  {smsSeg
                     ? (
-                      <span style={{ flexShrink: 0, color: customOverBudget ? '#B91C1C' : '#71717A' }}>
-                        {customSeg.remaining >= 0 ? `${customSeg.remaining} left` : `${-customSeg.remaining} over`} · 2-segment limit
+                      <span style={{ flexShrink: 0, color: overBudget ? '#B91C1C' : '#71717A' }}>
+                        {smsSeg.remaining >= 0 ? `${smsSeg.remaining} left` : `${-smsSeg.remaining} over`} · 2-segment limit
                       </span>
                     )
                     : note.length > 0 && <span style={{ flexShrink: 0 }}>{note.length}/{NOTE_MAX_CHARS}</span>}
@@ -944,12 +966,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               <button
                 type="button"
                 onClick={handleCommit}
-                disabled={!selected || busy || committed || noteBlocked || customOverBudget}
+                disabled={!selected || busy || committed || noteBlocked || overBudget}
                 style={{
                   flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
                   border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
-                  cursor: !selected || busy || committed || noteBlocked || customOverBudget ? 'default' : 'pointer',
-                  opacity: !selected || busy || committed || noteBlocked || customOverBudget ? 0.5 : 1,
+                  cursor: !selected || busy || committed || noteBlocked || overBudget ? 'default' : 'pointer',
+                  opacity: !selected || busy || committed || noteBlocked || overBudget ? 0.5 : 1,
                 }}
               >
                 {busy ? 'Moving…' : committed ? 'Moved' : 'Move appointment'}

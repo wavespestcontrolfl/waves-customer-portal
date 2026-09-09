@@ -76,6 +76,15 @@ const failClosed = (label, id, err) => {
 };
 
 const REGISTRY = {
+  request_app_deferred: {
+    async recheck(meta) {
+      try {
+        const request = await require('../request-app-notifications')
+          .loadEligibleRequest(meta.customer_id, meta.service_request_id, meta.request_status, meta.request_status_version);
+        return request ? { eligible: true } : { eligible: false, reason: 'request-unavailable-or-updated' };
+      } catch (err) { return failClosed('request-app', meta.service_request_id, err); }
+    },
+  },
   estimate_follow_up_deferred: {
     async recheck(meta) {
       if (!meta.estimate_id) return { eligible: true };
@@ -413,6 +422,32 @@ const REGISTRY = {
       await db('recipient_optin')
         .where({ phone_key: meta.optin_phone_key, customer_id: meta.optin_customer_id || null, status: 'pending' })
         .update({ status: 'ask_failed', updated_at: new Date() });
+    },
+  },
+
+  billing_failure_deferred: {
+    async recheck(meta) {
+      try {
+        const payment = await db('payments').where({ id: meta.payment_id, customer_id: meta.customer_id })
+          .first();
+        if (!payment || payment.status !== 'failed') return { eligible: false, reason: 'payment-no-longer-failed' };
+        if (Number(payment.retry_count || 0) !== Number(meta.retry_count)) return { eligible: false, reason: 'retry-superseded' };
+        const customer = await db('customers').where({ id: meta.customer_id }).first();
+        if (!customer || customer.deleted_at) return { eligible: false, reason: 'customer-unavailable' };
+        const { loadRetryContext, classifyFailedPaymentRetry, DISPOSITIONS } = require('../retry-collectibility');
+        const ctx = loadRetryContext();
+        const resolution = await classifyFailedPaymentRetry({ payment, customer, ctx });
+        if (ctx.lookupWarnings.length) throw new Error('Payment resolution lookup unavailable');
+        // A failed row can remain after another payment or prepay settled its
+        // obligation. Reuse the billing sweep's resolution rules. Disabled or
+        // paused Auto Pay still needs this notice; those are not settlements.
+        if ([DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, DISPOSITIONS.SELF_SUPERSEDE].includes(resolution.disposition)) {
+          return { eligible: false, reason: resolution.reason };
+        }
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('billing-failure', meta.payment_id, err);
+      }
     },
   },
 
@@ -1039,7 +1074,13 @@ async function contactSlotStillAuthorized(meta, label) {
     if (!meta.customer_id || !meta.to_phone) return { eligible: true };
     const customer = await db('customers').where({ id: meta.customer_id }).first();
     if (!customer) return { eligible: false, reason: 'customer-missing' };
-    const prefsRow = await db('notification_prefs').where({ customer_id: meta.customer_id }).first() || {};
+    // Visit-aware (app property scope, PR 3): a NON-primary saved property
+    // owns notify-primary, so the recipient recheck follows it; an
+    // unreadable property under enforcement fails closed like any other
+    // recheck error (failClosed) — never texts on the profile row's answer.
+    const { visitPrefsRow, getReminderPrefs } = require('../appointment-reminders');
+    const prefsRow = await visitPrefsRow(meta.customer_id, meta.scheduled_service_id || null) || {};
+    if (prefsRow.__prefsUnavailable === true) throw new Error('notification preferences unavailable for the replay recheck');
     const { getAppointmentContacts } = require('../customer-contact');
     const { filterRecipientsByOptin } = require('../recipient-optin');
     const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -1062,8 +1103,7 @@ async function contactSlotStillAuthorized(meta, label) {
       ? 'reminder72hChannel'
       : (purpose === 'appointment_confirmation' ? 'confirmationChannel' : null);
     if (channelField) {
-      const { getReminderPrefs } = require('../appointment-reminders');
-      const prefs = await getReminderPrefs(meta.customer_id);
+      const prefs = await getReminderPrefs(meta.customer_id, { scheduledServiceId: meta.scheduled_service_id || null });
       if (prefs?.[channelField] === 'email') {
         return { eligible: false, reason: 'channel-email' };
       }
