@@ -134,6 +134,24 @@ describe('transactional email provider retry classification', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
+  test('a visit summary retry whose provider request throws after the handoff settles as uncertain, never requeued', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed', template_key: 'service.visit_summary', recipient_email_snapshot: 'a@example.com' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.sendOne.mockRejectedValue(new Error('socket hang up'));
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001',
+      send_attempt_token: 'attempt-4', provider_retry_count: 0 });
+    expect(await retry.retryOne(stored)).toMatchObject({ sent: false, uncertain: true });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: null,
+      error_message: expect.stringMatching(/^Provider outcome unknown/) }));
+    expect(chain.update).not.toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: expect.any(Date) }));
+  });
+
   test('other templates never consult the visit summary fence', async () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
