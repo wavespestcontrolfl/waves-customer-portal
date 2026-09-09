@@ -1166,6 +1166,14 @@ mosquito-, tree-shrub-only and one-time customers get no lane), the
 per-lane open-callback dedupe (an existing open re-service answers with
 that visit's /reschedule link instead of a second booking), and open
 slots from the /book availability engine around the token row's address.
+GET accepts optional `lane=pest|lawn`; find-slots accepts the same optional
+`lane` body field. Both validate it against currently bookable lanes and
+use that lane's duration and technician capability. A single bookable lane
+is implicit. With route capacity enabled, multiple bookable lanes require
+selection: GET returns eligibility with null availability until selected,
+and find-slots returns 400. The page refreshes times and clears the previous
+slot when the selected lane changes. With capacity off, requests omitting
+lane retain the shared longest-duration browse behavior.
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
 feasibility, lunch reserve, day caps — the anti-forgery model
