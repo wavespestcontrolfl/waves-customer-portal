@@ -207,6 +207,8 @@ describe('getAvailableSlots — zone capacity end to end', () => {
     try {
       mockDb({ scheduledRows: [unassignedRow()] });
       const result = await getAvailableSlots('est-zone-1', { dateFrom: '2027-05-20', dateTo: '2027-05-20' });
+      expect(require('../services/scheduling/find-time').findAvailableSlots).toHaveBeenCalledWith(
+        expect.objectContaining({ serviceTypes: ['Pest Control'] }));
       const slots = [...(result.primary || []), ...(result.expander || [])];
       expect(slots.length).toBeGreaterThan(0);
       expect(slots.filter(overlapsBlockedWindow)).toHaveLength(0);

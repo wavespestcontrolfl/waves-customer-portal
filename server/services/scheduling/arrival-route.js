@@ -48,7 +48,7 @@ function hasCoords(stop) {
 
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
-  changes = {}, now = new Date(), travel, preserveCapacity = false, includeVisitGroup = false, visitWindows = null,
+  changes = {}, now = new Date(), travel, preserveCapacity = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -96,22 +96,10 @@ async function loadArrivalRouteContext({
   const excluded = new Set([serviceId, ...(capacity && !prospective ? [] : excludeServiceIds)].map(String));
   // Grouped work needs the unit mover's complete duration/placement. Do not
   // certify a partial group by excluding siblings from the simulated route.
-  let grouped = !!target.visit_id && !!(await conn('scheduled_services')
+  const grouped = !!target.visit_id && !!(await conn('scheduled_services')
     .where({ visit_id: target.visit_id }).whereNot('id', serviceId)
     .whereNotIn('id', capacity ? [] : excludeServiceIds)
     .whereNotIn('status', TERMINAL_ROW_STATUSES).first('id'));
-  let visitMembers = null;
-  if ((capacityEnabled() || preserveCapacity) && target.visit_id && (includeVisitGroup || visitWindows)) {
-    visitMembers = await conn('scheduled_services')
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .where('scheduled_services.visit_id', target.visit_id)
-      .whereNotIn('scheduled_services.status', TERMINAL_ROW_STATUSES)
-      .select(...COLUMNS.map(column => `scheduled_services.${column}`), ...guardedCoordSelects(conn));
-    if (visitMembers.length > 1 && (!visitWindows || visitMembers.every(member => visitWindows.some(window => window.id === member.id)))) {
-      for (const member of visitMembers) excluded.add(String(member.id));
-      grouped = false;
-    } else visitMembers = null;
-  }
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   return { target, rows: rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
@@ -119,7 +107,7 @@ async function loadArrivalRouteContext({
   date, now, grouped, activeTarget, prospective: !!prospective,
   insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
-  travel, preserveCapacity, blocks, visitMembers, visitWindows };
+  travel, preserveCapacity, blocks };
 }
 
 // A visit consumes the sum of its members' work, with one journey to the
@@ -185,33 +173,11 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const { date, rows, now, grouped, activeTarget } = context;
   const capacity = capacityEnabled() || context.preserveCapacity;
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
-  let target = {
+  const target = {
     ...context.target, window_start: windowStart, window_end: windowEnd,
     estimated_duration_minutes: context.prospective ? Number(durationMinutes)
       : Math.max(workDuration(context.target), Number(durationMinutes) || 0),
   };
-  if (capacity && context.visitMembers) {
-    const delta = minuteOfDay(windowStart) - minuteOfDay(context.target.window_start);
-    const members = context.visitMembers.map(member => {
-      const planned = context.visitWindows?.find(window => window.id === member.id);
-      const duration = member.id === target.id ? target.estimated_duration_minutes : workDuration(member);
-      return { ...member, ...(member.id === target.id ? target : {}), technician_id: target.technician_id,
-        route_order: member.route_order, estimated_duration_minutes: duration,
-        window_start: planned?.window_start || hhmm(minuteOfDay(member.window_start) + delta),
-        window_end: planned?.window_end || hhmm(minuteOfDay(member.window_start) + delta + duration) };
-    });
-    const group = groupRouteStops(members);
-    if (members.some(member => !placementFitsShift(minuteOfDay(member.window_start), minuteOfDay(member.window_end)))) return unverified(target, date);
-    if (!group || group.length !== 1) return unverified(target, date);
-    let targetOffset = 0;
-    for (const member of currentOrder(members)) {
-      if (member.id === context.target.id) break;
-      targetOffset += workDuration(member);
-    }
-    target = { ...target, ...group[0], id: context.target.id, technician_id: target.technician_id,
-      scheduled_date: date, window_start: windowStart, window_end: windowEnd,
-      estimated_duration_minutes: group[0].estimated_duration_minutes, arrivalOffsetMinutes: targetOffset };
-  }
   if (capacity && !placementFitsShift(minuteOfDay(windowStart), minuteOfDay(windowEnd))) return unverified(target, date);
   const own = rows.filter(row => row.technician_id === target.technician_id && (capacity || row.reservation_expires_at == null));
   if (!target.technician_id || !hasCoords(target) || grouped) {
@@ -241,7 +207,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const groupedPending = capacity ? groupRouteStops(pending) : pending;
   if (!groupedPending) return unverified(target, date);
   const baseline = currentOrder(groupedPending);
-  const orders = capacity && allowInsertion && (context.prospective || context.insertTarget || context.visitMembers)
+  const orders = capacity && allowInsertion && (context.prospective || context.insertTarget)
     ? Array.from({ length: baseline.length + 1 }, (_, i) => [...baseline.slice(0, i), target, ...baseline.slice(i)])
     : [currentOrder([...baseline, target])];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);

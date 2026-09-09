@@ -119,8 +119,11 @@ async function findCapacitySlots(opts) {
   if (technicianId) query = query.where('technicians.id', technicianId);
   const techs = await query.select('id', 'name');
   const { getBlackoutLayers } = require('./blackout-dates');
-  const requestedServices = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
-    .map(service_type => ({ service_type }));
+  let requestedServices = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
+    .filter(Boolean).map(service_type => ({ service_type }));
+  if (!requestedServices.length && opts.excludeServiceIds?.length) {
+    requestedServices = await db('scheduled_services').whereIn('id', opts.excludeServiceIds).select('service_type');
+  }
   const inactive = opts.arrivalWindow?.serviceId ? []
     : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
   const inactiveTechs = new Set(inactive.map(row => row.technician_id));
@@ -143,7 +146,7 @@ async function findCapacitySlots(opts) {
       });
       if (!context) continue;
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
-        .inactiveCapabilitiesForServices(db, [tech.id], context.visitMembers || [context.target])).length) continue;
+        .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
       const floor = Math.max(SHIFT.startMinutes, opts.earliestStartMin || 0,
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       for (let start = Math.ceil(floor / 60) * 60; start + SHIFT.arrivalMinutes <= SHIFT.endMinutes; start += 60) {
@@ -169,6 +172,8 @@ async function findCapacitySlots(opts) {
     const { context, date, tech, start, options } = candidate;
     const fit = evaluateArrivalPlacement(context, options);
     if (!fit.feasible) continue;
+    // Existing save probes have no traffic preload; their fallback must fit too.
+    if (!evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) continue;
     const index = fit.routeOrder.indexOf(context.target.id);
     const byId = new Map(context.rows.map(row => [row.id, row]));
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),

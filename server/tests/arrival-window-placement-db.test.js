@@ -75,6 +75,7 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
 
   test('capacity finder reads live blocks, eligibility and whole-hour arrivals from PostgreSQL', async () => {
     const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    let trafficSpy;
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     try {
       for (const table of ['tech_schedule_blocks', 'technician_capabilities', 'system_settings', 'schedule_blackout_dates']) {
@@ -89,6 +90,12 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       expect(moving.slots.every(slot => slot.route_arrivals.every(row => row.id !== TARGET))).toBe(true);
       expect(offers.slots.every(slot => /^\d{2}:00$/.test(slot.start_time) && slot.start_time <= '16:00')).toBe(true);
       expect(offers.slots.every(slot => slot.travel_source === 'conservative_model')).toBe(true);
+      const optimizer = require('../services/route-optimizer');
+      const createTravel = optimizer.createSchedulingTravel;
+      trafficSpy = jest.spyOn(optimizer, 'createSchedulingTravel').mockImplementation(opts => opts?.maxRequests === 0 ? createTravel(opts)
+        : { lookup: () => ({ minutes: 0, source: 'google_traffic' }), preload: async () => {}, diagnostics: () => ({ requests: 0, elements: 0 }) });
+      expect((await findAvailableSlots({ ...OPTIONS, durationMinutes: 120 })).slots.some(slot => slot.start_time === '16:00')).toBe(false);
+      trafficSpy.mockRestore();
       await mockConn('tech_schedule_blocks').insert({ date: DAY, technician_id: TECH, block_type: 'unavailable', start_time: '08:00', end_time: '18:00' });
       expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
       await mockConn('tech_schedule_blocks').delete();
@@ -107,6 +114,7 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       expect((await findAvailableSlots(OPTIONS)).slots.length).toBeGreaterThan(0);
       expect((await findAvailableSlots({ ...OPTIONS, includeBlackoutDates: false })).slots).toEqual([]);
     } finally {
+      trafficSpy?.mockRestore();
       if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = gate;
     }

@@ -72,7 +72,7 @@ test('complete visits sum member work while sharing one arrival anchor', () => {
   expect(groupRouteStops([members[0], { ...members[1], lat: 27.5 }])).toBeNull();
   expect(groupRouteStops([members[0], stop('between', 600, 30, { route_order: 1.5 }), members[1]])).toBeNull();
   const moving = members.map(member => ({ ...member, window_start: '16:00', window_end: '16:40' }));
-  expect(evaluateArrivalPlacement(context([], { prospective: false, target: moving[0], visitMembers: moving }), options(960, 90)).feasible).toBe(false);
+  expect(evaluateArrivalPlacement(context([], { prospective: false, target: moving[0], grouped: true }), options(960, 90)).feasible).toBe(false);
 });
 
 test('existing blocked time interrupts work and travel', () => {

@@ -69,11 +69,11 @@ function wireDayCapCounts(rows = []) {
   return builder;
 }
 
-async function build() {
+async function build(serviceKey = '') {
   return buildBookingAvailability({
     lat: 27.4, lng: -82.4, duration: 60,
     rangeFrom: D, rangeTo: D,
-    config: CONFIG, today: new Date(),
+    config: CONFIG, today: new Date(), serviceKey,
   });
 }
 
@@ -84,6 +84,12 @@ describe('buildBookingAvailability — gap fan-out', () => {
     jest.clearAllMocks();
     wireDayCapCounts([]);
     listOccupiedWindows.mockResolvedValue([]);
+  });
+
+  test('passes every selected service category to the capacity finder', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
+    await build('pest_control+tree_shrub');
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ serviceTypes: ['Pest Control', 'Tree & Shrub'] }));
   });
 
   test('a gap whose earliest snap lands in lunch still offers its free afternoon hours', async () => {

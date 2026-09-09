@@ -1767,6 +1767,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       lat: coords.lat,
       lng: coords.lng,
       durationMinutes: serviceProfile.durationMinutes,
+      serviceTypes: serviceProfile.services.map(service => service.label || service.service),
       // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
       bufferMinutes: customerFacingBufferMinutes(),
       dateFrom: segFrom,
@@ -1971,6 +1972,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     lat: coords.lat,
     lng: coords.lng,
     durationMinutes: serviceProfile.durationMinutes,
+    serviceTypes: serviceProfile.services.map(service => service.label || service.service),
     bufferMinutes: customerFacingBufferMinutes(),
     dateFrom,
     dateTo,

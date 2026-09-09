@@ -900,6 +900,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     lat,
     lng,
     durationMinutes: duration,
+    serviceTypes: normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]),
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
