@@ -51,11 +51,17 @@ export default function useEmailEditor(userId) {
   };
   const clearDraftResult = useCallback(() => setDraftResult(null), []);
   const changeDrafts = (update) => updateEmailDrafts(draftSession, update);
-  const setReplyDraft = (id, text) =>
+  const setReplyDraft = (id, text) => {
+    // A new or discarded draft in this conversation must not sit under an
+    // older "Reply sent." banner that reads as if the new text went out.
+    setSendFeedback((current) =>
+      current.reply?.messageId === id ? { ...current, reply: null } : current,
+    );
     changeDrafts((current) => ({
       ...current,
       replies: { ...current.replies, [id]: text },
     }));
+  };
   const setComposeForm = (update) => {
     setSendFeedback((current) => ({ ...current, compose: null }));
     changeDrafts((current) => ({
@@ -108,8 +114,12 @@ export default function useEmailEditor(userId) {
       if (!response.ok || !result.success || !result.messageId) throw new Error("Email outcome unknown");
       accepted = true;
       updateEmailSendAttempt(draftSession, key, { ...attempt, status: "provider_accepted", messageId: result.messageId }, attempt.id);
-      await onSuccess();
-      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: kind === "reply" ? "Reply sent." : "Email sent." } }));
+      // onSuccess reports whether the submitted snapshot was still the draft;
+      // edits made while the send was pending stay behind, unsent, and the
+      // banner must say so instead of labelling that newer text as sent.
+      const submittedCurrent = await onSuccess();
+      const sent = kind === "reply" ? "Reply sent." : "Email sent.";
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: submittedCurrent ? sent : `${sent} Your newer edits are still here.` } }));
       if (draftSession.saved) updateEmailSendAttempt(draftSession, key, null, attempt.id);
     } catch {
       if (accepted) {
@@ -138,17 +148,16 @@ export default function useEmailEditor(userId) {
       text,
       email.id,
       async () => {
+        const submittedCurrent = (draftSession.replyRevisions[email.id] || 0) === revision;
         changeDrafts((current) => ({
           ...current,
           replies: {
             ...current.replies,
-            [email.id]:
-              (draftSession.replyRevisions[email.id] || 0) === revision
-                ? ""
-                : current.replies[email.id],
+            [email.id]: submittedCurrent ? "" : current.replies[email.id],
           },
         }));
         await onSent(email);
+        return submittedCurrent;
       },
     );
   };
@@ -166,11 +175,13 @@ export default function useEmailEditor(userId) {
       null,
       async () => {
         // Only clear the submitted snapshot; edits can outlive this component.
-        if (draftSession.drafts.compose === composeForm) {
+        const submittedCurrent = draftSession.drafts.compose === composeForm;
+        if (submittedCurrent) {
           setComposeForm(() => ({ to: "", subject: "", body: "" }));
           setShowCompose(false);
         }
         await onSent();
+        return submittedCurrent;
       },
     );
   };

@@ -53,6 +53,10 @@ export default function useEmailInbox(active, clearDraftResult) {
     pendingActionRef.current = null;
     setPendingAction(null);
   };
+  // Read and attachment feedback is published outside the pendingAction
+  // guard, so it is tagged by source and cleared when that source runs again.
+  const clearFeedback = (source) =>
+    setActionFeedback((current) => (current?.source === source ? null : current));
   const wasActiveRef = useRef(false);
   selectedIdRef.current = selectedEmail?.id;
   useEffect(
@@ -227,6 +231,7 @@ export default function useEmailInbox(active, clearDraftResult) {
   const openEmail = async (email) => {
     messageSequenceRef.current += 1;
     setMessageState({ loading: false, error: false });
+    clearFeedback("read");
     selectedIdRef.current = email.id;
     setSelectedEmail(email);
     setThread([]);
@@ -242,7 +247,7 @@ export default function useEmailInbox(active, clearDraftResult) {
         patchEmail(email.id, { is_read: true });
         loadStats();
       } catch {
-        if (isSelected(email.id)) setActionFeedback({ error: true, message: "The email could not be marked as read." });
+        if (isSelected(email.id)) setActionFeedback({ error: true, message: "The email could not be marked as read.", source: "read" });
       }
     }
     await loadThread(email);
@@ -357,6 +362,7 @@ export default function useEmailInbox(active, clearDraftResult) {
 
   const handleDownloadAttachment = async (event, msg, att) => {
     event.preventDefault();
+    clearFeedback("attachment");
     try {
       const r = await adminFetch(
         `/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`,
@@ -375,7 +381,7 @@ export default function useEmailInbox(active, clearDraftResult) {
       a.remove();
       URL.revokeObjectURL(url);
     } catch {
-      setActionFeedback({ error: true, message: "Could not download the attachment. Try again." });
+      setActionFeedback({ error: true, message: "Could not download the attachment. Try again.", source: "attachment" });
     }
   };
 
