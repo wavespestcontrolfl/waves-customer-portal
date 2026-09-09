@@ -4285,6 +4285,15 @@ router.put('/:id/proposal', async (req, res, next) => {
             .where((published) => published.whereNotNull('sent_at').orWhereNotNull('viewed_at'))
             .whereRaw("COALESCE(disposition, '') <> 'expired_unsent'")))
         .where('expires_at', '<', authoredExpiry)
+        // Same render/authority guards as the extension service's sibling
+        // revive: a linkage-invalidated or re-price-held sibling cannot
+        // render, and while the send gate is on a sibling that fails the
+        // pricing-authority verdict (a delivered CLIENT_FALLBACK row) must
+        // not become customer-viewable again (pre-push codex P1 on #4270).
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+        .modify((q) => { if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL); })
         .update({
           expires_at: authoredExpiry,
           status: db.raw("CASE WHEN status = 'expired' THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),

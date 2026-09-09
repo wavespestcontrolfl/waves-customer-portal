@@ -87,7 +87,9 @@ const sendgrid = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
+const { GATED_SEND_AUTHORITY_SQL } = require('../services/pricing-authority-gate');
+const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 let row;
 let mutations;
@@ -173,6 +175,7 @@ function scheduledAttempt({ key = 'synthetic-scheduled-attempt', startedAt, resu
 }
 
 beforeEach(() => {
+  isEnabled.mockImplementation(() => false);
   jest.clearAllMocks();
   gateEnvValue.mockReturnValue(false);
   row = savedEstimate();
@@ -267,12 +270,20 @@ describe('commercial bid authoring', () => {
       expect(row).toEqual(before);
     }
   });
-  test('saving a longer fixed hold pushes the group\'s published members forward so the entry link keeps assembling the group (pre-push codex P1 on #4309)', async () => {
+  test.each([[false], [true]])('saving a longer fixed hold pushes the group\'s published members forward so the entry link keeps assembling the group (pre-push codex P1 on #4309; send gate on: %s)', async (sendGateOn) => {
     Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
+    isEnabled.mockImplementation((flag) => flag === 'sendRequiresServerPricing' && sendGateOn);
     const whereRawSql = [];
     db.mockImplementation((table) => { const b = estimateDatabase(table); const raw = b.whereRaw; b.whereRaw = jest.fn((sql) => { whereRawSql.push(String(sql)); return raw(sql); }); return b; });
     const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
     expect(whereRawSql.some((sql) => /expired_unsent/.test(sql))).toBe(true);
+    // The revive never reaches a sibling that cannot render, and under the
+    // send gate never one that fails the pricing-authority verdict
+    // (pre-push codex P1 on #4270).
+    expect(whereRawSql.some((sql) => /linkage_invalidated_at/.test(sql))).toBe(true);
+    expect(whereRawSql.some((sql) => /invalidation_pending_at/.test(sql))).toBe(true);
+    expect(whereRawSql).toContain(REPRICE_PENDING_ABSENT_SQL);
+    expect(whereRawSql.includes(GATED_SEND_AUTHORITY_SQL)).toBe(sendGateOn);
     expect(res.statusCode).toBe(200);
     const siblingExtension = mutations.find(({ patch }) => !patch.estimate_data && patch.expires_at);
     expect(new Date(siblingExtension.patch.expires_at).toISOString()).toBe('2100-01-01T04:59:59.999Z');

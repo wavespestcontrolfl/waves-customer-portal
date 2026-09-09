@@ -11,6 +11,13 @@ const { proposalExpiry, assertBidSendDate, validateBidFields, normalizeProjectCo
 const { computeProjectCosts, roundCents, showsLineBasis } = require('../../shared/proposal-bid.cjs');
 const { mapFormPrices, buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
 
+// buildProposalBidForm refuses a lapsed fixed hold against the real clock,
+// so the shared 2026-12-21 fixture is judged at a frozen date (Date only;
+// pdf-lib and the promise queue keep real timers) — AGENTS.md near-today
+// date rule (pre-push codex P1 on #4270).
+beforeAll(() => jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-09-09T16:00:00Z') }));
+afterAll(() => jest.useRealTimers());
+
 const line = (id, quantity, unitPrice, unit = 'acre') => ({ id, description: `Synthetic ${id}`, quantity, unitPrice, unit, frequency: 'one_time' });
 const estimate = (lines, extra = {}) => ({ estimate_data: { proposal: { enabled: true, validThrough: '2026-12-21', buildings: [{ name: 'Synthetic property', lineItems: lines }], ...extra }, proposalCosting: { privateMarker: 'PRIVATE_COST_DO_NOT_RENDER' } } });
 const normalized = (lines, extra) => normalizeProposal(estimate(lines, extra));
