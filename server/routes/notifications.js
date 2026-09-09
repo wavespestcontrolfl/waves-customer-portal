@@ -495,7 +495,7 @@ router.get('/preferences', async (req, res, next) => {
 // stay per PROFILE (ruling R2 pending) and are repeated on every entry with
 // `contactsShared: true`.
 async function savedPropertyPreferences(req) {
-  const entries = await accountSavedProperties(req);
+  const { properties: entries } = await accountSavedProperties(req);
   if (!entries.some((e) => e.propertyId)) return null; // profile-shaped: today's list
   const profileIds = [...new Set(entries.map((e) => String(e.customerId)))];
   const profiles = await db('customers').whereIn('id', profileIds).select('id', ...SERVICE_CONTACT_COLUMNS);

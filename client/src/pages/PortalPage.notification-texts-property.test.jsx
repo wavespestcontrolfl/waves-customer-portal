@@ -66,4 +66,14 @@ describe('Appointment texts per saved property', () => {
     expect(await screen.findByText(/Your primary residence gets every alert/)).toBeInTheDocument();
     expect(screen.getByText('All alerts on')).toBeInTheDocument();
   });
+  // The primary was retired: one active saved property, non-primary. Its own
+  // toggles render, never the contacts-only card editing the profile defaults
+  // (GitHub codex r0 P2).
+  it('a LONE secondary saved property still gets its own toggles', async () => {
+    api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [propertyPrefs[1]] });
+    render(<ScheduleTab customer={customer} properties={[entries[1]]} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
+    expect(await screen.findByText('Appointment texts')).toBeInTheDocument();
+    expect(screen.getByText('Tech en route')).toBeInTheDocument();
+    expect(screen.getByText('All alerts off')).toBeInTheDocument();
+  });
 });

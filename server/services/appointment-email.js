@@ -124,12 +124,22 @@ async function loadCustomer(customerId) {
 // (appointment_notify_primary) follows the visit's NON-primary saved property
 // when enforced under GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise. A
 // failed property read under enforcement reads as prefs-unavailable.
+const PROPERTY_PREFS_UNAVAILABLE = 'PROPERTY_PREFS_UNAVAILABLE';
+
 async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   if (prefs?.__prefsUnavailable !== true && scheduledServiceId) {
-    prefs = await require('./property-notification-prefs')
-      .prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients')
-      .catch(() => PREFS_UNAVAILABLE);
+    try {
+      prefs = await require('./property-notification-prefs').prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients');
+    } catch (err) {
+      // Enforced and unreadable: the recipient list cannot be built — the
+      // service-contact fan-out and the primary fallback below would send a
+      // notice whose property settings are unknown (GitHub codex r0 P1).
+      // sendTemplate turns this into a HELD result, never a send.
+      const held = new Error(`property notification settings unreadable for visit ${scheduledServiceId}: ${err.message}`);
+      held.code = PROPERTY_PREFS_UNAVAILABLE;
+      throw held;
+    }
   }
   const seen = new Set();
   const recipients = [];
@@ -222,7 +232,16 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
-  let recipients = await resolveRecipients(customer, { scheduledServiceId });
+  let recipients;
+  try {
+    recipients = await resolveRecipients(customer, { scheduledServiceId });
+  } catch (err) {
+    if (err?.code !== PROPERTY_PREFS_UNAVAILABLE) throw err;
+    // Held, not skipped: the next scan re-resolves (same posture as the
+    // reminders' preferences_unavailable hold).
+    await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'property_preferences_unavailable', metadata });
+    return { ok: false, held: true, reason: 'property_preferences_unavailable' };
+  }
   // Optional allowlist of addresses: the call-booking confirmation fan-out
   // targets ONLY email-only service-contact slots (a phone-channel customer's
   // primary must not receive an email their channel choice didn't ask for) —

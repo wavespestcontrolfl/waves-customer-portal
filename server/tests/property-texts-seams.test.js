@@ -90,3 +90,40 @@ describe('consent validator', () => {
     expect(state.lookupFailed).toBe(true);
   });
 });
+
+describe('appointment email recipients', () => {
+  const { resolveRecipients, sendTemplate } = require('../services/appointment-email')._private;
+  const customer = { id: 'c1', first_name: 'Pat', last_name: 'Q', email: 'pat@example.com', phone: '+19415550100' };
+  test('the visit reaches the resolver and notify-primary follows what it returns', async () => {
+    Prefs.prefsForVisit.mockResolvedValueOnce({ ...PREFS, appointment_notify_primary: false });
+    await resolveRecipients(customer, { scheduledServiceId: 'v1' });
+    expect(Prefs.prefsForVisit).toHaveBeenCalledWith(PREFS, 'c1', 'v1', 'email_recipients');
+  });
+  test('a resolver failure HOLDS the email (never the fan-out on unknown settings)', async () => {
+    Prefs.prefsForVisit.mockRejectedValueOnce(new Error('down'));
+    await expect(resolveRecipients(customer, { scheduledServiceId: 'v1' })).rejects.toMatchObject({ code: 'PROPERTY_PREFS_UNAVAILABLE' });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain([customer]);
+      if (table === 'notification_prefs') return chain([PREFS]);
+      const c = chain([]); c.insert = jest.fn(async () => [1]); return c;
+    });
+    Prefs.prefsForVisit.mockRejectedValueOnce(new Error('down'));
+    const out = await sendTemplate({ customerId: 'c1', templateKey: 'appointment.en_route', eventType: 'appointment.en_route', scheduledServiceId: 'v1' });
+    expect(out).toMatchObject({ ok: false, held: true, reason: 'property_preferences_unavailable' });
+  });
+});
+
+describe('direct appointment notices (visitPrefsRow)', () => {
+  const { visitPrefsRow } = require('../services/appointment-reminders')._test;
+  test('resolves the row through the property for the visit; a failure is the unavailable sentinel', async () => {
+    Prefs.prefsForVisit.mockResolvedValueOnce({ ...PREFS, appointment_notify_primary: false });
+    expect((await visitPrefsRow('c1', 'v1')).appointment_notify_primary).toBe(false);
+    expect(Prefs.prefsForVisit).toHaveBeenCalledWith(PREFS, 'c1', 'v1', 'reminders');
+    Prefs.prefsForVisit.mockRejectedValueOnce(new Error('down'));
+    expect((await visitPrefsRow('c1', 'v1')).__prefsUnavailable).toBe(true);
+    Prefs.prefsForVisit.mockClear();
+    expect(await visitPrefsRow('c1', null)).toEqual(PREFS);
+    expect(Prefs.prefsForVisit).not.toHaveBeenCalled();
+  });
+});
+

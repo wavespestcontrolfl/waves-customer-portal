@@ -19,7 +19,8 @@ jest.mock('../services/account-properties', () => {
     ...actual,
     appPropertyScopeEnabled: jest.fn(() => global.__SCOPE_ON__ === true),
     accountPropertyIds: jest.fn(async () => ['c1']),
-    accountSavedProperties: jest.fn(async () => global.__ENTRIES__ || []),
+    // The real return shape: { properties, selected } (GitHub codex r0 P1).
+    accountSavedProperties: jest.fn(async () => ({ properties: global.__ENTRIES__ || [], selected: null })),
   };
 });
 

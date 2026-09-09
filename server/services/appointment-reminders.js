@@ -1902,16 +1902,27 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
 // otherwise; the channels below stay the customer's. Omitted = customer row.
 // A property lookup that FAILS under enforcement reads as `unavailable`
 // (held), never as the customer row's answer.
-async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
-  let prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
-  if (prefs?.__prefsUnavailable !== true && scheduledServiceId) {
-    try {
-      prefs = await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders');
-    } catch (err) {
-      logger.warn(`[appt-remind] property toggles unreadable for visit ${scheduledServiceId}: ${err.message}`);
-      prefs = PREFS_UNAVAILABLE;
-    }
+// The customer's notification_prefs row as it applies to ONE visit: the raw
+// row, or (non-primary saved property, app property scope PR 3) the row with
+// the six appointment columns resolved from that property. A failed READ, and
+// a property lookup that fails under enforcement, both answer the
+// PREFS_UNAVAILABLE sentinel — held, never the customer row's answer. Shared
+// by getReminderPrefs and the direct reschedule / cancellation / no-show /
+// series-cancellation notices, whose recipient list (appointment_notify_
+// primary) must follow the property too (GitHub codex r0 P1).
+async function visitPrefsRow(customerId, scheduledServiceId = null) {
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
+  if (prefs?.__prefsUnavailable === true || !scheduledServiceId) return prefs;
+  try {
+    return await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders');
+  } catch (err) {
+    logger.warn(`[appt-remind] property toggles unreadable for visit ${scheduledServiceId}: ${err.message}`);
+    return PREFS_UNAVAILABLE;
   }
+}
+
+async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
+  const prefs = await visitPrefsRow(customerId, scheduledServiceId);
   const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
 
   return {
@@ -4017,7 +4028,7 @@ const AppointmentReminders = {
       try {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
-          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+          const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
           const day = formatDay(newApptTime);
           const date = formatDate(newApptTime);
           const time = formatTime(newApptTime);
@@ -4501,7 +4512,7 @@ const AppointmentReminders = {
       try {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
-          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+          const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
           const apptTime = new Date(record.appointment_time);
           const day = formatDay(apptTime);
           const date = formatDate(apptTime);
@@ -4655,7 +4666,7 @@ const AppointmentReminders = {
       const { customer } = await getCustomerAndTech(svc.customer_id, scheduledServiceId);
       if (!customer) return null;
 
-      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+      const prefs = await visitPrefsRow(svc.customer_id, scheduledServiceId);
 
       // scheduled_date is a DATE, window_start a TIME — compose into the
       // naive 'YYYY-MM-DDTHH:MM:SS' shape parseETDateTime expects so the
@@ -5293,7 +5304,7 @@ const AppointmentReminders = {
 
       const { customer } = await getCustomerAndTech(record.customer_id, representativeScheduledServiceId || record.scheduled_service_id);
       if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+        const prefs = await visitPrefsRow(record.customer_id, representativeScheduledServiceId || record.scheduled_service_id);
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
         Object.assign(seriesSendOutcome, {});
@@ -5475,6 +5486,7 @@ AppointmentReminders._test = {
   scheduledServiceApptTime,
   sendAppointmentNoticeEmail,
   getReminderPrefs,
+  visitPrefsRow,
   liveReminderServiceLabel,
   buildMergedServiceLabel,
   appendHeldEstimateAcceptLine,

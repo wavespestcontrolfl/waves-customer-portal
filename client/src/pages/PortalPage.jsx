@@ -5387,7 +5387,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       {propertyPrefs.length > 0 && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
-            {propertyPrefs.length > 1 ? (
+            {(propertyPrefs.length > 1 || perPropertyTexts) ? (
               <>
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
                 <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment texts</div>
@@ -5443,7 +5443,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             )}
           </div>
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {(propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === (perPropertyTexts ? activePropertyId : customer.id)) : propertyPrefs).map((property) => {
+            {/* A lone SECONDARY saved property (the primary retired) still gets its
+                own toggles — never the contacts-only card editing the profile
+                defaults (GitHub codex r0 P2). */}
+            {(perPropertyTexts ? propertyPrefs.filter((p) => p.id === activePropertyId) : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer.id) : propertyPrefs).map((property) => {
               const label = property.propertyId
                 ? (property.label || propertyRelationshipChip(property) || property.profileLabel || 'Service property')
                 : (property.profileLabel || 'Service property');
@@ -5461,7 +5464,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               const alertCount = options.length - 1;
               const contacts = displayContacts(property);
               const contactLockKey = `${property.id}:contact`;
-              const multiProperty = propertyPrefs.length > 1;
+              const multiProperty = propertyPrefs.length > 1 || perPropertyTexts;
               return (
                 <div key={property.id} style={{
                   border: '1px solid #E7E2D7',

@@ -1241,6 +1241,7 @@ const TwilioService = {
         const AppointmentEmail = require("./appointment-email");
         return await AppointmentEmail.sendTechEnRouteEmail({
           customerId,
+          scheduledServiceId,
           techName: customerTechName,
           etaMinutes,
           trackUrl: trackUrl || longTrackUrl,
