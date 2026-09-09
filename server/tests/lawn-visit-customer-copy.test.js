@@ -53,6 +53,10 @@ describe('customer publication', () => {
       expect(copy.customerObservations(text, findings)).toBe(copy.NO_OBSERVATIONS);
     }
     expect(copy.customerObservations('Some insect pressure is likely.', [chinch])).toBe(copy.NO_OBSERVATIONS);
+    for (const cause of ['Insect damage', 'Pest pressure', 'Disease', 'Infestation']) {
+      expect(copy.customerObservations(`${cause} is spreading.`, [{ name: cause, label: 'general lawn stress', confidence: 'high' }])).toBe(copy.NO_OBSERVATIONS);
+    }
+    expect(copy.customerObservations('Fungi are spreading.', [])).toBe(copy.NO_OBSERVATIONS);
     expect(copy.customerObservations('Chinchbugs are damaging the turf.', [])).toBe(copy.NO_OBSERVATIONS);
     expect(copy.customerObservations('Chinchbugs are damaging the turf.', [chinch])).toBe('Chinchbugs are damaging the turf.');
     expect(copy.customerObservations('Thin turf along the driveway edge.', [])).toBe('Thin turf along the driveway edge.');
@@ -93,7 +97,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(["weren't observed", "aren't present", 'wasn’t observed', "can't be found", 'cannot be confirmed'])(
+  test.each(["weren't observed", "aren't present", 'wasn’t observed', "can't be found", 'cannot be confirmed', 'were ruled-out', 'were ruled‑out'])(
     'a normalized finding that says chinch bugs %s cannot authorize cause prose', (polarity) => {
       const analysis = normalizeAssessment(answer({ findings: [finding({ name: `Chinch bugs ${polarity}`, confidence: 'high' })] }), 2);
       expect(analysis.findings).toHaveLength(1);

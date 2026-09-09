@@ -277,7 +277,7 @@ describe('buildPublicLawnReport whitelisting', () => {
   // customer copy for a low/unknown finding (the v0.4 naming gate). Deliberately omits
   // "disease" (the generic "no specific pest or disease" fallback uses it) and "weed"
   // (specific weeds are genericized to "weed pressure" at any confidence, by design).
-  const GOVERNED_CAUSE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|caterpillars?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|grubs?|large[\s‐‑‒–—-]+patch(?:es)?|brown[\s‐‑‒–—-]+patch(?:es)?|gr[ae]y[\s‐‑‒–—-]+leaf|dollar[\s‐‑‒–—-]+spots?|fungus|fungal|leaf[\s‐‑‒–—-]+spots?|mold|mildew|insects?|drought|water[\s‐‑‒–—-]+stress|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?)\b/i;
+  const GOVERNED_CAUSE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|caterpillars?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|grubs?|large[\s‐‑‒–—-]+patch(?:es)?|brown[\s‐‑‒–—-]+patch(?:es)?|gr[ae]y[\s‐‑‒–—-]+leaf|dollar[\s‐‑‒–—-]+spots?|fungus|fungi|fungal|leaf[\s‐‑‒–—-]+spots?|mold|mildew|insects?|infestations?|drought|water[\s‐‑‒–—-]+stress|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?)\b/i;
 
   // The diagnosis-driven, customer-facing fields — everything a cause name could leak
   // into. Excludes seasonal_context (server-generated SWFL education that legitimately
@@ -322,6 +322,8 @@ describe('buildPublicLawnReport whitelisting', () => {
       'Large-patch activity',
       'Leaf-spot activity',
       'Gray-leaf-spot activity',
+      'Fungi spreading',
+      'An infestation spreading',
     ])('low-confidence "%s" degrades to symptom-only copy', (name) => {
       const diag = sentDiagnostic({
         report_contract: JSON.stringify({
@@ -344,7 +346,7 @@ describe('buildPublicLawnReport whitelisting', () => {
       expect(causeCopy(buildPublicLawnReport(diag))).not.toMatch(GOVERNED_CAUSE);
     });
 
-    test.each(['Sod-webworm', 'Large-patch', 'Leaf-spot', 'Gray-leaf-spot'])(
+    test.each(['Sod-webworm', 'Large-patch', 'Leaf-spot', 'Gray-leaf-spot', 'Fungi', 'Iron deficiency', 'Rhizoctonia', 'Take-all', 'Fungal activity', 'Chinch bug pressure'])(
       'moderate %s copy still strips confirmed-language claims', (name) => {
         const diag = sentDiagnostic({
           report_contract: JSON.stringify({

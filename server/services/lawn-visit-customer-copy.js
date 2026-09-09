@@ -65,8 +65,10 @@ function namesUnpublishedCause(text, findings) {
     if (finding.negated || finding.label === NO_STRESS_LABEL) continue;
     // A mixed/negated name cannot establish positive evidence for prose.
     // Keep it internal until review supplies an unambiguous finding.
-    if (/\b(?:no|not|none|cannot|\w+n['’]t|without|ruled out|negative|absent|unlikely|excluded|free)\b/i.test(finding.name || '')) continue;
-    for (const term of governedTerms(`${finding.name || ''} ${finding.label}`)) published.add(term);
+    if (/\b(?:no|not|none|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|excluded|free)\b/i.test(finding.name || '')) continue;
+    for (const term of governedTerms(`${finding.name || ''} ${finding.label}`)) {
+      if (!['insect', 'pest', 'disease', 'infestation'].includes(term)) published.add(term);
+    }
   }
   for (const term of governedTerms(text)) if (!published.has(term)) return true;
   return false;

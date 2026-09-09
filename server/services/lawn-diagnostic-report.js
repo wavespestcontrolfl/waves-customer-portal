@@ -541,7 +541,7 @@ const CONDITION_LABELS = [
 const CAUSE_LABELS = new Set([
   'chinch bug activity', 'caterpillar activity', 'grub activity',
   'large patch (fungal) activity', 'gray leaf spot', 'dollar spot', 'fungal activity',
-  // Drought is a governed cause (PHOTO_ONLY_UNCERTAIN / CONFIRMABLE_CONDITION treat it
+  // Drought is a governed cause (PHOTO_ONLY_UNCERTAIN / SUMMARY_CAUSE_RE treat it
   // as photo-unconfirmable) — a low/unknown finding must not publish "drought stress".
   'drought stress',
 ]);
@@ -605,7 +605,7 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // resolves to a CAUSE_LABELS label), plus the GENERIC cause words (insect/pest/disease),
 // so a stale/LLM summary like "most consistent with caterpillar activity" is replaced
 // even though the public finding label is already downgraded to a symptom.
-const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|large[\s‐‑‒–—-]+patch(?:es)?|brown[\s‐‑‒–—-]+patch(?:es)?|gr[ae]y[\s‐‑‒–—-]+leaf|dollar[\s‐‑‒–—-]+spots?|rhizoctonia|take[\s‐‑‒–—-]?all|fungus|fungal|diseases?|leaf[\s‐‑‒–—-]+spots?|mold|mildew|insects?|pests?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|drought|water[\s‐‑‒–—-]+stress|chlorosis|iron[\s‐‑‒–—-]+deficiency|nitrogen[\s‐‑‒–—-]+deficiency|magnesium[\s‐‑‒–—-]+deficiency)\b/i;
+const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|large[\s‐‑‒–—-]+patch(?:es)?|brown[\s‐‑‒–—-]+patch(?:es)?|gr[ae]y[\s‐‑‒–—-]+leaf|dollar[\s‐‑‒–—-]+spots?|rhizoctonia|take[\s‐‑‒–—-]?all|fungus|fungi|fungal|diseases?|leaf[\s‐‑‒–—-]+spots?|mold|mildew|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|drought|water[\s‐‑‒–—-]+stress|chlorosis|iron[\s‐‑‒–—-]+deficiency|nitrogen[\s‐‑‒–—-]+deficiency|magnesium[\s‐‑‒–—-]+deficiency)\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -669,22 +669,17 @@ function classifyReleaseMode(contract = {}) {
   return 'standard';
 }
 
-// Condition nouns that must never appear as a "confirmed/active" claim in customer
-// copy. Shared by the adjective-form and predicate-form passes so the two stay in
-// sync. LOCKSTEP CONTRACT: this list + SUMMARY_CAUSE_RE + the public test's
-// GOVERNED_CAUSE must all cover the cause-mapped CONDITION_LABELS entries — when a new
-// cause label is added, update every one (else "<new cause> is confirmed" slips through
-// the moderate+ summary that the low-confidence gate never touches).
-const CONFIRMABLE_CONDITION = 'chinch(?:[\\s‐‑‒–—-]*bugs?)?|fungus|fungal|diseases?|large[\\s‐‑‒–—-]+patch(?:es)?|brown[\\s‐‑‒–—-]+patch(?:es)?|gray[\\s‐‑‒–—-]+leaf[\\s‐‑‒–—-]+spots?|grey[\\s‐‑‒–—-]+leaf[\\s‐‑‒–—-]+spots?|leaf[\\s‐‑‒–—-]+spots?|dollar[\\s‐‑‒–—-]+spots?|mold|mildew|drought|water[\\s‐‑‒–—-]+stress|grubs?|army[\\s‐‑‒–—-]?worms?|sod[\\s‐‑‒–—-]?webworms?|caterpillars?|worms?|insects?|pests?|infestations?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?';
+// The summary gate and confirmation-language scrub use the same governed
+// vocabulary, so a plural or deficiency cannot bypass one of the two screens.
 
 // Downgrade any over-confident pest/disease/drought wording to suggestive form.
 // Safety net for LLM-authored copy; deterministic copy never says "confirmed".
 function stripConfirmedLanguage(text) {
   if (!text) return text;
   return String(text)
-    .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${CONFIRMABLE_CONDITION})`, 'gi'),
+    .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
-    .replace(new RegExp(`\\b(${CONFIRMABLE_CONDITION})\\s+(?:is|are|was|were)\\s+confirmed\\b`, 'gi'),
+    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation))?\\s+(?:is|are|was|were)\\s+confirmed\\b`, 'gi'),
       '$1 most consistent with the visible pattern')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
