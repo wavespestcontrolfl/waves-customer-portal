@@ -288,6 +288,51 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
     await waitFor(() => expect(second).not.toBeDisabled());
   });
 
+  it.each(['edit', 'primary change'])('keeps an in-flight %s locked across a same-customer profile refresh', async operation => {
+    const pending = [];
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (opts.method === 'PATCH' || opts.method === 'POST') return new Promise(resolve => { pending.push(resolve); });
+      if (url.endsWith('/primary-preview')) return jsonResponse({ _version: 'current', primary_property: { address: '20 Oak St' }, effects: [] });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
+    }));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit refreshToken="before" />);
+    await screen.findByLabelText('Occupancy for 20 Oak St');
+    if (operation === 'edit') fireEvent.change(screen.getByLabelText('Occupancy for 20 Oak St'), { target: { value: 'seasonal' } });
+    else {
+      fireEvent.click(screen.getByRole('button', { name: 'Make primary' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Confirm primary property' }));
+    }
+    expect(pending).toHaveLength(1);
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c1" canEdit refreshToken="after" />);
+    const select = await screen.findByLabelText('Occupancy for 20 Oak St');
+    expect(select).toBeDisabled();
+    fireEvent.change(select, { target: { value: 'vacant' } });
+    expect(pending).toHaveLength(1);
+    await act(async () => { pending[0](await jsonResponse({ properties: [PRIMARY, { ...ELIGIBLE, occupancy_type: 'seasonal' }] })); });
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(select).toHaveValue('seasonal');
+  });
+
+  it('ignores an old row edit after switching away and back while a new edit is pending', async () => {
+    const pending = [];
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => opts.method === 'PATCH'
+      ? new Promise(resolve => { pending.push(resolve); })
+      : jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true })));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    fireEvent.change(await screen.findByLabelText('Occupancy for 20 Oak St'), { target: { value: 'seasonal' } });
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c2" canEdit />);
+    await screen.findByLabelText('Occupancy for 20 Oak St');
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    const select = await screen.findByLabelText('Occupancy for 20 Oak St');
+    fireEvent.change(select, { target: { value: 'vacant' } });
+    await act(async () => { pending[0](await jsonResponse({ properties: [PRIMARY, { ...ELIGIBLE, occupancy_type: 'seasonal' }] })); });
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue('owner_occupied');
+    await act(async () => { pending[1](await jsonResponse({ properties: [PRIMARY, { ...ELIGIBLE, occupancy_type: 'vacant' }] })); });
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(select).toHaveValue('vacant');
+  });
+
   it('constrains state to a two-letter code client-side', async () => {
     const fetchMock = vi.fn((url, opts = {}) => {
       if (opts.method === 'POST') return jsonResponse({ propertyId: 'p2', properties: [PRIMARY, SECOND] }, 201);
