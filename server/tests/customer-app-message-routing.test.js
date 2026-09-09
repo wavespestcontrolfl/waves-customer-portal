@@ -114,9 +114,10 @@ test('an unavailable invoice guard keeps a retry without falling back around the
 });
 
 test('temporary native failures retain their delay and never invoke a Text fallback', async () => {
+  prefs.invoice_channel = 'push';
   Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, error: 'native_provider_retryable', retryAfterMs: 900000 });
   const startedAt = Date.now();
-  const result = await sendCustomerMessage(input);
+  const result = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
   expect(result).toMatchObject({ sent: false, blocked: false, code: 'APP_PROVIDER_RETRY',
     retryable: true, deferred: true, retryAfterMs: 900000 });
   expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(startedAt + 900000);

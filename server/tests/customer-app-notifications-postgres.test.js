@@ -185,6 +185,44 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('notifications').first()).toMatchObject({ metadata: { pushState: 'accepted' } });
   });
 
+  test('the scheduled invoice rail respects native backoff and its existing five-attempt cap', async () => {
+    const [invoice] = await mockPg('invoices').insert({ customer_id: property, token: randomUUID(),
+      invoice_number: 'QA-NATIVE-RETRY', status: 'scheduled', scheduled_send_at: new Date(0), scheduled_send_attempts: 0 }).returning('*');
+    const Invoice = require('../services/invoice');
+    const gates = require('../config/feature-gates');
+    const originalGate = gates.isEnabled;
+    const gate = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'smsSendWindow' ? false : originalGate(key));
+    const jitter = jest.spyOn(Math, 'random').mockReturnValue(0);
+    const send = jest.spyOn(Invoice, 'sendViaSMSAndEmail').mockResolvedValue({ ok: false, creditApplied: 0,
+      sms: { code: 'APP_PROVIDER_RETRY', deferred: true, retryAfterMs: 900000, nextAllowedAt: new Date(Date.now() + 900000).toISOString() },
+    });
+    try {
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        await mockPg('invoices').where({ id: invoice.id }).update({ scheduled_send_at: new Date(0) });
+        const startedAt = Date.now();
+        expect(await Invoice.processScheduledSends()).toEqual({ sent: 0, failed: 1, deferred: 0 });
+        const row = await mockPg('invoices').where({ id: invoice.id }).first();
+        expect(row).toMatchObject({ status: 'scheduled', scheduled_send_attempts: attempt });
+        expect(row.scheduled_send_at.getTime()).toBeGreaterThanOrEqual(startedAt + 900000 * (2 ** (attempt - 1)));
+      }
+      await mockPg('invoices').where({ id: invoice.id }).update({ scheduled_send_at: new Date(0) });
+      expect(await Invoice.processScheduledSends()).toEqual({ sent: 0, failed: 0, deferred: 0 });
+      expect(send).toHaveBeenCalledTimes(5);
+    } finally { send.mockRestore(); gate.mockRestore(); jitter.mockRestore(); }
+  });
+
+  test('native retries preserve the existing fallback outcome for other App families', async () => {
+    await device(); await put({ serviceReminder24hChannel: 'push' });
+    apns.send.mockResolvedValue({ ok: false, retryable: true, retryAfterMs: 900000 });
+    const result = await require('../services/messaging/push-channel-routing').attemptPushFirst({
+      customerId: property, to: '+19415550101', body: 'QA reminder', messageType: 'appointment_reminder',
+      explicitPushOnly: true, notificationEventKey: 'qa-reminder-unchanged-policy',
+    });
+    expect(result.delivered).toBe(false);
+    expect(result.retryable).toBeUndefined();
+    expect(apns.send).toHaveBeenCalledTimes(1);
+  });
+
   test('one accepting device settles the event despite another temporary failure', async () => {
     await device(owner, 'ios'); await device(owner, 'android');
     apns.send.mockResolvedValue({ ok: false, retryable: true, retryAfterMs: 900000 });
