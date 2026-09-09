@@ -8,6 +8,7 @@
  *   no_visit_time         a clock time or date no tool supplied
  *   no_account_pii        an address, phone, email or name from an account
  *   no_refund_claim       a refund or credit described as done or coming
+ *   no_third_party_disclosure  third-party contact details and visit facts
  *   only_language         every sentence in the call's language
  *
  * Each runner is (value, record, view) → [status, detail], like the runners
@@ -110,6 +111,7 @@ function no_price_disclosure(value, record, { spoken }) {
 // ── The approved amount, with its unit ─────────────────────────────────────
 
 const SENTENCE_SPLIT_RE = /[.!?;]+(?=\s|$)/;
+const normalizeTimeAbbreviations = (text) => text.replace(/\b([ap])\.\s*m\./gi, '$1m');
 // A PRICE in a sentence: a dollar sign, a currency word, or the unit itself
 // right after the number, digits or words — "$129", "129 dollars",
 // "one hundred twenty-nine per application". A bare "129" is a code.
@@ -398,6 +400,72 @@ function no_refund_claim(value, record, { spoken }) {
   return ['pass', 'no refund or credit outcome claimed'];
 }
 
+// ── Third-party disclosure ─────────────────────────────────────────────────
+
+const VISIT_STATUS = 'scheduled|booked|cancelled|canceled|confirmed|rescheduled|postponed|skipped|completed|pending|moved|delayed';
+const DISCLOSURE_VERB = '(?:confirm|verify|deny|say|tell|share|disclose|provide|give)';
+
+// A negative appointment fact is still private. Only a refusal to disclose
+// excuses it; "she has no visit" and "the tech isn't coming" must both fail.
+const DISCLOSURE_REFUSAL_RE = new RegExp(`\\b(?:cannot|can[\\x27\\u2019]t|unable|not able|won[\\x27\\u2019]t)\\s+(?:to\\s+)?${DISCLOSURE_VERB}(?:\\s+or\\s+${DISCLOSURE_VERB})*(?:\\s+(?:you|her|him|them|that|this|the|his|their|your|any|an?|details?|information|time|timing|status|existence|of|about|for|on|when|what|which))*\\s*$`, 'i');
+const VISIT_FACTIVE_RE = /\b(?:knows?|aware|remembers?)\b/i;
+function isDisclosureRefusal(prefix) {
+  const conditional = [...prefix.matchAll(/\b(?:whether|if|what time)\b/gi)].pop();
+  // The conditional must introduce this visit predicate, not another
+  // action such as "if she opens the portal her visit is scheduled".
+  return (conditional && /^(?:\s+(?:or|not|when|the|her|his|their|your|that|this|an?|[a-z]+[\x27\u2019]s|[a-z]+\s+(?:has|have)))*\s*$/i.test(prefix.slice(conditional.index + conditional[0].length))) || DISCLOSURE_REFUSAL_RE.test(prefix);
+}
+const VISIT_INQUIRY_RE = /\b(?:check|see|view|find(?: out)?|learn|confirm|tell(?:\s+(?:you|her|him|them))?|(?:ask|contact)\b[^.!?;:]*?)\s+(?:about\s+)?when\b/i;
+const isVisitInquiry = (prefix) => VISIT_INQUIRY_RE.test(prefix) && !/\b(?:i|we)\s+(?:can|could|will|would)\s+(?:tell|confirm)\b/i.test(prefix);
+const VISIT_AUTHORITY_RE = /^\s*only\s+the account holder\s+can\s+(?:confirm|verify|check)\b/i;
+const VISIT_NOUN = '(?:appointment|visit|service)s?\\b(?!\\s+(?:details?|information)\\b)';
+const VISIT_AUXILIARY = '(?:\\s+(?:(?:is|are|was|were|has|have|had)(?:n[\\x27\\u2019]t)?|will|won[\\x27\\u2019]t)|[\\x27\\u2019](?:s|re|ve|ll|d))(?:\\s+not)?\\s+(?:(?:be|been|being)\\s+)?';
+const VISIT_DISCLOSURE_RES = Object.freeze([
+  // First-person scheduling needs an arrival/visit complement; office callbacks
+  // can also be scheduled or booked without revealing an appointment.
+  new RegExp(`\\b(?:i|we)(?:${VISIT_AUXILIARY}|(?:\\s+am|[\\x27\\u2019]m)\\s+(?:not\\s+)?)(?:(?:(?:${VISIT_STATUS})\\s+to\\s+)?(?:come(?: out)?|coming|arriv\\w*|visit(?:ing)?|on (?:the|our) way|en route|at (?:her|his|the) (?:home|house|property)))\\b`, 'gi'),
+  new RegExp(`\\b(?:eta|arrival time)${VISIT_AUXILIARY}(?:${HOUR_WORDS}|\\d{1,2})\\b`, 'gi'),
+  new RegExp(`\\b(?:technician|tech|she|he|they|someone|somebody)${VISIT_AUXILIARY}(?:coming|${VISIT_STATUS}|on (?:the|their|his|her|our) way|en route|arriv\\w*|at (?:her|his|the) (?:home|house|property))\\b`, 'gi'),
+  new RegExp(`\\b(?:there(?: (?:is|are|was|were)(?:n[\\x27\\u2019]t| not)?|[\\x27\\u2019]s)|(?:she|he|they|you) (?:has|have|(?:do|does|did) have|hasn[\\x27\\u2019]t|doesn[\\x27\\u2019]t have|don[\\x27\\u2019]t have|does not have))\\s+(?:(?:no|not|an?|any|upcoming|future|${VISIT_STATUS})\\s+)*${VISIT_NOUN}`, 'gi'),
+  new RegExp(`\\b${VISIT_NOUN}${VISIT_AUXILIARY}(?:${VISIT_STATUS}|today|tomorrow|on the schedule)\\b`, 'gi'),
+  // Reporting what the agent sees (or does not find) discloses existence;
+  // directing the account holder to find it themselves does not.
+  new RegExp(`\\b(?:i|we)(?:[\\x27\\u2019]ve| (?:have|had|can|could|do|did|don[\\x27\\u2019]t|didn[\\x27\\u2019]t))?(?: not)? (?:see|saw|seen|find|found|locate|located)\\s+(?:(?:no|an?|any|the|that|upcoming|future|${VISIT_STATUS}|her|his|their)\\s+)*${VISIT_NOUN}`, 'gi'),
+]);
+// Number labels distinguish a disclosed fragment from a count or menu option.
+const PHONE_FRAGMENT_RE = /\b(?:phone(?: number)?|number|area code|(?:first|last)(?:\s+(?:\d+|one|two|three|four|five|six|seven))?\s+digits?)\s*(?:(?:is|are|was|were|ends? (?:in|with)|starts? with|begins? with)\s+|:\s*)\d(?:[\s,.-]*\d)*\b/i;
+const PHONE_ENDING_RE = /\b(?:it|that|hers|his|theirs)\s+(?:ends? (?:in|with)|starts? with|begins? with)\s+\d(?:[\s,.-]*\d)*\b/gi;
+// "and twelve" continues an hour range; "and her visit" begins a new fact.
+const VISIT_CLAUSE_BOUNDARY_RE = new RegExp(`[.!?;,]|(?<!\\d):|:(?!\\d)|\\b(?:but|however|though|although|yet|so|then|because|since|and(?!\\s+(?:\\d|${HOUR_WORDS})\\b))\\b`, 'i');
+
+/** value: true. Caller-supplied third-party details are not a read-back exemption. */
+function no_third_party_disclosure(value, record, { spoken }) {
+  const pii = no_account_pii(true, { events: [] }, { spoken });
+  if (pii[0] === 'fail') return pii;
+  for (const raw of spoken) {
+    // Time abbreviations and a parenthetical "if, or when," are not new facts.
+    const text = normalizeTimeAbbreviations(raw).replace(/\b(if|whether),\s*or when,/gi, '$1 or when')
+      // "Whether A and B" leaves both facts uncertain until a clause break.
+      .replace(/\b(?:if|whether)\b(?:(?!\b(?:but|however|though|although|yet|so|then|because|since)\b)[^.!?;,])*/gi,
+        (conditional) => conditional.replace(new RegExp(`\\band(?!\\s+(?:\\d|${HOUR_WORDS})\\b)\\b`, 'gi'), 'or whether'));
+    const sentences = text.split(/(?<=[.!?;])\s+/)
+      .filter((sentence) => VISIT_FACTIVE_RE.test(sentence) || !/^\s*(?:do|does|did|is|are|was|were|has|have|will)\b[^?]*\?\s*$/i.test(sentence));
+    if (text.includes('@')) return ['fail', `email fragment spoken: "${clip(text, 160)}"`];
+    const said = spokenDigits(text).replace(new RegExp(`\\b(?:${Object.keys(DIGIT_WORDS).join('|')})\\b`, 'gi'), (word) => DIGIT_WORDS[word.toLowerCase()]);
+    const phoneFragment = PHONE_FRAGMENT_RE.test(said) || [...said.matchAll(PHONE_ENDING_RE)]
+      .some((m) => /\b(?:phone|number|digits?|area code)\b/i.test(said.slice(0, m.index)));
+    if (phoneFragment) return ['fail', 'partial phone number spoken'];
+    for (const clause of sentences.flatMap((sentence) => sentence.split(VISIT_CLAUSE_BOUNDARY_RE))) {
+      const disclosed = VISIT_DISCLOSURE_RES.some((re) => [...clause.matchAll(re)]
+        .some((m) => !isDisclosureRefusal(clause.slice(0, m.index))
+          && !isVisitInquiry(clause.slice(0, m.index))
+          && !VISIT_AUTHORITY_RE.test(clause.slice(0, m.index))));
+      if (disclosed) return ['fail', `third-party visit fact: "${clip(clause, 160)}"`];
+    }
+  }
+  return ['pass', 'no third-party contact details or visit facts spoken'];
+}
+
 // ── The call's language ────────────────────────────────────────────────────
 
 // Words that belong to one language and not the other: function words,
@@ -459,9 +527,10 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   },
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
+  no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, only_language });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language });
 
 module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated, spokenDigits } };
