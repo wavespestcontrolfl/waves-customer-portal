@@ -89,6 +89,10 @@ Paths above are relative to `server/`.
   and surface an office exception; they never charge again to simplify grouping.
 - Concurrent closeouts, double taps, retries after provider timeouts, late Stripe
   webhooks, and gate changes must all converge on the same invoice/payment.
+  Visits created under the full closeout gate retain `behavior_version=2`;
+  disabling creation does not restore individual completion or billing for
+  those visits. Missing summary-key configuration holds closeout without
+  completing services. Existing legacy visits keep their original version.
 - Preserve all deployed native app and public token contracts. Specialty
   compliance documents remain available even when the summary groups services.
 

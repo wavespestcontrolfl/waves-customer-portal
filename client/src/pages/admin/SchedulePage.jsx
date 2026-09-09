@@ -626,7 +626,7 @@ export function derivedTotalAmount(rate, areaSqft) {
   return Math.round(r * (a / 1000) * 100) / 100;
 }
 
-function createCompletionIdempotencyKey(serviceId) {
+export function createCompletionIdempotencyKey(serviceId) {
   const randomPart =
     window.crypto?.randomUUID?.() ||
     `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -10429,6 +10429,9 @@ export function CompletionPanel({
   products,
   onClose,
   onSubmit,
+  // The stop sheet prepares every canonical form before one visit submit.
+  onPrepared,
+  preparedDraft,
   onViewDetails,
   // Typed specialty completion (PR 4): parent-owned success-screen
   // follow-up CTA (the button only renders when provided).
@@ -12219,9 +12222,11 @@ export function CompletionPanel({
     "Complete & Send Invoice": "Apply discounts & send invoice",
     "Complete & Send Recap": "Apply discounts & send recap",
   };
-  const completionCtaLabel = applyingCompletionDiscounts
-    ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
-    : baseCompletionCtaLabel;
+  const completionCtaLabel = onPrepared
+    ? (submitting ? "Saving form…" : "Save service form")
+    : applyingCompletionDiscounts
+      ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
+      : baseCompletionCtaLabel;
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -12480,8 +12485,14 @@ export function CompletionPanel({
     setShowDraftPrompt(false);
     try {
       const raw = localStorage.getItem(completionDraftKey(service.id));
-      if (raw) {
-        const draft = JSON.parse(raw);
+      const localDraft = raw ? JSON.parse(raw) : null;
+      const prepared = preparedDraft?.serviceId === service.id ? preparedDraft : null;
+      const localIsNewer = localDraft?.serviceId === service.id
+        && (!prepared || (Date.parse(localDraft.savedAt) || 0) > (Date.parse(prepared.savedAt) || 0));
+      const draft = localIsNewer
+        ? { ...localDraft, ...(prepared?.servicePhotos ? { servicePhotos: prepared.servicePhotos } : {}) }
+        : prepared;
+      if (draft) {
         if (draft && draft.serviceId === service.id) {
           setSavedDraft(draft);
           setShowDraftPrompt(true);
@@ -12749,6 +12760,9 @@ export function CompletionPanel({
 
   function restoreDraft() {
     if (!savedDraft) return;
+    const restoredPhotos = onPrepared && Array.isArray(savedDraft.servicePhotos)
+      ? savedDraft.servicePhotos : servicePhotos;
+    if (onPrepared) setServicePhotos(restoredPhotos);
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
@@ -12989,7 +13003,7 @@ export function CompletionPanel({
     // (codex r78).
     if (generatedReportTextRef.current
       && Number.isInteger(savedDraft.generationPhotoCount)
-      && savedDraft.generationPhotoCount !== servicePhotos.length) {
+      && savedDraft.generationPhotoCount !== restoredPhotos.length) {
       restorePruned = true;
     }
     // Same contract for the lawn-assessment identity (codex r82): a
@@ -15036,6 +15050,13 @@ export function CompletionPanel({
       // byte-for-byte through replayCommittedCompletion above; a fresh build
       // reaching here becomes the candidate snapshot.
       lastSubmitBodyRef.current = body;
+      if (onPrepared) {
+        await onPrepared(service.id, body, {
+          ...draftSnapshotRef.current, serviceId: service.id, servicePhotos,
+        });
+        setSubmitting(false);
+        return;
+      }
       const result = await onSubmit(service.id, body);
       if (finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
@@ -15986,7 +16007,7 @@ export function CompletionPanel({
                   textOverflow: "ellipsis",
                 }}
               >
-                Complete service
+                {onPrepared ? "Service form" : "Complete service"}
               </div>{" "}
             </div>
             {onViewDetails ? (
@@ -18330,7 +18351,7 @@ export function CompletionPanel({
               id={`completion-panel-title-${service.id}`}
               style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
             >
-              Complete Service
+              {onPrepared ? "Service form" : "Complete Service"}
             </div>{" "}
             <button
               type="button"
@@ -20276,8 +20297,8 @@ export function CompletionPanel({
                 <span style={{ fontSize: 15, fontWeight: 500 }}>
                   {completionCtaLabel}
                 </span>{" "}
-                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
-                  {isIncompleteVisit
+                <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.85 }}>
+                  {onPrepared ? "Saved with the other services in this visit" : isIncompleteVisit
                     ? "Office follow-up alert will be created"
                     : effectiveSendSms
                       ? `SMS + Report sent to ${service.customerName}`
