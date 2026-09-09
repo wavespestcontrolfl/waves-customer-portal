@@ -1210,7 +1210,7 @@ Full table of the 45 (verifier notes in full):
 
 ### K.5 Not verified in this pass
 
-364 P2/P3 findings that were neither P1 nor flagged autofixable were not sent through the refute pass (all are listed, with their evidence lines and proposed fixes, in the tracked inventory `docs/design/ui-consistency-audit-2026-09-07-inventory.md`). They are consistency, duplication, typography and dead-code observations; treat each as "reader-reported" until a fix PR re-reads its lines.
+364 P2/P3 findings that were neither P1 nor flagged autofixable were not sent through the refute pass (all are listed, with their evidence lines and proposed fixes, in the companion inventory `docs/design/ui-consistency-audit-2026-09-07-inventory.md`, which lands separately in #4200). They are consistency, duplication, typography and dead-code observations; treat each as "reader-reported" until a fix PR re-reads its lines.
 
 ---
 
