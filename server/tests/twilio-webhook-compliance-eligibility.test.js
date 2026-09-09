@@ -7,7 +7,7 @@ jest.mock('../models/db', () => {
   const q = {
     where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q),
     whereNot: jest.fn(() => q), orWhereNull: jest.fn(() => q), join: jest.fn(() => q),
-    first: jest.fn(async () => { if (state.fail) throw new Error('db down'); return state.results.shift() ?? null; }),
+    first: jest.fn(async () => { if (state.fail) throw Object.assign(new Error('query failed for +19415551234'), { code: '08006' }); return state.results.shift() ?? null; }),
   };
   const db = jest.fn((table) => { state.tables.push(table); return q; });
   db.raw = jest.fn((sql) => sql);
@@ -70,5 +70,8 @@ describe('hasOutboundHistory — who may receive a STOP/HELP/START reply', () =>
   test('fails OPEN on a query error so a real STOP is still honored', async () => {
     state.fail = true;
     expect(await hasOutboundHistory('+19415551234')).toBe(true);
+    const log = require('../services/logger').warn.mock.calls.at(-1);
+    expect(JSON.stringify(log)).not.toContain('19415551234');
+    expect(log[1]).toEqual({ code: '08006' });
   });
 });

@@ -102,7 +102,7 @@ async function hasOutboundHistory(phone) {
       .first('id');
     return Boolean(suppressed);
   } catch (err) {
-    logger.warn(`[sms-compliance] outbound-history check failed (treating sender as eligible): ${err.message}`);
+    logger.warn('[sms-compliance] outbound-history check failed; treating sender as eligible', { code: err.code || 'unknown' });
     return true;
   }
 }
