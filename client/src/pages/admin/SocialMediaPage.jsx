@@ -2705,6 +2705,10 @@ function AnalyticsTab() {
           >
             Weekly Posting Trend
           </div>{" "}
+          {/* Up to 12 weekly buckets: each column keeps a floor width so the
+              12px MM-DD labels never collide, and the row scrolls sideways on
+              phones instead of widening the Analytics tab (Codex round 4). */}
+          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
           <div
             style={{
               display: "flex",
@@ -2713,6 +2717,7 @@ function AnalyticsTab() {
               // 80px bar + 13px value + 12px rotated label + gaps: the old
               // 100px box let the tallest columns overflow into the heading.
               height: 136,
+              minWidth: "max-content",
             }}
           >
             {weeklyTrend.map((w, i) => {
@@ -2723,6 +2728,7 @@ function AnalyticsTab() {
                   key={i}
                   style={{
                     flex: 1,
+                    minWidth: 36,
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
@@ -2756,6 +2762,7 @@ function AnalyticsTab() {
               );
             })}
           </div>{" "}
+          </div>
         </div>
       )}
     </div>

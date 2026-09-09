@@ -1421,10 +1421,21 @@ function VelocityChart({ velocity }) {
         border: `1px solid ${C.bdr}`,
         borderRadius: 12,
         padding: 16,
+        height: 150,
+        // Up to 13 weekly buckets at phone width: keep a floor width per
+        // column so the 11px M/D labels stay inside their columns and let
+        // the row scroll sideways instead of spilling out of the card.
+        overflowX: "auto",
+        WebkitOverflowScrolling: "touch",
+      }}
+    >
+    <div
+      style={{
         display: "flex",
         alignItems: "flex-end",
         gap: 6,
-        height: 150,
+        height: "100%",
+        minWidth: "max-content",
       }}
     >
       {velocity.map((v, i) => {
@@ -1438,6 +1449,7 @@ function VelocityChart({ velocity }) {
             key={i}
             style={{
               flex: 1,
+              minWidth: 32,
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
@@ -1465,6 +1477,7 @@ function VelocityChart({ velocity }) {
           </div>
         );
       })}
+    </div>
     </div>
   );
 }

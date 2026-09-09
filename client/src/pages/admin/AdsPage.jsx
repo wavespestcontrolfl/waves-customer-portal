@@ -1699,10 +1699,14 @@ function CapacityTab() {
               </span>{" "}
             </div>{" "}
           </div>{" "}
+          {/* Seven fixed columns: each keeps room for "Sep 9" / "SPENT" at
+              the caption floor, and the row scrolls sideways on phones
+              instead of letting day labels collide (Codex round 4). */}
+          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(7, 1fr)",
+              gridTemplateColumns: "repeat(7, minmax(84px, 1fr))",
               gap: 8,
             }}
           >
@@ -1715,7 +1719,8 @@ function CapacityTab() {
                     background: color + "15",
                     border: `1px solid ${color}44`,
                     borderRadius: 10,
-                    padding: "12px 8px",
+                    padding: "12px 6px",
+                    boxSizing: "border-box",
                     textAlign: "center",
                     minWidth: 0,
                   }}
@@ -1777,6 +1782,7 @@ function CapacityTab() {
               );
             })}
           </div>{" "}
+          </div>
         </Card>
       ))}
       {/* Legend */}
