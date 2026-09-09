@@ -445,17 +445,17 @@ function no_third_party_disclosure(value, record, { spoken }) {
   for (const raw of spoken) {
     // Time abbreviations and a parenthetical "if, or when," are not new facts.
     const text = normalizeTimeAbbreviations(raw).replace(/\b(if|whether),\s*or when,/gi, '$1 or when')
-      // "Whether A and B" leaves both facts uncertain until a clause break.
+      // Direct "whether A and/or B" alternatives remain uncertain until a clause break.
       .replace(/\b(?:if|whether)\b(?:(?!\b(?:but|however|though|although|yet|so|then|because|since)\b)[^.!?;,])*/gi,
-        (conditional) => conditional.replace(/\band\b/gi, (and, index) => {
+        (conditional) => conditional.replace(/\b(?:and|or)(?!\s+(?:whether|if|not|when)\b)\b/gi, (conjunction, index) => {
           // Only adjacent uncertain visit predicates share the conditional.
           // An intervening action ("we can help") starts a factual main clause.
-          const uncertain = conditional.slice(0, index).split(/\band\b/i).every((part, i) => {
+          const uncertain = conditional.slice(0, index).split(/\b(?:and|or)(?!\s+(?:whether|if|not|when)\b)\b/i).every((part, i) => {
             const fact = VISIT_DISCLOSURE_RES.flatMap((re) => [...part.matchAll(re)]).sort((a, b) => a.index - b.index)[0];
             return fact && isDisclosureRefusal((i ? 'whether ' : '') + part.slice(0, fact.index))
               && /^\s*(?:(?:today|tomorrow|tonight)\s*)?$/i.test(part.slice(fact.index + fact[0].length));
           });
-          return uncertain ? 'or whether' : and;
+          return uncertain ? 'or whether' : conjunction;
         }));
     const sentences = text.split(/(?<=[.!?;])\s+/)
       .filter((sentence) => VISIT_FACTIVE_RE.test(sentence) || !/^\s*(?:do|does|did|is|are|was|were|has|have|will)\b[^?]*\?\s*$/i.test(sentence));
