@@ -476,8 +476,12 @@ const NotificationService = {
       callLogId = row?.id || null;
     }
     if (!callLogId) return 0;
+    // Trigger-scoped (codex r2 P2): repeat_caller shares the missed_call
+    // category and its alert stays valid when a recording lands for the
+    // same call — only the missed-call bell is superseded by a voicemail.
     return db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
+      .whereRaw("metadata->>'triggerKey' = 'customer_missed_call'")
       .whereNull('read_at')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
       .update({ read_at: new Date() });

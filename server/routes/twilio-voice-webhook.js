@@ -49,6 +49,12 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] missed-call bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
+      // Repeat windows use the same post-call grace.
+      try {
+        await require('../services/repeat-caller-bell').ringRepeatCallerIfNeeded(callSid);
+      } catch (err) {
+        logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
+      }
     }, 3 * 60 * 1000);
   }, 2 * 60 * 1000);
 }

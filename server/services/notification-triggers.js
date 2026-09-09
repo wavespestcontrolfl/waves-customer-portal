@@ -333,6 +333,19 @@ const TRIGGER_REGISTRY = {
       link: '/admin/communications#tab=calls',
     }),
   },
+  // Staff alert for a repeat window, gated by GATE_REPEAT_CALLER_BELL.
+  repeat_caller: {
+    label: 'Repeat caller',
+    category: 'missed_call',
+    priority: 'high',
+    group: 'Communication',
+    allowContactDetails: true,
+    build: (p) => ({
+      title: `Repeat caller — ${p.name || 'unknown number'}`,
+      body: `${p.phone || 'unknown number'} has called ${p.count} times in the last 3 hours (${p.unanswered} unanswered)${p.line ? ` on ${p.line}` : ''}.`,
+      link: '/admin/communications#tab=calls',
+    }),
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -777,6 +790,11 @@ function pushTagFor(triggerKey, payload = {}) {
   }
   if (triggerKey === 'customer_missed_call') {
     return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
+  }
+  if (triggerKey === 'repeat_caller') {
+    // The persisted delivery identity survives a newer call reclaiming a
+    // push-only attempt. Different caller windows still have distinct tags.
+    return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
   }
   if (triggerKey === 'customer_email_received') {
     // Per-email tag: same-tag pushes replace each other without renotifying,

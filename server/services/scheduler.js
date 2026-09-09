@@ -4330,6 +4330,15 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Recover repeat-caller checks when a deploy interrupts the post-call timer.
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await require('./repeat-caller-bell').sweepRepeatCallers();
+    } catch (err) {
+      logger.warn(`[scheduler] repeat-caller sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 6:50 AM — Inbox hygiene: quarantine sweep + spam-folder rescue.
   // Runs before the 7:30 digest so the digest reports what actually happened.
