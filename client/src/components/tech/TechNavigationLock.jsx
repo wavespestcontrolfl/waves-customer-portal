@@ -25,6 +25,12 @@ export default function TechNavigationLock({ children }) {
   const lockedIndex = useRef(null);
   useLayoutEffect(() => {
     lockedIndex.current = navigationBusy ? window.history.state?.idx : null;
+    if (!navigationBusy) return undefined;
+    // Leaving this document has no router index to restore (direct/PWA
+    // entry, reload, or closing the tab). Let the browser confirm departure.
+    const guardUnload = (event) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', guardUnload);
+    return () => window.removeEventListener('beforeunload', guardUnload);
   }, [navigationBusy]);
   return <NavigationLock.Provider value={{ navigationBusy, setNavigationBusy }}>
     <HistoryGuard lockedIndex={lockedIndex} />
