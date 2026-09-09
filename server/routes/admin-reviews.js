@@ -84,7 +84,7 @@ async function createReviewRequest({ customerId, locationId, techName, serviceTy
 // GET /api/admin/reviews/send-time-preview?serviceType=… — what "Automatic"
 // means for a completion happening now, so the completion panel previews the
 // decision dispatch will make rather than a client-side approximation: in
-// cadence mode the smart-window rule (calculateReviewSendTime, jitter off);
+// cadence mode the smart-window rule (calculateReviewSendPlan, jitter off);
 // with cadences off, the legacy 120-minute separate ask. Also tells the panel
 // whether cadence mode owns the ask (never bundled) or the legacy path
 // bundles an explicit immediate ask into the completion SMS. Staff-scoped
