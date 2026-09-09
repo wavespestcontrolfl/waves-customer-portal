@@ -1,7 +1,21 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // Match LawnAssessmentPanel's V2 token pass for visual consistency.
-
+const D = {
+  bg: "#F4F4F5",
+  card: "#FFFFFF",
+  border: "#E4E4E7",
+  teal: "#18181B",
+  green: "#15803D",
+  amber: "#A16207",
+  red: "#991B1B",
+  text: "#27272A",
+  muted: "#71717A",
+  white: "#FFFFFF",
+  input: "#FFFFFF",
+  heading: "#09090B",
+  inputBorder: "#D4D4D8"
+};
 const MONO = "'JetBrains Mono', monospace";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -17,23 +31,23 @@ function adminFetch(path, options = {}) {
   });
 }
 const cardStyle = {
-  background: "#FFFFFF",
-  border: `1px solid ${"#E4E4E7"}`,
+  background: D.card,
+  border: `1px solid ${D.border}`,
   borderRadius: 12,
   padding: 16
 };
 const inputStyle = {
   width: "100%",
   padding: "10px 12px",
-  border: `1px solid ${"#D4D4D8"}`,
+  border: `1px solid ${D.inputBorder}`,
   borderRadius: 8,
   fontSize: 14,
-  background: "#FFFFFF",
-  color: "#27272A"
+  background: D.input,
+  color: D.text
 };
 const btnStyle = bg => ({
   background: bg,
-  color: "#FFFFFF",
+  color: D.white,
   border: "none",
   borderRadius: 8,
   padding: "10px 14px",
@@ -211,7 +225,7 @@ export default function EquipmentCalibrationPanel() {
       <div style={{
       fontSize: 18,
       fontWeight: 700,
-      color: "#09090B",
+      color: D.heading,
       marginBottom: 16
     }}>
         Equipment Calibration
@@ -223,7 +237,7 @@ export default function EquipmentCalibrationPanel() {
         {" "}
         <div style={{
         fontSize: 11,
-        color: "#71717A",
+        color: D.muted,
         marginBottom: 4
       }}>
           Equipment system
@@ -242,10 +256,10 @@ export default function EquipmentCalibrationPanel() {
         {selectedSystem?.notes && <div style={{
         marginTop: 10,
         padding: "8px 10px",
-        background: "#F4F4F5",
+        background: D.bg,
         borderRadius: 6,
         fontSize: 12,
-        color: "#71717A",
+        color: D.muted,
         lineHeight: 1.4
       }}>
             {selectedSystem.notes}
@@ -254,22 +268,22 @@ export default function EquipmentCalibrationPanel() {
         {/* Current active calibration — what we'll supersede on save */}
         {selectedSystemId && (loading ? <div style={{
         marginTop: 12,
-        color: "#71717A",
+        color: D.muted,
         fontSize: 12
       }}>
               Loading current calibration…
             </div> : activeCalibration ? <div style={{
         marginTop: 12,
         padding: 10,
-        background: "#F4F4F5",
+        background: D.bg,
         borderRadius: 8,
         fontSize: 12,
-        color: "#27272A"
+        color: D.text
       }}>
               {" "}
               <div style={{
           fontWeight: 500,
-          color: "#09090B",
+          color: D.heading,
           marginBottom: 4
         }}>
                 Current active calibration
@@ -284,11 +298,11 @@ export default function EquipmentCalibrationPanel() {
                 <div>
                   {" "}
                   <span style={{
-              color: "#71717A"
+              color: D.muted
             }}>status:</span>{" "}
                   <span style={{
               fontWeight: 700,
-              color: activeCalibration.calibration_status === "field_verified" ? "#15803D" : "#A16207"
+              color: activeCalibration.calibration_status === "field_verified" ? D.green : D.amber
             }}>
                     {calibrationStatusLabel(activeCalibration.calibration_status)}
                   </span>{" "}
@@ -296,7 +310,7 @@ export default function EquipmentCalibrationPanel() {
                 <div>
                   {" "}
                   <span style={{
-              color: "#71717A"
+              color: D.muted
             }}>carrier:</span>{" "}
                   <span style={{
               fontFamily: MONO,
@@ -305,20 +319,20 @@ export default function EquipmentCalibrationPanel() {
                     {activeCalibration.carrier_gal_per_1000}
                   </span>{" "}
                   <span style={{
-              color: "#71717A"
+              color: D.muted
             }}>gal/1,000 sqft</span>{" "}
                 </div>{" "}
                 <div>
                   {" "}
                   <span style={{
-              color: "#71717A"
+              color: D.muted
             }}>expires:</span>{" "}
                   <span>{fmtExpiry(activeCalibration.expires_at)}</span>{" "}
                 </div>{" "}
               </div>{" "}
               {activeCalibration.verified_at && <div style={{
           marginTop: 6,
-          color: "#71717A"
+          color: D.muted
         }}>
                   Verified {new Date(activeCalibration.verified_at).toLocaleDateString()}
                   {activeCalibration.verified_test_area_sqft ? ` over ${activeCalibration.verified_test_area_sqft} sqft` : ""}
@@ -328,7 +342,7 @@ export default function EquipmentCalibrationPanel() {
           marginTop: 10
         }}>
                   <button type="button" onClick={() => setVerifyOpen(v => !v)} style={{
-            ...btnStyle("#18181B"),
+            ...btnStyle(D.teal),
             padding: "8px 12px",
             fontSize: 12
           }}>
@@ -338,9 +352,9 @@ export default function EquipmentCalibrationPanel() {
               {verifyOpen && <div style={{
           marginTop: 10,
           padding: 10,
-          border: `1px solid ${"#E4E4E7"}`,
+          border: `1px solid ${D.border}`,
           borderRadius: 8,
-          background: "#FFFFFF"
+          background: D.card
         }}>
                   <div style={{
             display: "grid",
@@ -350,7 +364,7 @@ export default function EquipmentCalibrationPanel() {
           }}>
                     <div>
                       <div style={{
-                color: "#71717A",
+                color: D.muted,
                 marginBottom: 4
               }}>
                         Measured sqft
@@ -359,7 +373,7 @@ export default function EquipmentCalibrationPanel() {
                     </div>
                     <div>
                       <div style={{
-                color: "#71717A",
+                color: D.muted,
                 marginBottom: 4
               }}>
                         Measured gallons
@@ -368,7 +382,7 @@ export default function EquipmentCalibrationPanel() {
                     </div>
                     <div>
                       <div style={{
-                color: "#71717A",
+                color: D.muted,
                 marginBottom: 4
               }}>
                         Verification date
@@ -379,11 +393,11 @@ export default function EquipmentCalibrationPanel() {
                   <div style={{
             marginBottom: 10,
             padding: 10,
-            background: "#F4F4F5",
+            background: D.bg,
             borderRadius: 8
           }}>
                     <span style={{
-              color: "#71717A"
+              color: D.muted
             }}>Verified carrier:</span>{" "}
                     <span style={{
               fontFamily: MONO,
@@ -396,7 +410,7 @@ export default function EquipmentCalibrationPanel() {
             marginBottom: 10
           }}>
                     <div style={{
-              color: "#71717A",
+              color: D.muted,
               marginBottom: 4
             }}>
                       Verification notes
@@ -407,13 +421,13 @@ export default function EquipmentCalibrationPanel() {
             }} />
                   </div>
                   <div style={{
-            color: "#71717A",
+            color: D.muted,
             marginBottom: 10
           }}>
                     Tech is recorded from the signed-in admin/technician account.
                   </div>
                   <button type="button" onClick={handleVerifyCalibration} disabled={!canVerify} style={{
-            ...btnStyle("#15803D"),
+            ...btnStyle(D.green),
             width: "100%",
             opacity: canVerify ? 1 : 0.5
           }}>
@@ -423,10 +437,10 @@ export default function EquipmentCalibrationPanel() {
             </div> : <div style={{
         marginTop: 12,
         padding: 10,
-        background: "#F4F4F5",
+        background: D.bg,
         borderRadius: 8,
         fontSize: 12,
-        color: "#A16207"
+        color: D.amber
       }}>
               No active calibration. Plan engine cannot use this rig until one
               is recorded.
@@ -441,7 +455,7 @@ export default function EquipmentCalibrationPanel() {
         <div style={{
         fontSize: 13,
         fontWeight: 500,
-        color: "#09090B",
+        color: D.heading,
         marginBottom: 12
       }}>
           New calibration test
@@ -452,7 +466,7 @@ export default function EquipmentCalibrationPanel() {
           {" "}
           <div style={{
           fontSize: 11,
-          color: "#71717A",
+          color: D.muted,
           marginBottom: 4
         }}>
             Test area (sqft)
@@ -465,7 +479,7 @@ export default function EquipmentCalibrationPanel() {
           {" "}
           <div style={{
           fontSize: 11,
-          color: "#71717A",
+          color: D.muted,
           marginBottom: 4
         }}>
             Captured gallons
@@ -476,14 +490,14 @@ export default function EquipmentCalibrationPanel() {
         <div style={{
         marginBottom: 12,
         padding: 12,
-        background: "#F4F4F5",
+        background: D.bg,
         borderRadius: 8,
         textAlign: "center"
       }}>
           {" "}
           <div style={{
           fontSize: 11,
-          color: "#71717A",
+          color: D.muted,
           letterSpacing: 0.5
         }}>
             COMPUTED CARRIER RATE
@@ -492,7 +506,7 @@ export default function EquipmentCalibrationPanel() {
           fontFamily: MONO,
           fontSize: 24,
           fontWeight: 700,
-          color: computedRate != null ? "#15803D" : "#71717A"
+          color: computedRate != null ? D.green : D.muted
         }}>
             {computedRate != null ? `${computedRate} gal / 1,000 sqft` : "—"}
           </div>{" "}
@@ -509,7 +523,7 @@ export default function EquipmentCalibrationPanel() {
             {" "}
             <div style={{
             fontSize: 11,
-            color: "#71717A",
+            color: D.muted,
             marginBottom: 4
           }}>
               Pressure (PSI, optional)
@@ -520,7 +534,7 @@ export default function EquipmentCalibrationPanel() {
             {" "}
             <div style={{
             fontSize: 11,
-            color: "#71717A",
+            color: D.muted,
             marginBottom: 4
           }}>
               Engine RPM (optional)
@@ -534,7 +548,7 @@ export default function EquipmentCalibrationPanel() {
           {" "}
           <div style={{
           fontSize: 11,
-          color: "#71717A",
+          color: D.muted,
           marginBottom: 4
         }}>
             Notes (optional)
@@ -545,7 +559,7 @@ export default function EquipmentCalibrationPanel() {
         }} />{" "}
         </div>{" "}
         <button onClick={handleSave} disabled={!canSave} style={{
-        ...btnStyle("#15803D"),
+        ...btnStyle(D.green),
         width: "100%",
         padding: 14,
         fontSize: 15,
@@ -556,7 +570,7 @@ export default function EquipmentCalibrationPanel() {
         {savedAt && <div style={{
         marginTop: 10,
         fontSize: 12,
-        color: "#15803D",
+        color: D.green,
         textAlign: "center"
       }}>
             Calibration saved at {savedAt.toLocaleTimeString()}
@@ -580,32 +594,32 @@ function SystemLinkSummary({
   return <div style={{
     marginTop: 10,
     padding: "8px 10px",
-    background: "#F4F4F5",
+    background: D.bg,
     borderRadius: 6,
     fontSize: 12,
-    color: "#27272A",
+    color: D.text,
     lineHeight: 1.4
   }}>
       <div style={{
       fontWeight: 700,
-      color: "#09090B",
+      color: D.heading,
       marginBottom: 4
     }}>
         Operational links
       </div>
       {system.primary_equipment ? <div>
           <span style={{
-        color: "#71717A"
+        color: D.muted
       }}>Primary:</span>{" "}
           {assetName(system.primary_equipment)}
         </div> : <div style={{
-      color: "#A16207"
+      color: D.amber
     }}>No primary equipment linked</div>}
       {componentAssets.length > 0 && <div style={{
       marginTop: 4
     }}>
           <span style={{
-        color: "#71717A"
+        color: D.muted
       }}>Components:</span>{" "}
           {componentAssets.map(({
         role,
@@ -614,7 +628,7 @@ function SystemLinkSummary({
         </div>}
       {!system.primary_equipment && suggestions.length > 0 && <div style={{
       marginTop: 4,
-      color: "#71717A"
+      color: D.muted
     }}>
           Suggested: {suggestions.map(s => assetName(s)).join(", ")}
         </div>}
@@ -644,20 +658,20 @@ function ReconciliationPanel({
           <div style={{
           fontSize: 13,
           fontWeight: 700,
-          color: "#09090B"
+          color: D.heading
         }}>
             Equipment reconciliation
           </div>
           <div style={{
           fontSize: 12,
-          color: "#71717A",
+          color: D.muted,
           marginTop: 2
         }}>
             Links calibrated systems, operational assets, and tax register rows.
           </div>
         </div>
         <button type="button" onClick={onRefresh} disabled={loading} style={{
-        ...btnStyle("#18181B"),
+        ...btnStyle(D.teal),
         padding: "8px 12px",
         fontSize: 12,
         opacity: loading ? 0.6 : 1
@@ -668,7 +682,7 @@ function ReconciliationPanel({
 
       {!report && <div style={{
       fontSize: 12,
-      color: loading ? "#71717A" : "#A16207"
+      color: loading ? D.muted : D.amber
     }}>
           {loading ? "Loading reconciliation report..." : "Reconciliation report unavailable."}
         </div>}
@@ -681,9 +695,9 @@ function ReconciliationPanel({
         marginBottom: 14
       }}>
             <SummaryTile label="Systems linked" value={`${summary.systems_with_any_equipment_link ?? 0}/${summary.systems_active ?? 0}`} />
-            <SummaryTile label="No system link" value={summary.systems_without_equipment_link ?? 0} color={summary.systems_without_equipment_link > 0 ? "#A16207" : "#15803D"} />
+            <SummaryTile label="No system link" value={summary.systems_without_equipment_link ?? 0} color={summary.systems_without_equipment_link > 0 ? D.amber : D.green} />
             <SummaryTile label="Equipment tax links" value={`${summary.equipment_with_tax_link ?? 0}/${summary.equipment_active ?? 0}`} />
-            <SummaryTile label="Tax rows unlinked" value={summary.tax_register_unlinked ?? 0} color={summary.tax_register_unlinked > 0 ? "#A16207" : "#15803D"} />
+            <SummaryTile label="Tax rows unlinked" value={summary.tax_register_unlinked ?? 0} color={summary.tax_register_unlinked > 0 ? D.amber : D.green} />
           </div>
 
           {unlinkedSystems.length > 0 && <IssueSection title="Systems needing operational links" rows={unlinkedSystems.slice(0, 5).map(s => ({
@@ -700,7 +714,7 @@ function ReconciliationPanel({
 
           {issues.length === 0 && !loading && <div style={{
         fontSize: 12,
-        color: "#15803D"
+        color: D.green
       }}>
               No reconciliation issues detected.
             </div>}
@@ -710,17 +724,17 @@ function ReconciliationPanel({
 function SummaryTile({
   label,
   value,
-  color = "#09090B"
+  color = D.heading
 }) {
   return <div style={{
-    border: `1px solid ${"#E4E4E7"}`,
+    border: `1px solid ${D.border}`,
     borderRadius: 8,
     padding: 10,
     minHeight: 64
   }}>
       <div style={{
       fontSize: 10,
-      color: "#71717A",
+      color: D.muted,
       marginBottom: 4
     }}>
         {label}
@@ -742,7 +756,7 @@ function IssueSection({
       <div style={{
       fontSize: 12,
       fontWeight: 700,
-      color: "#09090B"
+      color: D.heading
     }}>
         {title}
       </div>
@@ -752,17 +766,17 @@ function IssueSection({
       gap: 6
     }}>
         {rows.map(row => <div key={row.id} style={{
-        border: `1px solid ${"#E4E4E7"}`,
+        border: `1px solid ${D.border}`,
         borderRadius: 8,
         padding: "8px 10px",
         fontSize: 12
       }}>
             <div style={{
-          color: "#27272A",
+          color: D.text,
           fontWeight: 500
         }}>{row.label}</div>
             <div style={{
-          color: "#71717A",
+          color: D.muted,
           marginTop: 2
         }}>{row.detail}</div>
           </div>)}

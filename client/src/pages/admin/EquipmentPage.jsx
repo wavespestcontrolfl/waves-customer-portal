@@ -206,8 +206,8 @@ export default function EquipmentPage() {
         });
       }
     } : null} variant="workspace" />
-      {activeGroup.tabs.length > 1 && <Tabs value={tab} onValueChange={selectLeaf} className="mb-4">
-          <TabList aria-label={`${activeGroup.label} views`}>
+      {activeGroup.tabs.length > 1 && <Tabs value={tab} onValueChange={selectLeaf} className="mb-4" variant="section">
+          <TabList aria-label={`${activeGroup.label} views`} scrollable>
             {activeGroup.tabs.map(key => {
           const leaf = EQUIPMENT_LEAF_BY_KEY[key];
           const LeafIcon = leaf.Icon;
