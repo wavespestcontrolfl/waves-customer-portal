@@ -171,6 +171,20 @@ describe('customer publication', () => {
     expect([...copy.governedTerms('Nutsedges, grey leaf spot and Gray leaf spots; iron deficiency')]).toEqual(['nutsedge', 'gray leaf', 'iron deficiency']);
   });
 
+  test.each([
+    ['Chinch bug activity — unconfirmed', 'Chinch bug activity is spreading.'],
+    ['Non-fungal stress', 'Fungal activity is spreading.'],
+    ['Non‑fungal stress', 'Fungal activity is spreading.'],
+    ['Non fungal stress', 'Fungal activity is spreading.'],
+  ])('negative-prefix finding %s cannot authorize customer prose', (name, text) => {
+    for (const confidence of ['moderate', 'high']) {
+      const evidence = { name, label: 'general lawn stress', confidence };
+      expect(copy.customerObservations(text, [evidence])).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.safeConfirmationStep(text, evidence)).toBe('');
+      expect(copy.reviewedObservations({ current: text, lastPublished: text, observations: text, findings: [evidence] })).toBe(copy.NO_OBSERVATIONS);
+    }
+  });
+
   test('plural aliases match their evidence and negated names do not establish positive causes', () => {
     expect(copy.customerObservations('Large patches are spreading in the shade.', [{ name: 'Large patch', label: 'large patch (fungal) activity', confidence: 'moderate' }])).toBe('Large patches are spreading in the shade.');
     expect(copy.customerObservations('Sodwebworms are damaging the turf.', [{ name: 'Sod webworm activity', label: 'caterpillar activity', confidence: 'moderate' }])).toBe('Sodwebworms are damaging the turf.');
