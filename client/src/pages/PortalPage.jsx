@@ -2617,7 +2617,7 @@ function SavedVisitDetails({ visits }) {
   </ul>;
 }
 
-function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [], activePropertyId, onSavedScopeUnavailable }) {
+function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable }) {
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
   const dashboardSavedScope = properties.some((p) => p.key);
@@ -2626,7 +2626,14 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // primary's ZIP) — withheld here rather than shown as house B's
   // (uncapped codex r1t P1). Next visit, tracker and last visit follow the
   // selection; the plan recommendations are plan-wide.
-  const dashboardSecondarySelection = dashboardSavedScope && !!dashboardEntry && !!dashboardEntry.propertyId && dashboardEntry.isPrimaryProperty !== true;
+  // Shown only once the selected entry is CONFIRMED the profile's primary (or
+  // a row-less profile, its own primary). A selection with no listed entry
+  // (the list read failed while /auth/me resolved a house; a house retired
+  // mid-session before the re-read; a closed profile) is withheld too
+  // (uncapped codex r1x P1) — never the primary's facts under an unconfirmed
+  // house. Profile mode (no selection, no saved entries) shows them as today.
+  const entryConfirmedPrimary = !!dashboardEntry && (dashboardEntry.isPrimaryProperty === true || !dashboardEntry.propertyId);
+  const dashboardSecondarySelection = !!(selectedProperty || dashboardSavedScope) && !entryConfirmedPrimary;
   const compact = useIsMobile(720);
   const nextRead = usePortalRead('next-visit', () => api.getNextService());
   // A next visit scoped to a different house than Home shows is stale (the
@@ -16469,7 +16476,7 @@ export default function PortalPage() {
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
-        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} onSavedScopeUnavailable={refreshProperties} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);

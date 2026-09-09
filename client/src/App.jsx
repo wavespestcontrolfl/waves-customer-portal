@@ -499,7 +499,13 @@ function ProtectedRoute({ children }) {
     }
     // Saved-property entries carry composite ids (GATE_APP_PROPERTY_SCOPE);
     // a notification names the PROFILE, so match on the entry's customer.
-    if (!properties.some((property) => String(property.customerId || property.id) === targetProperty)) {
+    // The saved-property list omits an active profile whose houses were ALL
+    // retired. A CUSTOMER-WIDE destination (Billing, Documents…) on such a
+    // sibling profile is still reachable — /auth/select-property verifies
+    // ownership and refuses a foreign profile — so only PROPERTY-scoped
+    // destinations require the profile to list a house (uncapped codex r1x
+    // P1); a customer-wide one proceeds to the ownership-checked switch.
+    if (propertyScopedDestination && !properties.some((property) => String(property.customerId || property.id) === targetProperty)) {
       setTargetError('This notification belongs to a property that is no longer available on your account.');
       return;
     }
@@ -517,7 +523,7 @@ function ProtectedRoute({ children }) {
     void switchProperty(savedEntry ? { customerId: savedEntry.customerId, propertyId: savedEntry.propertyId } : targetProperty).then((switched) => {
       if (!switched) setTargetError('This property could not be opened. Try again.');
     }).catch(() => setTargetError('This property could not be opened. Try again.'));
-  }, [targetPending, targetProperty, resolvedTargetPropertyId, primaryUnknown, currentProfileEntries.length, loading, properties, propertiesError, switchProperty]);
+  }, [targetPending, targetProperty, resolvedTargetPropertyId, primaryUnknown, propertyScopedDestination, currentProfileEntries.length, loading, properties, propertiesError, switchProperty]);
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
   useGlassSurface(loading || targetPending);

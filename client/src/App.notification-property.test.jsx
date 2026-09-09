@@ -216,3 +216,25 @@ test('the same retired-house hint on a PROPERTY-scoped destination (Visits) stil
   expect(state.auth.switchProperty).not.toHaveBeenCalled();
 });
 
+test('a CUSTOMER-WIDE push (Billing) to a sibling profile the saved list omits (its houses all retired) still switches by profile — ownership is verified by the switch (uncapped codex r1x P1)', async () => {
+  window.history.replaceState({}, '', '/?tab=billing&notificationProperty=property-9');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+    properties: [{ id: 'property-1:prop-a', key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true }],
+    propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith('property-9'));
+  expect(document.body.textContent).not.toMatch(/no longer available/);
+});
+
+test('the same unlisted sibling profile on a PROPERTY-scoped push (Visits) is refused', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-9');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+    properties: [{ id: 'property-1:prop-a', key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true }],
+    propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(document.body.textContent).toMatch(/no longer available/));
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+});
+

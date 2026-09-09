@@ -73,4 +73,14 @@ describe('Home under a saved-property selection', () => {
     render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
     expect(await screen.findByText('Last Visit')).toBeInTheDocument();
   });
+
+  it('a selection with NO listed entry (the list read failed while /auth/me resolved a house) withholds the primary\'s facts until confirmed (uncapped codex r1x P1); profile mode shows them', async () => {
+    render(<DashboardTab customer={customer} properties={[]} activePropertyId="cust-1:pb" selectedProperty={{ key: 'cust-1:pb', customerId: 'cust-1', propertyId: 'pb' }} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    expect(await screen.findByTestId('home-primary-facts-notice')).toBeInTheDocument();
+    expect(screen.queryByText('Property Alerts')).not.toBeInTheDocument();
+    cleanup();
+    render(<DashboardTab customer={customer} properties={[]} activePropertyId="cust-1" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    expect(await screen.findByText('Property Alerts')).toBeInTheDocument();
+    expect(screen.queryByTestId('home-primary-facts-notice')).not.toBeInTheDocument();
+  });
 });
