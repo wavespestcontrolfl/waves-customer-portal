@@ -73,6 +73,29 @@ describe('legacy score derivation', () => {
 describe('confirm scores preserve NULLs', () => {
   const scoreValue = (value) => Math.max(0, Math.min(100, Math.round(Number(value))));
 
+  test('a saved manual stress correction survives filling another missing score', () => {
+    const assessment = { turf_density: 72, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 };
+    const run = { status: 'complete', severities: { drought_stress: sig('moderate') }, scores_adjusted: { ...assessment } };
+    const options = { scoreValue, calculateOverallScore: () => 77 };
+    const partial = visit.confirmScores(assessment, run, { stress_damage: 90 }, options);
+    expect(partial).toMatchObject({ confirmed: false, stressOverride: 90, finalScores: { stress_damage: 90 } });
+    const saved = { ...assessment, ...partial.finalScores };
+    const savedRun = { ...run, reconciliation: JSON.stringify({ stress_damage_override: partial.stressOverride }) };
+    const later = visit.confirmScores(saved, savedRun, { color_health: 70 }, options);
+    expect(later).toMatchObject({ confirmed: true, stressOverride: 90, finalScores: { stress_damage: 90 } });
+    expect(later.aiScores.stress_damage).toBe(50);
+    // A full form can repeat unchanged component scores without clearing the correction.
+    expect(visit.confirmScores(saved, savedRun, { color_health: 70, fungus_control: 75, thatch_level: 60 }, options).stressOverride).toBe(90);
+    expect(visit.confirmScores({ ...saved, fungus_control: '75', thatch_level: '60' }, savedRun, { color_health: 70, fungus_control: 75, thatch_level: 60 }, options).stressOverride).toBe(90);
+    // A changed component intentionally requests a new derivation when stress is omitted.
+    const revised = visit.confirmScores(saved, savedRun, { color_health: 70, fungus_control: 40 }, options);
+    expect(revised).toMatchObject({ stressOverride: null, finalScores: { stress_damage: 40 } });
+    // Explicit zero is a saved correction too.
+    const zero = visit.confirmScores(saved, savedRun, { stress_damage: 0 }, options);
+    expect(zero).toMatchObject({ stressOverride: 0, finalScores: { stress_damage: 0 } });
+    expect(visit.confirmScores({ ...saved, ...zero.finalScores }, { ...savedRun, reconciliation: { stress_damage_override: 0 } }, { color_health: 70 }, options).finalScores.stress_damage).toBe(0);
+  });
+
   test('a NULL column stays NULL unless the technician entered a value; stress derives from the known values only', () => {
     const assessment = { turf_density: 72, weed_suppression: null, color_health: null, fungus_control: 75, thatch_level: null, stress_damage: null };
     expect(visit.resolveConfirmScores(assessment, undefined, scoreValue)).toEqual({

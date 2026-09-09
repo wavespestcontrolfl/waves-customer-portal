@@ -50,6 +50,7 @@ function adjustAvailableScores(scores, adjust) {
 }
 
 const known = (value) => typeof value === 'number' && Number.isFinite(value);
+const numericOverride = (value) => known(value) || (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value)));
 // The overall score needs its four inputs.
 function overallInputsComplete(scores) {
   return !!scores && OVERALL_INPUTS.every((key) => known(scores[key]));
@@ -104,19 +105,14 @@ function independentStressFloor(run) {
 // components instead of keeping the stored AI stress as a permanent floor
 // (Codex #4150 r13: the standalone panel deletes stress_damage before posting
 // a fungus edit). `undefined` (no run) keeps the stored value as the floor.
-function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor } = {}) {
+function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor, stressOverride } = {}) {
   const adjusted = adjustedScores && typeof adjustedScores === 'object' ? adjustedScores : {};
   const present = (value) => value != null && value !== '';
   // An override counts only when it is a finite number (or a non-blank string
   // that parses to one) — a blank, whitespace or malformed value falls back to
   // the stored score exactly as the legacy path does, never to 0.
-  const numeric = (value) => {
-    if (typeof value === 'number') return Number.isFinite(value);
-    if (typeof value !== 'string' || !value.trim()) return false;
-    return Number.isFinite(Number(value));
-  };
   const pick = (key) => {
-    if (numeric(adjusted[key])) return scoreValue(adjusted[key]);
+    if (numericOverride(adjusted[key])) return scoreValue(adjusted[key]);
     return present(assessment[key]) ? scoreValue(assessment[key]) : null;
   };
   const final = {
@@ -126,8 +122,10 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFl
     fungus_control: pick('fungus_control'),
     thatch_level: pick('thatch_level'),
   };
-  if (numeric(adjusted.stress_damage)) {
+  if (numericOverride(adjusted.stress_damage)) {
     final.stress_damage = scoreValue(adjusted.stress_damage);
+  } else if (known(stressOverride)) {
+    final.stress_damage = scoreValue(stressOverride);
   } else {
     const floor = stressFloor === undefined ? (present(assessment.stress_damage) ? Number(assessment.stress_damage) : null) : stressFloor;
     const parts = [final.fungus_control, final.thatch_level, floor]
@@ -166,7 +164,20 @@ function overallScoreFor(finalScores, calculateOverallScore) {
 // fills the gaps and confirms again. `missing` names the gaps for the client;
 // calibration needs a confirmed row with AI scores to compare against.
 function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
-  const finalScores = resolveConfirmScores(assessment, adjustedScores, scoreValue, run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {});
+  const adjusted = adjustedScores || {};
+  const previousOverride = parseJsonObject(run?.reconciliation)?.stress_damage_override;
+  const componentChanged = ['fungus_control', 'thatch_level'].some((key) => numericOverride(adjusted[key]) && scoreValue(adjusted[key]) !== (numericOverride(assessment[key]) ? scoreValue(assessment[key]) : null));
+  // Preserve an explicit correction across partial confirmations. A later
+  // change to a component without an explicit stress edit requests a fresh
+  // derivation. The caller persists this marker on the run in the SAME
+  // transaction as the assessment, including null when ownership is cleared.
+  const stressOverride = numericOverride(adjusted.stress_damage)
+    ? scoreValue(adjusted.stress_damage)
+    : (componentChanged || !known(previousOverride) ? null : previousOverride);
+  const finalScores = resolveConfirmScores(assessment, adjusted, scoreValue, {
+    ...(run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {}),
+    stressOverride,
+  });
   const confirmed = scoresComplete(finalScores);
   const aiScores = runAiScores(run);
   return {
@@ -175,6 +186,7 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
     confirmed,
     missing: missingScores(finalScores),
     aiScores,
+    stressOverride,
     calibrationEligible: confirmed && SCORE_KEYS.some((key) => known(aiScores[key])),
   };
 }
