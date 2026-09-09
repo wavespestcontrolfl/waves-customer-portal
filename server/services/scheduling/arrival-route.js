@@ -13,7 +13,7 @@ const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
-const { allocationKey } = require('./visit-capacity');
+const { allocationKey, occupiedRows } = require('./visit-capacity');
 
 const COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
@@ -236,17 +236,20 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     // Capacity models the selected technician's route; unassigned work still
     // blocks it, including the drive home. Legacy placement keeps its shared
     // occupancy rule for other technicians and live holds.
-    const fixed = rows.filter(row => capacity ? row.technician_id == null
-      : row.technician_id !== target.technician_id || row.reservation_expires_at != null);
+    const fixedRows = rows.filter(row => row.status !== 'completed'
+      && (capacity ? row.technician_id == null
+        : row.technician_id !== target.technician_id || row.reservation_expires_at != null));
+    const fixed = capacity ? occupiedRows(fixedRows) : fixedRows;
     const hitsFixed = simulation.arrivals.some((arrival, index) => fixed.some(row => {
-      if (row.id === arrival.id || row.status === 'completed') return false;
+      if (row.id === arrival.id) return false;
       const start = minuteOfDay(row.window_start);
+      const end = Math.max(start + workDuration(row), row.endMin ?? 0);
       const occupiedFrom = index === 0 ? startMin : simulation.arrivals[index - 1].departureMin;
-      return (capacity && start == null) || (start != null && occupiedFrom < start + workDuration(row) && arrival.departureMin > start);
+      return (capacity && start == null) || (start != null && occupiedFrom < end && arrival.departureMin > start);
     })) || (capacity && fixed.some(row => {
-      if (row.status === 'completed') return false;
       const start = minuteOfDay(row.window_start);
-      return start == null || (simulation.serviceFinishMin < start + workDuration(row) && simulation.returnFinishMin > start);
+      const end = Math.max(start + workDuration(row), row.endMin ?? 0);
+      return start == null || (simulation.serviceFinishMin < end && simulation.returnFinishMin > start);
     }));
     if (hitsFixed) continue;
     if (!winner || simulation.travelMin < winner.simulation.travelMin

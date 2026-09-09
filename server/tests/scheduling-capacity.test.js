@@ -103,3 +103,30 @@ test('capacity still rejects overlapping unassigned work and an overloaded selec
   expect(evaluateArrivalPlacement(context([stop('unassigned', 960, 60, { technician_id: null })]), options()).feasible).toBe(false);
   expect(evaluateArrivalPlacement(context([stop('own', 480, 600)]), options()).feasible).toBe(false);
 });
+
+test.each([null, 'other-tech'])('fixed allocations respect capacity ownership for technician %s', technician_id => {
+  const rows = ['pest', 'lawn'].map(id => stop(id, 540, 40, {
+    technician_id, customer_id: 'customer',
+    reservation_service_mix: { version: 2, allocatedServiceIds: ['pest', 'lawn'] },
+  }));
+  const input = context(rows, { now: new Date('2027-01-15T15:00:00Z') });
+  // Unassigned members block until 10:20; another technician has independent capacity.
+  expect(evaluateArrivalPlacement(input, options(600)).feasible).toBe(technician_id != null);
+  expect(evaluateArrivalPlacement({ ...input, now: new Date('2027-01-15T15:20:00Z') }, options(600)).feasible).toBe(true);
+});
+
+test('the return leg respects the full duration of a fixed allocation', () => {
+  const rows = ['pest', 'lawn'].map(id => stop(id, 600, 40, {
+    technician_id: null, customer_id: 'customer',
+    reservation_service_mix: { version: 2, allocatedServiceIds: ['pest', 'lawn'] },
+  }));
+  const input = context(rows, {
+    now: new Date('2027-01-01T12:00:00Z'),
+    blocks: [{ start_time: '10:00', end_time: '10:40' }],
+    travel: travel(20),
+  });
+  // Work ends at 10:00; the block delays the return to 10:40–11:00,
+  // which still overlaps the fixed allocation lasting until 11:20.
+  expect(evaluateArrivalPlacement(input, options(540, 60)).feasible).toBe(false);
+  expect(evaluateArrivalPlacement({ ...input, rows: [] }, options(540, 60)).feasible).toBe(true);
+});
