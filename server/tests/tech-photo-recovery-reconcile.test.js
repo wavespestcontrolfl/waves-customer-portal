@@ -1,0 +1,176 @@
+/**
+ * POST /api/tech/services/:id/photos/reconcile — completion-aware
+ * reconciliation after the completion panel recovers failed closeout photos
+ * (Codex #4091 P1: the attachment route only inserts the row).
+ *
+ * Invariants: same ownership rule as the photo routes; 409 not_completed when
+ * no service_record exists; the cached PDF key is cleared on every success;
+ * a render is re-queued ONLY when one was queued before (never starts a
+ * render for a report that never rendered); an in-flight render answers 409
+ * so the panel keeps its marker; a Tree & Shrub visit with an existing
+ * assessment raises a one-time dispatch alert instead of silently keeping the
+ * partial scoring; a failed PDF-key write fails the request (fail-closed).
+ */
+
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+const tables = {};
+const updates = [];
+let updateError = null;
+
+function mockChain(table) {
+  const state = { table, where: null };
+  const c = {
+    where: jest.fn((w) => { state.where = w; return c; }),
+    whereIn: jest.fn(() => c),
+    orderBy: jest.fn(() => c),
+    first: jest.fn(async () => {
+      const rows = tables[table] || [];
+      return rows.find((r) => !state.where || Object.entries(state.where).every(([k, v]) => r[k] === v)) || null;
+    }),
+    update: jest.fn(async (patch) => {
+      if (updateError) throw updateError;
+      updates.push({ table, where: state.where, patch });
+      return 1;
+    }),
+  };
+  return c;
+}
+
+jest.mock('../models/db', () => jest.fn((table) => mockChain(table)));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockEnqueue = jest.fn();
+jest.mock('../services/service-report/pdf-queue', () => ({ enqueuePdfRenderJob: (...a) => mockEnqueue(...a) }));
+const mockAlert = jest.fn();
+jest.mock('../services/dispatch-alerts', () => ({ createAlertOnce: (...a) => mockAlert(...a) }));
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, res, next) => {
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const users = {
+      admin: { id: 'admin-1', role: 'admin' },
+      tech: { id: 'tech-1', role: 'technician' },
+      other: { id: 'tech-2', role: 'technician' },
+    };
+    const user = users[token];
+    if (!user) return res.status(401).json({ error: 'Admin authentication required' });
+    req.technician = user;
+    req.technicianId = user.id;
+    req.techRole = user.role;
+    return next();
+  },
+  requireTechOrAdmin: (req, res, next) => (
+    ['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'Staff access required' })
+  ),
+}));
+
+const express = require('express');
+const router = require('../routes/tech-track');
+
+async function withServer(fn) {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/tech/services', router);
+  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+  const server = app.listen(0);
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  try { return await fn(baseUrl); } finally { await new Promise((r) => server.close(r)); }
+}
+
+const reconcile = (baseUrl, token = 'tech') => fetch(`${baseUrl}/api/tech/services/svc-1/photos/reconcile`, {
+  method: 'POST', headers: { Authorization: `Bearer ${token}` },
+});
+
+describe('POST /:id/photos/reconcile', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    updates.length = 0;
+    updateError = null;
+    for (const k of Object.keys(tables)) delete tables[k];
+    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', scheduled_date: '2026-09-01' }];
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest' }];
+    tables.service_report_pdf_jobs = [];
+    tables.tree_shrub_assessments = [];
+    mockEnqueue.mockResolvedValue({ ok: true, queued: true, job: { status: 'queued' } });
+    mockAlert.mockResolvedValue({ created: true });
+  });
+
+  test('another tech is refused; admin is allowed', async () => {
+    await withServer(async (baseUrl) => {
+      expect((await reconcile(baseUrl, 'other')).status).toBe(403);
+      expect((await reconcile(baseUrl, 'admin')).status).toBe(200);
+    });
+  });
+
+  test('409 not_completed when the visit has no completion record', async () => {
+    tables.service_records = [];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('not_completed');
+      expect(updates).toHaveLength(0);
+    });
+  });
+
+  test('clears the cached PDF key and does NOT start a render for a report that never rendered', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ ok: true, serviceRecordId: 'rec-1', pdf: { invalidated: true, requeued: false }, treeShrub: null });
+      expect(updates).toEqual([{ table: 'service_records', where: { id: 'rec-1' }, patch: { pdf_storage_key: null } }]);
+      expect(mockEnqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  test('re-queues the render with the prior token when a render was queued before', async () => {
+    tables.service_report_pdf_jobs = [{ id: 'job-1', service_record_id: 'rec-1', status: 'succeeded', payload: { source: 'dispatch_complete', token: 'tok-1' } }];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(200);
+      expect((await res.json()).pdf).toEqual({ invalidated: true, requeued: true });
+      expect(mockEnqueue).toHaveBeenCalledWith({ serviceRecordId: 'rec-1', payload: { source: 'photo_recovery', token: 'tok-1' } });
+    });
+  });
+
+  test('an in-flight render answers 409 so the panel keeps its recovery marker', async () => {
+    tables.service_report_pdf_jobs = [{ id: 'job-1', service_record_id: 'rec-1', status: 'rendering', payload: '{"token":"tok-1"}' }];
+    mockEnqueue.mockResolvedValue({ ok: true, queued: false, job: { status: 'rendering' } });
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('report_render_in_flight');
+    });
+  });
+
+  test('a Tree & Shrub visit with a closeout assessment raises a one-time review alert, never a re-score', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'tree_shrub' }];
+    tables.tree_shrub_assessments = [{ id: 'ta-1', service_record_id: 'rec-1' }];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(200);
+      expect((await res.json()).treeShrub).toEqual({ assessmentId: 'ta-1', rescored: false, flaggedForReview: true });
+      expect(mockAlert).toHaveBeenCalledTimes(1);
+      expect(mockAlert.mock.calls[0][0]).toMatchObject({
+        type: 'tree_shrub_assessment_partial_photos', severity: 'warn', jobId: 'svc-1', techId: 'tech-1',
+        payload: { source: 'photo_recovery', serviceRecordId: 'rec-1', assessmentId: 'ta-1' },
+      });
+    });
+  });
+
+  test('a Tree & Shrub visit without an assessment is not flagged', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'palm' }];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect((await res.json()).treeShrub).toEqual({ assessmentId: null, rescored: false, flaggedForReview: false });
+      expect(mockAlert).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a failed PDF-key write fails the request instead of reporting success', async () => {
+    updateError = new Error('db down');
+    await withServer(async (baseUrl) => {
+      expect((await reconcile(baseUrl)).status).toBe(500);
+      expect(mockEnqueue).not.toHaveBeenCalled();
+    });
+  });
+});

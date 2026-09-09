@@ -12448,9 +12448,10 @@ export function CompletionPanel({
           ? stored.servicePhotos : undefined }
         : stored || metadata;
       if (draft?.serviceId === service.id) {
-        if (draft.pendingPhotoCompletion && draft.servicePhotos?.length) {
+        if (draft.pendingPhotoCompletion && (draft.servicePhotos?.length || draft.reconcileOwed)) {
           // Closeout already succeeded. Reopen only the outstanding photo
-          // uploads; never submit completion or collect payment again.
+          // uploads (or the report reconciliation the uploads still owe);
+          // never submit completion or collect payment again.
           draftSnapshotRef.current = draft;
           setCompletionResult(draft.pendingPhotoCompletion);
           setSuccess(true);
@@ -12458,7 +12459,7 @@ export function CompletionPanel({
           setSavedDraft(draft);
           setShowDraftPrompt(true);
         }
-        if (draft.generationPhotoCount > 0 && !draft.servicePhotos?.length) {
+        if (draft.generationPhotoCount > 0 && !draft.servicePhotos?.length && !draft.reconcileOwed) {
           setDraftStorageNotice("The saved photos could not be restored. Reattach them before completing this visit.");
         }
       }
@@ -12539,10 +12540,15 @@ export function CompletionPanel({
     }
 
     const photosChanged = draftSnapshotRef.current?.servicePhotos !== servicePhotos;
+    // A restored draft re-persists at once (same revision) so its savedAt
+    // moves forward with this session's edits; only a real photo change
+    // mints a new revision.
+    const persistNow = photosChanged || draftSnapshotRef.current?.restoredFromStorage === true;
     const draft = {
         serviceId: service.id,
         // Field-only edits must not invalidate photos already saved to IDB.
-        draftId: photosChanged ? crypto.randomUUID() : draftSnapshotRef.current.draftId,
+        draftId: photosChanged || !draftSnapshotRef.current.draftId
+          ? crypto.randomUUID() : draftSnapshotRef.current.draftId,
         savedAt: new Date().toISOString(),
         servicePhotos,
         notes,
@@ -12657,7 +12663,7 @@ export function CompletionPanel({
     // The departure cleanup reads this snapshot before cancelling autosave.
     draftSnapshotRef.current = draft;
     // Start photo persistence immediately, including a photo-only draft.
-    if (photosChanged) void saveDraftSnapshot(draft);
+    if (persistNow) void saveDraftSnapshot(draft);
     const timer = setTimeout(() => {
       if (draftSnapshotRef.current !== draft) return;
       void saveDraftSnapshot(draft);
@@ -12732,6 +12738,13 @@ export function CompletionPanel({
   function restoreDraft() {
     if (!savedDraft) return;
     const restoredPhotos = Array.isArray(savedDraft.servicePhotos) ? savedDraft.servicePhotos : [];
+    // Seed the autosave snapshot from the restored draft so the first effect
+    // run compares the SAME photo array and keeps the stored photo revision.
+    // Without this a restore reads as a photo change, mints a new draftId and
+    // overwrites the localStorage metadata before the matching IndexedDB
+    // write commits — a reload in that window rejects the still-valid stored
+    // photos (Codex #4091 P1).
+    draftSnapshotRef.current = { ...savedDraft, servicePhotos: restoredPhotos, restoredFromStorage: true };
     setServicePhotos(restoredPhotos);
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
@@ -14131,13 +14144,13 @@ export function CompletionPanel({
   async function retryCompletionPhotos() {
     if (photoRetryLockRef.current) return;
     const draft = draftSnapshotRef.current;
-    if (!draft?.servicePhotos?.length) return;
+    if (!draft?.servicePhotos?.length && !draft?.reconcileOwed) return;
     photoRetryLockRef.current = true;
     setPhotoRetrying(true);
     setPhotoRetryError("");
     const failedPhotos = [];
     try {
-      for (const photo of draft.servicePhotos) {
+      for (const photo of draft.servicePhotos || []) {
         try {
           const [header, encoded] = photo.data.split(",");
           const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
@@ -14157,14 +14170,35 @@ export function CompletionPanel({
           failedPhotos.push(photo);
         }
       }
-      const result = {
-        ...draft.pendingPhotoCompletion,
-        completionPhotoUpload: { failed: failedPhotos.length },
-      };
       if (!failedPhotos.length) {
-        await finishCompletionSuccess(result);
+        // The attachment route only inserts the photo row. Photo-dependent
+        // artifacts (cached report PDF, Tree & Shrub scoring) were built from
+        // the photos that uploaded at closeout, so recovery is not complete
+        // until the server reconciles them. Keep the marker (photos already
+        // uploaded, reconciliation owed) if that step fails (Codex #4091 P1).
+        try {
+          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, { method: "POST" });
+        } catch {
+          const owed = { ...draft, servicePhotos: [], reconcileOwed: true,
+            pendingPhotoCompletion: { ...draft.pendingPhotoCompletion, completionPhotoUpload: { failed: 0, reconcileOwed: true } } };
+          draftSnapshotRef.current = owed;
+          await saveDraftSnapshot(owed);
+          if (!completionPanelClosedRef.current) {
+            setCompletionResult(owed.pendingPhotoCompletion);
+            setPhotoRetryError("Photos uploaded, but the report could not be updated yet. Retry when connected.");
+          }
+          return;
+        }
+        await finishCompletionSuccess({
+          ...draft.pendingPhotoCompletion,
+          completionPhotoUpload: { failed: 0 },
+        });
       } else {
-        const remaining = { ...draft, servicePhotos: failedPhotos, pendingPhotoCompletion: result };
+        const result = {
+          ...draft.pendingPhotoCompletion,
+          completionPhotoUpload: { failed: failedPhotos.length },
+        };
+        const remaining = { ...draft, servicePhotos: failedPhotos, reconcileOwed: false, pendingPhotoCompletion: result };
         draftSnapshotRef.current = remaining;
         await saveDraftSnapshot(remaining);
         if (!completionPanelClosedRef.current) {
@@ -15652,15 +15686,20 @@ export function CompletionPanel({
       {draftLoading ? "Loading saved draft…" : draftStorageNotice}
     </div>
   );
-  const photoRecoveryNotice = completionResult?.completionPhotoUpload?.failed > 0 && (
+  const photoReconcileOwed = completionResult?.completionPhotoUpload?.reconcileOwed === true;
+  const photoRecoveryNotice = (completionResult?.completionPhotoUpload?.failed > 0 || photoReconcileOwed) && (
     <div role="status" style={{ marginTop: 16, padding: 16, width: "100%", maxWidth: 360, boxSizing: "border-box",
       color: "#111111", background: "#FFFFFF", border: "1px solid #E5E5E5", borderRadius: 12, fontSize: 14, lineHeight: 1.5 }}>
-      <p style={{ margin: "0 0 12px" }}>The visit is saved. {completionResult.completionPhotoUpload.failed} {completionResult.completionPhotoUpload.failed === 1 ? "photo still needs" : "photos still need"} uploading.</p>
+      <p style={{ margin: "0 0 12px" }}>
+        {photoReconcileOwed
+          ? "The visit is saved and the photos are uploaded. The report still needs updating with them."
+          : `The visit is saved. ${completionResult.completionPhotoUpload.failed} ${completionResult.completionPhotoUpload.failed === 1 ? "photo still needs" : "photos still need"} uploading.`}
+      </p>
       {photoRetryError && <p>{photoRetryError}</p>}
       {draftStorageStatus}
       <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
         style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
-        {photoRetrying ? "Uploading photos…" : "Retry photo uploads"}
+        {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
       </button>
       <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>
         Later

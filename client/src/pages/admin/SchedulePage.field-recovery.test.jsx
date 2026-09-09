@@ -96,6 +96,24 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(screen.queryByAltText('exterior.jpg')).toBeNull();
   });
 
+  it('keeps the stored photo revision when the restore-time IndexedDB write is interrupted', async () => {
+    await seed();
+    const first = await mount();
+    // Restore must not read as a photo change: the metadata written right
+    // after Restore keeps draftId 'draft-one', which is what the still-valid
+    // stored photos carry when this write never commits (Codex #4091 P1).
+    vi.spyOn(completionStore, 'putCompletionDraft').mockResolvedValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    fireEvent(window, new Event('pagehide'));
+    first.unmount();
+    expect(JSON.parse(localStorage.getItem(key)).draftId).toBe('draft-one');
+    vi.restoreAllMocks();
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(screen.getByAltText('exterior.jpg').getAttribute('src')).toBe(photos[0].data);
+    expect(screen.queryByText(/saved photos could not be restored/)).toBeNull();
+  });
+
   it('retains failed uploads across reloads and retries only photos, with one request per double tap', async () => {
     await seed();
     const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });
@@ -112,10 +130,15 @@ describe('completion photos in an unsubmitted draft', () => {
     const originalFetch = fetch.getMockImplementation();
     let failUpload = true;
     const uploads = [];
+    const reconciles = [];
     fetch.mockImplementation(async (url, options) => {
       if (url === `/api/tech/services/${service.id}/photos`) {
         uploads.push(options);
         return { ok: !failUpload, status: 503, json: async () => failUpload ? { error: 'Upload unavailable' } : { photo: { id: 'photo-1' } } };
+      }
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) {
+        reconciles.push(options);
+        return { ok: true, json: async () => ({ ok: true }) };
       }
       return originalFetch(url, options);
     });
@@ -136,6 +159,57 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(uploads[1].headers['Content-Type']).toBeUndefined();
     expect(resubmit).not.toHaveBeenCalled();
     expect(completion).toHaveBeenCalledTimes(1);
+    // The failed retry never reconciles; the successful one reconciles once.
+    expect(reconciles).toHaveLength(1);
+    expect(reconciles[0].method).toBe('POST');
+    expect(completionResumeOwed(service.id)).toBe(false);
+    third.unmount();
+    expect(await getCompletionDraft(service.id)).toBeNull();
+  });
+
+  it('keeps the recovery marker when the uploads land but the report reconciliation fails', async () => {
+    await seed();
+    const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });
+    const first = await mount(completion);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => fireEvent.click(submitButton()));
+    await screen.findByRole('button', { name: 'Retry photo uploads' });
+    first.unmount();
+
+    const originalFetch = fetch.getMockImplementation();
+    let failReconcile = true;
+    const uploads = [];
+    const reconciles = [];
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos`) {
+        uploads.push(options);
+        return { ok: true, json: async () => ({ photo: { id: 'photo-1' } }) };
+      }
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) {
+        reconciles.push(options);
+        return { ok: !failReconcile, status: 409, json: async () => failReconcile ? { code: 'report_render_in_flight' } : { ok: true } };
+      }
+      return originalFetch(url, options);
+    });
+    const resubmit = vi.fn();
+    const second = await mount(resubmit);
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Retry photo uploads' })));
+    expect(uploads).toHaveLength(1);
+    expect(reconciles).toHaveLength(1);
+    // Photos are uploaded, so the panel must not offer to upload them again —
+    // but recovery is NOT complete until the server rebuilds the report.
+    expect(completionResumeOwed(service.id)).toBe(true);
+    await screen.findByText(/report could not be updated yet/);
+    expect(screen.getByRole('button', { name: 'Finish report update' })).toBeTruthy();
+    second.unmount();
+    expect(await getCompletionDraft(service.id)).toMatchObject({ reconcileOwed: true, servicePhotos: [], pendingPhotoCompletion: { serviceRecordId: 'record-1' } });
+
+    failReconcile = false;
+    const third = await mount(resubmit);
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Finish report update' })));
+    expect(uploads).toHaveLength(1);
+    expect(reconciles).toHaveLength(2);
+    expect(resubmit).not.toHaveBeenCalled();
     expect(completionResumeOwed(service.id)).toBe(false);
     third.unmount();
     expect(await getCompletionDraft(service.id)).toBeNull();
