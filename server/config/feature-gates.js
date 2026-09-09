@@ -12,6 +12,7 @@
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
+ *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -43,6 +44,7 @@
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
+ *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
@@ -1410,6 +1412,17 @@ const gates = {
   // SMS is skipped.
   droppedCallSms: process.env.GATE_DROPPED_CALL_SMS === 'true',
 
+  // Outbound voicemail text-back (services/outbound-voicemail-sms.js): an
+  // admin click-to-call that reaches the CUSTOMER'S voicemail hangs up the
+  // customer leg before a message is left and texts "sorry we missed you"
+  // instead (owner-directed 2026-09-08 — the "did you just call me?"
+  // callbacks). Same fail-CLOSED rule as the other text-back lanes:
+  // customer-facing auto-send, explicit opt-in in every environment. Owner
+  // sets GATE_OUTBOUND_VOICEMAIL_SMS=true to go live. Off → the outbound
+  // <Dial> requests no machine detection at all (no AMD charge, no hangup,
+  // no text) — the call flow is unchanged from before this lane.
+  outboundVoicemailSms: process.env.GATE_OUTBOUND_VOICEMAIL_SMS === 'true',
+
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
   // eligible requests consult GrowthBook (server SDK; LOCAL eval against a
@@ -1675,6 +1688,14 @@ const gates = {
   // except one admin notification on regression. Enable with
   // GATE_CALL_REPLAY_EVAL=true.
   callReplayEval: isProd ? process.env.GATE_CALL_REPLAY_EVAL === 'true' : true,
+
+  // Weekly voice relay conversation eval — replays the synthetic-caller
+  // scenario fixture (server/fixtures/voice-relay-eval/) through the LIVE
+  // Sandy conversation loop and the pinned judge, in a child process (the
+  // per-scenario gates it sets never reach this process). Notifications and
+  // ordinary judge telemetry may write; synthetic conversations cannot.
+  // Explicit opt-in in every environment: GATE_VOICE_RELAY_EVAL=true.
+  voiceRelayEval: process.env.GATE_VOICE_RELAY_EVAL === 'true',
 
   // Estimate "Show your work" — public estimate page trust block: property
   // facts with friendly data-source labels, the county parcel match line,

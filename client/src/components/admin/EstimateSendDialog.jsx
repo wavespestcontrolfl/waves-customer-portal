@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Button } from "../ui";
+import { ActionFeedback, Button, Checkbox, Field, Input, Radio, UiSurface } from "../ui";
 import useModalFocus from "../../hooks/useModalFocus";
 import { etDatetimeLocalToISO } from "../../lib/timezone";
 
@@ -47,6 +47,7 @@ export default function EstimateSendDialog({ request, onClose }) {
   const [copied, setCopied] = useState(false);
   const inFlight = useRef(false);
   const attempt = useRef(null);
+  const sendingLabel = useRef("");
   const dialogRef = useModalFocus(true, () => { if (!inFlight.current) onClose(outcome); });
 
   useEffect(() => {
@@ -72,6 +73,7 @@ export default function EstimateSendDialog({ request, onClose }) {
       scheduled = when.toISOString();
     }
     inFlight.current = true;
+    sendingLabel.current = submitLabel;
     setBusy(true);
     setError("");
     // Keep the exact body/key after a transport failure. Only a new dialog is
@@ -104,15 +106,16 @@ export default function EstimateSendDialog({ request, onClose }) {
   const stale = request.expectedEditVersion && preview?.editVersion && request.expectedEditVersion !== preview.editVersion;
   const notice = [request.warning, preview?.requiresEngineReview ? preview.blockReason : "", preview?.uncertainAttempt ? "An earlier send has an uncertain outcome. Check the conversation and email delivery records; another send could duplicate it." : ""].filter(Boolean).join(" ");
   const needsAcknowledgment = !!notice;
+  const submitLabel = attempt.current ? "Check / retry attempt" : scheduledAt ? "Confirm scheduled send" : "Confirm send";
   return createPortal(
-    <div className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center px-3 sm:px-6 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-[calc(12px+env(safe-area-inset-bottom,0px))]">
+    <UiSurface density="comfortable" onClick={(event) => event.stopPropagation()} className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center px-3 sm:px-6 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-[calc(12px+env(safe-area-inset-bottom,0px))]">
       <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="estimate-send-title" className="w-full max-w-2xl max-h-full overflow-y-auto bg-white text-ink-primary rounded-sm shadow-xl p-5 sm:p-6 text-16">
         <div className="flex items-start justify-between gap-4">
           <div><h2 id="estimate-send-title" className="text-22 font-medium">Review and send</h2><p className="text-14 text-ink-secondary mt-1">The saved estimate is the offer being sent.</p></div>
-          <Button variant="ghost" className="min-h-11" disabled={busy} onClick={() => onClose(outcome)}>Close</Button>
+          <Button variant="ghost" disabled={busy} onClick={() => onClose(outcome)}>Close</Button>
         </div>
-        {!preview && !error && <p role="status" className="py-6">Loading saved recipient and message…</p>}
-        {error && <p role="alert" className="my-4 text-alert-fg">{error}</p>}
+        {!preview && !error && <ActionFeedback className="py-6">Loading saved recipient and message…</ActionFeedback>}
+        {error && <ActionFeedback error className="my-4">{error}</ActionFeedback>}
         {preview && <div className="space-y-5 mt-5">
           <div className="border-b border-zinc-200 pb-4 break-words">
             <p className="font-medium">{preview.customerName || "Unnamed recipient"}</p>
@@ -121,11 +124,11 @@ export default function EstimateSendDialog({ request, onClose }) {
             <a className="inline-flex items-center min-h-11 text-ink-primary underline u-focus-ring" href={preview.previewPath} target="_blank" rel="noopener noreferrer">Preview saved customer document</a>
             <p className="text-14">Recipient changes belong in Customer &amp; property, followed by Save draft.</p>
           </div>
-          {(blocked || stale) && <p role="alert" className="text-alert-fg">{stale ? "This offer changed since the editor loaded. Reopen it and review the current version." : preview.blockReason}</p>}
+          {(blocked || stale) && <ActionFeedback error>{stale ? "This offer changed since the editor loaded. Reopen it and review the current version." : preview.blockReason}</ActionFeedback>}
           <fieldset disabled={locked} className="border-0 p-0 min-w-0">
             <legend className="font-medium mb-2">Choose delivery channel</legend>
-            {Object.entries(CHANNEL_LABELS).map(([key, label]) => <label key={key} className="flex items-center gap-3 min-h-11">
-              <input type="radio" name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={(key !== "email" && !preview.customerPhone) || (key !== "sms" && !preview.customerEmail)} />
+            {Object.entries(CHANNEL_LABELS).map(([key, label]) => <label key={key} className="ui-choice-label flex items-center gap-3">
+              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={(key !== "email" && !preview.customerPhone) || (key !== "sms" && !preview.customerEmail)} />
               <span>{label}</span>
             </label>)}
             <p className="text-14 text-ink-secondary mt-2 break-words">Text: {preview.customerPhone || "No phone saved"}<br />Email: {preview.customerEmail || "No email saved"}</p>
@@ -136,21 +139,21 @@ export default function EstimateSendDialog({ request, onClose }) {
             {method !== "sms" && <div><p className="text-14 font-medium mb-1">{preview.messages.email?.subject || "Email template unavailable"}</p><p className="whitespace-pre-wrap break-words rounded-sm bg-zinc-50 p-3 text-14">{preview.messages.email?.text || "Sending this channel will fail."}</p></div>}
             <p className="text-14 text-ink-secondary">Delivery replaces the full estimate URL with a tracked secure link to the same offer.</p>
           </div>}
-          <label className="block">Send later (Eastern time, optional)<input aria-label="Send later in Eastern time" type="datetime-local" disabled={locked} value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} className="mt-2 block w-full min-w-0 min-h-11 border border-zinc-300 rounded-sm p-2 text-16 u-focus-ring" /></label>
-          {needsAcknowledgment && <label className="flex items-start gap-3 min-h-11 text-14"><input className="mt-1" type="checkbox" disabled={locked} checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} /><span>{notice} I reviewed this warning and authorize this send.</span></label>}
+          <Field label="Send later (Eastern time, optional)"><Input aria-label="Send later in Eastern time" type="datetime-local" disabled={locked} value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} /></Field>
+          {needsAcknowledgment && <label className="ui-choice-label flex items-start gap-3 text-14"><Checkbox className="mt-1 shrink-0" disabled={locked} checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} /><span>{notice} I reviewed this warning and authorize this send.</span></label>}
           {outcome && <div role="status" className="border-t border-zinc-200 pt-4 space-y-2">
             {outcome.scheduled && <p>Scheduled for {new Date(outcome.scheduledAt).toLocaleString("en-US", { timeZone: "America/New_York" })} Eastern. No provider handoff yet.</p>}
             {Object.entries(outcome.channels || {}).map(([channel, result]) => <p key={channel}>{CHANNEL_LABELS[channel]} to {channel === "sms" ? preview.customerPhone : preview.customerEmail}: {result.uncertain ? "provider outcome uncertain; check delivery records before resending" : result.ok && result.real !== false ? "provider accepted; delivery not confirmed" : result.error || "not sent"}.</p>)}
             {outcome.groupPublicationFailures > 0 && <p className="text-alert-fg">{outcome.groupPublicationFailures} grouped properties were not published. Review the group before another send.</p>}
             {outcome.replayed && <p className="text-14">This is the recorded outcome of the earlier attempt. No new message was sent.</p>}
           </div>}
-          <div className="flex flex-wrap gap-2 border-t border-zinc-200 pt-4">
-            {!outcome && <Button className="min-h-11" disabled={!method || busy || blocked || stale || (needsAcknowledgment && !acknowledged)} onClick={send}>{busy ? "Sending…" : attempt.current ? "Check / retry attempt" : scheduledAt ? "Confirm scheduled send" : "Confirm send"}</Button>}
-            {preview.customerUrl && <Button variant="secondary" className="min-h-11" onClick={async () => { try { await navigator.clipboard.writeText(preview.customerUrl); setCopied(true); } catch { setError("Copy failed. Open the saved preview to access the link."); } }}>{copied ? "Link copied" : "Copy secure estimate link"}</Button>}
-            <Button variant="secondary" className="min-h-11" disabled={busy} onClick={() => onClose(outcome)}>{outcome ? "Done" : "Cancel"}</Button>
+          <div className="ui-record-actions border-t border-zinc-200 pt-4">
+            {!outcome && <Button loading={busy} disabled={!method || busy || blocked || stale || (needsAcknowledgment && !acknowledged)} onClick={send}>{busy ? sendingLabel.current : submitLabel}</Button>}
+            {preview.customerUrl && <Button variant="secondary" onClick={async () => { try { await navigator.clipboard.writeText(preview.customerUrl); setCopied(true); } catch { setError("Copy failed. Open the saved preview to access the link."); } }}>{copied ? "Link copied" : "Copy secure estimate link"}</Button>}
+            <Button variant="secondary" disabled={busy} onClick={() => onClose(outcome)}>{outcome ? "Done" : "Cancel"}</Button>
           </div>
         </div>}
       </section>
-    </div>, document.body,
+    </UiSurface>, document.body,
   );
 }
