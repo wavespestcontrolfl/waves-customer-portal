@@ -20,11 +20,13 @@ async function createRepairDatabase() {
       billing_address_line1 text, billing_city text, billing_state text, billing_zip text);
     CREATE TABLE customers (id uuid PRIMARY KEY, payer_id integer REFERENCES payers(id));
     CREATE TABLE technicians (id uuid PRIMARY KEY, name text);
-    CREATE TABLE services (id uuid PRIMARY KEY, name text, is_active boolean DEFAULT true);
+    CREATE TABLE services (id uuid PRIMARY KEY, name text, service_key text, is_active boolean DEFAULT true);
     CREATE TABLE scheduled_services (id uuid PRIMARY KEY, customer_id uuid REFERENCES customers(id),
       scheduled_date date, service_type text, service_key_snapshot text, status text,
       technician_id uuid REFERENCES technicians(id), payer_id integer REFERENCES payers(id),
-      po_number text, self_pay_override boolean DEFAULT false, is_callback boolean DEFAULT false, visit_id uuid);
+      po_number text, self_pay_override boolean DEFAULT false, is_callback boolean DEFAULT false, visit_id uuid,
+      service_id uuid REFERENCES services(id), followup_included boolean DEFAULT false,
+      prepaid_method text, prepaid_amount numeric(10,2), annual_prepay_term_id uuid);
     CREATE TABLE service_records (id uuid PRIMARY KEY, customer_id uuid REFERENCES customers(id),
       scheduled_service_id uuid REFERENCES scheduled_services(id), is_callback boolean DEFAULT false);
     CREATE TABLE service_completion_attempts (id uuid PRIMARY KEY,

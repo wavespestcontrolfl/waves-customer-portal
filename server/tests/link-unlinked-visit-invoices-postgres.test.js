@@ -46,6 +46,38 @@ jest.setTimeout(30000);
     await db('scheduled_services').insert({ id: randomUUID(), customer_id: ids.customerId, scheduled_date: '2020-01-01', status: 'confirmed' });
     expect((await readPlan()).skipped).toEqual({ ambiguous: 1 });
   });
+  test('treats a NULL-status invoice as live for uniqueness and existing-bill checks', async () => {
+    const ids = await seedPair(db);
+    const sibling = randomUUID();
+    await db('invoices').insert({ id: sibling, customer_id: ids.customerId, service_date: '2020-01-01', status: null });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'ambiguous' });
+    await db('invoices').where({ id: sibling }).update({ service_date: '2020-01-02', scheduled_service_id: ids.visitId });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'visitAlreadyInvoiced' });
+  });
+  test.each([
+    { service_type: 'Waves Pest Control Appointment Service' }, { followup_included: true },
+  ])('refuses designated no-cost work: %j', async (visit) => {
+    const ids = await seedPair(db, { visit });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'noCostVisit' });
+  });
+  test.each([
+    { prepaid_method: 'annual_prepay_invoice', prepaid_amount: 40, annual_prepay_term_id: randomUUID() },
+    { prepaid_method: 'annual_prepay_invoice' }, { annual_prepay_term_id: randomUUID() }, { prepaid_method: 'cash', prepaid_amount: 100 },
+  ])('refuses prepaid visits: %j', async (visit) => {
+    const ids = await seedPair(db, { visit });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'prepaid' });
+  });
+  test('refuses conflicting visit identities and accepts agreeing ones', async () => {
+    const ids = await seedPair(db, { visit: { service_key_snapshot: 'termite_bait' } });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'identityConflict' });
+    const serviceId = randomUUID();
+    await db('services').insert({ id: serviceId, name: 'Termite Bait Station Service', service_key: 'termite_bait' });
+    await db('scheduled_services').where({ id: ids.visitId }).update({ service_key_snapshot: null, service_id: serviceId });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'identityConflict' });
+    await db('services').where({ id: serviceId }).update({ name: 'Pest Control', service_key: 'pest_general_quarterly' });
+    await db('scheduled_services').where({ id: ids.visitId }).update({ service_key_snapshot: 'pest_general_quarterly' });
+    expect((await evaluate(db, ids.invoiceId)).pairing).toMatchObject({ visitId: ids.visitId });
+  });
   test('counts a legacy record-linked invoice as a competing bill', async () => {
     const ids = await seedPair(db); const legacyRecordId = randomUUID();
     await db('service_records').insert({ id: legacyRecordId, customer_id: ids.customerId });
