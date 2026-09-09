@@ -96,6 +96,12 @@ jobs:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
         run: npx jest --ci --silent --runInBand tests/visit-summary-identity-postgres.test.js
+      - name: Visit summary authorization and recovery transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
+        run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2

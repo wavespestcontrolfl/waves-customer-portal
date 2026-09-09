@@ -776,6 +776,15 @@ async function handleEmailMessageEvent(ev, message, client = db) {
 
   const updates = computeEmailMessageEventUpdates(ev, message, now);
   if (updates) await client('email_messages').where({ id: message.id }).update(updates);
+  if (updates && ['bounce', 'blocked', 'dropped'].includes(ev.event)) {
+    await require('../services/visit-completion-summary').reconcileSummaryEmailBounce(message, client);
+  }
+  // A delivery event after a provider-retry resend is the durable retry for
+  // the recovery the rail attempted inline (a transient failure there would
+  // otherwise leave the effect on office review with the message sent).
+  if (ev.event === 'delivered') {
+    await require('../services/visit-completion-summary').reconcileSummaryEmailRecovery(message, client);
+  }
   const groupKey = await groupKeyForEmailMessage(message, client);
   await recordEmailSuppressionForEvent(ev, message, groupKey, now, client);
 }
@@ -1011,5 +1020,6 @@ module.exports.canUseProviderMessageMatch = canUseProviderMessageMatch;
 module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId;
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
 module.exports.handleNewsletterEvent = handleNewsletterEvent;
+module.exports.handleEmailMessageEvent = handleEmailMessageEvent;
 module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;
 module.exports.shouldRecordNewsletterSuppression = shouldRecordNewsletterSuppression;

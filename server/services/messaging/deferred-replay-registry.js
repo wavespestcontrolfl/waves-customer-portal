@@ -4,7 +4,7 @@
  *
  * Every send path that requeues a held text (QUIET_HOURS_HOLD →
  * sms_log status 'scheduled') registers its entry_point here with up to
- * three hooks, and the executor consults the registry generically:
+ * four hooks, and the executor consults the registry generically:
  *
  *   recheck(claimMeta)   — BEFORE dispatch: is this message still valid?
  *                          The world moves overnight — estimates get
@@ -16,6 +16,8 @@
  *                          bounded re-check (used when the state READ
  *                          failed — fail closed, never send unverified),
  *                          or { eligible:true }.
+ *   preDispatch(claimMeta) — final claim fence inside the canonical sender,
+ *                          after validation, before the provider handoff.
  *   finalize(claimMeta, ctx) — AFTER the provider accepts: the state
  *                          transitions the immediate path would have run
  *                          inline (invoice draft→sent, review delivered
@@ -227,6 +229,14 @@ const REGISTRY = {
         },
       });
     },
+    durableFinalize: true,
+  },
+
+  visit_summary_deferred: {
+    recheck: (meta) => require('../visit-completion-summary').recheckDeferredSummarySms(meta),
+    preDispatch: (meta) => require('../visit-completion-summary').beginDeferredSummarySms(meta),
+    finalize: (meta) => require('../visit-completion-summary').finalizeDeferredSummarySms(meta),
+    onTerminal: (meta) => require('../visit-completion-summary').terminalDeferredSummarySms(meta),
     durableFinalize: true,
   },
 
@@ -1161,6 +1171,16 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
   }
 }
 
+// Failed reads prove no handoff occurred and stay on the bounded retry rail.
+async function preDispatchDeferredReplay(entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  try {
+    return entry?.preDispatch ? await entry.preDispatch(claimMeta) : { ok: true };
+  } catch {
+    return { ok: false, code: 'DEFERRED_RECHECK_FAILED', retryable: true };
+  }
+}
+
 // null = no finalize registered. { ok:false } rides the durable
 // finalize_only retry rail for durableFinalize entry points.
 async function finalizeDeferredReplay(entryPoint, claimMeta = {}, ctx = {}) {
@@ -1328,6 +1348,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
 
 module.exports = {
   recheckDeferredReplay,
+  preDispatchDeferredReplay,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
   runTerminalHookDurably,

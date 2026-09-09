@@ -1366,9 +1366,12 @@ const EFFECT_TYPE_BY_KIND = Object.freeze({
   on_site: 'tracker_arrived',
   reminder_72h: 'reminder_72h',
   reminder_24h: 'reminder_24h',
+  completion_sms: 'completion_sms',
+  completion_email: 'completion_email',
   visit_payment: 'visit_payment',
 });
 const REMINDER_EFFECT_TYPES = new Set(['reminder_72h', 'reminder_24h']);
+const PACKET_EFFECT_TYPES = new Set(['completion_sms', 'completion_email', 'visit_payment']);
 function effectTypeForKind(kind) {
   return EFFECT_TYPE_BY_KIND[kind] || 'tracker_arrived';
 }
@@ -1389,10 +1392,18 @@ function dedupeKeyFor(visit, effectType) {
     : `${visit.id}:${effectType}`;
 }
 
+// Only recorded packet members own packet effects. Retained history can
+// have a different assignment or stop tuple and cannot claim delivery.
+async function recordedPacketMember(packetId, database = db) {
+  return database('scheduled_services as s')
+    .join('visit_completion_packet_items as i', 'i.scheduled_service_id', 's.id')
+    .where('i.packet_id', packetId).orderBy('s.id').select('s.*').first();
+}
+
 async function claimVisitNotification(row, kind) {
   if (!row || !row.visit_id) return null;
   const effectType = effectTypeForKind(kind);
-  const packetEffect = effectType === 'visit_payment';
+  const packetEffect = PACKET_EFFECT_TYPES.has(effectType);
   const eligibleStatuses = packetEffect ? ['closing', 'closed'] : ['open'];
   const logger = require('./logger');
   const token = require('crypto').randomBytes(16).toString('hex');
@@ -1416,7 +1427,7 @@ async function claimVisitNotification(row, kind) {
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
         .first('id', 'visit_id', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
-      if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return { state: 'detached', token: null };
+      if (!fresh || String(fresh.visit_id) !== String(visit.id)) return { state: 'detached', token: null };
       // The visit owns assignment: a one-child reassignment that committed
       // ahead of its detach seam is a detached row (codex r12).
       if (visit.technician_id && String(fresh.technician_id || '') !== String(visit.technician_id)) return { state: 'detached', token: null };
@@ -1434,6 +1445,16 @@ async function claimVisitNotification(row, kind) {
       // visit's date — a move that committed while we waited must claim
       // under the date it actually holds).
       const dedupeKey = dedupeKeyFor(visit, effectType);
+      if (effectType === 'completion_sms') {
+        // Communications cancels a still-scheduled row by deleting it. The
+        // queue and pending marker were committed together, so its absence
+        // proves that this queued summary was cancelled before dispatch.
+        await t('visit_effects').where({ visit_id: visit.id, effect_type: effectType, dedupe_key: dedupeKey, status: 'pending' })
+          .whereNotNull('scheduled_at').whereNotExists(t('sms_log').select(t.raw('1'))
+            .where({ customer_id: visit.customer_id, direction: 'outbound' })
+            .whereRaw("metadata->>'visit_summary_claim_token' = visit_effects.claim_token"))
+          .update({ status: 'suppressed', last_error: 'scheduled_message_cancelled', updated_at: t.fn.now() });
+      }
       const rows = await t('visit_effects')
         .insert({
           visit_id: visit.id,
@@ -1451,6 +1472,15 @@ async function claimVisitNotification(row, kind) {
             .orWhere(function staleClaim() {
               this.where('visit_effects.status', '=', 'claimed').where('visit_effects.claimed_at', '<', leaseCutoff);
             });
+          // Email recovery consults each durable email_messages row and
+          // skips every uncertain handoff. Reclaiming its aggregate lets
+          // later, proven-unsent recipients finish. SMS has no such ledger.
+          if (effectType === 'completion_email') this.orWhere(function recoverEmail() {
+            this.where('visit_effects.status', 'unknown_delivery').where(function finishedOrStale() {
+              this.where('visit_effects.last_error', 'provider_outcome_unknown')
+                .orWhere('visit_effects.claimed_at', '<', leaseCutoff);
+            });
+          });
         })
         .returning('id');
       if (rows && rows.length) return { state: 'owner', token, dedupeKey };
@@ -1463,6 +1493,29 @@ async function claimVisitNotification(row, kind) {
     logger.warn(`[visit-groups] notification claim ${effectType} for visit ${row.visit_id} failed: ${err.message}`);
     return { state: 'error', token: null };
   }
+}
+
+// The non-idempotent provider handoff is durable BEFORE sending a summary.
+// SMS ambiguity cannot be reclaimed. Email recovery skips uncertain
+// recipient rows and fences each subsequent handoff with its new token.
+async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey = null, scheduled = false, database = db } = {}) {
+  const effectType = effectTypeForKind(kind);
+  if (!PACKET_EFFECT_TYPES.has(effectType) || !token) return false;
+  if (scheduled && effectType !== 'completion_sms') return false;
+  const rows = await database('visit_effects').where({ visit_id: visitId, effect_type: effectType,
+    dedupe_key: dedupeKey || `${visitId}:${effectType}`, claim_token: token,
+  }).modify((query) => {
+    if (scheduled) query.where({ status: 'pending' }).whereNotNull('scheduled_at');
+    else query.where(function owned() {
+      this.where('status', 'unknown_delivery').orWhere(function liveClaim() {
+        this.where('status', 'claimed').where('claimed_at', '>', new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS));
+      });
+    });
+    if (['completion_sms', 'completion_email'].includes(effectType)) {
+      query.whereExists(database('service_visits').select(database.raw('1')).where({ id: visitId }).whereNull('summary_token_revoked_at'));
+    }
+  }).update({ status: 'unknown_delivery', last_error: null, claimed_at: new Date(), updated_at: database.fn.now() }).returning('id');
+  return rows.length > 0;
 }
 
 /**
@@ -1506,7 +1559,7 @@ async function otherLiveMembers(t, visitId, rowId) {
 async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null, lastError, providerId } = {}) {
   const effectType = effectTypeForKind(kind);
   if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
-  const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
+  const status = ['sent', 'unknown_delivery'].includes(smsOutcome) ? smsOutcome : smsOutcome === 'retry' ? 'failed' : 'suppressed';
   // Reminder kinds MUST pass the claim's key (it carries the visit date);
   // tracker call sites keep the historical default untouched.
   const key = dedupeKey || `${visitId}:${effectType}`;
@@ -1522,6 +1575,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         dedupe_key: key,
         status,
         attempts: 1,
+        last_error: status === 'unknown_delivery' ? 'provider_outcome_unknown' : null,
         sent_at: status === 'sent' ? at : null,
         ...details,
       })
@@ -1531,6 +1585,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         attempts: db.raw('?? + 1', ['visit_effects.attempts']),
         sent_at: status === 'sent' ? at : null,
         updated_at: at,
+        last_error: status === 'unknown_delivery' ? 'provider_outcome_unknown' : null,
         ...details,
       })
       .where('visit_effects.status', '<>', 'sent')
@@ -1556,7 +1611,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
   }
 }
 
-const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'gate_off']);
+const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'gate_off', 'unknown_delivery']);
 // A claim is a lease: a `claimed` row older than this is reclaimable (its
 // owner's finalize failed or its process died). Sized well above any
 // plausible send (a multi-contact Twilio loop takes seconds, not minutes);
@@ -3181,6 +3236,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 }
 
 module.exports = {
+  NOTIFICATION_CLAIM_LEASE_MS,
   dateOnly,
   rowStillAtVisitStop,
   toMinutes,
@@ -3214,6 +3270,8 @@ module.exports = {
   releaseReminderHoldByToken,
   MOVE_HOLD_TTL_MS,
   claimVisitNotification,
+  recordedPacketMember,
+  beginVisitNotificationDispatch,
   notificationLeaseLive,
   renewNotificationLease,
   finalizeVisitNotification,

@@ -3,6 +3,9 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
+const { portalUrl } = require('../utils/portal-url');
+const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+const { createDefaultCustomerRows } = require('./customer-default-rows');
 
 const VISIT_SUMMARY_TOKEN_RE = /^[a-f0-9]{64}$/;
 
@@ -101,4 +104,371 @@ async function getVisitCompletionSummary(token, database = db) {
   };
 }
 
-module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary };
+// Queue ownership and the visit marker commit together. Packet recovery then
+// waits on this row; only the existing scheduled-SMS worker dispatches it.
+async function deferSummarySms({ visit, customer, recipient, body, claim, nextAllowedAt }) {
+  await db.transaction(async (trx) => {
+    const owned = await trx('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
+      claim_token: claim.token }).whereIn('status', ['claimed', 'unknown_delivery'])
+      .update({ status: 'pending', scheduled_at: new Date(nextAllowedAt), updated_at: trx.fn.now() });
+    if (!owned) return;
+    await trx('sms_log').insert({ customer_id: customer.id, direction: 'outbound',
+      from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: recipient.phone,
+      message_body: body, message_type: 'visit_summary', status: 'scheduled', scheduled_for: new Date(nextAllowedAt),
+      metadata: JSON.stringify({ entry_point: 'visit_summary_deferred', visit_id: visit.id,
+        visit_summary_claim_token: claim.token, summary_token_hash: visit.summary_token_hash,
+        customer_id: customer.id, to_phone: recipient.phone, resolve_from_by_customer: true }),
+    });
+  });
+}
+
+// A frozen bearer-link recipient must still be authorized when the queue runs.
+async function recheckDeferredSummarySms(meta, database = db) {
+  const visit = await database('service_visits').where({ id: meta.visit_id, customer_id: meta.customer_id,
+    summary_token_hash: meta.summary_token_hash }).whereNull('summary_token_revoked_at')
+    .whereIn('status', ['closing', 'closed']).first('id');
+  if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
+  const customer = await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
+    { db: database });
+  const recipient = getServiceContactSmsRecipient(customer);
+  if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
+  const effect = await database('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
+    claim_token: meta.visit_summary_claim_token }).first();
+  // A late provider-boundary quiet-hours block, or a provider refusal the
+  // scheduler is retrying (408 / 429 / 5xx: no message was created), proves
+  // no send occurred. Its durable scheduler stamp allows exactly that
+  // handoff to be retried; an ambiguous timeout carries no status and stays
+  // on office review.
+  const refusedAt = providerRefused({ providerHttpStatus: meta.provider_retry_http_status }) ? meta.provider_retry_at : null;
+  const provenUnsentAt = [meta.quiet_hours_hold_at, refusedAt].filter(Boolean)
+    .find((at) => new Date(at) >= new Date(effect?.claimed_at || 0));
+  if (effect?.status === 'unknown_delivery' && provenUnsentAt) {
+    await database('visit_effects').where({ id: effect.id, status: 'unknown_delivery', claimed_at: effect.claimed_at,
+      claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', updated_at: database.fn.now() });
+    effect.status = 'pending';
+  }
+  return { eligible: effect?.status === 'pending', reason: 'visit_summary_claim_unavailable' };
+}
+
+// Recipient authorization and the dispatch claim commit together while the
+// customer row is held, so a contact edit after recipient resolution cannot
+// hand the bearer link to the former destination. `authorized` re-resolves
+// the recipient from the locked row and says whether it still matches.
+async function claimDispatchForRecipient({ visitId, customerId, kind, token, authorized }) {
+  return db.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forShare().first('id');
+    // FOR SHARE cannot lock an absent row. The canonical seed serializes
+    // missing-row creation without inventing marketing consent or replacing
+    // an existing opt-out; hold the resulting row through the claim.
+    await createDefaultCustomerRows(trx, customerId);
+    const prefs = await trx('notification_prefs').where({ customer_id: customerId }).forShare().first();
+    const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(), { db: trx });
+    if (!(await authorized(customer, prefs, trx))) return false;
+    return VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { database: trx });
+  });
+}
+
+// The deferred replay's recheck (visit, recipient, claim state) and its
+// dispatch claim commit together the same way.
+async function beginDeferredSummarySms(meta) {
+  return db.transaction(async (trx) => {
+    await trx('customers').where({ id: meta.customer_id }).forShare().first('id');
+    // The sender's consent read ran before this callback. Materialize a
+    // missing row before locking so STOP/toggle upserts serialize too.
+    await createDefaultCustomerRows(trx, meta.customer_id);
+    const prefs = await trx('notification_prefs').where({ customer_id: meta.customer_id }).forShare().first();
+    if (prefs.sms_enabled === false || prefs.service_completed === false) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+    if (!(await recheckDeferredSummarySms(meta, trx)).eligible) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+    const owned = await VisitGroups.beginVisitNotificationDispatch(meta.visit_id, 'completion_sms',
+      meta.visit_summary_claim_token, { scheduled: true, database: trx });
+    return { ok: owned, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+  });
+}
+
+async function finalizeDeferredSummarySms(meta) {
+  return VisitGroups.finalizeVisitNotification(meta.visit_id, 'completion_sms', 'sent', new Date(), meta.visit_summary_claim_token);
+}
+
+async function terminalDeferredSummarySms(meta) {
+  const effect = await db('visit_effects').where({ visit_id: meta.visit_id, effect_type: 'completion_sms',
+    claim_token: meta.visit_summary_claim_token }).first('status');
+  if (!effect || ['sent', 'suppressed'].includes(effect.status)) return;
+  const result = await VisitGroups.finalizeVisitNotification(meta.visit_id, 'completion_sms',
+    effect.status === 'unknown_delivery' ? 'unknown_delivery' : 'suppressed', new Date(), meta.visit_summary_claim_token);
+  if (!result.ok) throw new Error('Visit summary terminal state could not be saved');
+}
+
+// 408 / 429 / 5xx from the provider: no message was created. Anything else
+// after a handoff (a timeout, an unclassified error) is ambiguous.
+function providerRefused(result) {
+  const status = Number(result?.providerHttpStatus);
+  return [408, 429].includes(status) || status >= 500;
+}
+
+async function sendSummarySms({ visit, member, customer, summaryUrl, requested }) {
+  const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
+  if (claim?.state !== 'owner') return;
+  const recipient = getServiceContactSmsRecipient(customer);
+  let dispatched = false;
+  try {
+    if (!requested || !recipient?.phone) {
+      await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'suppressed', new Date(), claim.token);
+      return;
+    }
+    const body = `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${summaryUrl}`;
+    const result = await require('./messaging/send-customer-message').sendCustomerMessage({
+      channel: 'sms', audience: 'customer', purpose: 'service_completion',
+      to: recipient.phone, customerId: customer.id, appointmentId: member.id,
+      body,
+      identityTrustLevel: 'service_contact_authorized', entryPoint: 'visit_closeout_summary',
+      // The bearer link is the message. Both push-routing layers key on the
+      // message type, and the generic service_complete push lands on the
+      // Visits tab without it — so the summary stays an SMS (its deferred
+      // row already carries this type).
+      metadata: { original_message_type: 'visit_summary' },
+      preDispatchCheck: async () => {
+        // A claim that cannot be read is not a lost claim: no provider
+        // handoff happened, so the requested SMS stays retryable.
+        try {
+          dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_sms',
+            token: claim.token, authorized: (current) => getServiceContactSmsRecipient(current).phone === recipient.phone });
+        } catch { return { ok: false, code: 'VISIT_SUMMARY_CLAIM_UNAVAILABLE', retryable: true }; }
+        return { ok: dispatched, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+      },
+    });
+    if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
+      dispatched = false; // The provider boundary can also prove it held before sending.
+      await deferSummarySms({ visit, customer, recipient, body, claim, nextAllowedAt: result.nextAllowedAt });
+      return;
+    }
+    // Once handed to a non-idempotent provider, an ambiguous result stays
+    // unknown for office reconciliation. Never reclaim it after a timeout.
+    // A refusal the provider reported (408 / 429 / 5xx) created no message,
+    // so it is the retryable failure the recovery sweep exists for.
+    if (!result.sent && !result.blocked && dispatched && !providerRefused(result)) {
+      await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'unknown_delivery', new Date(), claim.token);
+      return;
+    }
+    const retryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
+    const outcome = result.sent ? 'sent' : retryable ? 'retry' : 'suppressed';
+    await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', outcome, new Date(), claim.token);
+  } catch {
+    await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', dispatched ? 'unknown_delivery' : 'retry', new Date(), claim.token);
+  }
+}
+
+// The template library saves each recipient before provider handoff. Only an
+// absent row or its explicit pre-dispatch abort proves another send is safe.
+function summaryEmailState(message) {
+  if (!message) return 'retry';
+  if (['sent', 'delivered', 'opened', 'clicked'].includes(message.status)) return 'sent';
+  if (message.status === 'blocked') return 'suppressed';
+  if (message.status === 'failed' && !message.sent_at && !message.provider_message_id
+    && message.error_message === require('./email-template-library').ABORTED_BEFORE_DISPATCH) return 'retry';
+  return 'unknown_delivery';
+}
+
+// The customer's Email Messages kill switch and the Service Complete Report
+// toggle both apply; the SMS leg honors the latter through the sender policy.
+function summaryEmailRecipients(customer, prefs) {
+  if (prefs?.email_enabled === false || prefs?.service_completed === false) return [];
+  return getServiceReportEmailRecipients(customer, prefs);
+}
+
+async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, visible, database }) {
+  const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
+  if (claim?.state !== 'owner') return;
+  const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
+  try {
+    const messages = await database('email_messages').where({
+      trigger_event_id: `visit_summary:${visit.id}`, template_key: 'service.visit_summary', recipient_id: customer.id,
+    }).select('idempotency_key', 'status', 'sent_at', 'provider_message_id', 'error_message');
+    const previous = new Map(messages.map((message) => [message.idempotency_key, message]));
+    const states = messages.map(summaryEmailState);
+    let sent = states.includes('sent');
+    let unknown = states.includes('unknown_delivery');
+    let pending = false;
+    for (const recipient of recipients) {
+      const recipientKey = crypto.createHash('sha256').update(recipient.email.toLowerCase()).digest('hex').slice(0, 32);
+      const idempotencyKey = `visit_summary:${visit.id}:${recipientKey}`;
+      if (summaryEmailState(previous.get(idempotencyKey)) !== 'retry') continue;
+      let dispatched = false;
+      try {
+        const result = await require('./email-template-library').sendTemplate({
+          templateKey: 'service.visit_summary', to: recipient.email,
+          payload: { first_name: recipient.name || 'there', summary_url: summaryUrl },
+          recipientType: 'customer', recipientId: customer.id, idempotencyKey,
+          triggerEventId: `visit_summary:${visit.id}`,
+          categories: ['service_visit_summary'], suppressionGroupKey: 'service_operational',
+          suppressProviderErrorLog: true,
+          onQueued: async () => {
+            // A stale aggregate owner cannot hand off a later recipient after
+            // recovery has claimed the visit. A thrown callback is advisory in
+            // the library, so convert it to an explicit dispatch refusal.
+            try {
+              dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_email',
+                token: claim.token, authorized: (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
+                  .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase()) });
+              return dispatched;
+            } catch { return false; }
+          },
+        });
+        if (result.sent) { sent = true; continue; }
+        if (result.blocked) continue;
+        unknown ||= dispatched;
+        pending ||= !dispatched;
+      } catch (err) {
+        // An administrator archived the template: a deliberate decision, not
+        // a transient failure — the leg is suppressed rather than retried.
+        if (err?.code === 'EMAIL_TEMPLATE_DISABLED') continue;
+        if (dispatched) unknown = true;
+        else pending = true;
+      }
+    }
+    // The ledger, not the library's return value, decides what was accepted:
+    // a bounce webhook can land between the provider handoff and the
+    // library's return, in which case the row already carries its terminal
+    // status while the call still reports sent.
+    const ledger = (await database('email_messages').where({
+      trigger_event_id: `visit_summary:${visit.id}`, template_key: 'service.visit_summary', recipient_id: customer.id,
+    }).select('status', 'sent_at', 'provider_message_id', 'error_message')).map(summaryEmailState);
+    sent = ledger.includes('sent');
+    unknown ||= ledger.includes('unknown_delivery');
+    // Finish proven-unsent recipients before surfacing an earlier uncertain
+    // recipient. Its durable email row is always skipped on a later retry.
+    const outcome = pending ? 'retry' : unknown ? 'unknown_delivery' : sent ? 'sent' : 'suppressed';
+    await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email', outcome, new Date(), claim.token);
+  } catch {
+    await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email', 'retry', new Date(), claim.token);
+  }
+}
+
+// A provider bounce arrives after the aggregate closed as sent. When the
+// recipient ledger no longer proves any accepted send, the effect returns to
+// the uncertain bucket the office already reviews, once per closed packet.
+async function reconcileSummaryEmailBounce(message, database = db) {
+  const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
+  if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
+  const visitId = match[1];
+  // Two recipients can bounce in concurrent webhook transactions; holding
+  // the shared effect serializes them so the second reads the first's
+  // committed outcome instead of its stale 'sent'.
+  const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'sent' })
+    .forUpdate().first('id');
+  if (!effect) return { reconciled: false };
+  const messages = await database('email_messages').where({ trigger_event_id: message.trigger_event_id,
+    template_key: 'service.visit_summary', recipient_id: message.recipient_id })
+    .select('status', 'sent_at', 'provider_message_id', 'error_message');
+  if (messages.map(summaryEmailState).includes('sent')) return { reconciled: false };
+  const flipped = await database('visit_effects').where({ id: effect.id, status: 'sent' })
+    .update({ status: 'unknown_delivery', last_error: 'provider_bounce', updated_at: database.fn.now() }).returning('id');
+  if (!flipped.length) return { reconciled: false };
+  const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');
+  const member = packet ? await VisitGroups.recordedPacketMember(packet.id, database) : null;
+  if (packet && member) {
+    // Same transaction as the effect flip: a webhook that fails after this
+    // point rolls both back, and SendGrid's redelivery cannot leave an alert
+    // for an effect that never changed.
+    await require('./dispatch-alerts').createAlert({
+      type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id,
+      payload: { visitId, packetId: packet.id, delivery: 'delivery_review', reason: 'summary_email_bounced' }, trx: database,
+    });
+  }
+  return { reconciled: true };
+}
+
+// The provider-retry rail resends a stored recipient snapshot. A summary is a
+// bearer link, so before that handoff the recipient must STILL be one of the
+// customer's current summary recipients under their current preferences, and
+// the link must not have been revoked; the rail's own template and
+// suppression checks know nothing about visits.
+async function summaryRetryAuthorized(message, database = db) {
+  const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
+  if (!match || message.template_key !== 'service.visit_summary') return { ok: true };
+  const visit = await database('service_visits').where({ id: match[1] }).whereNull('summary_token_revoked_at')
+    .whereIn('status', ['closing', 'closed']).first('id', 'customer_id');
+  if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
+  const customer = await withAccountPrimaryContact(
+    await database('customers').where({ id: visit.customer_id }).first(), { db: database },
+  );
+  if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
+  const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
+  const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
+  const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
+  return current ? { ok: true } : { ok: false, reason: 'visit_summary_recipient_changed' };
+}
+
+// The provider-retry rail can resend a blocked summary recipient later. When
+// the ledger proves an accepted send again, the effect a bounce reopened
+// returns to sent and the bounce alert it raised is resolved.
+async function reconcileSummaryEmailRecovery(message, database = db) {
+  const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
+  if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
+  const visitId = match[1];
+  return database.transaction(async (trx) => {
+    // provider_bounce: a bounce reopened a sent aggregate. provider_outcome_unknown:
+    // the bounce landed before the initial send returned, or the handoff was
+    // ambiguous — a delivery event is the proof either lacked.
+    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
+      .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
+    if (!effect) return { reconciled: false };
+    const messages = await trx('email_messages').where({ trigger_event_id: message.trigger_event_id,
+      template_key: 'service.visit_summary', recipient_id: message.recipient_id })
+      .select('status', 'sent_at', 'provider_message_id', 'error_message');
+    if (!messages.map(summaryEmailState).includes('sent')) return { reconciled: false };
+    await trx('visit_effects').where({ id: effect.id })
+      .update({ status: 'sent', sent_at: trx.fn.now(), last_error: null, updated_at: trx.fn.now() });
+    // The bounce alert, or the coordinator's delivery-review alert when the
+    // email leg was the only reason for review: an SMS leg still parked as
+    // unknown_delivery is terminal and needs the office, so that alert stays.
+    const otherUncertain = await trx('visit_effects').where({ visit_id: visitId, status: 'unknown_delivery' })
+      .whereNot('id', effect.id).first('id');
+    const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+      .whereRaw("payload->>'visitId' = ?", [visitId])
+      .where(function reviewOnlyForDelivery() {
+        this.whereRaw("payload->>'reason' = 'summary_email_bounced'");
+        if (!otherUncertain) {
+          this.orWhere(function coordinator() {
+            this.whereRaw("payload->>'delivery' = 'delivery_review'").whereRaw("COALESCE(payload->>'payment', '') <> 'office_required'");
+          });
+        }
+      }).select('id');
+    for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
+    return { reconciled: true };
+  });
+}
+
+async function deliverVisitCompletionSummary(packetId, token, database = db) {
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first();
+  const visit = await database('service_visits').where({ id: packet.visit_id }).first();
+  const customer = await withAccountPrimaryContact(
+    await database('customers').where({ id: visit.customer_id }).first(), { db: database },
+  );
+  const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
+  // A recorded member owns the effects; retained history never qualifies.
+  const member = await VisitGroups.recordedPacketMember(packet.id, database);
+  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const summary = token ? await getVisitCompletionSummary(token, database) : null;
+  const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
+    .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');
+  const context = { visit, member, customer, prefs, database, visible: Boolean(summary),
+    summaryUrl: token ? portalUrl(`/visit/${token}`) : null,
+    requested: payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms === true) };
+  await sendSummarySms(context);
+  await sendSummaryEmail(context);
+  const effects = await database('visit_effects').where({ visit_id: visit.id })
+    .whereIn('effect_type', ['completion_sms', 'completion_email']);
+  // Keep the packet on recovery while either channel has proven-unsent work
+  // or a live provider handoff, even if the other channel needs office review.
+  const unknown = effects.some((effect) => effect.status === 'unknown_delivery'
+    && (effect.last_error === 'provider_outcome_unknown'
+      || new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS));
+  const pending = effects.length !== 2 || effects.some((effect) => !['sent', 'suppressed', 'unknown_delivery'].includes(effect.status)
+    || (effect.status === 'unknown_delivery' && effect.last_error !== 'provider_outcome_unknown'
+      && new Date(effect.claimed_at).getTime() > Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS));
+  return { state: pending ? 'delivery_pending' : unknown ? 'delivery_review' : 'delivered' };
+}
+
+module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
+  deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
+  recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms };

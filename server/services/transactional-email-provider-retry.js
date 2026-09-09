@@ -200,6 +200,28 @@ async function retryOne(message) {
     return { sent: false, stopped: true, reason };
   }
 
+  // A visit summary is a bearer link: its recipient, the customer's
+  // preferences and the link itself are re-authorized right before the
+  // handoff, not only the template and the suppression ledger.
+  if (message.template_key === 'service.visit_summary') {
+    let fence;
+    try {
+      fence = await require('./visit-completion-summary').summaryRetryAuthorized(message);
+    } catch (err) {
+      // Fail closed, the same way an unreadable suppression ledger does.
+      await markRetryFailure(message, new Error(`Visit summary recheck failed: ${err.message}`));
+      return { sent: false, error: err };
+    }
+    if (!fence.ok) {
+      const reason = `Suppressed before retry: ${fence.reason}`;
+      await db('email_messages')
+        .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+        .update({ status: 'blocked', error_message: reason, provider_retry_next_at: null,
+          provider_retry_exhausted_at: new Date(), updated_at: new Date() });
+      return { sent: false, stopped: true, reason };
+    }
+  }
+
   const group = String(message.suppression_group_key_snapshot || '').trim().toLowerCase();
   const asmGroupId = group === 'transactional_required' ? 0 : sendgrid.serviceGroupId();
   try {
@@ -232,6 +254,10 @@ async function retryOne(message) {
         status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
       })
       .returning('*');
+    if (updated?.template_key === 'service.visit_summary') {
+      await require('./visit-completion-summary').reconcileSummaryEmailRecovery(updated)
+        .catch((err) => logger.warn(`[email-provider-retry] visit summary recovery not reconciled for ${message.id}: ${err.message}`));
+    }
     return { sent: true, message: updated || message };
   } catch (err) {
     await markRetryFailure(message, err);
