@@ -82,8 +82,16 @@ const sBtn = (bg, color) => ({
   fontWeight: 500,
   cursor: "pointer",
 });
+// Weekly-trend axis label: "Sep 1" instead of the raw "09-01" slice.
+function formatWeekLabel(week) {
+  if (!week) return "";
+  const d = new Date(`${String(week).slice(0, 10)}T00:00:00`);
+  return Number.isNaN(d.getTime())
+    ? String(week).substring(5)
+    : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
 const sBadge = (bg, color) => ({
-  fontSize: 10,
+  fontSize: 12, // UI audit F0540
   padding: "2px 8px",
   borderRadius: 4,
   background: bg,
@@ -208,7 +216,7 @@ function MetaHealthStrip({ health, onRefresh }) {
           Facebook: {fbDetails.pageName || "Page check"} · Linked IG: {linkedIg} · Instagram: {igLabel} · {quotaLabel}
         </div>
         {health?.checkedAt && (
-          <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>
+          <div style={{ fontSize: 11, color: D.muted, marginTop: 3 }}>
             Checked {new Date(health.checkedAt).toLocaleString('en-US', { timeZone: 'America/New_York' })}
           </div>
         )}
@@ -518,7 +526,7 @@ export default function SocialMediaPage() {
                 {cred?.lastError && healthStatus !== "healthy" && (
                   <div
                     style={{
-                      fontSize: 10,
+                      fontSize: 11,
                       color: D.muted,
                       marginTop: 4,
                       overflow: "hidden",
@@ -589,7 +597,7 @@ export default function SocialMediaPage() {
               </div>{" "}
               <div
                 style={{
-                  fontSize: 10,
+                  fontSize: 11,
                   color: D.muted,
                   textTransform: "uppercase",
                   letterSpacing: 1,
@@ -977,7 +985,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700, color: item.color }}>
               {item.value}
             </div>
-            <div style={{ fontSize: 10, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>
               {item.label}
             </div>
           </div>
@@ -1134,7 +1142,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                                 background: D.card,
                               }}
                             >
-                              <div style={{ fontSize: 10, fontWeight: 700, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>
                                 {platform === "gbp" ? "GBP" : platform}
                               </div>
                               <div style={{ fontSize: 12, color: D.text, whiteSpace: "pre-wrap", maxHeight: 110, overflowY: "auto" }}>
@@ -2562,7 +2570,7 @@ function AnalyticsTab() {
             </div>{" "}
             <div
               style={{
-                fontSize: 9,
+                fontSize: 11,
                 color: D.muted,
                 textTransform: "uppercase",
                 letterSpacing: 1,
@@ -2728,7 +2736,7 @@ function AnalyticsTab() {
                   }}
                 >
                   {" "}
-                  <div style={{ fontSize: 9, color: D.muted }}>
+                  <div style={{ fontSize: 13, color: D.muted, fontVariantNumeric: "tabular-nums" }}>
                     {w.total}
                   </div>{" "}
                   <div
@@ -2741,14 +2749,14 @@ function AnalyticsTab() {
                   />{" "}
                   <div
                     style={{
-                      fontSize: 8,
+                      fontSize: 12, // UI audit F0540 (was 8px rotated)
                       color: D.muted,
                       transform: "rotate(-45deg)",
                       transformOrigin: "center",
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {w.week?.substring(5)}
+                    {formatWeekLabel(w.week)}
                   </div>{" "}
                 </div>
               );

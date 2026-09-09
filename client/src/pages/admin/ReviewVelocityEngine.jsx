@@ -450,7 +450,7 @@ function Tag({ type, children }) {
   return (
     <span
       style={{
-        fontSize: 10,
+        fontSize: 12, // UI audit F0517
         fontWeight: 500,
         padding: "3px 8px",
         borderRadius: 20,
@@ -470,9 +470,10 @@ function Btn({ variant = "ghost", onClick, disabled, children, style: extra }) {
     alignItems: "center",
     gap: 6,
     padding: "7px 14px",
+    minHeight: 36, // UI audit F0517: ~28px touch height before
     borderRadius: 8,
     fontFamily: C.sans,
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: 500,
     cursor: disabled ? "not-allowed" : "pointer",
     border: "none",
@@ -827,7 +828,7 @@ export default function ReviewVelocityEngine() {
                     minWidth: 18,
                     height: 18,
                     borderRadius: 9,
-                    fontSize: 10,
+                    fontSize: 11,
                     fontWeight: 700,
                     padding: "0 5px",
                     marginLeft: 6,
@@ -1193,7 +1194,7 @@ function Dashboard({
                   >
                     <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase" }}>{ch.channel}</div>
                     <div style={{ fontSize: 15, fontWeight: 700 }}>{ch.sent}</div>
-                    <div style={{ fontSize: 10, color: C.t3 }}>
+                    <div style={{ fontSize: 11, color: C.t3 }}>
                       {ch.sent > 0 ? Math.round((ch.reviewed / ch.sent) * 100) : 0}% converted
                     </div>
                   </div>
@@ -1342,7 +1343,7 @@ function Dashboard({
                       >
                         {s.v}
                       </div>{" "}
-                      <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+                      <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                         {s.l}
                       </div>{" "}
                     </div>
@@ -1438,7 +1439,7 @@ function VelocityChart({ velocity }) {
               height: "100%",
             }}
           >
-            <div style={{ fontSize: 10, fontWeight: 700, color: C.t2, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 2 }}>
               {v.reviews}
             </div>
             <div
@@ -1452,7 +1453,7 @@ function VelocityChart({ velocity }) {
                 transition: "height .3s",
               }}
             />
-            <div style={{ fontSize: 9, color: C.t3, marginTop: 4 }}>
+            <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>
               {wk ? `${wk.getMonth() + 1}/${wk.getDate()}` : ""}
             </div>
           </div>
@@ -2006,7 +2007,7 @@ function ActivityList({ log, max }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               {" "}
               <div style={{ fontSize: 12, lineHeight: 1.5 }}>{l.msg}</div>{" "}
-              <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+              <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                 {l.time}
               </div>{" "}
             </div>{" "}
@@ -2287,7 +2288,7 @@ function CustomerDrawer({
             <Tag type="acc">{gbp?.name || c.gbpId}</Tag>{" "}
             <span
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 color: C.t3,
                 flex: 1,
                 overflow: "hidden",
@@ -2316,14 +2317,14 @@ function CustomerDrawer({
                 >
                   {" "}
                   <span style={{ fontWeight: 500 }}>{j.svcType}</span>{" "}
-                  <span style={{ fontSize: 10, color: C.t3 }}>
+                  <span style={{ fontSize: 11, color: C.t3 }}>
                     {j.date}
                   </span>{" "}
                 </div>
                 {j.notes && (
                   <div style={{ color: C.t3, marginTop: 2 }}>{j.notes}</div>
                 )}
-                <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+                <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                   {j.tech} · ${j.revenue}
                 </div>{" "}
               </div>
@@ -2349,7 +2350,7 @@ function CustomerDrawer({
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 10, color: C.t3, marginBottom: 2 }}>
+                <div style={{ fontSize: 11, color: C.t3, marginBottom: 2 }}>
                   {m.date} {m.dir === "out" ? "→ Sent" : "← Received"}
                 </div>
                 {m.text}
@@ -2416,7 +2417,7 @@ function CustomerDrawer({
             />{" "}
             <div
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 color: C.t3,
                 marginTop: 6,
                 lineHeight: 1.5,

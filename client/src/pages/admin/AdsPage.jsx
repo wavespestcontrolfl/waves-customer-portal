@@ -166,7 +166,7 @@ function Badge({ mode }) {
         display: "inline-block",
         padding: "2px 8px",
         borderRadius: 4,
-        fontSize: 10,
+        fontSize: 12, // UI audit F0357
         fontWeight: 700,
         background: (colors[mode] || D.muted) + "22",
         color: colors[mode] || D.muted,
@@ -1732,7 +1732,7 @@ function CapacityTab() {
                     {day.dayName}
                   </div>{" "}
                   <div
-                    style={{ fontSize: 10, color: D.muted, marginBottom: 8 }}
+                    style={{ fontSize: 13, color: D.muted, marginBottom: 8 }}
                   >
                     {day.dayLabel}
                   </div>{" "}
@@ -1757,12 +1757,12 @@ function CapacityTab() {
                   >
                     {day.booked}/{day.slots}
                   </div>{" "}
-                  <div style={{ fontSize: 10 }}>
+                  <div style={{ fontSize: 12 }}>
                     {modeEmoji[day.budgetMode] || ""}{" "}
                     <span
                       style={{
                         fontWeight: 500,
-                        fontSize: 9,
+                        fontSize: 12,
                         letterSpacing: "0.5px",
                         color: D.muted,
                       }}
@@ -1770,7 +1770,7 @@ function CapacityTab() {
                       {day.budgetMode?.toUpperCase()}
                     </span>
                     {day.isSunday && (
-                      <span style={{ color: D.teal, fontSize: 9 }}>*</span>
+                      <span style={{ color: D.teal, fontSize: 12 }}>*</span>
                     )}
                   </div>{" "}
                 </div>
