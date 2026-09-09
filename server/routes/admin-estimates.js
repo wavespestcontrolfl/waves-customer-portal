@@ -398,7 +398,7 @@ function assertAutoSendPricingAuthority(row = {}) {
 // `forUpdate`: lock the sibling rows for the caller's transaction (the
 // schedule route), so a concurrent revision of a sibling serializes against
 // the scheduling write instead of slipping between this read and it.
-async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false } = {}) {
+async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false, sendAt = null } = {}) {
   if (!estimate?.estimate_group_id) return null;
   // Two sets are judged (never re-claimed): the PUBLISHABLE siblings this
   // send would publish (draft / scheduled / send_failed, unlocked) and every
@@ -416,6 +416,9 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
+    if (sendAt && ['draft', 'scheduled', 'send_failed'].includes(sibling.status) && !sibling.price_locked_at) {
+      assertBidSendDate(sibling, sendAt);
+    }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,
     // not from the cron parking the anchor at publication (codex r16 P2 on
@@ -1245,7 +1248,7 @@ router.post('/:id/send', async (req, res, next) => {
             ['estimate-group-send', String(estimate.estimate_group_id)],
           );
         }
-        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true });
+        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true, sendAt: scheduledTime });
         if (blockingSibling) return { blockingSibling };
         await assertReviewedEstimateGroup(trx, estimate, req.body?.groupVersions);
         const lockedRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
@@ -3788,8 +3791,9 @@ router.put('/:id/proposal', async (req, res, next) => {
     const incomingBuildings = Array.isArray(incoming.buildings) ? incoming.buildings : [];
     if (!gateEnvValue('GATE_COMMERCIAL_BID_BUILDER')) {
       const savedUnits = new Map(savedProposal.buildings.flatMap((building) => building.lineItems.map((line) => [line.id, line.unit || null])));
-      const unitsChanged = incomingBuildings.some((building) => (building.lineItems || building.line_items || [])
-        .some((line) => (line.unit || null) !== (savedUnits.get(line.id) || null)));
+      const incomingLines = incomingBuildings.flatMap((building) => building.lineItems || building.line_items || []);
+      const omittedIdentifiers = [...savedUnits.values()].some(Boolean) && incomingLines.some((line) => !line.id);
+      const unitsChanged = omittedIdentifiers || incomingLines.some((line) => (line.unit || null) !== (savedUnits.get(line.id) || null));
       if (unitsChanged
         || (incoming.validThrough || null) !== (savedProposal.validThrough || null)) {
         return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units and validity dates remain in place.' });
@@ -4034,9 +4038,11 @@ router.put('/:id/proposal', async (req, res, next) => {
 
     const existingData = parseEstimateData(estimate.estimate_data) || {};
     const authoredExpiry = proposalExpiry({ estimate_data: { proposal: normalized } });
-    const expiryUpdate = authoredExpiry || (hasFixedBidValidity(estimate)
-      ? estimateExpiresAt(() => new Date(estimate.sent_at || Date.now())) : null);
-    const revivingBid = expiredRecovery && expiryUpdate > new Date();
+    const hadFixedValidity = hasFixedBidValidity(estimate);
+    const standardStart = estimate.sent_at || estimate.scheduled_at;
+    const expiryUpdate = authoredExpiry || (hadFixedValidity && standardStart
+      ? estimateExpiresAt(() => new Date(standardStart)) : null);
+    const revivingBid = expiredRecovery && (expiryUpdate > new Date() || (hadFixedValidity && !expiryUpdate));
     const nextData = {
       ...existingData,
       proposal: {
@@ -4178,7 +4184,7 @@ router.put('/:id/proposal', async (req, res, next) => {
       monthly_total: totals.monthlyEquivalent,
       annual_total: totals.annualRecurring,
       onetime_total: totals.oneTime,
-      ...(expiryUpdate ? { expires_at: expiryUpdate } : {}),
+      ...(authoredExpiry || hadFixedValidity ? { expires_at: expiryUpdate } : {}),
       ...(revivingBid ? { status: estimate.viewed_at ? 'viewed' : estimate.sent_at ? 'sent' : 'draft' } : {}),
       ...(revivingBid && ['expired_unviewed', 'expired_viewed', 'expired_unsent'].includes(estimate.disposition)
         ? { disposition: null, disposition_source: null, disposition_at: null, disposition_note: null } : {}),

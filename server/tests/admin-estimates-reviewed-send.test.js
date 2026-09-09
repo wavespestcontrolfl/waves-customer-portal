@@ -216,6 +216,29 @@ describe('commercial bid authoring', () => {
     expect(dataOf().proposal.validThrough).toBe('2099-12-21');
     expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
   });
+  test('a legacy editor cannot discard saved units by omitting line identifiers while the gate is off', async () => {
+    gateEnvValue.mockReturnValue(false);
+    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+    const incoming = proposal();
+    delete incoming.buildings[0].lineItems[0].id;
+    delete incoming.buildings[0].lineItems[0].unit;
+    const res = await invoke('/:id/proposal', 'put', { proposal: incoming });
+    expect(res.statusCode).toBe(409);
+    expect(mutations).toHaveLength(0);
+    expect(dataOf().proposal.buildings[0].lineItems[0].unit).toBe('acre');
+  });
+  test.each([
+    ['draft', null, null, null], ['expired', null, null, null],
+    ['sent', '2099-01-01T12:00:00Z', null, '2099-01-08T12:00:00.000Z'],
+    ['scheduled', null, '2099-01-10T12:00:00Z', '2099-01-17T12:00:00.000Z'],
+  ])('clearing fixed validity restores the ordinary %s expiry from delivery, never the save time', async (status, sentAt, scheduledAt, expected) => {
+    Object.assign(row, { status, sent_at: sentAt, scheduled_at: scheduledAt, expires_at: new Date('2026-01-09T04:59:59.999Z'),
+      estimate_data: { proposal: { ...proposal(), validThrough: '2026-01-08' } } });
+    const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: null } });
+    expect(res.statusCode).toBe(200);
+    expect(row.expires_at?.toISOString() ?? null).toBe(expected);
+    if (!sentAt && !scheduledAt) expect(row.status).toBe('draft');
+  });
   test.each(['validity', 'unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
     row.status = 'draft'; row.estimate_data = { proposal: proposal() };
     const body = { proposal: proposal() };
