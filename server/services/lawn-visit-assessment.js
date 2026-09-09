@@ -46,6 +46,8 @@ const {
   CONDITION_LABEL_VALUES,
 } = require('./lawn-diagnostic-report');
 const { containsReportAccessCode } = require('./service-report/technician-report-copy');
+const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
+const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
 const { CURATED_REFERENCE, AUTO_RELEASE_RULE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
 const { FUNGUS_DISPLAY, THATCH_DISPLAY } = require('./lawn-assessment');
 const { normalizeGrassType } = require('./lawn-grass-context');
@@ -143,7 +145,7 @@ const RESPONSE_SCHEMA = obj({
 // (lawn-diagnostic-prompt.js) so the two lawn lanes share one agronomy
 // reference and one confidence discipline.
 const SYSTEM_PROMPT = `# ROLE
-You are the Southwest Florida lawn diagnostician for Waves Pest Control & Lawn Care,
+You are the Southwest Florida lawn diagnostician for Waves Pest Control,
 reading EVERY photo a technician took on one lawn visit, in one pass. You OBSERVE what
 is visible, then SELECT and ASSEMBLE approved agronomy for what that evidence supports.
 You do NOT invent agronomy, products, label timing, or numbers. Your output feeds a
@@ -306,14 +308,21 @@ function validateVisitPhotos(photos) {
   return { error: null, zones };
 }
 
-// sha256 of everything the model saw: prompt version, the context lines'
-// inputs, and each photo's bytes with its position, zone and media type. The
-// eval replays by assessment id and compares hashes to prove it rebuilt the
-// same input.
+// The composed system prompt and the response schema, digested once. The
+// prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
+// AUTO_RELEASE_RULE, FALSE_PRECISION_RULE): editing one changes what the
+// model sees without a PROMPT_VERSION bump here, so the context hash seeds
+// with what was actually sent, not only the version label (Codex #4149 r7).
+const PROMPT_DIGEST = crypto.createHash('sha256').update(SYSTEM_PROMPT).update('\n').update(JSON.stringify(RESPONSE_SCHEMA)).digest('hex');
+
+// sha256 of everything the model saw: prompt version, the composed prompt
+// and schema (PROMPT_DIGEST), the context lines' inputs, and each photo's
+// bytes with its position, zone and media type. The eval replays by
+// assessment id and compares hashes to prove it rebuilt the same input.
 function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) {
   const c = visionContext || {};
   const hash = crypto.createHash('sha256');
-  hash.update(PROMPT_VERSION).update('\n');
+  hash.update(PROMPT_VERSION).update('\n').update(PROMPT_DIGEST).update('\n');
   hash.update(JSON.stringify({
     season: c.season ?? null, month: c.month ?? null, region: c.region ?? null, grassType: c.grassType ?? null,
     turfHeightIn: c.turfHeightIn ?? null, irrigation: c.irrigation ?? null,
@@ -447,7 +456,12 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
     // gate is applied per finding — undeterminable, no cause published
     // (Codex #4149 r6).
     const unsupported = photoRefs.length > 0 && !photoRefs.some((ref) => usable.has(ref));
-    const canDetermine = raw.can_determine !== false && !untraceable && !unsupported;
+    // Determinability is a claim the answer has to make: only a literal
+    // `true` keeps the confidence. The shape check lets any scalar through,
+    // so an omitted key or the string "false" must read as undeterminable,
+    // never as a high-confidence named cause (Codex #4149 r7).
+    const unstated = raw.can_determine !== true;
+    const canDetermine = !unstated && !untraceable && !unsupported;
     const confidence = canDetermine ? finding.confidence : 'unknown';
     return {
       ...finding,
@@ -459,7 +473,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
       photo_refs: photoRefs,
       zone: zoneFromRefs(photoRefs, photoZones),
       can_determine: canDetermine,
-      cannot_determine_reason: canDetermine ? '' : (clip(raw.cannot_determine_reason, 300) || (untraceable ? 'no photo of this visit cited' : '') || (unsupported ? 'every cited photo rated poor' : '')),
+      cannot_determine_reason: canDetermine ? '' : (clip(raw.cannot_determine_reason, 300) || (untraceable ? 'no photo of this visit cited' : '') || (unsupported ? 'every cited photo rated poor' : '') || (unstated && raw.can_determine !== false ? 'determinability not stated' : '')),
       // The allowlisted customer label — the naming gate applied here, once,
       // so no consumer ever maps the raw name itself.
       label: safeConditionLabel(finding.name, confidence),
@@ -590,8 +604,20 @@ function deriveLegacyScores(analysis) {
 // fallback — never the outage sentinel.
 function customerObservations(text) {
   const scrubbed = scrubCustomerText(text || '').slice(0, 600).trim();
-  if (!scrubbed || containsReportAccessCode(scrubbed)) return NO_OBSERVATIONS;
+  if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return NO_OBSERVATIONS;
   return scrubbed;
+}
+
+// The customer-copy compliance screen every other customer surface applies,
+// on top of the egress scrub: a schema-valid observation can still carry a
+// banned claim the prompt only asks the model to avoid ("pet-safe",
+// "EPA-approved", a fixed drying / re-entry figure — the report lane's
+// re-entry predicate; "eliminated", "guaranteed", "is clear" — the report
+// lane's banned-copy list). Rejected copy falls back whole: the neutral
+// sentence, never a rewrite (Codex #4149 r7). An access code is rejected
+// the same way.
+function unpublishableCustomerCopy(text) {
+  return containsReportAccessCode(text) || findBannedCustomerCopy(text).length > 0 || !!reentrySafetyClaimFinding(text);
 }
 
 // The composite-shaped object the route's grass capture and response read
@@ -858,7 +884,12 @@ function validateReview(body = {}, run) {
 function mergedReviewInputs(run, review = {}) {
   const sent = review.sent || {};
   const stored = {
-    reviewedFindings: parseJsonArray(run?.reviewed_findings).map((row) => ({ finding_id: String(row.finding_id), keep: row.keep !== false, name: row.label || null, tech_note: row.tech_note || null })),
+    // A stored finding is a rename only when the technician renamed it (the
+    // review row says so) — every stored row carries a label, so the label
+    // alone must never read as rename intent, or a score-only follow-up
+    // would rewrite an untouched model finding to its label at moderate
+    // confidence (Codex #4149 r7).
+    reviewedFindings: parseJsonArray(run?.reviewed_findings).map((row) => ({ finding_id: String(row.finding_id), keep: row.keep !== false, name: row.renamed ? (row.name || row.label || null) : null, tech_note: row.tech_note || null })),
     addedDetails: parseJsonArray(run?.added_details).map((row) => ({ text: row.name, zone: row.zone ?? null, finding_id: row.finding_id })),
     appliedProducts: parseJsonObject(run?.reconciliation)?.products || [],
   };
@@ -871,19 +902,31 @@ function mergedReviewInputs(run, review = {}) {
 // were mapped to; a new one takes the next number above every id ever
 // assigned, so a reorder or a replacement can never move `T1` onto another
 // condition while a retained product still addresses it (Codex #4149 r6).
-// A retained reference to a detail that no longer exists drops out in
-// buildTreatmentRationale.
-function technicianFindingIds(details, stored) {
+// "Ever assigned" is persisted, not inferred from the stored details: a
+// follow-up that clears the details while keeping the products leaves a
+// mapping to `T1` and no `T1` — the next detail added must not become `T1`
+// and inherit that treatment (Codex #4149 r7). The high-water mark is the
+// reconciliation's stored number, or the highest id a retained product
+// still addresses, whichever is greater. A retained reference to a detail
+// that no longer exists drops out in buildTreatmentRationale.
+const technicianNumber = (id) => (/^T\d+$/.test(String(id || '')) ? Number(String(id).slice(1)) : 0);
+function storedTechnicianHighWater(reconciliation) {
+  const stored = Number(reconciliation?.technician_finding_high_water) || 0;
+  const addressed = (reconciliation?.products || []).flatMap((product) => (Array.isArray(product?.addresses_findings) ? product.addresses_findings : []).map(technicianNumber));
+  return Math.max(stored, 0, ...addressed);
+}
+function technicianFindingIds(details, stored, highWater = 0) {
   const normalized = (text) => String(text || '').trim().toLowerCase();
   const byText = new Map(stored.filter((row) => /^T\d+$/.test(row.finding_id || '')).map((row) => [normalized(row.name), row.finding_id]));
-  let next = Math.max(0, ...[...byText.values()].map((id) => Number(id.slice(1))));
+  let next = Math.max(highWater, 0, ...[...byText.values()].map(technicianNumber));
   const taken = new Set();
-  return details.map((detail) => {
+  const ids = details.map((detail) => {
     const kept = byText.get(normalized(detail.text));
     if (kept && !taken.has(kept)) { taken.add(kept); return kept; }
     next += 1;
     return `T${next}`;
   });
+  return { ids, highWater: next };
 }
 
 // A technician-added detail becomes a finding of its own: moderate at most
@@ -946,10 +989,15 @@ function buildReview(run, rawReview = {}) {
       label: entry?.name ? entry.name : (finding.label || safeConditionLabel(finding.name, finding.confidence)),
       keep: entry ? entry.keep !== false : true,
       tech_note: entry?.tech_note || null,
+      // Rename intent, persisted: a follow-up that omits reviewedFindings
+      // restores the rename (and its technician confidence) only where one
+      // happened.
+      renamed: !!entry?.name,
       source: finding.source || 'model',
     };
   });
-  const ids = technicianFindingIds(review.addedDetails, parseJsonArray(run?.added_details));
+  const storedReconciliation = parseJsonObject(run?.reconciliation);
+  const { ids, highWater } = technicianFindingIds(review.addedDetails, parseJsonArray(run?.added_details), storedTechnicianHighWater(storedReconciliation));
   const added = review.addedDetails.map((detail, index) => technicianFinding(detail, ids[index]));
   // The reconciliation builders interpolate finding NAMES into customer-facing
   // copy (customer_explanation, watch items, flag wording), so they only ever
@@ -970,6 +1018,9 @@ function buildReview(run, rawReview = {}) {
       treatment_rationale: treatmentRationale,
       flags,
       watch_items: buildWatchItems(reconcilable, flags),
+      // The highest technician finding number ever assigned on this run —
+      // read back by the next follow-up so a number is never reused.
+      technician_finding_high_water: highWater,
       computed_at: new Date().toISOString(),
     },
   };
@@ -981,7 +1032,7 @@ function buildReview(run, rawReview = {}) {
 // fallback takes its place).
 function safeConfirmationStep(text) {
   const scrubbed = scrubCustomerText(text || '').slice(0, 200).trim();
-  return !scrubbed || containsReportAccessCode(scrubbed) ? '' : scrubbed;
+  return !scrubbed || unpublishableCustomerCopy(scrubbed) ? '' : scrubbed;
 }
 
 async function reviewRun({ run, review, technicianId }, knex) {
@@ -1150,11 +1201,13 @@ module.exports = {
   GATE,
   LANE_ID,
   PROMPT_VERSION,
+  PROMPT_DIGEST,
   MAX_VISIT_PHOTOS,
   MAX_OUTPUT_TOKENS,
   UNAVAILABLE_OBSERVATIONS,
   NO_OBSERVATIONS,
   customerObservations,
+  unpublishableCustomerCopy,
   runAiScores,
   billedUsage,
   safeConfirmationStep,
