@@ -31,6 +31,9 @@ const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|(?:repl
 // Direct read verbs resolve an exact full name ("Show John Smith details")
 // without becoming refusal hints: a read that names nobody stays a read.
 const READ_SELECTOR_SOURCE = 'show|find|get|look\\s+up|pull\\s+up|open|view|display|check|summarize|read';
+// The record nouns and their determiners a read verb may carry before naming
+// the customer: "show me the latest conversation with", "read the texts from".
+const READ_OBJECT_WORDS = 'the|my|our|all|any|recent|latest|last|open|past|full|entire|conversation|conversations|thread|threads|message|messages|text|texts|sms|call|calls|email|emails|history|notes|balance|balances|schedule|appointment|appointments|estimate|estimates|invoice|invoices|record|records|detail|details|activity|log|logs|timeline';
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
@@ -185,7 +188,10 @@ function namesTargetCustomer(clause, customer) {
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
-  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE}|(?:${READ_SELECTOR_SOURCE})(?:\\s+me)?)$`).test(before);
+  // A read may name its customer through a record noun and a preposition
+  // ("show me the conversation with", "read the messages from"), not only
+  // directly after the verb.
+  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE}|(?:${READ_SELECTOR_SOURCE})(?:\\s+me)?(?:\\s+(?:${READ_OBJECT_WORDS}))*(?:\\s+(?:with|from|of|to|between))?)$`).test(before);
 }
 
 async function namedCustomers(prompt) {
@@ -399,6 +405,9 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     // An explicitly named customer that did not resolve keeps the request
     // target-specific: broad customer-row readers stay refused until it does.
     namesRequested: nameHint,
+    // A phone or email literal in the target clause identifies one customer
+    // even when no send/read recipient grammar captured it.
+    contactRequested: [...targetClause(prompt).matchAll(CONTACT_LITERAL_RE)].length > 0,
     reviewReference: reviewReference || null,
     bulkLeadRequest: !nameHint && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
@@ -543,7 +552,7 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
   'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging', 'get_blocked_senders',
-  'get_my_route', 'get_payout_details',
+  'get_my_route', 'get_payout_details', 'export_payouts',
 ]);
 
 // Readers that confine themselves to the task's read scope (readCustomerIds).
@@ -572,10 +581,14 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   // reader that carries its own selector or record identifier.
   if (context.ambiguous) return { error: 'Name one customer for this record lookup', code: 'target_clarification_required' };
   const input = { ...params };
-  if ((context.targets?.length || context.namesRequested) && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
+  // A request about one customer — a resolved target, an unresolved name, or
+  // a phone/email literal that identifies the customer — never widens into
+  // a reader that lists every customer.
+  const customerSpecific = Boolean(context.targets?.length || context.namesRequested || context.contactRequested);
+  if (customerSpecific && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
     return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
   }
-  if ((context.targets?.length || context.namesRequested) && ACTOR_WIDE_READERS.has(toolName)) {
+  if (customerSpecific && ACTOR_WIDE_READERS.has(toolName)) {
     return { error: 'Past-conversation search returns verbatim exchanges about any customer and cannot be limited to the task customer, so it is unavailable inside a task for a specific customer.', code: 'customer_scope_required' };
   }
   if (context.namesRequested && !context.targets?.length
@@ -632,4 +645,20 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   return invalid || { input };
 }
 
-module.exports = { UUID_RE, BROAD_CUSTOMER_ROW_READERS, pageIds, resolve, validateRecordTarget, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+// A sender block inside a customer-scoped task may only target the task
+// customer's own saved address. A domain-wide filter affects every sender at
+// that domain and cannot be bound to one customer, so it is refused there.
+async function validateSenderBlock(params, context) {
+  if (!context?.targets?.length) return null;
+  if (String(params.domain || '').trim()) {
+    return { error: 'A domain-wide block affects every sender at that domain and cannot be proposed inside a task for a specific customer. Block the customer\'s own address instead.', code: 'target_relationship_mismatch' };
+  }
+  const email = normalizeEmail(params.email_address);
+  const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('email');
+  if (!email || !owners.some(owner => normalizeEmail(owner.email) === email)) {
+    return { error: 'Use the task customer\'s own email address for this block', code: 'target_clarification_required' };
+  }
+  return null;
+}
+
+module.exports = { UUID_RE, BROAD_CUSTOMER_ROW_READERS, pageIds, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

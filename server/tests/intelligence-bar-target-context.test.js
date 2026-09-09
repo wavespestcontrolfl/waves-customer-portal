@@ -514,11 +514,44 @@ test('route-wide writers are refused inside a customer-scoped task', async () =>
   }
 });
 
-test('payout details list other customers\' transactions and are refused inside a customer-scoped task', async () => {
+test('payout details and exports list other customers\' transactions and are refused inside a customer-scoped task', async () => {
   const schema = { properties: { payout_id: { type: 'string' } } };
-  expect(await Context.prepareReadInput({}, context(), { toolName: 'get_payout_details', schema })).toMatchObject({ code: 'customer_scope_required' });
-  expect(await Context.prepareReadInput({}, { targets: [], namesRequested: true, page: { ids: {} } }, { toolName: 'get_payout_details', schema })).toMatchObject({ code: 'customer_scope_required' });
-  expect(await Context.prepareReadInput({}, { targets: [], page: { ids: {} } }, { toolName: 'get_payout_details', schema })).toEqual({ input: {} });
+  for (const toolName of ['get_payout_details', 'export_payouts']) {
+    expect(await Context.prepareReadInput({}, context(), { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
+    expect(await Context.prepareReadInput({}, { targets: [], namesRequested: true, page: { ids: {} } }, { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
+    expect(await Context.prepareReadInput({}, { targets: [], page: { ids: {} } }, { toolName, schema })).toEqual({ input: {} });
+  }
+});
+
+test('a phone or email literal keeps a request customer-specific for broad readers', async () => {
+  const schema = { properties: { limit: { type: 'number' } } };
+  for (const prompt of ['Show the outstanding balance for 941-555-0123', 'What does synthetic.person@example.invalid owe', 'Check the balance on (941) 555-0123']) {
+    const task = await Context.resolve({ prompt, pageData: {} });
+    expect(task.contactRequested).toBe(true);
+    expect(await Context.prepareReadInput({}, task, { toolName: 'get_outstanding_balances', schema })).toMatchObject({ code: 'customer_scope_required' });
+    expect(await Context.prepareReadInput({}, task, { toolName: 'search_ib_history', schema })).toMatchObject({ code: 'customer_scope_required' });
+  }
+  const broad = await Context.resolve({ prompt: 'Show the outstanding balances', pageData: {} });
+  expect(broad.contactRequested).toBe(false);
+  expect(await Context.prepareReadInput({}, broad, { toolName: 'get_outstanding_balances', schema })).toEqual({ input: {} });
+});
+
+test('a read that names its customer through a record noun and preposition resolves', async () => {
+  lookupRows = [rows.customers[0]];
+  for (const prompt of ['Show me the conversation with Synthetic Person', 'Read the messages from Synthetic Person', 'Pull up the latest emails from Synthetic Person',
+    'Show the full call history of Synthetic Person', 'Get the text thread between Synthetic Person and us', 'Check the balance of Synthetic Person']) {
+    expect((await Context.resolve({ prompt, pageData: {} })).target).toMatchObject({ customer_id: A, provenance: 'current_request_lookup' });
+  }
+});
+
+test('a sender block inside a customer-scoped task is bound to the task customer\'s own address', async () => {
+  rows.customers[0].email = 'Synthetic.Person@example.invalid';
+  const scoped = { targets: [{ customer_id: A }] };
+  expect(await Context.validateSenderBlock({ domain: 'example.invalid' }, scoped)).toMatchObject({ code: 'target_relationship_mismatch' });
+  expect(await Context.validateSenderBlock({ email_address: 'other@example.invalid' }, scoped)).toMatchObject({ code: 'target_clarification_required' });
+  expect(await Context.validateSenderBlock({}, scoped)).toMatchObject({ code: 'target_clarification_required' });
+  expect(await Context.validateSenderBlock({ email_address: 'synthetic.person@example.invalid' }, scoped)).toBeNull();
+  expect(await Context.validateSenderBlock({ domain: 'example.invalid' }, { targets: [] })).toBeNull();
 });
 
 test('scoped customer-row readers fail closed for an explicitly named customer who did not resolve', async () => {

@@ -429,7 +429,11 @@ function GlobalCommandPalette({ user }, ref) {
     submittingRef.current = false;
     setLoading(false);
     setActiveTask(null);
-    setResponse(null);
+    // With threads on, the visible reply stays with the thread it belongs to:
+    // clearing it would look like a new conversation while the next prompt
+    // silently carried the previous exchange. It is cleared below only when
+    // the thread itself is discarded.
+    if (!threadsAvailableRef.current) setResponse(null);
     // Legacy threaded approvals have no task recovery. Keep their bound cards
     // until resolved; task-backed cards can be reopened from Saved requests.
     if (!threadsAvailableRef.current) setPendingActions([]);
