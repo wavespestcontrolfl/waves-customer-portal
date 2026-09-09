@@ -122,6 +122,8 @@ function adjustmentPreview(product, input, options) {
     conversion_confidence: plan.conversionConfidence,
     lot_number: input.lotNumber || null, reason: input.reason || null, note: input.note || null,
     effects: 'Records physical stock and its movement ledger. A first count enables stock tracking. Does not place an order.',
+    ...(product.low_stock_threshold != null && plan.stockAfter <= Number(product.low_stock_threshold)
+      ? { low_stock_after: true, warning: 'Stock will be at or below the low-stock threshold.' } : {}),
     ...(plan.stockAfter < 0 ? { warning: 'This takes stock negative. Verify the physical count.' } : {}),
   };
   return { ...preview, _version: versionFor(product, preview) };
@@ -203,7 +205,8 @@ async function createRestockRequest(productId, raw, options = {}) {
       created_by: options.actorId || null, created_by_name: options.actorName || null,
       created_at: new Date(), updated_at: new Date(),
     }).returning('*');
-    const saved = request?.id && await trx('product_restock_requests').where({ id: request.id }).first();
+    const saved = request?.id && await trx('product_restock_requests').where({ id: request.id })
+      .select('*', trx.raw('needed_by::text as needed_by')).first();
     if (!saved || saved.product_id !== productId || saved.status !== 'open'
       || numberOrNull(saved.requested_quantity) !== plan.requested_quantity || saved.unit !== plan.unit) {
       throw inventoryError('Saved restock request did not match the request', 409, 'verification_failed');

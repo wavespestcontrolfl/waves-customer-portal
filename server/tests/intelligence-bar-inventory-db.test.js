@@ -117,7 +117,7 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(JSON.stringify(proposed.body.pendingActions[0].contract)).toContain(fields.needed_by);
     const saved = await confirm(proposed);
     expect(saved.body).toMatchObject({ success: true, result: { request: { product_id: intended.id } } });
-    expect(etDateString(new Date(saved.body.result.request.needed_by))).toBe(fields.needed_by);
+    expect(saved.body.result.request.needed_by).toBe(fields.needed_by);
     const persisted = await db('product_restock_requests').where({ id: saved.body.result.request.id })
       .select('id', db.raw('needed_by::text as needed_by')).first();
     expect(persisted.needed_by).toBe(fields.needed_by);
@@ -423,6 +423,49 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(saved.body).toMatchObject({ success: true, result: { request_id: one.id, status: 'cancelled' } });
     expect((await db('product_restock_requests').where({ id: second.id }).first()).status).toBe('open');
   }, 50000);
+
+  test.each([
+    ['mark_ordered', name => `I ordered the ${name}`],
+    ['cancel', name => `cancel that ${name} request`],
+  ])('documented %s wording requires one exact active product request', async (action, wording) => {
+    const row = await product(), other = await product();
+    const request = await requestFor(row), wrong = await requestFor(other);
+    const prompt = wording(row.name);
+    const rejected = await propose('update_restock_request', { request_id: wrong.id, action }, prompt);
+    expect(rejected.body.pendingActions || []).toHaveLength(0);
+    const proposed = await propose('update_restock_request', { request_id: request.id, action }, prompt);
+    expect((await confirm(proposed)).body.success).toBe(true);
+    await requestFor(row);
+    await requestFor(row);
+    const ambiguous = await propose('update_restock_request', { request_id: request.id, action }, prompt);
+    expect(ambiguous.body.pendingActions || []).toHaveLength(0);
+  }, 40000);
+
+  test('spilled-bag wording binds the whole product and retains low-stock warnings', async () => {
+    const row = await product({ low_stock_threshold: 8 });
+    const fields = { product_id: row.id, movement_type: 'damaged_lost', quantity: 2, unit: 'lb' };
+    const preview = await require('../services/inventory-operations').previewStockAdjustment(row.id,
+      { movementType: 'damaged_lost', quantity: 2, unit: 'lb' });
+    expect(preview).toMatchObject({ stock_after: 8, low_stock_after: true });
+    expect(preview.warning).toContain('low-stock');
+    const proposed = await propose('adjust_stock', fields, `write off the spilled bag of ${row.name}`);
+    expect((await confirm(proposed)).body.success).toBe(true);
+    expect(await onHand(row.id)).toBe(8);
+  }, 30000);
+
+  test('model duplicate override requires explicit operator intent', async () => {
+    const row = await product();
+    await requestFor(row);
+    const fields = { product_id: row.id, quantity: 2, unit: 'lb', allow_duplicate: true };
+    for (const prompt of [`Request 2 lb of ${row.name}`, `Do not create another request for 2 lb of ${row.name}`]) {
+      const rejected = await propose('create_restock_request', fields, prompt);
+      expect(rejected.body.pendingActions || []).toHaveLength(0);
+    }
+    expect(await db('product_restock_requests').where({ product_id: row.id })).toHaveLength(1);
+    const proposed = await propose('create_restock_request', fields, `Create another restock request for 2 lb of ${row.name}`);
+    expect((await confirm(proposed)).body.success).toBe(true);
+    expect(await db('product_restock_requests').where({ product_id: row.id })).toHaveLength(2);
+  }, 40000);
 
   test('product IDs inside notes and message data never authorize a stock write', async () => {
     const row = await product();

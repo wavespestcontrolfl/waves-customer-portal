@@ -928,7 +928,9 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     }
     // Named request selectors also retain the complete product identity.
     const namedClause = String(prompt).trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
-    const productName = namedClause.match(/^(?:mark|record|cancel|receive)\s+(?:the\s+)?restock request for\s+(.+?)(?:\s+as\s+(?:ordered|received|cancelled))?$/i)?.[1];
+    const productName = namedClause.match(/^(?:mark|record|cancel|receive)\s+(?:the\s+)?restock request for\s+(.+?)(?:\s+as\s+(?:ordered|received|cancelled))?$/i)?.[1]
+      || namedClause.match(/^I ordered (?:the\s+)?(.+)$/i)?.[1]
+      || namedClause.match(/^cancel (?:that|the)\s+(.+?)\s+request$/i)?.[1];
     if (!productName) return unavailable;
     const resolved = await resolveProduct({ product_name: productName });
     if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
@@ -938,8 +940,13 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     if (requests.length !== 1 || requests[0].id !== preview.request?.id || resolved.product.id !== preview.product?.id) return unavailable;
     return { productId: preview.product.id, requestId: preview.request.id };
   }
+  if (toolName === 'create_restock_request' && preview.allow_duplicate === true
+    && !/^(?:save|create)\s+another\s+(?:(?:restock|reorder)\s+)?request\s+for\s+/i.test(clause)) {
+    return { error: 'Explicitly request another restock request to create a duplicate.', code: 'duplicate_intent_required' };
+  }
   const amount = `(?:the\\s+)?${quantity}\\s+${unit}\\s+of\\s+`;
   const patterns = [
+    /^write off the (?:spilled|damaged) (?:bag|bottle|container|case|jug) of\s+(.+)$/i,
     new RegExp(`^(?:add|record|request|receive|write off)\\s+${amount}(.+)$`, 'i'),
     new RegExp(`^(?:save|create)\\s+(?:a|an|another|the)\\s+(?:(?:restock|reorder)\\s+)?request\\s+for\\s+${amount}(.+)$`, 'i'),
     /^(?:set\s+)?(?:the\s+)?(?:physical\s+)?shelf count for\s+(.+?)\s+(?:is|to)\s+.+$/i,
