@@ -270,6 +270,18 @@ router.post('/sms', async (req, res) => {
     // while older customer rows may still have local formatting.
     const customer = await findSingleCustomerByPhone(From);
 
+    // Shadow screen: known relationships bypass it; lookup/model failures
+    // leave ordinary message handling intact. No sender is linked here.
+    let solicitation = null;
+    try {
+      const screen = require('../services/sms-solicitation-classifier');
+      if (screen.classifierMode() !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
+        const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
+        solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
+      }
+    } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
+    const solicitationMeta = solicitation ? { spam_verdict: solicitation } : {};
+
     // Event-driven health rescore on a hot inbound signal (competitor mention,
     // cancellation, price complaint). Fire-and-forget so it never delays the
     // webhook ack; gated behind GATE_EVENT_RESCORE (no-op when off). Defined
@@ -343,7 +355,7 @@ router.post('/sms', async (req, res) => {
       // Loud reactions are typed as ordinary inbound so the unanswered digest
       // and completion guard count them (codex r3).
       messageType: quietReaction ? 'sms_reaction' : undefined,
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...solicitationMeta },
     }).catch(() => {});
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
@@ -381,6 +393,7 @@ router.post('/sms', async (req, res) => {
           customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
           message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
           metadata: JSON.stringify({
+            ...solicitationMeta,
             opt_out_reason: optCommand.reason,
             detection_method: optCommand.detectionMethod,
             source_keyword: optCommand.sourceKeyword,
@@ -718,6 +731,7 @@ router.post('/sms', async (req, res) => {
       // sms_log-backed unread counts agree with the unified messages row.
       ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
       metadata: JSON.stringify({
+        ...solicitationMeta,
         locationId: numberConfig.locationId,
         source: numberConfig.type,
         domain: numberConfig.domain,
