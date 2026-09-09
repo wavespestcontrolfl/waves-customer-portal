@@ -1,8 +1,8 @@
 /**
  * Staff appointment placement within the EXISTING two-hour arrival promises.
  * Extends the route-reorder simulation; never changes other visits' windows,
- * service durations, route_order, or customer communications. Capacity reads
- * evaluate insertion orders for the later reservation and dispatch writers.
+ * service durations, or customer communications. Capacity writers certify
+ * insertion orders and persist them with an audit inside the occupancy lock.
  */
 const db = require('../../models/db');
 const RouteOptimizer = require('../route-optimizer');
