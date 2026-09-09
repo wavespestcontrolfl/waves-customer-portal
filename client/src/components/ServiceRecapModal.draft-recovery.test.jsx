@@ -17,6 +17,36 @@ beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); })
 afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
 describe('recap interruption recovery', () => {
+  it.each([
+    ['serviceType', 'Mosquito Control'],
+    ['customerId', 'customer-b'],
+    ['scheduledDate', '2026-01-02'],
+  ])('blocks stale treatment drafts after the live visit %s changes', async (field, value) => {
+    const service = { ...context.service, serviceType: 'Pest Control', customerId: 'customer-a', scheduledDate: '2026-01-01' };
+    let current = { ...structuredClone(context), service };
+    const request = vi.fn(async (path) => path.endsWith('/context') ? structuredClone(current) : { ok: true });
+    const open = () => render(<ServiceRecapModal service={service} request={request} onClose={vi.fn()} />);
+    const first = open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Example gel', exact: true }));
+    fireEvent.change(noteInput(), { target: { value: 'Treatment for the original visit.' } });
+    fireEvent.change(screen.getByLabelText('Application rate for Example gel'), { target: { value: '0.4' } });
+    fireEvent.change(screen.getByPlaceholderText(/The recap your customer receives/), { target: { value: 'Original service recap.' } });
+    first.unmount();
+
+    current = { ...current, service: { ...service, [field]: value } };
+    open();
+    expect(await screen.findByRole('button', { name: 'Restore draft', exact: true })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Complete Service', exact: true })).toBeDisabled();
+    expect(request.mock.calls.every(([, options]) => !options?.method)).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft', exact: true }));
+    expect(noteInput()).toHaveValue('');
+    expect(screen.getByPlaceholderText(/The recap your customer receives/)).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'Complete Service', exact: true }));
+    await waitFor(() => expect(request.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(true));
+    const payload = JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'POST')[1].body);
+    expect(payload).toMatchObject({ technicianNotes: '', customerRecap: '', products: [], sendSms: false });
+  });
+
   it.each(['completed elsewhere', 'record edited', 'record lookup failed', 'product lookup failed'])('blocks restoring a draft when %s', async (change) => {
     const currentProduct = { ...product, id: 2, name: 'Current product' };
     const initial = { ...structuredClone(context), products: [product, currentProduct] };
