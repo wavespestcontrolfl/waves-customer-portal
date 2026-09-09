@@ -8,7 +8,7 @@
 // Treatment Plans delegates to ServiceLibraryPage so desktop and mobile
 // use the same URL-addressable workflow.
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Library } from "lucide-react";
 import AdminCommandHeader from "./AdminCommandHeader";
 import { SERVICE_CATEGORY_LABELS as CATEGORY_LABELS } from "../../constants/serviceCategories";
@@ -974,6 +974,7 @@ const PRICING_TYPES = [
 ];
 
 function ServiceEditPanel({ service, onCancel, onSaved }) {
+  const originalService = useRef(service);
   const isNew = !service?.id;
   const isArchived = !!service?.is_archived;
   const [name, setName] = useState(service?.name || "");
@@ -1032,6 +1033,7 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
           method: isNew ? "POST" : "PUT",
           body: JSON.stringify(buildMobileServicePayload({
             service,
+            originalService: originalService.current,
             isNew,
             name,
             duration,
