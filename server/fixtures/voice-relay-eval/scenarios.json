@@ -3750,7 +3750,7 @@
           "get_account_overview": {
             "text": "Upcoming appointments: not available for this caller. Do NOT say whether one is scheduled, and do NOT give a date or a window — the account holder can see it in their portal, or the office can go over it with them directly."
           },
-          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_service_history": "Completed visits, newest first: 2026-08-12 Lawn Care Program; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
           "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
           "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
           "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
