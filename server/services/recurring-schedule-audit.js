@@ -226,7 +226,7 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
       const families = converter.comboRouteFamiliesFromCatalogKey(identity);
       const matches = families.length ? families.includes(family)
         : converter.seedingFamilyKey({ service: identity, name: row.service_type }) === family;
-      return matches && !row.is_callback && !row.followup_included;
+      return matches && !row.is_callback && !row.followup_included && !isBoosterVisit(row);
     });
     if (matching.length && matching.every((row) => stoppedRoots.has(row.recurring_parent_id || row.id))) continue;
     const rows = matching.filter((row) => !stoppedRoots.has(row.recurring_parent_id || row.id));
@@ -234,6 +234,15 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
     if (finding) findings.push(finding);
   }
   return findings;
+}
+
+// Booster months are deliberately non-recurring rows that hang off a recurring
+// root (is_recurring:false + recurring_parent_id): paid extras, not part of the
+// accepted cadence. Auditing them as plan visits would call a complete series
+// missing recurrence (and flag their off-cadence spacing). A root reservation
+// that never acquired is_recurring has no parent and is still audited.
+function isBoosterVisit(row) {
+  return !row.is_recurring && !!row.recurring_parent_id;
 }
 
 function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, seeder }) {
