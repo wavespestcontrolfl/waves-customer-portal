@@ -49,7 +49,7 @@ It excludes unrelated Tech work from the original stack. Conflicts with the
 new caption-floor changes resolve to shared readable controls; the superseded
 local palette, badge and table-style helpers are removed.
 
-Fresh verification: 33 focused tests and production build passed. The browser
+Fresh verification: 34 focused tests and production build passed. The browser
 runner passed 322 layout cases across Chromium desktop and touch WebKit, captured
 70 screenshots, and reported no page errors or unmatched APIs. Representative
 Banking/payout, Taxes overview, expense, bank-import and receivables renders were
@@ -60,3 +60,8 @@ identical; repeated tax reads now use the existing migration's read helper.
 Evidence lives in `.tmp/admin-finance-foundation/` in the task-owned integration
 checkout. This is synthetic frontend evidence; no live payout, reminder, bank
 import, database or physical-device acceptance was exercised.
+
+Pre-push review identified a bank-import pagination race during filter changes.
+The integration clears stale rows/pagination and blocks overlapping page reads.
+A deferred-response regression failed before the fix and passes afterward; the
+production build and full finance browser runner also pass on the fixed code.

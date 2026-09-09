@@ -4795,6 +4795,7 @@ function BankImportTab() {
 
   const busyRef = useRef(false);
   const rowsSeq = useRef(0);
+  const rowsPending = useRef(false);
   const coverageSeq = useRef(0);
   const [readErrors, setReadErrors] = useState({});
   const [rowsLoading, setRowsLoading] = useState(true);
@@ -4837,8 +4838,14 @@ function BankImportTab() {
   // so growing a single limit stalls there; offset pages don't
   const loadRows = useCallback(
     (offset) => {
+      if (offset > 0 && rowsPending.current) return;
+      rowsPending.current = true;
       const seq = ++rowsSeq.current;
       setRowsLoading(true);
+      if (offset === 0) {
+        setRows([]);
+        setHasMore(false);
+      }
       setReadErrors((prev) => ({
         ...prev,
         rows: null,
@@ -4864,7 +4871,10 @@ function BankImportTab() {
           }));
         })
         .finally(() => {
-          if (seq === rowsSeq.current) setRowsLoading(false);
+          if (seq === rowsSeq.current) {
+            rowsPending.current = false;
+            setRowsLoading(false);
+          }
         });
     },
     [filter],
@@ -6039,7 +6049,7 @@ function BankImportTab() {
               onClick={() => loadRows(rows.length)}
               variant="secondary"
               className="min-w-11"
-              disabled={!!busy}
+              disabled={!!busy || rowsLoading}
             >
               Load 200 more
             </Button>

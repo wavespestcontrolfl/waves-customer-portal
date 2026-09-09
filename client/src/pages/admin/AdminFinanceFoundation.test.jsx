@@ -339,6 +339,37 @@ describe("Finance workflow preservation", () => {
     );
     await screen.findByText("Total Expenses", { exact: true });
   });
+  it("does not append an old page while a new bank-import filter is loading", async () => {
+    const key = "GET /api/admin/tax/bank-import/transactions";
+    const oldRow = { id: "old-row", description: "Previous filter row", status: "ignored", amount: 10 };
+    const newRow = { ...oldRow, id: "new-row", description: "Filtered first page", status: "unmatched" };
+    overrides.set("GET /api/admin/tax/bank-import/status", () => response({ enabled: true, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set(key, () => response({ transactions: [oldRow], hasMore: true }));
+    open(TaxPage);
+    await taxSection("Expenses", "Bank Import");
+    await screen.findByText(oldRow.description);
+    const releaseFilter = hold(key);
+    edit("Status", "unmatched");
+    await screen.findByText("Loading bank transactions…");
+    expect(screen.queryByRole("button", { name: "Load 200 more" })).not.toBeInTheDocument();
+    expect(screen.queryByText(oldRow.description)).not.toBeInTheDocument();
+    expect(requests.filter((r) => r.key === key).map((r) => r.query)).toEqual([
+      "?limit=200&offset=0", "?limit=200&offset=0&status=unmatched",
+    ]);
+    await act(async () => releaseFilter(response({ transactions: [newRow], hasMore: true })));
+    await screen.findByText(newRow.description);
+    const releaseMore = hold(key);
+    const more = screen.getByRole("button", { name: "Load 200 more" });
+    act(() => { fireEvent.click(more); fireEvent.click(more); });
+    expect(more).toBeDisabled();
+    expect(requests.filter((r) => r.key === key)).toHaveLength(3);
+    expect(requests.filter((r) => r.key === key).at(-1).query).toBe("?limit=200&offset=1&status=unmatched");
+    await act(async () => releaseMore(response({ transactions: [{ ...newRow, id: "next-row", description: "Filtered next page" }], hasMore: false })));
+    await screen.findByText("Filtered next page");
+    expect(screen.getByText(newRow.description)).toBeInTheDocument();
+    expect(screen.queryByText(oldRow.description)).not.toBeInTheDocument();
+  });
   it("keeps the bank-import gate closed on a failed status read", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>
       response({ error: "Read unavailable" }, 503),
