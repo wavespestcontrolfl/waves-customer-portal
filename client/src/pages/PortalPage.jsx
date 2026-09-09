@@ -15359,11 +15359,13 @@ function VisitsTab({ customer, properties = [], activePropertyId, subTab, onSubT
         <>
           {/* Completed visits and reports read /services, which is
               customer-wide (per-property history is PR 4 of the lane): under
-              the saved-property scope say so, so house B never appears to
-              own the other houses' reports (codex #4207 r1e). */}
-          {properties.length > 1 && properties.some((p) => p.key) && (
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }}>
-              Completed visits and reports cover every property on this profile.
+              the saved-property MODEL say so — whenever the list is
+              saved-shaped, not only with 2+ active entries (GitHub codex r8
+              P2): a profile whose other houses were retired still lists their
+              visits and reports here, under the remaining house's address. */}
+          {properties.some((p) => p.key) && (
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }} data-testid="completed-profile-wide-notice">
+              Completed visits and reports are listed for this whole profile, including any property that is no longer active.
             </div>
           )}
           <ServicesTab />
@@ -15861,7 +15863,11 @@ export default function PortalPage() {
   // The watering-plan deep link names a PROFILE; saved-property entries carry
   // composite ids, so match on the entry's customer (its first entry wins).
   const wateringPlanProperty = portalProperties.find((property) => String(property.customerId || property.id) === wateringPlanCustomerId);
-  const canSwitchProperties = portalProperties.length > 1;
+  // Switchable with 2+ entries — or with ONE entry that is not the current
+  // selection (this profile closed, every saved property retired, while a
+  // sibling profile still lists a house): the sole entry is the way out, not
+  // a no-op (GitHub codex r8 P2).
+  const canSwitchProperties = portalProperties.length > 1 || (propertyScope === 'saved' && !activeProperty && portalProperties.length > 0);
   const propertyRenderKey = `${activePropertyId}:${requestRefreshKey}`;
   // A NON-primary saved property of a profile is selected: My Property is
   // profile-scoped (see PropertyProfileScopedNotice) — the primary entry of
@@ -16530,4 +16536,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, ReportIssueOverlay, PortalGlassContext };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
