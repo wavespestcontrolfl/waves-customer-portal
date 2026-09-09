@@ -37,6 +37,8 @@
 //     through commit, so a terminal sibling flipped back to live
 //     (handleRefundFailed rewinding refunded → paid) or an invoice redated
 //     onto the day contends on its own row and waits (GitHub r8 P1);
+//   - the frozen invoice payer and PO match the visit's effective Bill-To;
+//     exempt payers carry zero tax. Resolution errors abort the run.
 //   - a positive line reads like the visit's application: exactly the
 //     visit's label or an active catalog service name in the visit's family
 //     (or a ≥8-char label contained in one); fee/charge and product words
@@ -53,7 +55,8 @@
 //      — ALWAYS, an empty plan included, so a stale file from an earlier
 //      scan can never be the one --execute consumes (GitHub r3 P2). Each
 //      pairing carries the ids, the figures the reviewer reads (invoice
-//      total, visit service) and a sha256 DIGEST of every review-relevant
+//      total, visit service, previous and resulting technician ids) and a
+//      sha256 DIGEST of every review-relevant
 //      invoice and visit field (status, dates, service type, line items,
 //      amounts, technician, completion record). The operator reads the list.
 //   2. --execute --plan=<file> links ONLY the pairs in that reviewed file —
@@ -80,14 +83,7 @@ const argValue = (name) => { const hit = process.argv.find((a) => a.startsWith(`
 const DAYS = Math.max(1, parseInt(argValue('days') || '120', 10) || 120);
 const PLAN_OUT = argValue('plan-out');
 const PLAN_IN = argValue('plan');
-if (EXECUTE && !PLAN_IN) { console.error('--execute requires --plan=<file written by a reviewed dry run>'); process.exit(2); }
-
-// The Postgres service's public endpoint (the app service's DATABASE_URL is
-// the private host and is unreachable from a laptop).
-const CONNECTION = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
-if (!CONNECTION) { console.error('DATABASE_PUBLIC_URL (or DATABASE_URL) is required'); process.exit(2); }
-
-const knex = require(path.join(ROOT, 'node_modules', 'knex'))({ client: 'pg', connection: CONNECTION, pool: { min: 0, max: 2 } });
+const PayerService = require(path.join(ROOT, 'server', 'services', 'payer'));
 const InvoiceService = require(path.join(ROOT, 'server', 'services', 'invoice'));
 const { serviceKeyFor } = require(path.join(ROOT, 'server', 'services', 'recurring-appointment-seeder'));
 const { acquireScheduledInvoiceMintLock, acquireScheduledMintLockChain, assertScheduledInvoiceNotPacketOwned } = require(path.join(ROOT, 'server', 'services', 'scheduled-invoice-mint'));
@@ -108,11 +104,11 @@ function lineAmount(li) { const q = li?.quantity != null ? Number(li.quantity) :
 // --execute and compared with the plan: any review-relevant edit in between
 // (amount, lines, status, dates, service type, technician, completion
 // record) aborts the batch even when the edited rows still pass the rule.
-const INVOICE_DIGEST_FIELDS = ['id', 'customer_id', 'status', 'service_date', 'service_type', 'title', 'line_items', 'subtotal', 'discount_amount', 'tax_amount', 'total', 'technician_id', 'payer_id'];
-const VISIT_DIGEST_FIELDS = ['id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id'];
-function pairingDigest(inv, svc, serviceRecordId) {
+const INVOICE_DIGEST_FIELDS = ['id', 'customer_id', 'status', 'service_date', 'service_type', 'title', 'line_items', 'subtotal', 'discount_amount', 'tax_amount', 'total', 'technician_id', 'payer_id', 'po_number', 'tax_rate', 'payer_snapshot'];
+const VISIT_DIGEST_FIELDS = ['id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id', 'payer_id', 'po_number', 'self_pay_override'];
+function pairingDigest(inv, svc, serviceRecordId, billTo) {
   const pick = (row, keys) => keys.map((k) => { const v = row[k]; return v instanceof Date ? v.toISOString() : (v === undefined ? null : v); });
-  const body = JSON.stringify({ invoice: pick(inv, INVOICE_DIGEST_FIELDS), visit: pick(svc, VISIT_DIGEST_FIELDS), serviceRecordId: serviceRecordId || null });
+  const body = JSON.stringify({ invoice: pick(inv, INVOICE_DIGEST_FIELDS), visit: pick(svc, VISIT_DIGEST_FIELDS), serviceRecordId: serviceRecordId || null, billTo });
   return crypto.createHash('sha256').update(body).digest('hex');
 }
 
@@ -169,7 +165,7 @@ async function evaluate(conn, invoiceId, catalogNames, { lock = false } = {}) {
     // The canonical chain every invoice-attaching writer takes; the visit
     // row comes back locked and fresh (status / date / service_type).
     svc = await acquireScheduledMintLockChain(conn, { scheduledServiceId: visits[0].id, customerId: inv.customer_id,
-      visitColumns: ['id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id'] });
+      visitColumns: ['id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id', 'payer_id', 'po_number', 'self_pay_override'] });
     if (!svc || DEAD_VISIT_STATUSES.includes(String(svc.status)) || dateOnly(svc.scheduled_date) !== day) return { skip: 'visitChanged' };
     // Uniqueness AGAIN under the locks (pre-push P1): a visit moved onto or
     // reactivated for this date while we waited makes the pairing a guess.
@@ -186,7 +182,7 @@ async function evaluate(conn, invoiceId, catalogNames, { lock = false } = {}) {
     const stillOne = allVisits.filter((row) => dateOnly(row.scheduled_date) === day && !DEAD_VISIT_STATUSES.includes(String(row.status)));
     if (stillOne.length !== 1 || String(stillOne[0].id) !== String(svc.id)) return { skip: 'ambiguous' };
   } else {
-    svc = await conn('scheduled_services').where({ id: visits[0].id }).first('id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id');
+    svc = await conn('scheduled_services').where({ id: visits[0].id }).first('id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id', 'payer_id', 'po_number', 'self_pay_override');
   }
   // The invoice must be the customer's ONLY live unlinked invoice dated
   // that day. Under the locks the predicate is read from EVERY invoice row
@@ -218,10 +214,24 @@ async function evaluate(conn, invoiceId, catalogNames, { lock = false } = {}) {
   if (await conn('visit_billing_dispositions').where({ scheduled_service_id: svc.id }).first('id')) return { skip: 'dispositioned' };
   try { await assertScheduledInvoiceNotPacketOwned(conn, svc.id); } catch { return { skip: 'packetOwned' }; }
   if (!invoiceBillsVisitApplication(inv, svc, catalogNames)) return { skip: 'noEvidence' };
+  // Customer and visit are already locked during execute. Hold the referenced
+  // payer rows too: deactivation/exemption edits must wait through commit.
+  const customer = await conn('customers').where({ id: inv.customer_id }).first();
+  if (!customer) return { skip: 'customerChanged' };
+  if (lock) {
+    const payerIds = [...new Set([customer.payer_id, svc.payer_id, inv.payer_id].filter((id) => id != null))];
+    await conn('payers').whereIn('id', payerIds).orderBy('id').forUpdate().select('id');
+  }
+  const billTo = await PayerService.resolveForInvoice({ database: conn, customerId: inv.customer_id,
+    customer, scheduledServiceId: svc.id, throwOnError: true });
+  if (String(inv.payer_id || '') !== String(billTo.payerId || '')
+    || String(inv.po_number || '').trim() !== String(billTo.poNumber || '').trim()) return { skip: 'billToMismatch' };
+  if (billTo.taxExempt && (Number(inv.tax_rate) !== 0 || Number(inv.tax_amount) !== 0)) return { skip: 'payerTaxMismatch' };
   const record = await canonicalCompletionRecordId(conn, svc.id);
   return { pairing: { invoiceId: inv.id, invoiceStatus: inv.status, invoiceTotal: inv.total == null ? null : Number(inv.total), serviceDate: day,
     visitId: svc.id, visitStatus: svc.status, visitService: svc.service_type || null,
-    serviceRecordId: record, technicianId: svc.technician_id || null, digest: pairingDigest(inv, svc, record) } };
+    serviceRecordId: record, previousTechnicianId: inv.technician_id || null, technicianId: svc.technician_id || inv.technician_id || null,
+    digest: pairingDigest(inv, svc, record, billTo) } };
 }
 
 // The visit's canonical completion record, or null when it cannot be told:
@@ -275,14 +285,23 @@ function readPlan(file) {
   return pairs;
 }
 
-(async () => {
+async function main() {
+  if (EXECUTE && !PLAN_IN) { console.error('--execute requires --plan=<file written by a reviewed dry run>'); process.exit(2); }
+
+  // The Postgres service's public endpoint (the app service's DATABASE_URL is
+  // the private host and is unreachable from a laptop).
+  const CONNECTION = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
+  if (!CONNECTION) { console.error('DATABASE_PUBLIC_URL (or DATABASE_URL) is required'); process.exit(2); }
+
+  const knex = require(path.join(ROOT, 'node_modules', 'knex'))({ client: 'pg', connection: CONNECTION, pool: { min: 0, max: 2 } });
+
   try {
     if (!EXECUTE) {
       const { scanned, pairings, skipped } = await plan(knex);
       console.log(`DRY RUN — ${scanned} unlinked invoice(s) in the last ${DAYS} days; ${pairings.length} pairing(s); skipped: ${JSON.stringify(skipped)}`);
       for (const p of pairings) {
         const total = p.invoiceTotal == null ? '' : ` $${p.invoiceTotal.toFixed(2)}`;
-        console.log(`  ${p.serviceDate}  invoice ${p.invoiceId} (${p.invoiceStatus}${total}) -> visit ${p.visitId} (${p.visitStatus}${p.visitService ? `, ${p.visitService}` : ''})${p.serviceRecordId ? ` + record ${p.serviceRecordId}` : ''}`);
+        console.log(`  ${p.serviceDate}  invoice ${p.invoiceId} (${p.invoiceStatus}${total}) -> visit ${p.visitId} (${p.visitStatus}${p.visitService ? `, ${p.visitService}` : ''})${p.serviceRecordId ? ` + record ${p.serviceRecordId}` : ''}; technician ${p.previousTechnicianId || 'none'} -> ${p.technicianId || 'none'}`);
       }
       if (PLAN_OUT) {
         // Written on EVERY scan, an empty plan included — a stale file from
@@ -352,4 +371,7 @@ function readPlan(file) {
   } finally {
     await knex.destroy();
   }
-})();
+}
+
+if (require.main === module) void main();
+module.exports = { evaluate, pairingDigest, readPlan };
