@@ -130,3 +130,16 @@ test('the return leg respects the full duration of a fixed allocation', () => {
   expect(evaluateArrivalPlacement(input, options(540, 60)).feasible).toBe(false);
   expect(evaluateArrivalPlacement({ ...input, rows: [] }, options(540, 60)).feasible).toBe(true);
 });
+
+
+test('legacy morning unassigned work stops blocking after its arrival range and work end', () => {
+  const rows = [stop('legacy', 480, 30, { technician_id: null,
+    window_start: null, window_end: null, time_window: 'morning' })];
+  const morning = context(rows, { now: new Date('2027-01-15T15:00:00Z') });
+  expect(evaluateArrivalPlacement(morning, options(600)).feasible).toBe(false);
+  const afternoon = context(rows, { now: new Date('2027-01-15T18:00:00Z') });
+  expect(evaluateArrivalPlacement(afternoon, options(960)).feasible).toBe(true);
+  expect(evaluateArrivalPlacement(context(rows), { ...options(960), departureMin: 780 }).feasible).toBe(true);
+  expect(evaluateArrivalPlacement(context([{ ...rows[0], time_window: 'unknown' }]),
+    { ...options(960), departureMin: 780 }).feasible).toBe(false);
+});
