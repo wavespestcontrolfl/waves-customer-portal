@@ -4317,26 +4317,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 2 MINUTES — Missed-call bell durable retry (owner ruling
+  // EVERY 2 MINUTES — Call-alert durable retry (owner ruling
   // 2026-08-28). Its own callback, NOT chained after the Gmail sync: the
   // post-call timer is in-memory and the sweep window is 24h, so a Gmail
   // hang must never be able to starve it (hook P1).
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
-    try {
-      await require('./missed-call-bell').sweepMissedCalls();
-    } catch (err) {
-      logger.warn(`[scheduler] missed-call sweep failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // Recover repeat-caller checks when a deploy interrupts the post-call timer.
-  cron.schedule('*/2 * * * *', async () => {
-    try {
-      await require('./repeat-caller-bell').sweepRepeatCallers();
-    } catch (err) {
-      logger.warn(`[scheduler] repeat-caller sweep failed: ${err.message}`);
-    }
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
+      Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
+    ]);
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller'][index]} sweep failed: ${result.reason.message}`);
+    });
   }, { timezone: 'America/New_York' });
 
   // =========================================================================

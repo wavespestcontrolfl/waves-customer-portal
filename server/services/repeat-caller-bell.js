@@ -9,6 +9,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 const { isSentinelPhone } = require('./external-phone');
+const { outcomeUnanswered } = require('./missed-call-bell');
 const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
 
 const REPEAT_THRESHOLD = 3;
@@ -38,7 +39,7 @@ function repeatCallerPlan(calls, now = Date.now()) {
   });
   if (recent.length < REPEAT_THRESHOLD) return null;
   const newest = recent[0];
-  if (!TERMINAL_STATUSES.has(newest.status)
+  if (recent.some(call => !TERMINAL_STATUSES.has(call.status))
     || !(new Date(newest.updated_at || newest.created_at).getTime() <= now - SWEEP_GRACE_MS)) return null;
   if (recent.some((c) => c.repeat_caller_alerted_at)) return null;
   // A live lease belongs to another worker; only stale leases can be reclaimed.
@@ -47,8 +48,8 @@ function repeatCallerPlan(calls, now = Date.now()) {
     return Number.isFinite(t) && now - t < LEASE_MS;
   })) return null;
   if (recent.some((c) => c.booked)) return null;
-  const answered = recent.filter((c) => c.answered_by === 'human' || c.answered_by === 'ai_agent').length;
-  return { count: recent.length, unanswered: recent.length - answered, since: recent[recent.length - 1].created_at };
+  const unanswered = recent.filter(outcomeUnanswered).length;
+  return { count: recent.length, unanswered, since: recent[recent.length - 1].created_at };
 }
 
 async function ringRepeatCallerIfNeeded(callSid) {
@@ -102,12 +103,14 @@ async function ringRepeatCallerIfNeeded(callSid) {
     }
     let stats = null;
     let delivered = false;
+    const stillUnbooked = async () => !await db('call_log').whereIn('id', plan.windowIds).whereRaw(BOOKED_SQL).first('id');
     try {
       const customer = call.customer_id
         ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
         : null;
       const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
       const { triggerNotification } = require('./notification-triggers');
+      if (!await stillUnbooked()) { stats = { superseded: true }; return false; }
       stats = await triggerNotification('repeat_caller', {
         customerId: call.customer_id || null,
         name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || null,
@@ -117,7 +120,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
         unanswered: plan.unanswered,
         callLogId: call.id,
         repeatCallerDeliveryId: String(plan.deliveryId),
-      });
+      }, { beforePush: stillUnbooked });
     } finally {
       // Settle only delivery or deliberate silence; release a failed attempt for retry.
       delivered = Boolean(stats && !stats.error
@@ -126,7 +129,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
         await settle().catch(() => {});
       } else {
         await fenced().update({ metadata: db.raw("metadata - 'repeat_caller_claim'") }).catch(() => {});
-        logger.warn(`[repeat-caller-bell] delivery did not happen for call ${String(callSid).slice(-6)} — lease released`);
+        if (!stats?.superseded) logger.warn(`[repeat-caller-bell] delivery did not happen for call ${String(callSid).slice(-6)} — lease released`);
       }
     }
     return delivered;
@@ -148,8 +151,7 @@ async function sweepRepeatCallers({ limit = 50 } = {}) {
     .havingRaw("BOOL_AND(COALESCE(metadata->>'repeat_caller_alerted_at', '') = '')")
     .havingRaw(`BOOL_AND(${CLAIM_FREE_SQL})`, [new Date(Date.now() - LEASE_MS)])
     .havingRaw(`NOT BOOL_OR(${BOOKED_SQL})`)
-    // Evaluate the newest call after grouping, so an active call cannot disappear.
-    .havingRaw('(array_agg(status ORDER BY created_at DESC, id DESC))[1] = ANY(?)', [[...TERMINAL_STATUSES]])
+    .havingRaw('BOOL_AND(COALESCE(status, \'\') = ANY(?))', [[...TERMINAL_STATUSES]])
     .havingRaw('(array_agg(COALESCE(updated_at, created_at) ORDER BY created_at DESC, id DESC))[1] < ?', [new Date(Date.now() - SWEEP_GRACE_MS)])
     .select(db.raw('(array_agg(twilio_call_sid ORDER BY created_at DESC, id DESC))[1] AS newest_sid'))
     .limit(limit);

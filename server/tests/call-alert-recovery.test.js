@@ -26,6 +26,18 @@ describe('finding 5/6 — repeat callers and spoken-name variants', () => {
     expect(callerKey('+449415550100')).not.toBe(callerKey('+19415550100'));
     expect(callerKey('anonymous')).toBeNull();
   });
+
+  test('repeat counts distinguish known unanswered outcomes from ambiguous completed calls', () => {
+    const now = Date.parse('2026-09-06T18:00:00Z');
+    const calls = [
+      { status: 'completed', answered_by: null },
+      { status: 'completed', answered_by: 'human' },
+      { status: 'completed', answered_by: 'ai_agent' },
+      { status: 'completed', answered_by: 'voicemail' },
+      { status: 'no-answer', answered_by: null },
+    ].map((call, i) => ({ ...call, created_at: new Date(now - (10 + i) * 60000) }));
+    expect(repeatCallerPlan(calls, now)).toMatchObject({ count: 5, unanswered: 2 });
+  });
 });
 
 describe('finding 4 — missed-call bell for unknown callers (GATE_MISSED_CALL_UNKNOWN_CALLERS)', () => {

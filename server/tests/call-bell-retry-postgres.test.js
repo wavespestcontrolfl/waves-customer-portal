@@ -75,6 +75,29 @@ jest.setTimeout(30000);
     expect(await sweepMissedCalls()).toBe(0);
   });
 
+  test('permanently ineligible calls are excluded before the missed-call page is loaded', async () => {
+    const rejected = [
+      { from_phone: 'anonymous' },
+      { from_phone: '+17378742833' },
+      { recording_url: 'https://example.invalid/recording' },
+      { voicemail_callback_alerted_at: new Date(now) },
+      { call_outcome: 'ai_handled' },
+      { call_outcome: 'ai_transferred' },
+      ...[1, '1', true].map(score => ({ metadata: { addons: { results: { nomorobo_spamscore: { status: 'successful', result: { score } } } } } })),
+    ].map(extra => call(120, extra));
+    const eligible = call(10);
+    await database('call_log').insert([...rejected, eligible]);
+    const queries = [];
+    const listener = query => { if (query.sql.includes('AS sweep_created_at')) queries.push(query); };
+    database.on('query', listener);
+    try {
+      expect(await sweepMissedCalls({ limit: 1 })).toBe(1);
+      expect(queries).toHaveLength(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      expect(triggerNotification.mock.calls[0][1].callLogId).toBe(eligible.id);
+    } finally { database.removeListener('query', listener); }
+  });
+
   test.each(['+7378742833', '+17378742833'])('numeric withheld callers stay silent through both sweeps: %s', async phone => {
     const rows = [call(60, { from_phone: phone }), call(30, { from_phone: phone }), call(10, { from_phone: phone })];
     await mockConn('call_log').insert(rows);
@@ -113,6 +136,49 @@ jest.setTimeout(30000);
     expect(triggerNotification).not.toHaveBeenCalled();
     await mockConn('call_log').where({ id: rows[2].id }).update({ updated_at: new Date(now - 6 * 60000) });
     expect(Boolean(await run())).toBe(true);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['timer', 'sweep'])('%s waits for an earlier overlapping call to terminate', async entry => {
+    const rows = [call(60, { status: 'in-progress', answered_by: 'human' }), call(30), call(10)];
+    await database('call_log').insert(rows);
+    const run = () => entry === 'timer' ? ringRepeatCallerIfNeeded(rows[2].twilio_call_sid) : sweepRepeatCallers();
+    expect(Boolean(await run())).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    await database('call_log').where({ id: rows[0].id }).update({ status: 'completed' });
+    expect(Boolean(await run())).toBe(true);
+    expect(triggerNotification.mock.calls[0][1]).toMatchObject({ count: 3, unanswered: 2 });
+  });
+
+  test('a booking committed after the claim suppresses delivery and releases the lease', async () => {
+    const customerId = randomUUID();
+    const rows = [call(60), call(30), call(10, { customer_id: customerId })];
+    await database('call_log').insert(rows);
+    await database('customers').insert({ id: customerId });
+    const query = database.client.query;
+    jest.spyOn(database.client, 'query').mockImplementation(async function (connection, request) {
+      const result = await query.call(this, connection, request);
+      if (request.sql.startsWith('select') && request.sql.includes('from "customers"')) {
+        await database('scheduled_services').insert({ id: randomUUID(), source_call_log_id: rows[2].id, status: 'confirmed' });
+      }
+      return result;
+    });
+    expect(await ringRepeatCallerIfNeeded(rows[2].twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect((await database('call_log').where({ id: rows[2].id }).first()).metadata.repeat_caller_claim).toBeUndefined();
+    expect(await sweepRepeatCallers()).toBe(0);
+  });
+
+  test('the repeat push guard rechecks a booking committed during notification delivery', async () => {
+    const rows = [call(60), call(30), call(10)];
+    await database('call_log').insert(rows);
+    triggerNotification.mockImplementationOnce(async (_trigger, _payload, { beforePush }) => {
+      expect(await beforePush()).toBe(true);
+      await database('scheduled_services').insert({ id: randomUUID(), source_call_log_id: rows[0].id, status: 'confirmed' });
+      expect(await beforePush()).toBe(false);
+      return { bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } };
+    });
+    expect(await ringRepeatCallerIfNeeded(rows[2].twilio_call_sid)).toBe(true);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 

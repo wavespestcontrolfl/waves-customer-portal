@@ -13,7 +13,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { isSentinelPhone } = require('./external-phone');
+const { isSentinelPhone, PHONE_SENTINELS } = require('./external-phone');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // A row with NO answered_by (the Studio-flow status_callback fallback in
@@ -184,10 +184,20 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
       .where({ direction: 'inbound' })
       .modify((q) => {
         if (!unknownCallers) q.whereNotNull('customer_id');
-        else q.whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'");
+        else {
+          q.whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'");
+          q.where(group => group.whereNotNull('customer_id').orWhere(unknown => unknown
+            .whereRaw("LENGTH(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g')) >= 10")
+            .whereRaw("NOT (regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g') = ANY(?))", [[...PHONE_SENTINELS].flatMap(value => [value, `1${value}`])])
+            .whereRaw("NOT COALESCE(jsonb_path_exists(COALESCE(metadata, '{}'::jsonb), ?::jsonpath, '{}'::jsonb, true), false)",
+              ['strict $.addons.results.nomorobo_spamscore ? (@.status == "successful" && (@.result.score == true || @.result.score.double() == 1))'])));
+        }
       })
       .whereIn('status', TERMINAL_STATUSES)
       .whereNull('recording_sid')
+      .whereNull('recording_url')
+      .whereNull('voicemail_callback_alerted_at')
+      .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
       .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
       // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
@@ -217,4 +227,4 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
   return rung;
 }
 
-module.exports = { missedCallEligible, ringMissedCallIfUnanswered, sweepMissedCalls };
+module.exports = { missedCallEligible, ringMissedCallIfUnanswered, sweepMissedCalls, outcomeUnanswered };
