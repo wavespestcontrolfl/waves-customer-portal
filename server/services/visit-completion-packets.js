@@ -15,7 +15,7 @@ const db = require('../models/db');
 const { hashCompletionRequest, withoutPhotoBytes } = require('./completion-attempts');
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
 const { parseETDateTime } = require('../utils/datetime-et');
-const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
 
 function failure(status, code, error) {
@@ -49,10 +49,24 @@ function packetRequest({ visitId, idempotencyKey, items }) {
   return { visitId: canonicalVisitId, key: idempotencyKey.trim(), items: ordered, hash };
 }
 
+// The schedule's status-only completion path can leave no canonical record.
+// Read that evidence for both staff access and the locked packet snapshot.
+function visitCloseoutMemberQuery(visitId, database = db) {
+  return database('scheduled_services').where({ visit_id: visitId }).select('scheduled_services.*', database.raw(
+    'EXISTS (SELECT 1 FROM service_records r WHERE r.scheduled_service_id = scheduled_services.id AND r.customer_id = scheduled_services.customer_id) AS has_service_record',
+  ));
+}
+
+function retainedCloseoutMembers(members, packet) {
+  if (packet) return packet.payload.retainedMembers || [];
+  return members.filter((member) => RETAINED_HISTORY_STATUSES.includes(member.status)
+    || (member.status === 'completed' && member.has_service_record === true))
+    .map((member) => ({ serviceId: member.id, status: member.status }));
+}
+
 function packetSnapshot(request, actor, members, existing) {
   if (existing) return { ...existing.payload, retainedMembers: existing.payload.retainedMembers || [] };
-  const retainedMembers = members.filter((member) => TERMINAL_ROW_STATUSES.includes(member.status))
-    .map((member) => ({ serviceId: member.id, status: member.status }));
+  const retainedMembers = retainedCloseoutMembers(members, null);
   // The packet-level request hash still covers the original photo bytes (a
   // save-time replay must resend the same photos); each member's attempt hash
   // covers this stripped form. Uploaded objects belong to each service record;
@@ -121,14 +135,16 @@ async function saveVisitCompletionPacket(input, database = db) {
         .where({ id: peek.id, stop_base_key: peek.stop_base_key, customer_id: peek.customer_id })
         .forUpdate().first();
       if (!visit) return failure(409, 'visit_changed', 'The visit moved. Refresh before closing it.');
-      const members = await trx('scheduled_services').where({ visit_id: visit.id }).orderBy('id').forUpdate();
-      const ownership = members.map((member) => completionOwnershipError({
-        role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
-      })).find(Boolean);
-      if (ownership) return { status: ownership.status, body: ownership.payload };
+      const members = await visitCloseoutMemberQuery(visit.id, trx).orderBy('id').forUpdate();
       const existing = await trx('visit_completion_packets').where({ visit_id: visit.id }).first();
       const snapshot = packetSnapshot(request, actor, members, existing);
       const retainedIds = new Set(snapshot.retainedMembers.map((member) => member.serviceId));
+      // Retained history (a cancelled child, its assignment cleared) is not
+      // the technician's work; ownership is judged on the members recorded.
+      const ownership = members.filter((member) => !retainedIds.has(member.id)).map((member) => completionOwnershipError({
+        role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
+      })).find(Boolean);
+      if (ownership) return { status: ownership.status, body: ownership.payload };
       // Frozen visits retain terminal children as history. Only live children
       // need forms on the first submit. Replays use saved form membership,
       // since recording those services has already made them terminal too.
@@ -138,7 +154,8 @@ async function saveVisitCompletionPacket(input, database = db) {
           || frozenMemberIds.join() !== members.map((member) => member.id).join()) {
         return failure(409, 'visit_members_changed', 'The visit service list changed. Refresh all service forms.');
       }
-      if (members.some((member) => member.customer_id !== visit.customer_id
+      // Retained history keeps the visit's identity but not its assignment.
+      if (members.filter((member) => !retainedIds.has(member.id)).some((member) => member.customer_id !== visit.customer_id
           || (member.property_id || null) !== (visit.property_id || null)
           || dateOnly(member.scheduled_date) !== dateOnly(visit.scheduled_date)
           || member.technician_id !== visit.technician_id
@@ -158,6 +175,12 @@ async function saveVisitCompletionPacket(input, database = db) {
         return recordsResult(existing, saved, billing, true);
       }
       if (visit.status !== 'open') return failure(409, 'visit_not_open', 'This visit is no longer open for closeout.');
+      if (Number(visit.behavior_version) < 2 && !require('../config/feature-gates').isEnabled('visitCloseout')) {
+        return failure(404, 'visit_closeout_disabled', 'Visit closeout is unavailable.');
+      }
+      if (!process.env.DATA_HYGIENE_VAULT_KEY) {
+        return failure(503, 'visit_closeout_unavailable', 'Visit closeout is temporarily unavailable. No services were completed.');
+      }
       const keyOwner = await trx('visit_completion_packets').where({ idempotency_key: request.key }).first('id');
       if (keyOwner) return failure(409, 'visit_closeout_key_reused', 'The idempotency key belongs to another visit.');
       const [packet] = await trx('visit_completion_packets').insert({
@@ -460,4 +483,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { visitCloseoutMemberQuery, retainedCloseoutMembers, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
