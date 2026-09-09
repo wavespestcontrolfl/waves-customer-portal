@@ -8,7 +8,7 @@
 // node ops/agents/execute-visit-invoice-plan.js --execute --plan=/tmp/link-plan.json
 const { isDeepStrictEqual } = require('util');
 const { evaluate, readPlan, formatPairing } = require('./link-unlinked-visit-invoices');
-const { acquireScheduledInvoiceMintLock, acquireScheduledMintLockChain } = require('../../server/services/scheduled-invoice-mint');
+const { acquireScheduledInvoiceMintLock } = require('../../server/services/scheduled-invoice-mint');
 
 async function executePlan(database, reviewed) {
   if (!reviewed.length) throw new Error('Empty plan — nothing to execute');
@@ -40,19 +40,18 @@ async function executePlan(database, reviewed) {
     if (!isDeepStrictEqual(currentInvoices.map((r) => r.id), invoices.map((r) => r.id))) {
       throw new Error('Customer invoice set changed while acquiring locks — batch aborted');
     }
-    for (const id of visitIds) {
-      await acquireScheduledMintLockChain(trx, { scheduledServiceId: id, visitColumns: ['id'] });
-    }
     // All dates/statuses: a silent historical correction can move a sibling
-    // onto the reviewed date. Keep these rows locked until the batch commits.
-    const visits = await trx('scheduled_services').whereIn('customer_id', customerIds).orderBy('id').forUpdate().select('id', 'payer_id');
+    // onto the reviewed date. This also locks the reviewed visits, after the
+    // mint and customer locks above. All remaining row locks use NOWAIT:
+    // a visit-first editor may next need an invoice already held by the repair.
+    const visits = await trx('scheduled_services').whereIn('customer_id', customerIds).orderBy('id').forUpdate().noWait().select('id', 'payer_id');
     // Existing callback flags and canonical completion attempts need row
     // locks too. The held visit FK prevents insertions/retargeting into this
     // set; these locks prevent existing records changing after evaluation.
-    await trx('service_records').whereIn('scheduled_service_id', visitIds).orderBy('id').forUpdate().select('id');
-    await trx('service_completion_attempts').whereIn('service_id', visitIds).orderBy('id').forUpdate().select('id');
+    await trx('service_records').whereIn('scheduled_service_id', visitIds).orderBy('id').forUpdate().noWait().select('id');
+    await trx('service_completion_attempts').whereIn('service_id', visitIds).orderBy('id').forUpdate().noWait().select('id');
     const payerIds = [...new Set([...customers, ...visits, ...invoices].map((r) => r.payer_id).filter((id) => id != null))].sort((a, b) => a - b);
-    await trx('payers').whereIn('id', payerIds).orderBy('id').forUpdate().select('id');
+    await trx('payers').whereIn('id', payerIds).orderBy('id').forUpdate().noWait().select('id');
     for (const p of reviewed) {
       const again = await evaluate(trx, p.invoiceId);
       if (!isDeepStrictEqual(again.pairing, p)) {

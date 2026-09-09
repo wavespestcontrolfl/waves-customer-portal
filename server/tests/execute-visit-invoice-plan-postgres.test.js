@@ -84,16 +84,31 @@ jest.setTimeout(30000);
       invoice: { service_date: '2020-01-02' }, visit: { scheduled_date: '2020-01-02' } });
     expect(await executePlan(db, [await review(first), await review(second)])).toBe(2);
   });
-  test('sees a callback edit that commits while waiting for the record lock', async () => {
+  test('refuses a pending callback edit and still rejects the reviewed plan after it commits', async () => {
     const ids = await seedPair(db); const reviewed = await review(ids);
     const edit = await db.transaction();
-    const { rows: [{ pid }] } = await edit.raw('SELECT pg_backend_pid() AS pid');
-    await edit('service_records').where({ id: ids.recordId }).update({ is_callback: true });
-    const executing = executePlan(db, [reviewed]);
-    // Attach rejection handling immediately while another transaction holds it.
-    const rejected = expect(executing).rejects.toThrow('callback');
-    try { await waitForBlocker(pid); } finally { await edit.commit(); }
-    await rejected;
+    try {
+      await edit('service_records').where({ id: ids.recordId }).update({ is_callback: true });
+      await expect(executePlan(db, [reviewed])).rejects.toMatchObject({ code: '55P03',
+        message: expect.stringContaining('could not obtain lock on row in relation "service_records"') });
+    } finally { await edit.commit(); }
+    await expect(executePlan(db, [reviewed])).rejects.toThrow('callback');
+    expect((await invoice(ids)).scheduled_service_id).toBeNull();
+  });
+  test.each(['reviewed', 'sibling'])('refuses a %s visit editor before it waits for an invoice', async (target) => {
+    const ids = await seedPair(db); const reviewed = await review(ids);
+    const edited = target === 'reviewed' ? ids : await seedPair(db, { customerId: ids.customerId,
+      invoice: { service_date: '2020-01-02', status: 'sent' }, visit: { scheduled_date: '2020-01-02' } });
+    const edit = await db.transaction();
+    try {
+      // admin-schedule re-service conversion holds the visit before locking
+      // its invoice to void it. Cover both the reviewed visit and another date.
+      await edit('scheduled_services').where({ id: edited.visitId }).forUpdate();
+      await expect(executePlan(db, [reviewed])).rejects.toMatchObject({ code: '55P03',
+        message: expect.stringContaining('could not obtain lock on row in relation "scheduled_services"') });
+      await edit.raw("SET LOCAL lock_timeout = '100ms'");
+      expect(await edit('invoices').where({ id: edited.invoiceId }).update({ status: 'void' })).toBe(1);
+    } finally { await edit.rollback(); }
     expect((await invoice(ids)).scheduled_service_id).toBeNull();
   });
   test('refuses a busy customer so a customer-first merge can finish its invoice sweep', async () => {
