@@ -6326,16 +6326,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:23AM — IB thread retention purge (GATE_IB_THREADS lane, owner
-  // default 365 days / IB_THREAD_RETENTION_DAYS). Hard-deletes idle
-  // ib_threads; turns ride the FK cascade. No-op while the gate is off —
-  // nothing writes threads then, and pre-existing rows still age out.
+  // DAILY 4:23AM — IB retention. Threads use IB_THREAD_RETENTION_DAYS
+  // (default 365); tasks use their stored 30-day expiry. The sweep runs with
+  // either write gate off so pre-existing conversation data still ages out.
   // =========================================================================
   cron.schedule('23 4 * * *', async () => {
     try {
       await runExclusive('ib-thread-retention', async () => {
         const { purgeExpiredThreads } = require('./intelligence-bar/threads');
         await purgeExpiredThreads();
+        const deletedTasks = await require('./intelligence-bar/tasks').purgeExpiredTasks();
+        if (deletedTasks) logger.info(`IB retention removed ${deletedTasks} expired task(s)`);
       });
     } catch (err) {
       logger.error(`IB thread retention purge failed: ${err.message}`);

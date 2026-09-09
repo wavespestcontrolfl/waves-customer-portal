@@ -63,6 +63,7 @@ Use for: "find messages about rescheduling", "who texted us about lawn care?", "
         search: { type: 'string', description: 'Search in message body text' },
         customer_name: { type: 'string' },
         phone: { type: 'string' },
+        customer_id: { type: 'string', format: 'uuid' },
         direction: { type: 'string', enum: ['inbound', 'outbound'] },
         message_type: { type: 'string', enum: ['manual', 'auto_reply', 'reminder', 'confirmation', 'review_request', 'estimate', 'post_service', 'follow_up'] },
         days_back: { type: 'number', description: 'Only search last N days (default 7)' },
@@ -90,6 +91,7 @@ Use for: "what calls came in this morning?", "show me today's calls", "any misse
       properties: {
         offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset' },
         call_id: { type: 'string', format: 'uuid', description: 'Read one known call; ignores days_back. Returns a transcript page.' },
+        customer_id: { type: 'string', format: 'uuid', description: 'Filter calls to this customer' },
         transcript_offset: { type: 'integer', minimum: 0, description: 'Continue a call transcript from transcript_next_offset' },
         direction: { type: 'string', enum: ['inbound', 'outbound', 'all'] },
         has_recording: { type: 'boolean', description: 'Only calls with recordings' },
@@ -230,7 +232,18 @@ async function executeCommsTool(toolName, input) {
       default: return { error: `Unknown comms tool: ${toolName}` };
     }
   } catch (err) {
-    logger.error(`[intelligence-bar:comms] Tool ${toolName} failed:`, err);
+    // The sender preserves a provider receipt when its later audit write
+    // fails. Losing that receipt would label an accepted message failed and
+    // invite a duplicate send. Never include the recipient/body in logs.
+    if (err.providerOutcome?.sent === true) {
+      return {
+        success: true, state: 'provider_accepted',
+        providerMessageId: err.providerOutcome.providerMessageId || null,
+        auditLogId: err.providerOutcome.auditLogId || null,
+        warning: 'The provider accepted the message, but its local audit could not be completed. Do not send it again.',
+      };
+    }
+    logger.error(`[intelligence-bar:comms] Tool ${toolName} failed (code=${err.code || 'unknown'})`);
     return { error: err.message };
   }
 }
@@ -367,6 +380,9 @@ async function getConversationThread(input) {
         .orWhereRaw("RIGHT(REPLACE(to_phone, '+', ''), 10) = ?", [digits]);
     })
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
+    .modify(qb => {
+      if (input.customer_id) qb.where(scope => scope.where('sms_log.customer_id', input.customer_id).orWhereNull('sms_log.customer_id'));
+    })
     .select(
       'sms_log.id', 'sms_log.direction', 'sms_log.message_body',
       'sms_log.from_phone', 'sms_log.to_phone',
@@ -399,7 +415,16 @@ async function getConversationThread(input) {
 
 
 async function searchMessages(input) {
-  const { search, customer_name, phone, direction, message_type, days_back = 7, limit: rawLimit } = input;
+  const { search, customer_name, phone: requestedPhone, direction, message_type, days_back = 7, limit: rawLimit } = input;
+  let phone = requestedPhone;
+  if (input.customer_id) {
+    const customer = await db('customers').where('id', input.customer_id).whereNull('deleted_at').first('phone');
+    if (!customer) return { error: 'The requested customer is unavailable', code: 'record_unavailable' };
+    phone = customer.phone;
+    if (requestedPhone && String(requestedPhone).replace(/\D/g, '').slice(-10) !== String(phone || '').replace(/\D/g, '').slice(-10)) {
+      return { error: 'The phone no longer matches the requested customer', code: 'target_relationship_mismatch' };
+    }
+  }
   const limit = Math.min(rawLimit || 20, 100);
   const offset = Math.max(0, Math.trunc(input.offset || 0));
   const since = new Date(Date.now() - days_back * 86400000).toISOString();
@@ -413,7 +438,16 @@ async function searchMessages(input) {
     )
     .orderBy('sms_log.created_at', 'desc').orderBy('sms_log.id', 'desc');
 
+  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+  const atPhone = scope => scope.whereRaw("RIGHT(REPLACE(sms_log.from_phone, '+', ''), 10) = ?", [digits])
+    .orWhereRaw("RIGHT(REPLACE(sms_log.to_phone, '+', ''), 10) = ?", [digits]);
   if (search) query = query.whereILike('sms_log.message_body', `%${search}%`);
+  if (input.customer_id) query = query.where(scope => {
+    scope.where('sms_log.customer_id', input.customer_id);
+    // Linked history stays with its account after a number change. Only
+    // unlinked history needs the current saved phone as ownership evidence.
+    if (digits.length === 10) scope.orWhere(unlinked => unlinked.whereNull('sms_log.customer_id').where(atPhone));
+  });
   if (direction) query = query.where('sms_log.direction', direction);
   if (message_type) query = query.where('sms_log.message_type', message_type);
 
@@ -424,13 +458,7 @@ async function searchMessages(input) {
         .orWhereRaw("TRIM(customers.first_name || ' ' || COALESCE(customers.last_name, '')) ILIKE ?", [`%${customer_name}%`]);
     });
   }
-  if (phone) {
-    const digits = phone.replace(/\D/g, '').slice(-10);
-    query = query.where(function () {
-      this.whereRaw("RIGHT(REPLACE(sms_log.from_phone, '+', ''), 10) = ?", [digits])
-        .orWhereRaw("RIGHT(REPLACE(sms_log.to_phone, '+', ''), 10) = ?", [digits]);
-    });
-  }
+  if (requestedPhone) query = query.where(atPhone);
 
   const fetched = await query.limit(limit + 1).offset(offset);
   const messages = fetched.slice(0, limit);
@@ -556,6 +584,7 @@ async function getCallLog(input) {
     .orderBy('call_log.created_at', 'desc').orderBy('call_log.id', 'desc');
 
   if (direction && direction !== 'all') query = query.where('call_log.direction', direction);
+  if (input.customer_id) query = query.where('call_log.customer_id', input.customer_id);
   if (has_recording) query = query.whereNotNull('call_log.recording_url').where('call_log.recording_url', '!=', '');
   if (has_transcript) query = query.whereNotNull('call_log.transcription');
   if (customer_name) {
@@ -750,6 +779,9 @@ async function sendSms(input) {
     logger.info(`[intelligence-bar:comms] Sent SMS (custId=${custId || 'n/a'} segs=${result.segmentCount})`);
     return {
       success: true,
+      state: 'provider_accepted',
+      providerMessageId: result.providerMessageId || null,
+      auditLogId: result.auditLogId || null,
       sent_to: phone,
       customer: customerName,
       message,
@@ -793,6 +825,7 @@ async function draftSmsReply(input) {
   // Get the last inbound message from this customer
   const lastInbound = await db('sms_log')
     .where('direction', 'inbound')
+    .where(scope => scope.where('customer_id', customer.id).orWhereNull('customer_id'))
     .where(function () {
       this.whereRaw("RIGHT(REPLACE(from_phone, '+', ''), 10) = ?", [digits]);
     })
