@@ -84,7 +84,10 @@ through 16:00 ET are offered; estimate ASAP and booking open-day expansion
 cannot create additional starts. The estimate cache separates capacity mode
 from legacy mode. Assigned technicians have independent route capacity;
 unassigned work remains a fixed blocker. Public responses expose no full route,
-provider legs or exact route coordinates. Gate-off availability is unchanged.
+provider legs or exact route coordinates. Scheduling traffic lookups share a
+40-request/800-element allowance per application process per 15 minutes across
+HTTP requests and fall back to the conservative model when exhausted; response
+data remains request-local. Gate-off availability is unchanged.
 Transactional reservation and route-order persistence belong to the following
 writer stage; this gate remains off until those writers are integrated.
 Existing request fields, token/signature guards, rate limits and privacy headers
@@ -1173,7 +1176,9 @@ is implicit. With route capacity enabled, multiple bookable lanes require
 selection: GET returns eligibility with null availability until selected,
 and find-slots returns 400. The page refreshes times and clears the previous
 slot when the selected lane changes. With capacity off, requests omitting
-lane retain the shared longest-duration browse behavior.
+lane retain the shared longest-duration browse behavior. A recognized selected
+lane that becomes unavailable refreshes eligibility with null availability,
+allowing the page to select the remaining lane; malformed lanes still return 400.
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
 feasibility, lunch reserve, day caps — the anti-forgery model

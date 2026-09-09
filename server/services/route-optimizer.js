@@ -28,8 +28,14 @@ const FIELD_MASK = [
   'routes.legs.endLocation',
 ].join(',');
 
-/** Request-scoped road estimates. Nothing from Google is persisted or shared
- * across requests. The caller preloads before taking any scheduling lock. */
+// One paid-provider allowance across scheduling requests in this process.
+// Exhaustion uses the conservative model; a fresh anonymous request cannot
+// buy another full matrix budget. Google results themselves remain request-local.
+const schedulingTravelBudget = { resetAt: 0, requests: 0, elements: 0 };
+const SCHEDULING_TRAVEL_BUDGET_MS = 15 * 60 * 1000;
+
+/** Request-scoped road estimates under both local and shared provider limits.
+ * The caller preloads before taking any scheduling lock. */
 function createSchedulingTravel({ maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now() } = {}) {
   const { parseETDateTime } = require('../utils/datetime-et');
   const results = new Map();
@@ -89,6 +95,20 @@ function createSchedulingTravel({ maxRequests = 40, maxElements = 800, budgetMs 
         const batch = work.shift();
         if (!batch) return;
         if (requests >= maxRequests || elements + batch.legs.length > maxElements || now() >= deadline) return;
+        const currentTime = now();
+        if (currentTime >= schedulingTravelBudget.resetAt) {
+          schedulingTravelBudget.resetAt = currentTime + SCHEDULING_TRAVEL_BUDGET_MS;
+          schedulingTravelBudget.requests = 0;
+          schedulingTravelBudget.elements = 0;
+        }
+        if (schedulingTravelBudget.requests >= 40 || schedulingTravelBudget.elements + batch.legs.length > 800) {
+          for (const leg of batch.legs) results.set(keyFor(leg), fallback(leg, 'shared_provider_budget'));
+          return;
+        }
+        // Reserve synchronously before awaiting the network so simultaneous
+        // calendars and workers consume the same allowance without a race.
+        schedulingTravelBudget.requests++;
+        schedulingTravelBudget.elements += batch.legs.length;
         requests++;
         elements += batch.legs.length;
         let reason = 'provider_error';

@@ -215,3 +215,24 @@ it('loads the selected service and discards the old slot and late search when sw
   await waitFor(() => expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).toBeInTheDocument());
   expect(screen.queryByText('Old pest result')).not.toBeInTheDocument();
 });
+
+
+it('loads the remaining service when the selected lane becomes unavailable', async () => {
+  let unscopedLoads = 0;
+  const fetchMock = vi.fn((url) => {
+    if (String(url).includes('/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+    const selected = new URL(String(url), 'http://localhost').searchParams.get('lane');
+    const lawn = { key: 'lawn', label: 'Lawn Care Re-Service', alreadyBooked: null };
+    if (selected === 'pest') return Promise.resolve(jsonResponse(bookablePayload({ lanes: [lawn], availability: null })));
+    unscopedLoads += 1;
+    return Promise.resolve(jsonResponse(bookablePayload(unscopedLoads === 1
+      ? { lanes: [{ key: 'pest', label: 'Pest Control Re-Service', alreadyBooked: null }, lawn], availability: null }
+      : { lanes: [lawn] })));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  renderPage();
+  fireEvent.click(await screen.findByRole('button', { name: /Pests inside or out/ }));
+  expect(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).toBeInTheDocument();
+  expect(unscopedLoads).toBe(2);
+  expect(screen.queryByRole('button', { name: /Try again/ })).not.toBeInTheDocument();
+});

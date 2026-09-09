@@ -442,6 +442,16 @@ describe('selected-lane availability for a customer with both plans', () => {
       expect(build).toHaveBeenCalledWith(expect.objectContaining({ duration: 30, serviceKey: 'lawn_care', timeOfDay: 'afternoon' }));
     } finally { parse.mockRestore(); summary.mockRestore(); }
   });
+  test('a stale selected lane refreshes eligibility and the remaining lane can be browsed', async () => {
+    listResults['scheduled_services as s'] = [{ category: 'lawn_care', service_type: 'Monthly Lawn Care Program' }];
+    const stale = await browse({ lane: 'pest' });
+    expect(stale.status).not.toHaveBeenCalled();
+    expect(stale.json).toHaveBeenCalledWith(expect.objectContaining({ state: 'bookable', availability: null,
+      lanes: [expect.objectContaining({ key: 'lawn', alreadyBooked: null })] }));
+    expect(build).not.toHaveBeenCalled();
+    await browse({});
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey: 'lawn_care', duration: 30 }));
+  });
   test('rejects an unavailable service without building offers', async () => {
     const res = await browse({ lane: 'termite' });
     expect(res.status).toHaveBeenCalledWith(400);

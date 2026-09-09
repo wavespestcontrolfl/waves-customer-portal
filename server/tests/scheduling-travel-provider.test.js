@@ -52,3 +52,35 @@ test.each(['timeout', 'missing', 'error', 'zero'])('Google %s never becomes a ze
   expect(fetchImpl).toHaveBeenCalledTimes(1);
   delete process.env.GOOGLE_MAPS_API_KEY;
 });
+
+
+test.each(['requests', 'elements'])('new and concurrent providers share the paid %s allowance until its window resets', async limit => {
+  let optimizer;
+  jest.isolateModules(() => { optimizer = require('../services/route-optimizer'); });
+  const oldKey = process.env.GOOGLE_MAPS_API_KEY;
+  process.env.GOOGLE_MAPS_API_KEY = 'synthetic-test-key';
+  let millis = now.getTime();
+  const fetchImpl = jest.fn(async () => ({ ok: true, json: async () => [] }));
+  const leg = { date, from: optimizer.HQ, to: { lat: 27.5, lng: -82.4 }, departureMin: 480 };
+  const legs = limit === 'elements'
+    ? Array.from({ length: 25 }, (_, i) => ({ ...leg, to: { lat: 27.5 + i / 1000, lng: -82.4 } })) : [leg];
+  const expectedRequests = limit === 'elements' ? 32 : 40;
+  try {
+    // Different provider instances model distinct simultaneous HTTP requests.
+    await Promise.all(Array.from({ length: 50 }, async () => {
+      const provider = optimizer.createSchedulingTravel({ fetchImpl, now: () => millis });
+      await provider.preload(legs);
+    }));
+    expect(fetchImpl).toHaveBeenCalledTimes(expectedRequests);
+    const exhausted = optimizer.createSchedulingTravel({ fetchImpl, now: () => millis });
+    await exhausted.preload(legs);
+    expect(fetchImpl).toHaveBeenCalledTimes(expectedRequests);
+    expect(exhausted.lookup(leg)).toMatchObject({ source: 'conservative_model', reason: 'shared_provider_budget' });
+    millis += 15 * 60 * 1000;
+    await optimizer.createSchedulingTravel({ fetchImpl, now: () => millis }).preload(legs);
+    expect(fetchImpl).toHaveBeenCalledTimes(expectedRequests + 1);
+  } finally {
+    if (oldKey === undefined) delete process.env.GOOGLE_MAPS_API_KEY;
+    else process.env.GOOGLE_MAPS_API_KEY = oldKey;
+  }
+});

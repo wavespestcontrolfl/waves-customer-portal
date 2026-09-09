@@ -243,6 +243,9 @@ router.get('/:token', async (req, res, next) => {
 
     const requestedLane = req.query.lane;
     if (requestedLane != null && !bookableLanes.includes(requestedLane)) {
+      // A parallel booking or plan change should refresh eligibility, not
+      // trap Retry on the same stale lane query. Malformed lanes still fail.
+      if (Object.hasOwn(RESERVICE_LANES, requestedLane)) return res.json({ ...base, availability: null });
       return res.status(400).json({ error: 'Choose an available service.' });
     }
     const browseLanes = requestedLane ? [requestedLane] : bookableLanes;
