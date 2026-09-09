@@ -184,6 +184,33 @@ describe('cross-tab saved-property switch', () => {
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
   });
 
+  it('a cross-tab property change goes pending until /auth/me resolves — the old house never renders over the new token', async () => {
+    const tokA = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-a' });
+    const tokB = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' });
+    const store = { waves_token: tokA, waves_refresh_token: 'ref-a' };
+    stubLocalStorage(store);
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-a' } });
+    api.getAuthProperties.mockResolvedValue(SAVED);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-1');
+    // /auth/me for the new token stalls...
+    let resolveMe;
+    api.getMe.mockReturnValueOnce(new Promise((res) => { resolveMe = res; }));
+    await act(async () => {
+      store.waves_token = tokB;
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token', newValue: tokB }));
+    });
+    // ...and meanwhile nothing of house A is on screen: no customer, loading, no selection.
+    expect(screen.getByTestId('customer-id').textContent).toBe('');
+    expect(authApi.loading).toBe(true);
+    expect(screen.getByTestId('selected').textContent).toBe('');
+    api.getAuthProperties.mockResolvedValue({ ...SAVED, selected: { key: 'cust-1:prop-b', customerId: 'cust-1', propertyId: 'prop-b' } });
+    await act(async () => { resolveMe({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-b' } }); });
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-1');
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
+    expect(authApi.loading).toBe(false);
+  });
+
   it('a cross-tab property change adopts the selection the server honored (/auth/me), even when the follow-up list read fails', async () => {
     const tokA = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-a' });
     const tokB = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' });

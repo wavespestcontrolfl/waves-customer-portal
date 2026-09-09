@@ -9,6 +9,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })) }));
 jest.mock('../services/cancellation-eligibility', () => ({ hasCancellableWork: jest.fn(async () => true) }));
+jest.mock('../services/reservice-scheduler', () => ({
+  reserviceSelfServeEnabled: jest.fn(() => true),
+  reserviceLanesForCustomer: jest.fn(async () => ['pest']),
+}));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
   return { ...actual, resolveSessionScope: jest.fn(async () => global.__SCOPE__) };
@@ -162,6 +166,20 @@ describe('saved-property scope on the customer schedule routes', () => {
     await withServer(async (base) => {
       await fetch(`${base}/schedule/next?allProperties=1`);
       expect(propertyPredicates(visitsChainCalls())).toEqual([]);
+    });
+  });
+
+  test('GET /: the customer-wide re-service handoff is withheld under a SECONDARY selection, kept under the primary', async () => {
+    tables.customers = [{ id: 'cust-1', active: true, waveguard_tier: 'Silver', monthly_rate: 89, reservice_token: 'tok-reservice' }];
+    global.__SCOPE__ = MULTI_SECONDARY;
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/schedule`)).json();
+      expect(body.reservice).toBeNull();
+    });
+    global.__SCOPE__ = MULTI_PRIMARY;
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/schedule`)).json();
+      expect(body.reservice).toEqual({ url: '/reservice/tok-reservice', lanes: ['pest'] });
     });
   });
 });

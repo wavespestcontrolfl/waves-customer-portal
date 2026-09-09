@@ -334,13 +334,18 @@ export function AuthProvider({ children }) {
       if (familyChanged || propertyChanged) setSessionEpoch(++sessionEpochRef.current);
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (propertyChanged && !identityChanged) {
-        // The previous selection is gone the moment the token changes, so
-        // the page never keeps house A's label over house B's visits — and
+        // The previous selection is gone the moment the token changes, and
         // the new one is NOT reconstructed from the raw claim (the server may
-        // ignore it: retired property, gate off). The picker reads "Select a
-        // property" until loadCustomer below adopts the selection the server
-        // honored (/auth/me propertyScope, then the list).
+        // ignore it: retired property, gate off). Go PENDING exactly like a
+        // profile switch (codex #4207 r1g P1): the old customer must not keep
+        // rendering house A's label while requests already run under house
+        // B's token; loadCustomer below adopts the selection the server
+        // honored (/auth/me propertyScope, then the list), and its retry
+        // branch keeps the shell pending on failure.
         setSelectedProperty(null);
+        customerRef.current = null;
+        setCustomer(null);
+        setLoading(true);
       }
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not

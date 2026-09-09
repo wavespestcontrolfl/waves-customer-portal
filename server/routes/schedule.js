@@ -167,9 +167,15 @@ router.get('/', async (req, res, next) => {
     // the portal simply doesn't render the CTA. Best-effort: a lookup
     // failure must not break the schedule list.
     let reservice = null;
+    // The self-serve re-service page books at the customer's PRIMARY address,
+    // so under a secondary saved-property selection the handoff is withheld
+    // (codex #4207 r1g P1): offering it would book house A from house B's
+    // screen. The overlay then files a notify-only ticket as before the
+    // streamline; a property-carrying re-service link is a follow-up.
+    const secondarySelection = !!(scope && scope.enabled && scope.multi && scope.property && scope.property.is_primary !== true);
     try {
       const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
-      if (reserviceSelfServeEnabled()) {
+      if (!secondarySelection && reserviceSelfServeEnabled()) {
         const customer = await db('customers')
           .where({ id: req.customerId })
           .whereNull('deleted_at')

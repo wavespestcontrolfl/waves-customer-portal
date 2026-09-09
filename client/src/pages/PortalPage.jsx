@@ -4333,7 +4333,16 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       // predicate, so this tab must fall back to the profile model too —
       // re-read the property list (which now answers the profile shape) and
       // serve the profile summary meanwhile.
-      ? api.getSavedPropertiesNext().catch((err) => {
+      ? api.getSavedPropertiesNext().then((res) => {
+        // Every unified entry gets a row; a selection missing from them means
+        // the office retired that house while this tab was open — the server
+        // has already fallen back to the primary, so the label must follow
+        // (codex #4207 r1g P1): re-read the list, which carries the honored
+        // selection. The rows still render meanwhile.
+        const rows = Array.isArray(res?.properties) ? res.properties : [];
+        if (rows.length && !rows.some((row) => row.key === activePropertyId) && onSavedScopeUnavailable) onSavedScopeUnavailable();
+        return res;
+      }).catch((err) => {
         if (err?.status !== 404) throw err;
         if (onSavedScopeUnavailable) onSavedScopeUnavailable();
         return api.getAccountUpcoming();
