@@ -405,10 +405,21 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
 // Booster months are deliberately non-recurring rows that hang off a recurring
 // root (is_recurring:false + recurring_parent_id): paid extras, not part of the
 // accepted cadence. Auditing them as plan visits would call a complete series
-// missing recurrence (and flag their off-cadence spacing). A root reservation
-// that never acquired is_recurring has no parent and is still audited.
+// missing recurrence (and flag their off-cadence spacing). The contract is an
+// explicit false: is_recurring is nullable, and a legacy / malformed child
+// whose flag is NULL is still a plan visit the classifier must report. A root
+// reservation that never acquired is_recurring has no parent and is audited.
 function isBoosterVisit(row) {
-  return !row.is_recurring && !!row.recurring_parent_id;
+  return row.is_recurring === false && !!row.recurring_parent_id;
+}
+
+// An adopted upcoming appointment is recorded as the acceptance's reservation.
+// If it already carries recurrence (or rides a recurring root) it is a real
+// plan visit and stays audited; only a standalone reservation that never
+// acquired recurrence is dropped. Shared by the scheduled reader and the
+// converter's immediate check so the two audits cannot diverge.
+function isStandaloneReservation(row, reservations) {
+  return reservations.has(row.id) && !row.is_recurring && !row.recurring_parent_id;
 }
 
 function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, seeder }) {
@@ -582,7 +593,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     // cancellation exemption; they never contribute to working visit counts.
     const linkedRows = [...roots].flatMap((root) => (customer.roots.get(root) || [])
       .filter((row) => stopped.has(root) || !retainedRoots.has(root) || row.scheduled_date >= acceptedDay))
-      .filter((row) => row.is_recurring || row.recurring_parent_id || !reservations.has(row.id));
+      .filter((row) => !isStandaloneReservation(row, reservations));
     findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds }));
   }
   return findings;
@@ -596,6 +607,7 @@ module.exports = {
   formatDateOnly,
   normalizeLimit,
   acceptedScheduleFindings,
+  isStandaloneReservation,
   readActiveFamilyHolds,
   readStoppedRecurringRoots,
   findAcceptedRecurringScheduleGaps,

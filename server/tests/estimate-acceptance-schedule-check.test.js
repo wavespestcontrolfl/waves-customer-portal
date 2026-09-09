@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { etDateString } = require('../utils/datetime-et');
+const { isStandaloneReservation } = require('../services/recurring-schedule-audit');
 
 // Exercise the private reader without booting the converter's external services.
 const source = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
@@ -33,7 +34,7 @@ test('retained coverage excludes prior-term visits using the selected Eastern ac
   };
   const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
     etDateString,
-    require: () => ({ acceptedScheduleFindings: classify, formatDateOnly: (value) => value || null,
+    require: () => ({ acceptedScheduleFindings: classify, formatDateOnly: (value) => value || null, isStandaloneReservation,
       readActiveFamilyHolds: async () => [], readStoppedRecurringRoots: async () => new Set() }),
     logger: { warn: jest.fn(), error: jest.fn() },
   });
@@ -41,6 +42,37 @@ test('retained coverage excludes prior-term visits using the selected Eastern ac
   expect(classify.mock.calls[0][1].map((visit) => visit.id)).toEqual(['current', 'future']);
   expect(result.ok).toBe(false);
   expect(insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'recurring_schedule_missing_followups' }));
+});
+
+test.each([
+  { label: 'already-recurring adopted appointment stays audited', reserved: { is_recurring: true, recurring_parent_id: null }, kept: true },
+  { label: 'recurring child adopted as the reservation stays audited', reserved: { is_recurring: null, recurring_parent_id: 'root' }, kept: true },
+  { label: 'standalone reservation that never acquired recurrence is dropped', reserved: { is_recurring: false, recurring_parent_id: null }, kept: false },
+])('immediate audit applies the scheduled reader\'s reservation predicate: $label', async ({ reserved, kept }) => {
+  const estimate = { id: 'estimate-new', customer_id: 'customer-1', accepted_at: new Date('2040-01-01T16:00:00Z') };
+  const visits = [
+    { id: 'root', source_estimate_id: 'estimate-old', is_recurring: true, scheduled_date: '2040-01-05', status: 'pending' },
+    { id: 'adopted', source_estimate_id: 'estimate-old', scheduled_date: '2040-02-05', status: 'pending', ...reserved },
+  ];
+  const classify = jest.fn(() => []);
+  const database = (table) => {
+    const query = {
+      where: () => query, leftJoin: () => query, select: () => query,
+      first: async () => estimate, insert: jest.fn(async () => []),
+      then: (resolve, reject) => Promise.resolve(table === 'activity_log'
+        ? [{ metadata: { estimateId: estimate.id, existingParentId: 'root', reservedServiceId: 'adopted' } }]
+        : visits).then(resolve, reject),
+    };
+    return query;
+  };
+  const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
+    etDateString,
+    require: () => ({ acceptedScheduleFindings: classify, formatDateOnly: (value) => value || null, isStandaloneReservation,
+      readActiveFamilyHolds: async () => [], readStoppedRecurringRoots: async () => new Set() }),
+    logger: { warn: jest.fn(), error: jest.fn() },
+  });
+  await verify(database, { estimateId: estimate.id, customerId: estimate.customer_id });
+  expect(classify.mock.calls[0][1].map((visit) => visit.id)).toEqual(kept ? ['root', 'adopted'] : ['root']);
 });
 
 test.each(['2040-01-10', '2040-01-11'])('acceptance honors active family holds until resume day (%s)', async (todayET) => {
@@ -74,7 +106,7 @@ test.each(['2040-01-10', '2040-01-11'])('acceptance honors active family holds u
     ? [] : [{ serviceFamily: 'pest', recordedVisits: 0, expectedVisits: 12 }]);
   const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
     etDateString: () => todayET,
-    require: () => ({ acceptedScheduleFindings: classify, readActiveFamilyHolds, readStoppedRecurringRoots: async () => new Set() }),
+    require: () => ({ acceptedScheduleFindings: classify, isStandaloneReservation, readActiveFamilyHolds, readStoppedRecurringRoots: async () => new Set() }),
     logger: { warn: jest.fn(), error: jest.fn() },
   });
   const result = await verify(database, { estimateId: estimate.id, customerId: estimate.customer_id });

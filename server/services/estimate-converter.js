@@ -3848,7 +3848,7 @@ async function verifyAcceptedRecurringSchedule(database, { estimateId, customerI
       's.recurring_nth', 's.recurring_weekday', 's.skip_weekends', 's.weekend_shift', 's.date_exception',
       's.date_exception_cadence_date', 's.property_id',
       'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type');
-  const { acceptedScheduleFindings, formatDateOnly, readActiveFamilyHolds, readStoppedRecurringRoots } = require('./recurring-schedule-audit');
+  const { acceptedScheduleFindings, formatDateOnly, isStandaloneReservation, readActiveFamilyHolds, readStoppedRecurringRoots } = require('./recurring-schedule-audit');
   const todayET = etDateString();
   const holds = await readActiveFamilyHolds(database, [customerId], todayET);
   const stoppedRoots = await readStoppedRecurringRoots(database, [customerId]);
@@ -3858,7 +3858,9 @@ async function verifyAcceptedRecurringSchedule(database, { estimateId, customerI
   // Property linkage runs after the caller commits this transaction. Avoid
   // reporting that known post-commit invariant in the immediate check.
   const auditRows = rows.filter((row) => {
-    if (reservedServiceIds.has(row.id)) return false;
+    // Same predicate as the scheduled reader: an adopted appointment that is
+    // already recurring is a plan visit, not a standalone reservation.
+    if (isStandaloneReservation(row, reservedServiceIds)) return false;
     // Keep stopped roots as evidence for the classifier's explicit exemption,
     // even when all their visits precede this acceptance.
     if (stoppedRoots.has(row.recurring_parent_id || row.id)) return true;

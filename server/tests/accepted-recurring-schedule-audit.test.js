@@ -48,6 +48,13 @@ test('a booster cannot stand in for the recurring applications it rides alongsid
   expect(gap.appointmentIds).not.toContain('booster-1');
 });
 
+test('a child whose is_recurring is NULL is a plan visit, not a booster — its missing recurrence is still reported', () => {
+  const rows = series('monthly', 12).map((row, index) => (index === 0 ? row : { ...row, is_recurring: null }));
+  const [gap] = check(estimate(), rows);
+  expect(gap.issues).toContain('missing_recurrence');
+  expect(gap.appointmentIds).toEqual(expect.arrayContaining(['child-0']));
+});
+
 test('accepted pest selection outranks the stale quarterly engine line', () => {
   const [gap] = check(estimate(), series('quarterly', 4));
   expect(gap).toMatchObject({ pattern: 'monthly', expectedVisits: 12, recordedVisits: 4 });
