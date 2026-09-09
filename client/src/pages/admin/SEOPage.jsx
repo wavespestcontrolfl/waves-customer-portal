@@ -2259,6 +2259,24 @@ function BacklinksTab() {
             <AeoRateTable label="All managed queries by engine" rows={llmDash?.byPlatform || []} />
             <AeoRateTable label="Daily benchmark observations by engine and model" rows={llmDash?.trend || []} />
           </details>
+          {llmDash?.entity && (
+            <Card>
+              <h3 style={{ fontSize: 16, color: D.heading, fontWeight: 500, marginTop: 0 }}>Entity accuracy: what engines say about Waves</h3>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 24 }}>
+                <div><div style={{ fontSize: 14, color: D.muted }}>Facts stated correctly</div><div style={{ fontSize: 24, color: D.heading }}>{aeoRate(llmDash.entity.factAccuracy)}</div></div>
+                <div><div style={{ fontSize: 14, color: D.muted }}>Answers with a wrong claim</div><div style={{ fontSize: 24, color: D.heading }}>{aeoRate(llmDash.entity.wrongClaimRate)}</div></div>
+                <div><div style={{ fontSize: 14, color: D.muted }}>Questions observed</div><div style={{ fontSize: 24, color: D.heading }}>{llmDash.entity.observedQuestions} / {llmDash.entity.questions}</div></div>
+              </div>
+              <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.6, marginBottom: 0 }}>
+                {llmDash.entity.activeQuestions} questions active · {llmDash.entity.observed} answers scored against the owner-approved cohort {llmDash.entity.version}.
+                Facts are the founder, founding year, license, footprint, services and contact details; wrong claims are the rulings an answer must not contradict (a franchise, fumigation, damage-repair coverage inferred from the termite bond).
+                {llmDash.entity.missingMostOften?.length > 0 && <> Missing most often: {llmDash.entity.missingMostOften.map(f => `${f.label} (${f.count})`).join(", ")}.</>}
+                {llmDash.entity.wrongMostOften?.length > 0 && <> Wrong most often: {llmDash.entity.wrongMostOften.map(f => `${f.label} (${f.count})`).join(", ")}.</>}
+              </p>
+            </Card>
+          )}
+          <EntityFactsTable label="Entity accuracy by engine and model" rows={llmDash?.entity?.byPlatform || []} />
+          <EntityFactsTable label="Entity accuracy by question" rows={llmDash?.entity?.byQuestion || []} first="Question" />
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             <Card style={{ flex: 1, minWidth: 240 }}>
               <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>Linked Waves pages</h3>
@@ -2314,6 +2332,29 @@ function aeoStatus(row) {
   if (!row.citations_complete) return "Unresolved source link";
   if (row.waves_cited_urls.length) return "Linked citation";
   return row.waves_mentioned ? "Mention only" : "No Waves mention or citation";
+}
+
+function EntityFactsTable({ label, rows, first = "Group" }) {
+  const scored = rows.filter(row => row.observed > 0);
+  return (
+    <Card style={{ flex: 1, minWidth: 0 }}>
+      <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>{label}</h3>
+      {scored.length === 0 ? <p style={{ fontSize: 14, color: D.muted }}>No scored answers yet.</p> : (
+        <div style={{ overflowX: "auto" }}>
+          <table aria-label={label} style={{ width: "100%", minWidth: 520, borderCollapse: "collapse", fontSize: 14, color: D.text }}>
+            <thead><tr>{[first, "Facts right", "Wrong claims", "Answers", "Missing most often"].map(title => <th key={title} style={{ textAlign: "left", fontWeight: 500, padding: "8px", borderBottom: `1px solid ${D.border}` }}>{title}</th>)}</tr></thead>
+            <tbody>{scored.map(row => <tr key={row.key}>
+              <td style={{ padding: "8px", overflowWrap: "anywhere" }}>{row.key}</td>
+              <td style={{ padding: "8px", whiteSpace: "nowrap" }}>{aeoRate(row.factAccuracy)}</td>
+              <td style={{ padding: "8px", whiteSpace: "nowrap" }}>{row.wrongClaims} of {row.observed}</td>
+              <td style={{ padding: "8px" }}>{row.observed}</td>
+              <td style={{ padding: "8px", color: D.muted }}>{(row.missingMostOften || []).map(f => f.label).join(", ") || "None"}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
 }
 
 function AeoRateTable({ label, rows }) {

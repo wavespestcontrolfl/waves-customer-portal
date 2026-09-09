@@ -23,6 +23,7 @@ jest.mock('../routes/stripe-webhook-helpers', () => ({
 }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+15550009999') }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn() }));
 jest.mock('../services/stripe-invoice-state', () => ({
   isInvoiceCollectibleStatus: jest.fn(() => true),
@@ -67,7 +68,11 @@ jest.mock('../models/db', () => {
     const q = { _wheres: [] };
     q.where = jest.fn((...a) => { q._wheres.push(a[0]); return q; });
     q.whereIn = jest.fn((col, vals) => { q._wheres.push({ [col]: vals }); return q; });
-    q.first = jest.fn(async () => (table === 'payment_methods' ? state.paymentMethodRow : null));
+    q.first = jest.fn(async () => (table === 'payment_methods' ? state.paymentMethodRow : table === 'customers' ? state.customer : null));
+    q.insert = jest.fn(async (row) => {
+      if (state.failNoticeInsert) throw new Error('queue unavailable');
+      state.queued.push(row);
+    });
     q.update = jest.fn(async (patch) => {
       if (state.failUpdates) throw new Error('db write failed');
       state.updates.push({ table, wheres: q._wheres, patch });
@@ -101,6 +106,9 @@ beforeEach(() => {
   mockEnroll.mockResolvedValue({ enrolled: true, methodId: 'pm-row-1', inChargeMethodId: 'pm-row-1' });
   state.updates = [];
   state.failUpdates = false;
+  state.customer = null;
+  state.queued = [];
+  state.failNoticeInsert = false;
   state.paymentMethodRow = {
     id: 'pm-row-1',
     customer_id: 'cust-1',
@@ -221,6 +229,26 @@ test('gate off + browser died: a CARD completion still proceeds (card lane unaff
   await handleSetupIntentSucceeded(setupIntent({ payment_method: 'pm_card_1' }));
   expect(mockSavePaymentMethod).toHaveBeenCalled();
   expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card' }));
+});
+
+test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('setup failure deferred by %s queues the same event identity and allows a later event', async (code) => {
+  state.customer = { id: 'cust-1', phone: '+15550001111' };
+  require('../services/sms-template-renderer').renderRequiredSmsTemplate.mockResolvedValue('Please verify your bank account.');
+  const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;
+  sender.mockResolvedValue({ sent: false, deferred: true, code, nextAllowedAt: '2026-09-09T12:00:00Z' });
+  await handleSetupIntentFailed(setupIntent(), 'evt-failure-1');
+  await handleSetupIntentFailed(setupIntent(), 'evt-failure-2');
+  expect(state.queued).toHaveLength(2);
+  for (const [index, row] of state.queued.entries()) {
+    const meta = JSON.parse(row.metadata);
+    expect(meta).toMatchObject({ entry_point: 'stripe_webhook_billing_deferred',
+      notificationEventKey: `payment-problem:stripe:evt-failure-${index + 1}:bank_verification_failed:0`,
+      replay_purpose: 'payment_failure', waves_customer_id: 'cust-1', customer_initiated: true,
+    });
+    expect(sender.mock.calls[index][0].metadata.notificationEventKey).toBe(meta.notificationEventKey);
+  }
+  state.failNoticeInsert = true;
+  await expect(handleSetupIntentFailed(setupIntent(), 'evt-failure-3')).rejects.toMatchObject({ code: 'BILLING_NOTICE_ENQUEUE_FAILED' });
 });
 
 test('setup_failed moves a pending bank row to verification_failed (Codex r3)', async () => {

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from "react";
+import { Button } from "../ui";
 
 /**
  * DictationButton — small Web Speech API mic that transcribes speech to text.
@@ -15,7 +16,16 @@ import { useEffect, useRef, useState } from 'react';
  *   title           optional — accessible label / tooltip (default "Dictate")
  *   size            optional — button diameter in px (default 30)
  */
-export default function DictationButton({ onAppend, palette, title = 'Dictate', size = 30 }) {
+export default function DictationButton({
+  onAppend,
+  palette,
+  title = "Dictate",
+  size = 30,
+  presentation = "legacy",
+  disabled = false,
+}) {
+  const migrated = presentation === "admin";
+  const Control = migrated ? Button : "button";
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
   const recognitionRef = useRef(null);
@@ -23,19 +33,25 @@ export default function DictationButton({ onAppend, palette, title = 'Dictate', 
   onAppendRef.current = onAppend;
 
   useEffect(() => {
-    const SR = typeof window !== 'undefined'
-      ? window.SpeechRecognition || window.webkitSpeechRecognition
-      : null;
+    const SR =
+      typeof window !== "undefined"
+        ? window.SpeechRecognition || window.webkitSpeechRecognition
+        : null;
     setSupported(!!SR);
     return () => {
-      try { recognitionRef.current?.stop(); } catch { /* already stopped */ }
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        /* already stopped */
+      }
     };
   }, []);
 
   const toggle = () => {
-    const SR = typeof window !== 'undefined'
-      ? window.SpeechRecognition || window.webkitSpeechRecognition
-      : null;
+    const SR =
+      typeof window !== "undefined"
+        ? window.SpeechRecognition || window.webkitSpeechRecognition
+        : null;
     if (!SR) return;
     if (listening && recognitionRef.current) {
       recognitionRef.current.stop();
@@ -44,56 +60,74 @@ export default function DictationButton({ onAppend, palette, title = 'Dictate', 
     const rec = new SR();
     rec.continuous = true;
     rec.interimResults = false;
-    rec.lang = 'en-US';
+    rec.lang = "en-US";
     rec.onresult = (ev) => {
-      let append = '';
+      let append = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
       }
       if (append.trim()) onAppendRef.current?.(append.trim());
     };
     rec.onerror = (e) => {
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        alert('Microphone access is blocked. Allow mic permission for this site, or use the keyboard mic on your phone.');
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        alert(
+          "Microphone access is blocked. Allow mic permission for this site, or use the keyboard mic on your phone.",
+        );
       }
       setListening(false);
     };
-    rec.onend = () => { setListening(false); recognitionRef.current = null; };
+    rec.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+    };
     recognitionRef.current = rec;
-    try { rec.start(); setListening(true); } catch { /* start can throw if already running */ }
+    try {
+      rec.start();
+      setListening(true);
+    } catch {
+      /* start can throw if already running */
+    }
   };
 
   if (!supported) return null;
 
-  const P = palette || {};
-  const accent = P.accent || '#0ea5e9';
-  const muted = P.muted || '#94a3b8';
-  const red = P.red || '#ef4444';
-  const card = P.card || '#ffffff';
+  const {
+    accent = "#0ea5e9",
+    muted = "#94a3b8",
+    red = "#ef4444",
+    card = "#ffffff",
+  } = palette || {};
 
   return (
-    <button
+    <Control
       type="button"
       onClick={toggle}
-      title={listening ? 'Stop dictation' : title}
-      aria-label={listening ? 'Stop dictation' : title}
+      disabled={disabled}
+      title={listening ? "Stop dictation" : title}
+      aria-label={listening ? "Stop dictation" : title}
       aria-pressed={listening}
-      style={{
-        width: size,
-        height: size,
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderRadius: '50%',
-        border: `1px solid ${listening ? red : muted}`,
-        background: listening ? red : card,
-        color: listening ? '#fff' : accent,
-        cursor: 'pointer',
-        padding: 0,
-        boxShadow: listening ? `0 0 0 4px ${red}33` : 'none',
-        transition: 'background 0.15s, box-shadow 0.15s',
-        flex: '0 0 auto',
-      }}
+      variant={migrated ? (listening ? "danger" : "secondary") : undefined}
+      className={migrated ? "min-w-11 !p-0" : undefined}
+      style={
+        migrated
+          ? undefined
+          : {
+              width: size,
+              height: size,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "50%",
+              border: `1px solid ${listening ? red : muted}`,
+              background: listening ? red : card,
+              color: listening ? "#fff" : accent,
+              cursor: "pointer",
+              padding: 0,
+              boxShadow: listening ? `0 0 0 4px ${red}33` : "none",
+              transition: "background 0.15s, box-shadow 0.15s",
+              flex: "0 0 auto",
+            }
+      }
     >
       <svg
         width={Math.round(size * 0.52)}
@@ -110,6 +144,6 @@ export default function DictationButton({ onAppend, palette, title = 'Dictate', 
         <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
         <line x1="12" y1="19" x2="12" y2="22" />
       </svg>
-    </button>
+    </Control>
   );
 }

@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../hooks/useFeatureFlag', () => ({
@@ -14,9 +14,12 @@ import AdminChangePasswordPage from './AdminChangePasswordPage';
 import AdminForgotPasswordPage from './AdminForgotPasswordPage';
 import AdminLoginPage from './AdminLoginPage';
 
+function CurrentPath() { const location = useLocation(); return <output>{location.pathname}{location.search}</output>; }
+
 function renderRoutes(initialPath, page) {
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
+      <CurrentPath />
       <Routes>
         <Route path="/admin/login" element={page} />
         <Route path="/admin/change-password" element={page} />
@@ -66,6 +69,22 @@ describe('staff authentication destinations', () => {
 
     expect(await screen.findByText('Field tools home')).toBeInTheDocument();
     expect(localStorage.getItem('waves_admin_token')).toBe('tech-jwt');
+  });
+
+  it.each([
+    ['/tech?visit=row%3Atwo', '/tech?visit=row%3Atwo'],
+    ['/tech/tools?visit=row%3Atwo', '/tech/tools?visit=row%3Atwo'],
+    ['/TECH/?visit=row%3Atwo', '/TECH/?visit=row%3Atwo'],
+    ['/TECH/TOOLS/?visit=row%3Atwo', '/TECH/TOOLS/?visit=row%3Atwo'],
+    ['/TECHNOLOGY?visit=row%3Atwo', '/tech'],
+    ['/technology?visit=row%3Atwo', '/tech'],
+    ['//example.com/tech?visit=row%3Atwo', '/tech'],
+  ])('preserves allowed technician destinations for %s', async (next, expected) => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ token: 'fixture-only', user: { id: 'tech-fixture', role: 'technician' } }) })));
+    renderRoutes(`/admin/login?next=${encodeURIComponent(next)}`, <AdminLoginPage />);
+    fillLogin();
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(expected));
+    expect(screen.getByRole('status').textContent).toBe(expected);
   });
 
   it('keeps a committed login successful when flag refresh fails', async () => {

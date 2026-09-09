@@ -3522,3 +3522,39 @@ describe('stampFirstResponseByContact', () => {
     expect(raws[0].binds).toEqual(['442079460958']);
   });
 });
+
+// An assessment is NOT a win (owner ruling 2026-09-08): the canonical
+// converter refuses when the event's visit is a Waves Assessment — booking
+// AND completion triggers pass their row — before resolving any lead.
+describe('convertLeadFromEvent — a Waves Assessment never converts', () => {
+  beforeEach(() => leadAttribution.markConverted.mockClear());
+
+  test('assessment booking/completion returns converted:false without touching leads', async () => {
+    const database = jest.fn(() => { throw new Error('no lead lookup expected'); });
+    const result = await convertLeadFromEvent({
+      source: 'service_completed',
+      customerId: 'c1',
+      booking: { id: 'svc-1', service_type: 'Waves Assessment', service_id: null },
+      database,
+    });
+    expect(result).toEqual({ converted: false, reason: 'assessment_not_a_win' });
+    expect(database).not.toHaveBeenCalled();
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+  });
+
+  test('the catalog FK identifies an assessment when the label does not', async () => {
+    const first = jest.fn(async () => ({ id: 'cat-1', service_key: 'lawn_inspection', name: 'Renamed' }));
+    const database = jest.fn((table) => {
+      if (table !== 'services') throw new Error(`unexpected table ${table}`);
+      return { where: () => ({ first }) };
+    });
+    const result = await convertLeadFromEvent({
+      source: 'appointment_booked',
+      customerId: 'c1',
+      booking: { id: 'svc-1', service_type: 'Consultation', service_id: 'cat-1' },
+      database,
+    });
+    expect(result).toEqual({ converted: false, reason: 'assessment_not_a_win' });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+  });
+});
