@@ -369,4 +369,101 @@ describe("Email workspace feedback and request ownership", () => {
     expect(calls("/send")).toHaveLength(2);
   });
 
+
+  it("collapses the selected row while its conversation is unavailable", async () => {
+    const view = mount(); await open();
+    expect(screen.getByRole("button", { expanded: true })).toHaveAttribute("aria-controls", `email-conversation-${a.id}`);
+    view.rerender(emailRoute(false));
+    overrides.set(`/api/admin/email/message/${a.id}`, () => response({}, 503));
+    view.rerender(emailRoute(true));
+    await screen.findByText("The linked email is unavailable.");
+    expect(screen.queryByRole("button", { expanded: true })).not.toBeInTheDocument();
+    const row = screen.getByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes(a.subject) });
+    expect(row).toHaveAttribute("aria-expanded", "false");
+    expect(row).not.toHaveAttribute("aria-controls");
+  });
+
+  it("says a reply sent behind newer edits left those edits unsent, until the draft changes again", async () => {
+    let finish;
+    overrides.set("/api/admin/email/send", () => new Promise((resolve) => { finish = resolve; }));
+    mount(); const reply = await open(a);
+    fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply", exact: true }));
+    fireEvent.change(reply, { target: { value: "Newer unsent edit" } });
+    await act(async () => finish(await response({ success: true, messageId: "fixture-sent" })));
+    expect(await screen.findByText("Reply sent. Your newer edits are still here.")).toBeInTheDocument();
+    expect(reply).toHaveValue("Newer unsent edit");
+    fireEvent.change(reply, { target: { value: "Newer unsent edit, revised" } });
+    expect(screen.queryByText(/Reply sent/)).not.toBeInTheDocument();
+  });
+
+  it("says a reply typed during the post-send thread refresh is still unsent", async () => {
+    let finishRefresh, threadCalls = 0;
+    overrides.set(`/api/admin/email/thread/${a.gmail_thread_id}`, () => ++threadCalls === 1 ? response({ thread: [a] }) : new Promise((resolve) => { finishRefresh = resolve; }));
+    mount(); const reply = await open(a);
+    fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply", exact: true }));
+    await waitFor(() => expect(finishRefresh).toBeDefined());
+    expect(reply).toHaveValue("");
+    fireEvent.change(reply, { target: { value: "Typed during refresh" } });
+    await act(async () => finishRefresh(await response({ thread: [a] })));
+    expect(await screen.findByText("Reply sent. Your newer edits are still here.")).toBeInTheDocument();
+    expect(reply).toHaveValue("Typed during refresh");
+  });
+
+  it("clears a plain sent banner when a new reply is started in the same conversation", async () => {
+    mount(); const reply = await open(a);
+    fireEvent.change(reply, { target: { value: "First reply" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply", exact: true }));
+    await screen.findByText("Reply sent.");
+    expect(reply).toHaveValue("");
+    fireEvent.change(reply, { target: { value: "Second reply" } });
+    expect(screen.queryByText("Reply sent.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the composer open with newer edits and labels the earlier send as the one delivered", async () => {
+    let finish;
+    overrides.set("/api/admin/email/send", () => new Promise((resolve) => { finish = resolve; }));
+    mount(); fireEvent.click(await screen.findByRole("button", { name: "New email" }));
+    const dialog = screen.getByRole("dialog", { name: "New email" });
+    fireEvent.change(within(dialog).getByLabelText("To *"), { target: { value: "recipient@example.invalid" } });
+    fireEvent.change(within(dialog).getByLabelText("Message *"), { target: { value: "Submitted compose" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
+    fireEvent.change(within(dialog).getByLabelText("Message *"), { target: { value: "Newer compose edit" } });
+    await act(async () => finish(await response({ success: true, messageId: "fixture-sent" })));
+    expect(await within(dialog).findByText("Email sent. Your newer edits are still here.")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Message *")).toHaveValue("Newer compose edit");
+    expect(within(dialog).getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  });
+
+  it("clears a mark-as-read failure once the operator opens another message or retries", async () => {
+    overrides.set("/api/admin/email/inbox", () => response({ emails: [{ ...a, is_read: false }, b], total: 2 }));
+    overrides.set(`/api/admin/email/message/${a.id}/read`, () => response({}, 503));
+    mount(); await open(a);
+    await screen.findByText("The email could not be marked as read.");
+    await open(b);
+    await waitFor(() => expect(screen.queryByText("The email could not be marked as read.")).not.toBeInTheDocument());
+    await open(a);
+    await screen.findByText("The email could not be marked as read.");
+    overrides.delete(`/api/admin/email/message/${a.id}/read`);
+    await open(a);
+    await waitFor(() => expect(screen.queryByText("The email could not be marked as read.")).not.toBeInTheDocument());
+  });
+
+  it("clears an attachment failure when a later download succeeds", async () => {
+    const attachment = { id: "att-1", gmail_attachment_id: "gatt-1", filename: "fixture.pdf", size_bytes: 1024 };
+    overrides.set(`/api/admin/email/thread/${a.gmail_thread_id}`, () => response({ thread: [{ ...a, attachments: [attachment] }] }));
+    const download = `/api/admin/email/message/${a.id}/attachment/${attachment.gmail_attachment_id}`;
+    overrides.set(download, () => response({}, 503));
+    URL.createObjectURL = () => "blob:fixture"; URL.revokeObjectURL = () => {};
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    mount(); await open(a);
+    const link = await screen.findByRole("link", { name: /fixture\.pdf/ });
+    fireEvent.click(link);
+    await screen.findByText("Could not download the attachment. Try again.");
+    overrides.set(download, () => Promise.resolve({ ok: true, status: 200, blob: async () => new Blob(["fixture"]) }));
+    fireEvent.click(link);
+    await waitFor(() => expect(screen.queryByText("Could not download the attachment. Try again.")).not.toBeInTheDocument());
+    expect(calls(`/attachment/${attachment.gmail_attachment_id}`)).toHaveLength(2);
+  });
 });

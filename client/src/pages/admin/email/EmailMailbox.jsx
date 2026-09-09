@@ -97,9 +97,12 @@ function emailDetails(email) {
   catch { return null; }
 }
 
-function EmailMessageRow({ email, mailbox, editor, onOpen }) {
+function EmailMessageRow({ email, mailbox, editor, onOpen, conversationOpen }) {
   const { selectedEmail, handleStar, pendingAction } = mailbox;
   const isSelected = selectedEmail?.id === email.id;
+  // The row only "controls" a conversation that is actually rendered; a
+  // retained selection whose refresh failed shows the recovery panel instead.
+  const expanded = isSelected && conversationOpen;
   const extractedData = emailDetails(email);
   const categoryLabel = CATEGORY_LABELS[email.classification], autoActionLabel = AUTO_ACTION_LABELS[email.classification];
   const sender = email.from_name || email.from_address;
@@ -108,7 +111,7 @@ function EmailMessageRow({ email, mailbox, editor, onOpen }) {
       <Button variant="ghost" onClick={(event) => handleStar(event, email)} disabled={Boolean(pendingAction)} loading={pendingAction === `star:${email.id}`} aria-label={`${email.is_starred ? "Unstar" : "Star"} ${email.subject || "email"}`} aria-pressed={Boolean(email.is_starred)} className="my-2 ml-1 shrink-0 self-start px-2">
         <Star size={18} fill={email.is_starred ? "currentColor" : "none"} aria-hidden />
       </Button>
-      <button type="button" onClick={(event) => onOpen(event, email)} aria-expanded={isSelected} aria-controls={isSelected ? `email-conversation-${email.id}` : undefined}
+      <button type="button" onClick={(event) => onOpen(event, email)} aria-expanded={expanded} aria-controls={expanded ? `email-conversation-${email.id}` : undefined}
         className="u-focus-ring min-w-0 flex-1 appearance-none border-0 bg-transparent px-3 py-4 text-left text-ui-body">
         <span className="sr-only">Open email:</span>
         <span className="flex flex-col items-start gap-1">
@@ -207,28 +210,40 @@ function LinkedEmailError({ mailbox, onBack }) {
   </div>;
 }
 
+function EmailConversationPane({ active, mailbox, editor, selected, onBack }) {
+  if (mailbox.messageState.error) return <LinkedEmailError mailbox={mailbox} onBack={onBack} />;
+  if (mailbox.messageState.loading && !selected) return <div role="status" className="min-h-48 rounded-md border-hairline border-zinc-200 bg-white p-6">Loading linked email…</div>;
+  if (selected) return <EmailConversation active={active} mailbox={mailbox} editor={editor} onBack={onBack} />;
+  return <div className="hidden min-h-80 flex-col items-center justify-center rounded-md border-hairline border-zinc-200 bg-white p-8 text-center xl:flex">
+    <Mail size={24} className="mb-3 text-ink-secondary" aria-hidden />
+    <h2 className="m-0 mb-2 text-18 font-medium leading-[1.35]">Choose an email</h2>
+    <p className="m-0 max-w-sm text-ink-secondary">Select a message from the inbox to read the conversation and reply.</p>
+  </div>;
+}
+
 export function EmailInbox({ active, mailbox, editor }) {
   const { stats, total, visibleEmails, filter, setFilter, search, setSearch, page, setPage, showArchived, setShowArchived } = mailbox;
   const counts = mailbox.statsState.error ? {} : stats || {};
-  const lastOpenedRef = useRef(null), searchRef = useRef(null), restoreFocusRef = useRef(false);
+  const lastOpenedRef = useRef(null), searchRef = useRef(null), wasSelectedRef = useRef(false);
   const selected = Boolean(mailbox.selectedEmail);
+  const conversationOpen = selected && !mailbox.messageState.error;
   const openEmail = (event, email) => {
     lastOpenedRef.current = event.currentTarget;
     mailbox.openEmail(email);
   };
+  // Whatever closed the conversation (Back to inbox, browser Back, archive),
+  // its focused heading unmounts, so focus returns to the opened row or search.
   useEffect(() => {
-    if (selected || !restoreFocusRef.current) return undefined;
-    restoreFocusRef.current = false;
+    const wasSelected = wasSelectedRef.current;
+    wasSelectedRef.current = selected;
+    if (selected || !wasSelected) return undefined;
     const frame = requestAnimationFrame(() => {
       const target = lastOpenedRef.current?.isConnected ? lastOpenedRef.current : searchRef.current;
       target?.focus();
     });
     return () => cancelAnimationFrame(frame);
   }, [selected]);
-  const backToInbox = () => {
-    restoreFocusRef.current = true;
-    mailbox.closeEmail(mailbox.selectedEmail.id, true);
-  };
+  const backToInbox = () => mailbox.closeEmail(mailbox.selectedEmail.id, true);
   const filters = [
     { key: "all", label: "All", count: counts.total }, { key: "unread", label: "Unread", count: counts.unread },
     { key: "starred", label: "Starred", count: counts.starred }, { key: "leads", label: "Leads" },
@@ -254,7 +269,7 @@ export function EmailInbox({ active, mailbox, editor }) {
           {mailbox.inboxState.loading ? <p className="m-0 min-h-48 p-6 text-ink-secondary" role="status">Loading inbox…</p>
             : mailbox.inboxState.error ? <ActionFeedback error onRetry={mailbox.loadEmails} className="min-h-48 p-6">The email inbox is unavailable.</ActionFeedback>
             : visibleEmails.length === 0 ? <p className="m-0 p-8 text-center text-ink-secondary">No emails found</p>
-            : visibleEmails.map((email) => <EmailMessageRow key={email.id} email={email} mailbox={mailbox} editor={editor} onOpen={openEmail} />)}
+            : visibleEmails.map((email) => <EmailMessageRow key={email.id} email={email} mailbox={mailbox} editor={editor} onOpen={openEmail} conversationOpen={conversationOpen} />)}
         </div>
         {total > 50 && <div className="flex flex-wrap items-center justify-between gap-2 border-t-hairline border-zinc-200 p-3">
           <span className="u-nums w-full text-center text-ui-caption text-ink-secondary">Page {page} of {Math.ceil(total / 50)}</span>
@@ -262,14 +277,7 @@ export function EmailInbox({ active, mailbox, editor }) {
           <Button variant="secondary" onClick={() => setPage((current) => current + 1)} disabled={page >= Math.ceil(total / 50) || mailbox.inboxState.loading || mailbox.inboxState.error}>Next</Button>
         </div>}
       </section>
-      {mailbox.messageState.error ? <LinkedEmailError mailbox={mailbox} onBack={backToInbox} />
-        : mailbox.messageState.loading && !selected ? <div role="status" className="min-h-48 rounded-md border-hairline border-zinc-200 bg-white p-6">Loading linked email…</div>
-        : selected ? <EmailConversation active={active} mailbox={mailbox} editor={editor} onBack={backToInbox} />
-        : <div className="hidden min-h-80 flex-col items-center justify-center rounded-md border-hairline border-zinc-200 bg-white p-8 text-center xl:flex">
-          <Mail size={24} className="mb-3 text-ink-secondary" aria-hidden />
-          <h2 className="m-0 mb-2 text-18 font-medium leading-[1.35]">Choose an email</h2>
-          <p className="m-0 max-w-sm text-ink-secondary">Select a message from the inbox to read the conversation and reply.</p>
-        </div>}
+      <EmailConversationPane active={active} mailbox={mailbox} editor={editor} selected={selected} onBack={backToInbox} />
     </div>
   </div>;
 }

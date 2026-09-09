@@ -360,6 +360,15 @@ describe("Email draft and navigation preservation", () => {
     await waitFor(() => expect(screen.getByPlaceholderText("Search emails...")).toHaveFocus());
   });
 
+  it("restores focus to the opened row when browser Back closes the conversation", async () => {
+    window.history.replaceState({ idx: 0 }, "", "/admin/communications#tab=email");
+    mount(); await open(a);
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("id")).toBe(a.id));
+    act(() => window.history.back());
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Reply", exact: true })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes(a.subject) })).toHaveFocus());
+  });
+
   it("actually renders an archived or off-page message reached by a deep link", async () => {
     inbox = [];
     window.history.replaceState({}, "", `/admin/communications?id=${a.id}#tab=email`);
