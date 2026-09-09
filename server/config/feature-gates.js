@@ -1976,6 +1976,11 @@ const gates = {
   // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
   scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),
 
+  // Existing Dispatch queue: unresolved future-route locations, durations,
+  // modeled lateness, closures and unallocated work. Requires measurements;
+  // separate opt-in so collection can stay observational.
+  scheduleQualityAlerts: gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an

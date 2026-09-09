@@ -683,6 +683,15 @@ async function runRouteReorder(opts = {}, conn = db) {
     logger.error(`[route-reorder] run fatal: ${fatal.message}`);
   }
 
+  // The existing nightly pass refreshes unresolved future-route cards.
+  // Change-triggered repairs are followed by this check in their caller.
+  if (!opts.repairOnly && qualityEnabled && gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS')) {
+    const alerts = await require('./scheduling/quality-alerts').refreshScheduleQualityAlerts({ dates, now: opts.now }, conn);
+    if (alerts.status === 'failed') {
+      if (status === 'completed') status = 'completed_with_errors';
+      summary.failed.push({ reason: 'QUALITY_ALERT_REFRESH_FAILED' });
+    }
+  }
   // ── Ledger: one route_optimization_planner_runs row per run. ──
   const ledger = await writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }, conn);
   // A lost ledger row means the promised audit record is missing — the run

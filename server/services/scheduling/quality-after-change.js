@@ -70,6 +70,8 @@ async function refreshScheduleQualityAfterChange({ jobId, dates = [], trx = null
       }).returning('id');
       return { status: 'recorded', ledgerId: ledger.id, dates: affectedDates };
     }, { isolationLevel: 'repeatable read' });
+    const alerts = await require('./quality-alerts').refreshScheduleQualityAlerts({ dates: affectedDates, now }, conn);
+    if (alerts.status === 'failed') return { ...recorded, status: 'recorded_with_alert_error', repair, alerts };
     return repair ? { ...recorded, repair } : recorded;
   } catch (error) {
     logger.error(`[schedule-quality] post-change check failed for ${jobId || 'affected-dates'} (${error.code || 'check_or_ledger_failure'})`);
