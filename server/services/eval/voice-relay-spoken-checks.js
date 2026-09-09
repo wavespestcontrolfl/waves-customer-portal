@@ -500,11 +500,15 @@ function isNonVisitPredicate(clause, match) {
     || DISCLOSURE_REFUSAL_RE.test(match[0].replace(/\b(?:appointment|visit|service)s?$/i, ''));
 }
 
+const CONVERSATIONAL_CONDITION_RE = /^\s*(?:(?:that|this|it)(?:[\x27\u2019]s|\s+(?:is|was|helps|answers|clarifies|makes sense))\b|you\s+(?:were|are|was|want|wanted|need|needed|would like|care|asked|ask|like)\b|(?:anyone|anybody)\s+(?:is|was)\s+(?:wondering|asking)\b)/i;
 function isConditionalVisitSuffix(clause, match) {
   if (!/\bwill\b/i.test(match[0])) return false;
   const suffix = clause.slice(match.index + match[0].length);
   const condition = /\b(?:only\s+)?(?:if|unless)\b/i.exec(suffix);
-  return Boolean(condition && VISIT_MODIFIERS_RE.test(suffix.slice(0, condition.index)));
+  // "if she requests it" governs the visit; "if that is what you wanted to
+  // know" or "if you were wondering" only qualifies the conversation.
+  return Boolean(condition && VISIT_MODIFIERS_RE.test(suffix.slice(0, condition.index))
+    && !CONVERSATIONAL_CONDITION_RE.test(suffix.slice(condition.index + condition[0].length)));
 }
 
 /** value: true. Caller-supplied third-party details are not a read-back exemption. */
