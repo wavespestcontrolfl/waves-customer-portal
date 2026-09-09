@@ -337,7 +337,11 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   if (referralMember) {
     await require('./referral-engine').creditReferralOnFirstService({ customerId: referralMember.customer_id, serviceId: referralMember.id });
   }
-  const reviewEnrollment = await enrollVisitCompletionReview(packet.id, database);
+  // Review outreach follows the summary: enrollment waits until every
+  // requested delivery leg has settled and never runs for an uncertain one.
+  const reviewEnrollment = delivery.state === 'delivered'
+    ? await enrollVisitCompletionReview(packet.id, database)
+    : { enrolled: false, reason: delivery.state };
   const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
   const pending = paymentPending || delivery.state === 'delivery_pending' || reviewEnrollment.retryable === true;
   const review = payment.state === 'office_required' || delivery.state === 'delivery_review';
@@ -379,11 +383,16 @@ async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
   try {
     packetId = (await database('invoices').where({ id: invoiceId }).first('visit_completion_packet_id'))?.visit_completion_packet_id;
   } catch (err) {
-    const reopened = await database('visit_completion_packets')
-      .whereIn('id', database('invoices').where({ id: invoiceId }).whereNotNull('visit_completion_packet_id').select('visit_completion_packet_id'))
-      .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now() })
-      .catch(() => 0);
-    return { enrolled: false, retryable: true, reason: 'error', error: err.message, reopened: Number(reopened) > 0 };
+    let reopened = null;
+    try {
+      reopened = Number(await database('visit_completion_packets')
+        .whereIn('id', database('invoices').where({ id: invoiceId }).whereNotNull('visit_completion_packet_id').select('visit_completion_packet_id'))
+        .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now() }));
+    } catch { reopened = null; }
+    // A reopen that ran and touched no packet proves no packet owns this
+    // invoice: the legacy representative-record enrollment stands.
+    if (reopened === 0) return null;
+    return { enrolled: false, retryable: true, reason: 'error', error: err.message, reopened: reopened > 0 };
   }
   if (!packetId) return null;
   return enrollVisitCompletionReview(packetId, database);
@@ -414,6 +423,18 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db) {
   if (!requested || visit.billing_hold) return { enrolled: false, reason: 'visit_review_suppressed' };
   const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
   if (invoice && !['paid', 'prepaid'].includes(invoice.status)) return { enrolled: false, reason: 'invoice_unpaid' };
+  // A paid signal can arrive while the summary is still being delivered or
+  // after an uncertain handoff: the ask never goes out ahead of the summary
+  // it follows, and an uncertain delivery stays with the office.
+  const legs = await database('visit_effects').where({ visit_id: packet.visit_id })
+    .whereIn('effect_type', ['completion_sms', 'completion_email']).select('status');
+  if (legs.some((leg) => leg.status === 'unknown_delivery')) return { enrolled: false, reason: 'delivery_review' };
+  if (legs.some((leg) => !['sent', 'suppressed'].includes(leg.status))) {
+    await database('visit_completion_packets').where({ id: packet.id }).update({
+      status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now(),
+    });
+    return { enrolled: false, retryable: true, reason: 'delivery_pending' };
+  }
   const members = await database('visit_completion_packet_items as i')
     .join('service_records as r', 'r.id', 'i.service_record_id')
     .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
@@ -427,6 +448,11 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db) {
       || (member.structured_notes?.typedReportDelivery && member.structured_notes.typedReportDelivery !== 'auto_send'))) {
     return { enrolled: false, reason: 'visit_outcome' };
   }
+  // Terminal eligibility, checked here because the legacy and cadence paths
+  // both report an archived customer as an opaque error that would otherwise
+  // be retried on every recovery sweep.
+  const customer = await database('customers').where({ id: visit.customer_id }).first('deleted_at');
+  if (!customer || customer.deleted_at) return { enrolled: false, reason: 'customer_archived' };
   const first = members[0];
   const result = await require('./review-request').enrollPostService({
     customerId: visit.customer_id, serviceRecordId: first.record_id, scheduledServiceId: first.id,

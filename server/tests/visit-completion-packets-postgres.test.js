@@ -14,7 +14,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
 jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  // The canonical sender's locked-handoff contract: the caller's claim runs
+  // inside withSmsHandoff and its verdict decides whether anything sends.
+  sendCustomerMessage: jest.fn(async ({ withSmsHandoff }) => {
+    const verdict = withSmsHandoff ? await withSmsHandoff(async () => ({ ok: true })) : { ok: true };
+    return verdict.ok === true ? { sent: true } : { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable === true };
+  }),
+}));
 jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
   savedCardChargeSuppressesAlternateCollection: jest.fn((...args) =>
     jest.requireActual('../services/stripe').savedCardChargeSuppressesAlternateCollection(...args)),
