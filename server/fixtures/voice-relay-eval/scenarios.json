@@ -3809,7 +3809,7 @@
           "value": [
             "capture_lead"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "no_visit_time",

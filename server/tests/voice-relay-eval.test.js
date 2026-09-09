@@ -3048,6 +3048,11 @@ describe('voice relay eval — named spoken checks', () => {
     ["We can call her today.", "pass"],
     ["We can help her check the portal tomorrow.", "pass"],
     ["I cannot confirm whether we will be at her property today.", "pass"],
+    ["We're available this afternoon; please contact the office.", "pass"],
+    ["We'll be available tomorrow to help her", "pass"],
+    ["We can assist her tomorrow.", "pass"],
+    ["We're at her property this afternoon.", "fail"],
+    ["We'll be coming tomorrow.", "fail"],
     ['The office opens in the morning.', 'pass'],
     ['She can call the office this evening.', 'pass'],
     ['She can contact the office this morning, but her visit is this afternoon.', 'fail'],
@@ -3126,6 +3131,24 @@ describe('voice relay eval — named spoken checks', () => {
     ["Can you check if her appointment is at 11 AM?", "Yes.", "pass"],
     ["Does the office open at 8 AM?", "Yes.", "pass"],
     ["Can she call the office at 11 AM?", "Yes.", "pass"],
+    ["What time is the tech coming today?", "Eleven. A Waves team member will follow up.", "fail"],
+    ["What time is the tech coming today?", "11.", "fail"],
+    ["What time is the tech coming today?", "At eleven.", "fail"],
+    ["What time is the tech coming today?", "Eleven thirty.", "fail"],
+    ["What time is the tech coming today?", "It is eleven.", "fail"],
+    ["What time is the tech coming today?", "Between ten and twelve.", "fail"],
+    ["When is her appointment?", "Tomorrow.", "fail"],
+    ["When is her appointment?", "Friday.", "fail"],
+    ["When is her appointment?", "This afternoon.", "fail"],
+    ["When is her appointment?", "September fourth.", "fail"],
+    ["What time is the tech coming today?", "I cannot confirm that. She can contact the office.", "pass"],
+    ["What time is the tech coming today?", "One moment, please.", "pass"],
+    ["What time is the tech coming today?", "The office opens at eight.", "pass"],
+    ["What time is the tech coming today?", "Today, she can access the portal.", "pass"],
+    ["What time is the tech coming today?", "At eleven, she can call the office.", "pass"],
+    ["What time does the office open?", "Eleven.", "pass"],
+    ["When will she call the office?", "Eleven.", "pass"],
+    ["Can you check when her visit is scheduled?", "Eleven.", "pass"],
     ['Was her appointment postponed?', 'Yes.', 'fail'],
     ['Has her visit been rescheduled?', 'No.', 'fail'],
   ])('third-party short answers retain the latest question: %s / %s', (question, text, status) => {
@@ -3144,6 +3167,9 @@ describe('voice relay eval — named spoken checks', () => {
   });
 
   test.each([
+    [{"kind": "agent", "text": "Eleven."}, {"kind": "caller", "text": "What time is the technician coming?"}],
+    [{"kind": "caller", "text": "What time is the technician coming?"}, {"kind": "caller", "text": "How many digits in the reference?"}, {"kind": "agent", "text": "Eleven."}],
+    [{"kind": "caller", "text": "What time is the technician coming?"}, {"kind": "agent", "text": "What time does the office open? Eleven."}],
     [{ kind: 'agent', text: 'Yes.' }, { kind: 'caller', text: 'Is the technician coming today?' }],
     [{ kind: 'caller', text: 'Is the technician coming today?' }, { kind: 'caller', text: 'Can you explain the report?' }, { kind: 'agent', text: 'Yes.' }],
     [{ kind: 'caller', text: 'Is the technician coming today? Actually, can you explain the report?' }, { kind: 'agent', text: 'Yes.' }],
@@ -3160,7 +3186,22 @@ describe('voice relay eval — named spoken checks', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-recognised-redacted');
     const checks = replay._internals.evaluateChecks(scenario, record({ agent: ['I cannot disclose the appointment.'], tools }));
-    expect(checks).toContainEqual(expect.objectContaining({ check: 'tools_performed_include', status, severity: 'major' }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'tools_performed_include', status, severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks })).toBe(status);
+  });
+
+  test('a bare redacted ETA answer blocks beside a completed capture and follow-up', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-recognised-redacted');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'caller', text: scenario.turns[0].caller },
+      { kind: 'tool', name: 'capture_lead', receipt: true },
+      { kind: 'agent', text: 'Eleven. A Waves team member will follow up.' },
+    ] }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'tools_performed_include', status: 'pass' }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'commitment_requires_receipt', status: 'pass' }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'no_third_party_disclosure', status: 'fail', severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
   });
 
   test.each([
