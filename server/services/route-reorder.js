@@ -8,20 +8,20 @@
  * write the trusted admin /optimize path performs (route_order = position).
  * DAY-MOVES NEVER HAPPEN HERE: this pass only reorders stops within a day.
  *
- * Freeze rules (owner-approved, all HARD):
+ * Freeze rules for distance optimization:
  *   - A day containing ANY frozen visit is skipped whole — frozen = the visit
  *     starts within 72 hours OR its 72-hour reminder is recorded as sent
  *     (appointment_reminders.reminder_72h_sent; the reminder is the hard gate
- *     because its SMS promises "{day} at {time}"). Unreadable reminder status
+ *     because its SMS promises an arrival window). Unreadable reminder status
  *     freezes the run's every day (fail closed).
  *   - Today is never touched (band starts tomorrow; the 8am day-open plus the
  *     72h clock already exclude it — the band floor makes it structural).
  *   - >25 geocoded stops for one tech-day = Google Routes cap → the tech-day
  *     is SKIPPED AND LOGGED, never silently truncated.
  *
- * Zero customer communication: route_order is a dispatch-board ordering
- * column; no reminder, SMS, or email path reads it. Nothing here touches
- * dates, windows, statuses, or techs.
+ * Zero communication sends: route_order controls the board and the tracker's
+ * day-of stops-ahead count. Nothing here changes dates, arrival promises,
+ * statuses, or technicians; today is excluded.
  *
  * Every run writes ONE ledger row to route_optimization_planner_runs
  * (run_type 'route_tiers_nightly') summarizing the reorders it applied/skipped
@@ -30,15 +30,20 @@
  *
  * Gates: GATE_ROUTE_REORDER (this pass) — separate from GATE_ROUTE_TIERS
  * (day-move eligibility inside auto-dispatch); both dark by default.
+ * GATE_ROUTE_REORDER_REPAIR + GATE_DRIVE_TIME_CALIBRATION opt into a narrow
+ * near-term repair: insert null-position timed stops into an already
+ * chronological route only when this restores all existing arrival promises.
+ * It uses the same fenced writer, never moves a date/window, and needs no
+ * mileage gain. Unreadable reminder state and staff pins still stop repairs.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
-const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
-const { computeWindowFitOrder, effectiveWindowRange, currentOrder } = require('./route-reorder-window-fit');
+const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration } = require('./route-reorder-window-fit');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -156,7 +161,7 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
       if (startMin > range.endMin) return true; // provably misses the promise
       startMin = Math.max(startMin, range.startMin); // waiting for open is fine
     }
-    const dur = Number(s.estimated_duration_minutes) > 0 ? Number(s.estimated_duration_minutes) : 60;
+    const dur = workDuration(s);
     clock = startMin + dur;
   }
   return false;
@@ -217,39 +222,52 @@ function withinFreezeClock(dateStr, windowStart, now) {
   return appt.getTime() - now.getTime() < FREEZE_HOURS * 3600000;
 }
 
-async function runRouteReorder(opts = {}) {
+async function runRouteReorder(opts = {}, conn = db) {
   const config = getRouteReorderConfig(opts);
   const now = opts.now || new Date();
   const today = etDateString(now);
-  const bandStart = etDateString(addETDays(now, 1));
-  const bandEnd = etDateString(addETDays(now, TIER2_MIN_DAYS_OUT - 1)); // today+6: <7 days out
+  const repairGates = ['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'];
+  // Change-triggered runs can only repair the explicitly affected dates.
+  // They never fall through to Google's discretionary distance optimizer.
+  if (opts.repairOnly) repairGates.push('GATE_ROUTE_REORDER');
+  const repairEnabled = repairGates.every(gateEnvValue);
+  if (opts.repairOnly && !repairEnabled) return { status: 'gate_off' };
+  const lastDate = etDateString(addETDays(now, 30));
+  const dates = opts.repairOnly
+    ? [...new Set((opts.dates || []).map(toDateStr))].filter(date => validCalendarDate(date) && date > today && date <= lastDate).sort()
+    : Array.from({ length: TIER2_MIN_DAYS_OUT - 1 }, (_, index) => etDateString(addETDays(now, index + 1)));
+  if (!dates.length) return { status: 'outside_planning_horizon' };
+  const bandStart = dates[0];
+  const bandEnd = dates.at(-1);
   const summary = {
-    run_type: 'route_tiers_nightly',
+    run_type: opts.repairOnly ? 'route_repair_change' : 'route_tiers_nightly',
     band: { start: bandStart, end: bandEnd },
     applied: [],
     skipped: [],
     failed: [],
   };
   const techIds = new Set();
+  const qualityEnabled = gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS');
+  if (qualityEnabled) summary.measurements = [];
   let status = 'completed';
 
   try {
-    for (let offset = 1; offset < TIER2_MIN_DAYS_OUT; offset++) {
-      const dateStr = etDateString(addETDays(now, offset));
+    for (const dateStr of dates) {
       let stops;
       try {
-        stops = await dayStopsQuery(db, {
+        stops = await dayStopsQuery(conn, {
           dateStr,
           excludeStatuses: EXCLUDE_STATUSES,
           select: [
             'scheduled_services.id', 'scheduled_services.technician_id',
             'scheduled_services.route_order', 'scheduled_services.window_start',
+            'scheduled_services.window_end', 'scheduled_services.visit_id',
             'scheduled_services.time_window',
             'scheduled_services.estimated_duration_minutes',
             'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
             'scheduled_services.service_type',
             'scheduled_services.zone', 'scheduled_services.created_at',
-            ...guardedCoordSelects(db),
+            ...guardedCoordSelects(conn),
           ],
         }).whereRaw(LIVE_HOLD_SQL);
       } catch (loadErr) {
@@ -259,13 +277,29 @@ async function runRouteReorder(opts = {}) {
       }
       if (!stops || stops.length === 0) continue;
 
+      const byTech = new Map();
+      for (const s of stops) {
+        if (!s.technician_id) continue;
+        if (!byTech.has(s.technician_id)) byTech.set(s.technician_id, []);
+        byTech.get(s.technician_id).push(s);
+      }
+      if (qualityEnabled) {
+        const { measureDayQuality } = require('./scheduling/day-quality');
+        const RouteOptimizer = require('./route-optimizer');
+        for (const [techId, techStops] of byTech) {
+          summary.measurements.push({ date: dateStr, technician_id: techId, as_of: now.toISOString(), snapshot_phase: 'loaded_schedule',
+            drive_model: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
+            ...measureDayQuality(RouteOptimizer, techStops) });
+        }
+      }
+
       // ── Day-level freeze: ANY frozen visit freezes the whole day. ──
       const clockFrozen = stops.some((s) => withinFreezeClock(dateStr, s.window_start, now));
-      if (clockFrozen) {
+      if (clockFrozen && !repairEnabled) {
         summary.skipped.push({ date: dateStr, reason: 'WITHIN_72H', stops: stops.length });
         continue;
       }
-      const freeze = await loadReminderFreeze(db, stops.map((s) => s.id), now);
+      const freeze = await loadReminderFreeze(conn, stops.map((s) => s.id), now);
       if (freeze.failed) {
         // Fail closed AND fail loud — cannot prove no reminder went out for
         // this day, and an outage that silently disables the whole pass must
@@ -276,19 +310,14 @@ async function runRouteReorder(opts = {}) {
         logger.error(`[route-reorder] ${dateStr}: reminder-freeze read failed — day frozen (fail closed)`);
         continue;
       }
-      if (stops.some((s) => freeze.frozen.has(s.id))) {
+      const reminderFrozen = stops.some((s) => freeze.frozen.has(s.id));
+      if (reminderFrozen && !repairEnabled) {
         summary.skipped.push({ date: dateStr, reason: 'REMINDER_SENT_FROZEN', stops: stops.length });
         continue;
       }
 
       // ── Per tech-day reorder. Unassigned stops (no tech) have no route to
       // reorder within — they are left untouched and noted. ──
-      const byTech = new Map();
-      for (const s of stops) {
-        if (!s.technician_id) continue;
-        if (!byTech.has(s.technician_id)) byTech.set(s.technician_id, []);
-        byTech.get(s.technician_id).push(s);
-      }
       const unassigned = stops.filter((s) => !s.technician_id).length;
       if (unassigned > 0) {
         summary.skipped.push({ date: dateStr, reason: 'UNASSIGNED_STOPS_LEFT_IN_PLACE', stops: unassigned });
@@ -340,7 +369,21 @@ async function runRouteReorder(opts = {}) {
           // appends coordless stops at the end, so the whole day gets a
           // consistent route_order sequence.
           const ordered = currentOrder(techStops);
-          const result = await RouteOptimizer.optimizeRoute(
+          const repair = repairEnabled ? computeChronologicalRepair(RouteOptimizer, ordered) : null;
+          if (opts.repairOnly && !repair) {
+            summary.skipped.push({ ...entryBase, reason: 'NO_SAFE_INSERTION' });
+            continue;
+          }
+          if ((clockFrozen || reminderFrozen) && !repair) {
+            summary.skipped.push({ ...entryBase, reason: clockFrozen ? 'WITHIN_72H' : 'REMINDER_SENT_FROZEN', repair: 'NO_SAFE_INSERTION' });
+            continue;
+          }
+          const result = repair ? {
+            orderedStops: repair.orderedStops,
+            totalDistanceMeters: modelDistanceMeters(RouteOptimizer, repair.orderedStops),
+            totalDurationSeconds: Math.round(repair.simulation.travelMin * 60),
+            source: 'chronological_repair',
+          } : await RouteOptimizer.optimizeRoute(
             ordered.map((s) => ({ id: s.id, lat: parseFloat(s.lat) || null, lng: parseFloat(s.lng) || null, serviceType: s.service_type })),
             { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true, techId },
           );
@@ -374,6 +417,8 @@ async function runRouteReorder(opts = {}) {
             after_duration_seconds: result.totalDurationSeconds || 0,
             saved_meters: savedMeters,
             source: result.source,
+            ...(repair ? { before_window_feasible: false, after_window_feasible: true,
+              distance_change_meters: afterMeters - beforeMeters } : {}),
           };
           // Window chronology guard: the optimizer sees only coordinates, so a
           // pure-distance order could put a later fixed window before an
@@ -397,7 +442,7 @@ async function runRouteReorder(opts = {}) {
           // here would record BELOW_MIN_SAVINGS and never consult the
           // fallback (pre-push audit r3 P1). Fallback OFF keeps the legacy
           // sequencing byte for byte.
-          if (savedMeters < config.minSavingsMeters
+          if (!repair && savedMeters < config.minSavingsMeters
               && (!windowFitEnabled || (!chronoConflict && !fitConflict))) {
             summary.skipped.push({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
             continue;
@@ -479,7 +524,7 @@ async function runRouteReorder(opts = {}) {
             // a stale tech-day skip. Especially relevant while the 4:10
             // auto-dispatch run may still be applying moves under its own
             // advisory lock.
-            await db.transaction(async (trx) => {
+            await conn.transaction(async (trx) => {
               // MEMBERSHIP FENCE (codex GitHub round P1): the writers that can
               // add/reassign a stop onto this tech-day already serialize on
               // the tech-scoped 'slot-reserve' advisory xact lock — the
@@ -523,6 +568,7 @@ async function runRouteReorder(opts = {}) {
                 .forUpdate('scheduled_services')
                 .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
                 .select('scheduled_services.id', 'scheduled_services.window_start',
+                  'scheduled_services.window_end', 'scheduled_services.visit_id',
                   'scheduled_services.time_window',
                   'scheduled_services.estimated_duration_minutes',
                   'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
@@ -533,9 +579,9 @@ async function runRouteReorder(opts = {}) {
               // these, so any mid-run change invalidates the order.
               const windowSig = (s) => {
                 const r = effectiveWindowRange(s);
-                const dur = Number(s.estimated_duration_minutes) > 0 ? Number(s.estimated_duration_minutes) : 60;
+                const dur = workDuration(s);
                 const locked = (s.auto_dispatch_locked || s.auto_dispatch_excluded) ? 'L' : '-';
-                return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}|${locked}`;
+                return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}|${locked}|${s.visit_id || ''}`;
               };
               const snapshot = new Map(techStops.map((s) => [s.id, {
                 window: windowSig(s),
@@ -570,8 +616,12 @@ async function runRouteReorder(opts = {}) {
                 // while the throw still rolls the write back.
                 throw Object.assign(new Error('reminder status unreadable at commit'), { code: 'REMINDER_GUARD_OUTAGE' });
               }
-              if (techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale('a 72h reminder was sent during the run');
-              if (techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
+              if (repair && !repairGates.every(gateEnvValue)) {
+                throw stale('route repair was disabled during the run');
+              }
+              if (etDateString(commitNow) >= dateStr) throw stale('the service day started during the run');
+              if (!repair && techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale('a 72h reminder was sent during the run');
+              if (!repair && techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
                 throw stale('day entered the 72h freeze window during the run');
               }
               for (let i = 0; i < finalOrdered.length; i++) {
@@ -609,6 +659,16 @@ async function runRouteReorder(opts = {}) {
             throw writeErr;
           }
           summary.applied.push({ ...entryBase, ...appliedMetrics });
+          if (qualityEnabled) {
+            // Record the order that actually committed as well as the loaded
+            // baseline, so later performance does not compare against the
+            // defect this same run repaired.
+            const finalIds = finalOrdered.map(stop => stop.id);
+            summary.measurements.push({ date: dateStr, technician_id: techId, as_of: (opts.now || new Date()).toISOString(),
+              snapshot_phase: 'applied_reorder', drive_model: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION') ? 'calibrated' : 'legacy',
+              ...require('./scheduling/day-quality').measureDayQuality(RouteOptimizer,
+                techStops.map(stop => ({ ...stop, route_order: finalIds.indexOf(stop.id) + 1 }))) });
+          }
           logger.info(`[route-reorder] ${dateStr} tech ${techId}: reordered ${withCoords.length} stops, saved ~${Math.round(appliedMetrics.saved_meters)} m (${appliedMetrics.source})`);
         } catch (techErr) {
           status = 'completed_with_errors';
@@ -623,8 +683,8 @@ async function runRouteReorder(opts = {}) {
     logger.error(`[route-reorder] run fatal: ${fatal.message}`);
   }
 
-  // ── Ledger: one route_optimization_planner_runs row per nightly run. ──
-  const ledger = await writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary });
+  // ── Ledger: one route_optimization_planner_runs row per run. ──
+  const ledger = await writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }, conn);
   // A lost ledger row means the promised audit record is missing — the run
   // must surface as an exception, never report green (codex round-13 P1).
   const finalStatus = ledger == null && status === 'completed' ? 'completed_with_errors' : status;
@@ -633,7 +693,7 @@ async function runRouteReorder(opts = {}) {
 
 /** Summarize the same night's auto-dispatch day-move run for the ledger
  *  (best-effort — a read failure must not lose the reorder ledger row). */
-async function loadAutoDispatchSummary(today) {
+async function loadAutoDispatchSummary(today, conn = db) {
   try {
     // THAT NIGHT'S CRON run specifically — a manual (possibly dry_run) run
     // started after 4:10 must not shadow it, or the ledger reports the wrong
@@ -643,12 +703,12 @@ async function loadAutoDispatchSummary(today) {
     // failed 4:10 run vanish from the ledger (run:null) or be shadowed by an
     // earlier successful run from the same day; a failed night must be
     // VISIBLE in the ledger, status preserved.
-    const run = await db('auto_dispatch_runs')
+    const run = await conn('auto_dispatch_runs')
       .where('triggered_by', 'cron')
       .orderBy('created_at', 'desc')
       .first('id', 'status', 'mode', 'total_evaluated', 'total_skipped', 'total_recommended', 'total_changed', 'total_failed', 'created_at');
     if (!run || toDateStr(run.created_at) !== today) return { run: null, moves: [] };
-    const moves = await db('auto_dispatch_audit_logs')
+    const moves = await conn('auto_dispatch_audit_logs')
       .where({ auto_dispatch_run_id: run.id, action: 'changed' })
       .select('scheduled_service_id', 'old_scheduled_date', 'new_scheduled_date', 'old_technician_id', 'new_technician_id', 'score_improvement')
       .limit(500);
@@ -677,30 +737,34 @@ async function loadAutoDispatchSummary(today) {
   }
 }
 
-async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }) {
+async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }, conn = db) {
   try {
-    const autoDispatch = await loadAutoDispatchSummary(today);
-    const [row] = await db('route_optimization_planner_runs')
+    const autoDispatch = summary.run_type === 'route_tiers_nightly' ? await loadAutoDispatchSummary(today, conn) : null;
+    const [row] = await conn('route_optimization_planner_runs')
       .insert({
-        run_type: 'route_tiers_nightly',
+        run_type: summary.run_type,
         status,
         start_date: bandStart,
         end_date: bandEnd,
         technician_ids: JSON.stringify([...techIds]),
         service_types: JSON.stringify([]),
         constraints: JSON.stringify({
-          gate: 'GATE_ROUTE_REORDER',
+          gate: summary.run_type === 'route_repair_change' ? 'GATE_ROUTE_REORDER_REPAIR' : 'GATE_ROUTE_REORDER',
+          repair_only: summary.run_type === 'route_repair_change',
           window_fit: gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT'),
           min_savings_meters: config.minSavingsMeters,
           max_applies_per_run: config.maxAppliesPerRun,
           waypoint_cap: GOOGLE_WAYPOINT_CAP,
           freeze_hours: FREEZE_HOURS,
+          repair_enabled: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
+          ...(summary.measurements ? { day_quality_version: 2, code_revision: process.env.RAILWAY_GIT_COMMIT_SHA || null } : {}),
         }),
         result: JSON.stringify({
           reorders: summary.applied,
           skips: summary.skipped,
           failures: summary.failed,
           auto_dispatch: autoDispatch,
+          ...(summary.measurements ? { route_quality: summary.measurements } : {}),
           ...(summary.fatal_error ? { fatal_error: summary.fatal_error } : {}),
         }),
         applied_count: summary.applied.length,
@@ -719,6 +783,11 @@ async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, conf
 async function runRouteReorderIfEnabled() {
   if (!gateEnvValue('GATE_ROUTE_REORDER')) return { status: 'gate_off' };
   return runRouteReorder();
+}
+
+/** Same fenced writer, limited to narrow repairs on affected future dates. */
+async function runRouteRepairAfterChange({ dates, now } = {}, conn = db) {
+  return runRouteReorder({ dates, now, repairOnly: true }, conn);
 }
 
 /**
@@ -756,6 +825,7 @@ async function recordSkippedTick(reason, now = new Date()) {
 module.exports = {
   runRouteReorder,
   runRouteReorderIfEnabled,
+  runRouteRepairAfterChange,
   recordSkippedTick,
   getRouteReorderConfig,
   _internals: { currentOrder, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
