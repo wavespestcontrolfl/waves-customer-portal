@@ -133,8 +133,14 @@ const PRESENTATION = {
 };
 
 function pushPresentation(messageType) {
+  // Completion/report pushes land on Documents (customer-wide), matching the
+  // "Service completed" lifecycle bell in admin-schedule. Under the
+  // saved-property scope the sink forwards the visit's house as a hint;
+  // Documents is not a property-scoped destination, so a report for a house
+  // retired since the visit still opens (uncapped codex r1z P1) — a Visits
+  // link would have failed closed as "Property unavailable".
   if (messageType.startsWith('service_complete') || messageType.startsWith('service_report_v1')) {
-    return { title: 'Your service report is ready', link: '/?tab=visits', category: 'service' };
+    return { title: 'Your service report is ready', link: '/?tab=documents', category: 'service' };
   }
   return PRESENTATION[messageType] || { title: 'Waves Pest Control', link: '/', category: 'service' };
 }

@@ -55,4 +55,28 @@ describe('ServiceTracker arrival checklist under the saved-property scope', () =
     expect(screen.queryByText(/Pet plan:/)).not.toBeInTheDocument();
     expect(api.getPropertyPreferences).not.toHaveBeenCalled();
   });
+  // Another tab switched to a newly added house and the property-list reload
+  // failed: the old saved list is retained while the new selection is
+  // adopted, so the selection has NO listed entry. The primary's gate code
+  // and pet plan must not render on that house (uncapped codex r1z P1).
+  it('withholds them when the selection has NO listed entry under a saved list', async () => {
+    render(<ServiceTracker currentEntry={null} savedScope selectedProperty={{ customerId: 'c1', propertyId: 'pc' }} />);
+    expect(await screen.findByText('Before your tech arrives')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Secure pets before tech arrives')).toBeInTheDocument());
+    expect(screen.queryByText('Gate code on file')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Pet plan:/)).not.toBeInTheDocument();
+    expect(api.getPropertyPreferences).not.toHaveBeenCalled();
+  });
+  it('withholds them when a house is selected but the retained list is still profile-shaped', async () => {
+    render(<ServiceTracker currentEntry={null} savedScope={false} selectedProperty={{ customerId: 'c1', propertyId: 'pc' }} />);
+    expect(await screen.findByText('Before your tech arrives')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Secure pets before tech arrives')).toBeInTheDocument());
+    expect(screen.queryByText('Gate code on file')).not.toBeInTheDocument();
+    expect(api.getPropertyPreferences).not.toHaveBeenCalled();
+  });
+  it('profile mode (no selection, no saved entries) still shows them', async () => {
+    render(<ServiceTracker currentEntry={null} savedScope={false} selectedProperty={null} />);
+    expect(await screen.findByText('Gate code on file')).toBeInTheDocument();
+    expect(api.getPropertyPreferences).toHaveBeenCalledTimes(1);
+  });
 });

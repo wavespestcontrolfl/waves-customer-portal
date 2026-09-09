@@ -2956,7 +2956,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           on the day of service, where the tech is matters more than the
           greeting. ServiceTracker renders null on every other day, so
           non-service-day layout is unchanged. */}
-      <ServiceTracker currentEntry={dashboardEntry} savedScope={dashboardSavedScope} onSavedScopeUnavailable={onSavedScopeUnavailable} />
+      <ServiceTracker currentEntry={dashboardEntry} savedScope={dashboardSavedScope} selectedProperty={selectedProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} />
 
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
@@ -11724,7 +11724,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
   );
 }
 
-function ServiceTracker({ currentEntry = null, savedScope = false, onSavedScopeUnavailable = null }) {
+function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
   const [propertyPrefs, setPropertyPrefs] = useState(null);
@@ -11746,8 +11746,15 @@ function ServiceTracker({ currentEntry = null, savedScope = false, onSavedScopeU
   // profile's PRIMARY address. Under a NON-primary saved selection they are
   // neither fetched nor shown (uncapped codex r1s P1): "Gate code on file"
   // for house A must not render on house B's tracker. The generic prep
-  // reminders stay.
-  const profileFactsApply = !(savedScope && currentEntry && currentEntry.propertyId && currentEntry.isPrimaryProperty !== true);
+  // reminders stay. Shown only once the selected entry is CONFIRMED the
+  // profile's primary (or a row-less profile entry): a selection with NO
+  // listed entry (another tab switched to a newly added house and the list
+  // reload failed, so the old list was retained; a house retired mid-session)
+  // is withheld too (uncapped codex r1z P1) — same rule as DashboardTab's
+  // entryConfirmedPrimary. Profile mode (no selection, no saved entries)
+  // shows them as today.
+  const entryConfirmedPrimary = !!currentEntry && (currentEntry.isPrimaryProperty === true || !currentEntry.propertyId);
+  const profileFactsApply = !(selectedProperty || savedScope) || entryConfirmedPrimary;
   const profileFactsRef = useRef(profileFactsApply);
   profileFactsRef.current = profileFactsApply;
   const adoptTracker = useCallback((d) => {
