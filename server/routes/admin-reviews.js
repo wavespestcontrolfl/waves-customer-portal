@@ -110,7 +110,12 @@ function serviceRecordsHaveReportTemplateColumn() {
 router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
   try {
     const serviceType = typeof req.query.serviceType === 'string' ? req.query.serviceType.slice(0, 100) : '';
-    const reviewSequencesEnabled = isEnabled('reviewSequences');
+    // Effective availability, not the feature gate alone (codex #4140 r15
+    // P1): the cadence cron (and the legacy 15-minute scheduler) registers
+    // only while the master GATE_CRON_JOBS is on — with it dark an enrolled
+    // sequence never reaches any tick, so the panel must not promise one.
+    const schedulerEnabled = isEnabled('cronJobs');
+    const reviewSequencesEnabled = isEnabled('reviewSequences') && schedulerEnabled;
     const plan = reviewSequencesEnabled
       ? ReviewService.__private.calculateReviewSendPlan(new Date(), serviceType, { jitter: false })
       : null;
@@ -121,7 +126,12 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // Names the rule behind `at`; the panel compares buckets, not instants
       // (a relative answer moves with every request) — codex #4140 r4 P1.
       bucket: plan ? plan.bucket : `legacy:+${ReviewService.LEGACY_REVIEW_DELAY_MINUTES}m`,
+      // The eligibility range live enrollment's jitter can land in; the
+      // panel names the cadence ticks either end reaches (codex #4140 r14 P2).
+      earliestAt: plan ? plan.earliestAt.toISOString() : null,
+      latestAt: plan ? plan.latestAt.toISOString() : null,
       reviewSequencesEnabled,
+      schedulerEnabled,
       // The 8 AM–8 PM hold only exists while GATE_SMS_SEND_WINDOW is on; the
       // panel must not promise a hold the server will not apply (r4 P2).
       smsSendWindowEnabled: isEnabled('smsSendWindow'),
@@ -130,10 +140,9 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // Runtime state (a recap already texted on a resumed completion)
       // can only be known at dispatch and is not claimed here (r4 P2).
       bundlesImmediateAsk: !reviewSequencesEnabled && serviceReportV1Delivery === false,
-      // processReviewSequences runs at :14 and :44 — an immediate ask waits for
-      // the next tick, up to 30 minutes. The offsets let the panel say when a
-      // custom time actually goes out (codex #4140 r5 P2).
-      cadenceTickMinutes: 30,
+      // processReviewSequences runs on fixed minutes of the hour (:14/:44);
+      // the panel uses them to say when a custom time actually goes out
+      // (codex #4140 r5 P2).
       cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
     });
   } catch (err) {
@@ -743,6 +752,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
     const thirtyDaysAgo = Date.now() - 30 * 86400000;
 
     res.json({
+      // The worker's effective state rides with the rows it explains, so the
+      // page never renders a plan against an unknown gate (codex #4140 r15 P2).
+      reviewSequencesEnabled: isEnabled('reviewSequences') && isEnabled('cronJobs'),
       customers: customers.map(c => {
         // SMS eligibility is consent-gated; EMAIL eligibility is not (the
         // #2948 artifact covers texting only) — resolve separately so an
@@ -951,7 +963,7 @@ router.get('/outreach-analytics', requireAdmin, async (req, res, next) => {
 
     // Tell the client whether automated cadences are live so it can hide the
     // Start-Cadence affordance when the gate is off (one-off sends still work).
-    res.json({ ...analytics, cardScans, reviewSequencesEnabled: isEnabled('reviewSequences') });
+    res.json({ ...analytics, cardScans, reviewSequencesEnabled: isEnabled('reviewSequences') && isEnabled('cronJobs') });
   } catch (err) { next(err); }
 });
 

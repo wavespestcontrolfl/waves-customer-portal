@@ -324,29 +324,51 @@ const DECISION_LABELS = {
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
   cap_stats_unavailable: "Re-checking the ask cap",
 };
+const fmtETWhen = (d) => new Date(d).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 function decisionLine(seq, sequencesEnabled) {
   if (!seq) return null;
   // A stranded claim (null schedule the worker never re-selects) needs a hand
   // whether or not the gate is on — say so first (codex #4140 r6 P2).
   if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
-  // The worker skips every run while GATE_REVIEW_SEQUENCES is off, so an
-  // active row's next tick is not a plan — it is frozen (codex #4140 r5 P2).
-  if (sequencesEnabled === false) return "Paused — cadences are off (GATE_REVIEW_SEQUENCES) · Owner action: turn the gate on, or stop this cadence";
+  // The worker skips every run while GATE_REVIEW_SEQUENCES is off — the
+  // redemption sweep included — so neither an active row's next tick nor a
+  // parked row's re-check is a plan: both are frozen (codex #4140 r5, r13 P2).
+  // An UNKNOWN gate state is not a plan either (codex #4140 r15 P2): only a
+  // confirmed-on worker earns a "Next" time. Both gates are needed — the
+  // cadence cron registers only under the master GATE_CRON_JOBS.
+  if (sequencesEnabled !== true) return `Paused — cadences are off (GATE_REVIEW_SEQUENCES / GATE_CRON_JOBS)${sequencesEnabled == null ? " or the gate state is unavailable" : ""} · Owner action: turn the gates on, or stop this ${seq.parked ? "parked " : ""}cadence`;
   if (seq.sending) return "Sending now · Owner action: none";
+  // A parked series final (deferred until the opener's send settles) is a
+  // durable enrollment the redemption sweep redeems — not "no cadence"
+  // (codex #4140 r12 P2). It needs no branch of its own: its stored
+  // decision is opener_in_flight with no plannedAt, so it renders below as
+  // "Re-check <tick> · Series final parked… · Owner action: none" — the
+  // tick because the sweep runs on the cadence ticks (nextSendTickAt),
+  // not at the raw park time (codex #4140 r13 P2).
   const d = seq.decision || {};
   const label = DECISION_LABELS[d.reason] || (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
   // nextRunAt is when the row becomes ELIGIBLE; the worker runs at :14/:44,
   // so the planned send is the next tick the server computes
   // (nextSendTickAt) — a 4:30 PM row cannot text before 4:44 (codex #4140 r4).
   const when = seq.nextSendTickAt || seq.nextRunAt || d.plannedAt || d.nextEvalAt;
-  const whenText = when
-    ? new Date(when).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
-    : null;
+  // An ask step that swaps channel at send time lands on the other channel's
+  // tick — say both when they differ (codex #4140 r14, r16 P2).
+  const fallback = seq.fallbackTickAt ? ` by ${seq.plannedChannel}, or ${fmtETWhen(seq.fallbackTickAt)} if it falls back to ${seq.fallbackChannel}` : "";
+  const whenText = when ? `${fmtETWhen(when)}${fallback}` : null;
   const owner = d.ownerAction && d.ownerAction !== "none" ? `Owner action: ${d.ownerAction}` : "Owner action: none";
   // A cadence enrolled before the decision column existed has no decision
   // until its next runner update; its next_run_at is a planned send.
   const planned = !!d.plannedAt || !d.reason;
-  return [whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null, label, owner].filter(Boolean).join(" · ");
+  return [whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null, label, capturedRequestText(seq, d), owner].filter(Boolean).join(" · ");
+}
+// A "Customer asked for the link" captured against a cadence that was already
+// running keeps that cadence's own decision (its schedule is unchanged), so
+// the capture is shown beside it — who and when (codex #4140 r8).
+function capturedRequestText(seq, decision) {
+  const c = seq.customerRequested;
+  if (!c || decision.reason === "customer_requested") return null;
+  const at = c.at ? fmtETWhen(c.at) : null;
+  return ["Customer asked for the link", c.byName ? `captured by ${c.byName}` : null, at].filter(Boolean).join(" ");
 }
 
 function fmtDate(d) {
@@ -579,6 +601,9 @@ export default function ReviewVelocityEngine() {
   // sends from other sessions; it's replaced by /outreach-activity.
   const [activityLog, setActivityLog] = useState([]);
   const [analytics, setAnalytics] = useState(null);
+  // GATE_REVIEW_SEQUENCES && GATE_CRON_JOBS as the candidates response reports
+  // them; null until known.
+  const [sequencesEnabled, setSequencesEnabled] = useState(null);
   const [drawerCust, setDrawerCust] = useState(null);
   const [toast, setToast] = useState("");
   const [batchModal, setBatchModal] = useState(false);
@@ -618,6 +643,9 @@ export default function ReviewVelocityEngine() {
     adminFetch("/admin/reviews/outreach-candidates")
       .then((d) => {
         setCustomers((d.customers || []).map(apiToCustomer));
+        // The gate rides with the rows (codex #4140 r15 P2); an absent value
+        // stays unknown, which decisionLine treats as paused.
+        setSequencesEnabled(typeof d.reviewSequencesEnabled === "boolean" ? d.reviewSequencesEnabled : null);
         setLoading(false);
       })
       .catch((err) => {
@@ -947,7 +975,7 @@ export default function ReviewVelocityEngine() {
           setPipeSearch={setPipeSearch}
           quickSend={quickSend}
           quickStartSequence={quickStartSequence}
-          sequencesEnabled={analytics?.reviewSequencesEnabled}
+          sequencesEnabled={sequencesEnabled}
           setDrawerCust={setDrawerCust}
           setBatchModal={setBatchModal}
           addLog={addLog}
@@ -970,7 +998,7 @@ export default function ReviewVelocityEngine() {
           showToast={showToast}
           sendReviewRequest={sendReviewRequest}
           startSequence={startSequence}
-          sequencesEnabled={analytics?.reviewSequencesEnabled}
+          sequencesEnabled={sequencesEnabled}
         />
       )}
       {/* Batch Modal */}
@@ -2137,7 +2165,7 @@ function CustomerDrawer({
 
   const startSequence = async () => {
     if (c.sequence) {
-      showToast("Already in an active cadence");
+      showToast(c.sequence.parked ? "A cadence is already parked for this customer" : "Already in an active cadence");
       return;
     }
     setSeqStarting(true);

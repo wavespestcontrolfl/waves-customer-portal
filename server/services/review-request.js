@@ -491,6 +491,11 @@ function parseDecision(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
+// Service types whose Day-0 ask waits for the customer to see the result
+// (calculateReviewSendPlan): same afternoon before 3 PM, else next morning.
+const JITTER_MAX_MINUTES = 15;
+const RESULTS_FIRST_SERVICE_WORDS = ["mosquito", "waveguard", "lawn", "turf", "tree", "shrub", "dethatch"];
+
 /**
  * Smart review send-time calculator.
  * Instead of a flat 90-180 min delay, pick the moment the customer is most
@@ -514,7 +519,7 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 
   // ±15 min jitter so messages don't all land at the same second. Off for
   // the completion panel's preview (same rules, stable answer).
-  const jitter = () => (withJitter ? Math.floor(Math.random() * 31) - 15 : 0);
+  const jitter = () => (withJitter ? Math.floor(Math.random() * (2 * JITTER_MAX_MINUTES + 1)) - JITTER_MAX_MINUTES : 0);
 
   // Last writer wins: normalizeReviewSendWindow may turn a relative answer
   // into an anchored one (9 AM / 5 PM fences).
@@ -564,22 +569,12 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 
   // ── Service-type overrides ──────────────────────────────────
 
-  // Mosquito / WaveGuard: delay until evening when they're outside enjoying the yard
-  if (svc.includes("mosquito") || svc.includes("waveguard")) {
+  // Mosquito / WaveGuard: delay until evening when they're outside enjoying
+  // the yard. Lawn care / tree & shrub: let them see the results first. Same
+  // rule for both: this afternoon before 3 PM, otherwise next morning.
+  if (RESULTS_FIRST_SERVICE_WORDS.some((w) => svc.includes(w))) {
     if (hour < 15) return atHour(completedAt, LATE_AFTERNOON);
     return nextDayAtHour(completedAt, MORNING);
-  }
-
-  // Lawn care / tree & shrub: let them see the results first
-  if (
-    svc.includes("lawn") ||
-    svc.includes("turf") ||
-    svc.includes("tree") ||
-    svc.includes("shrub") ||
-    svc.includes("dethatch")
-  ) {
-    if (hour < 15) return atHour(completedAt, LATE_AFTERNOON); // same afternoon
-    return nextDayAtHour(completedAt, MORNING); // next morning
   }
 
   // WDO / first-time inspections: high anxiety → high relief, capture it fast
@@ -604,8 +599,7 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
 
   if (hour >= 7 && hour < 12) return normalizeReviewSendWindow(addMins(completedAt, 120)); // morning: 2-hour delay
   if (hour >= 12 && hour < 15) return normalizeReviewSendWindow(addMins(completedAt, 90)); // early afternoon: 90 min
-  if (hour >= 15 && hour < 17) return nextDayAtHour(completedAt, MORNING); // late afternoon: next morning
-  // After 5 PM or before 7 AM — next morning 10 AM
+  // 3 PM onward, or before 7 AM — next morning 10 AM
   return nextDayAtHour(completedAt, MORNING);
   })();
 
@@ -615,7 +609,26 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
   const bucket = kind === "relative"
     ? `relative:${dayKey}:+${relativeMinutes}m`
     : `anchored:${dayKey}T${pad(p.hour)}:${pad(p.minute)}`;
-  return { at, kind, bucket };
+  // The eligibility RANGE a jitter-free answer stands for (codex #4140 r14
+  // P2): live enrollment adds up to ±15 min — an anchored answer's minute is
+  // clamped inside its hour (atHour), a relative one moves freely. The
+  // completion panel names the cadence ticks either end lands on.
+  // A relative answer keeps its jitter only inside the 9 AM–5 PM fences
+  // (normalizeReviewSendWindow falls back to the unjittered instant), so an
+  // end that crosses a fence collapses to `at` (codex #4140 r15 P2).
+  const hourStart = new Date(at.getTime());
+  hourStart.setUTCMinutes(0, 0, 0); // ET offsets are whole hours
+  const insideFences = (d) => { const h = etParts(d).hour; return h >= 9 && h < 17; };
+  let earliestAt = new Date(at.getTime() - JITTER_MAX_MINUTES * 60000);
+  let latestAt = new Date(at.getTime() + JITTER_MAX_MINUTES * 60000);
+  if (kind === "anchored") {
+    earliestAt = new Date(Math.max(earliestAt.getTime(), hourStart.getTime()));
+    latestAt = new Date(Math.min(latestAt.getTime(), hourStart.getTime() + 59 * 60000));
+  } else {
+    if (!insideFences(earliestAt)) earliestAt = at;
+    if (!insideFences(latestAt)) latestAt = at;
+  }
+  return { at, kind, bucket, earliestAt, latestAt };
 }
 
 function calculateReviewSendTime(completedAt, serviceType, opts) {
@@ -627,6 +640,40 @@ function calculateReviewSendTime(completedAt, serviceType, opts) {
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
 // page shows that tick, not the eligibility instant (codex #4140 r4 P2).
 const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
+// The tick the Reviews page shows for a step: an SMS step's tick must also
+// clear the 8 AM–8 PM send window while GATE_SMS_SEND_WINDOW is on — a
+// 7:50 PM row's 8:14 PM tick is refused by checkSendWindow and held to the
+// next morning, so the displayed plan is the first tick after the window
+// reopens (codex #4140 r11 P2). Email steps are not windowed. A no-link
+// check-in labelled "email" is forced to SMS by sendOutreachTouch, so only
+// an ask step's own "email" channel is email here.
+function nextSendTickFor(step, from) {
+  return isEmailAskStep(step) ? nextCadenceTickAt(from) : windowedSmsTickAt(from);
+}
+// The tick an ask step lands on if it swaps to the OTHER channel at send
+// time ({ fallbackChannel, fallbackTickAt }); both null when the step is not
+// an ask (a check-in is always SMS) or the other channel's tick is the same.
+function fallbackTickFor(step, from) {
+  const none = { fallbackChannel: null, plannedChannel: null, fallbackTickAt: null };
+  if (!from || !OUTREACH.isAskTemplate(step?.templateKey)) return none;
+  const emailTick = nextCadenceTickAt(from);
+  const smsTick = windowedSmsTickAt(from);
+  if (!emailTick || !smsTick || smsTick.getTime() === emailTick.getTime()) return none;
+  // Both channel names are spelled here (text/email) so the page renders
+  // them without deciding anything.
+  return isEmailAskStep(step)
+    ? { fallbackChannel: "text", plannedChannel: "email", fallbackTickAt: smsTick }
+    : { fallbackChannel: "email", plannedChannel: "text", fallbackTickAt: emailTick };
+}
+function isEmailAskStep(step) {
+  return String(step?.channel || "sms").toLowerCase() === "email" && OUTREACH.isAskTemplate(step?.templateKey);
+}
+function windowedSmsTickAt(from) {
+  const tick = nextCadenceTickAt(from);
+  if (!tick || !require("../config/feature-gates").isEnabled("smsSendWindow")) return tick;
+  const { isWithinSendWindowET, nextSendWindowOpenET } = require("./messaging/send-window");
+  return isWithinSendWindowET(tick) ? tick : nextCadenceTickAt(nextSendWindowOpenET(tick));
+}
 function nextCadenceTickAt(from) {
   const d = from instanceof Date ? from : new Date(from);
   if (Number.isNaN(d.getTime())) return null;
@@ -4123,6 +4170,25 @@ const ReviewService = {
   // In-flight supersession re-check spacing — a knob so tests don't wait
   // real provider-settle seconds.
   _SUPERSEDE_RETRY_DELAY_MS: 1500,
+  /**
+   * The already_active outcome of startReviewSequence — every path that
+   * finds another active cadence (the up-front lookup, and the two
+   * unique-index race recoveries) returns through here so a "customer asked
+   * for the link" capture is never lost (codex #4140 r4 P2, r9 P2). Only
+   * customer_requested is written: the schedule is not moved (a second ask
+   * inside the window is what the 3-day rule spaces) and updated_at is the
+   * runner's claim stamp (claimIsStale) and must not be refreshed. A race
+   * that left NO active row (the winner already completed) records nothing.
+   */
+  async _alreadyActive(active, customerRequested) {
+    let requestRecorded = false;
+    if (customerRequested && active?.id) {
+      await db("review_sequences").where({ id: active.id }).update({ customer_requested: JSON.stringify(customerRequested) });
+      requestRecorded = true;
+    }
+    return { started: false, reason: "already_active", sequence: active, requestRecorded };
+  },
+
 
   async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null }) {
     const customer = await db("customers").where({ id: customerId }).first();
@@ -4206,12 +4272,7 @@ const ReviewService = {
         // second ask inside the window is what the 3-day rule (PR 3) spaces.
         // Only customer_requested is written: updated_at is the runner's
         // claim stamp (claimIsStale) and must not be refreshed here.
-        let requestRecorded = false;
-        if (customerRequested) {
-          await db("review_sequences").where({ id: active.id }).update({ customer_requested: JSON.stringify(customerRequested) });
-          requestRecorded = true;
-        }
-        return { started: false, reason: "already_active", sequence: active, requestRecorded };
+        return this._alreadyActive(active, customerRequested);
       }
     }
 
@@ -4397,20 +4458,20 @@ const ReviewService = {
           await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested, decision });
           return { started: false, reason: "deferred_inflight", deferred: true };
         }
-        if (existing) return { started: false, reason: "already_active", sequence: existing };
+        if (existing) return this._alreadyActive(existing, customerRequested);
         supersedeOpenerId = null;
         try {
           [sequence] = await insertReplacement();
         } catch (retryErr) {
           if (retryErr?.code === "23505") {
             const raced = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-            return { started: false, reason: "already_active", sequence: raced };
+            return this._alreadyActive(raced, customerRequested);
           }
           throw retryErr;
         }
       } else if (err?.code === "23505") {
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-        return { started: false, reason: "already_active", sequence: existing };
+        return this._alreadyActive(existing, customerRequested);
       } else {
         throw err;
       }
@@ -4835,7 +4896,14 @@ const ReviewService = {
         await db("review_sequences").where({ id: row.id }).del();
         continue;
       }
-      let result = null;
+      // startReviewSequence always returns an outcome object (every path
+      // above returns { started, reason }); a throw is the catch below.
+      let result;
+      // The parked row's own enrollment reason (opener_in_flight carries the
+      // final's reason) becomes the redeemed sequence's decision; the park
+      // time is its planned/next-eval instant (codex #4140 r5).
+      const parkedReason = parseDecision(row.decision)?.enrollmentReason || null;
+      const parkedAtISO = row.started_at || new Date();
       try {
         result = await this.startReviewSequence({
           customerId: row.customer_id,
@@ -4849,13 +4917,7 @@ const ReviewService = {
           firstTouchAt: row.started_at ? new Date(row.started_at) : null,
           seriesFinal: row.series_final === true,
           customerRequested: parseDecision(row.customer_requested),
-          decision: parseDecision(row.decision)?.enrollmentReason
-            ? sequenceDecision({
-              reason: parseDecision(row.decision).enrollmentReason,
-              plannedAt: row.started_at || new Date(),
-              nextEvalAt: row.started_at || new Date(),
-            })
-            : null,
+          decision: parkedReason ? sequenceDecision({ reason: parkedReason, plannedAt: parkedAtISO, nextEvalAt: parkedAtISO }) : null,
         });
       } catch (err) {
         logger.error(`[review] deferred enrollment redeem failed (customerId=${row.customer_id} errType=${err?.name || "Error"})`);
@@ -4866,19 +4928,19 @@ const ReviewService = {
           .catch(() => {});
         continue;
       }
-      if (result?.started) {
+      if (result.started) {
         redeemed += 1;
         await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
         continue;
       }
-      if (result?.reason === "already_active") {
+      if (result.reason === "already_active") {
         // Opener still active — release with backoff.
         await db("review_sequences")
           .where({ id: row.id, status: "redeeming" })
           .update({ status: "deferred", next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
         continue;
       }
-      if (result?.reason === "deferred_inflight") {
+      if (result.reason === "deferred_inflight") {
         // startReviewSequence may have seen THIS claimed row as the
         // existing park and inserted nothing (codex #3243 r24 P2) — only
         // drop it when a DISTINCT replacement actually exists; otherwise
@@ -5412,27 +5474,42 @@ const ReviewService = {
   /** Map of customerId → active sequence summary (for candidate annotation). */
   async getActiveSequencesForCustomers(ids = []) {
     if (!ids.length) return {};
-    const rows = await db("review_sequences").whereIn("customer_id", ids).where("status", "active");
+    // Parked series finals (deferred / redeeming, _parkDeferredFinal) are a
+    // durable enrollment too (codex #4140 r12 P2): after the opener settles
+    // and before the redemption sweep the customer has no active row, and
+    // the page must not read that as "no cadence" and offer Start Cadence.
+    // An active row wins over a parked one for the same customer.
+    const rows = await db("review_sequences").whereIn("customer_id", ids).whereIn("status", ["active", "deferred", "redeeming"]);
     const map = {};
     rows.forEach((r) => {
+      const parked = r.status !== "active";
+      if (parked && map[r.customer_id] && !map[r.customer_id].parked) return;
       const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
 
       map[r.customer_id] = {
         id: r.id,
+        parked,
         currentStep: r.current_step,
         totalSteps: plan.length,
         nextRunAt: r.next_run_at,
         // The worker tick that will actually pick the row up (null while the
-        // runner holds the claim).
-        nextSendTickAt: r.next_run_at ? nextCadenceTickAt(r.next_run_at) : null,
+        // runner holds the claim). An overdue row (missed tick, gate re-enabled
+        // between ticks) is picked up at the next tick from NOW, not at a tick
+        // that has already passed (codex #4140 r8).
+        nextSendTickAt: r.next_run_at ? nextSendTickFor(plan[r.current_step], new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
+        // An ask step can swap channel at send time (sendOutreachTouch: the
+        // intended channel unavailable, the other allowed) — email→SMS then
+        // meets the send window, SMS→email escapes it — so the page shows the
+        // other channel's tick when it differs (codex #4140 r14, r16 P2).
+        ...fallbackTickFor(plan[r.current_step], r.next_run_at ? new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now())) : null),
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon
         // is a stranded claim (process exit mid-send), not a live one — the
         // cron never re-selects a NULL schedule, so say so instead of
         // "Sending now" forever (codex #4140 r1).
-        sending: r.next_run_at == null && !claimIsStale(r),
-        stranded: r.next_run_at == null && claimIsStale(r),
+        sending: !parked && r.next_run_at == null && !claimIsStale(r),
+        stranded: !parked && r.next_run_at == null && claimIsStale(r),
         decision: parseDecision(r.decision),
         customerRequested: parseDecision(r.customer_requested),
       };
