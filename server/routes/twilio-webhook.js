@@ -1063,6 +1063,23 @@ router.post('/sms', async (req, res) => {
       }).catch((e) => logger.warn(`[tech-line] text notify failed: ${e.message}`));
     }
 
+    let aiAutoReplyOn = false;
+    if (isAiNumber) {
+      if (isEnabled('aiAssistantAutoReply')) {
+        aiAutoReplyOn = true;
+      } else {
+        try {
+          const toggle = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
+          if (toggle?.value === 'true') aiAutoReplyOn = true;
+        } catch { /* ignore */ }
+      }
+    }
+    // The assistant line answers its own unknown senders — but only when it
+    // actually will (auto-reply on, no scheduling/reschedule intent it hands
+    // to humans, not a reaction/closer — mirrors the AI branch's own gate).
+    // A text the assistant will NOT answer must still ring (codex #4210 r2).
+    const aiWillAnswer = isAiNumber && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly;
+
     // Unknown senders (and a known customer whose bell above did not land)
     // ring the SAME sms_reply bell + push. This used to be an owner SMS
     // forward ("📩 New SMS") sent as internal_alert — TwilioService redirects
@@ -1090,6 +1107,12 @@ router.post('/sms', async (req, res) => {
       try {
         const prior = await db('sms_log')
           .where({ direction: 'inbound', from_phone: From })
+          // Only a prior message that could itself have rung counts: a
+          // consumed START/HELP/STOP or a reaction never alerted, so it
+          // must not swallow the service request that follows it (codex r2).
+          .where(function alertable() {
+            this.whereNotIn('message_type', ['opt_out', 'opt_in', 'help_request', 'sms_reaction']).orWhereNull('message_type');
+          })
           .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
           .where('created_at', '<', smsLogEntry.created_at)
           .whereNot('twilio_sid', MessageSid)
@@ -1098,10 +1121,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    // The AI assistant line answers its own unknown senders (and escalates
-    // on its own terms below) — its ordinary chatbot turns must not page
-    // staff (codex #4210 P1).
-    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !isAiNumber && !knownInboundNotified && !repeatUnknownSender && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !aiWillAnswer && !knownInboundNotified && !repeatUnknownSender && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
       } catch (e) {
@@ -1127,17 +1147,6 @@ router.post('/sms', async (req, res) => {
     // WAVES AI ASSISTANT — route through conversational AI engine
     // Only active on the dedicated AI assistant number
 
-    let aiAutoReplyOn = false;
-    if (isAiNumber) {
-      if (isEnabled('aiAssistantAutoReply')) {
-        aiAutoReplyOn = true;
-      } else {
-        try {
-          const toggle = await db('system_config').where({ key: 'ai_sms_auto_reply' }).first();
-          if (toggle?.value === 'true') aiAutoReplyOn = true;
-        } catch { /* ignore */ }
-      }
-    }
     // Scheduling-intent gate — high-stakes scheduling questions must not be
     // auto-answered. A real failure motivated this: a customer asked "are we
     // on the schedule for tomorrow?" and the canned AI reply said "fully
