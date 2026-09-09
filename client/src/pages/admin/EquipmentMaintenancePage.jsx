@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { Button, Field, Select, Badge, Card, ActionFeedback } from "../../components/ui";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { BarChart3, Truck } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -8,23 +9,12 @@ const API = import.meta.env.VITE_API_URL || "/api";
 // STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
 // stay distinct from green/amber/red/muted in their respective scopes.
 // SEV_COLORS.high keeps explicit '#f97316' for warning-orange between amber and red.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  darkCard: "#FAFAFA",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8"
-};
+
+// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
+// STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
+// stay distinct from green/amber/red/muted in their respective scopes.
+// SEV_COLORS.high keeps explicit '#f97316' for warning-orange between amber and red.
+
 function af(path, opts = {}) {
   return fetch(`${API}${path}`, {
     headers: {
@@ -38,8 +28,8 @@ function af(path, opts = {}) {
   });
 }
 const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
+  background: "#FFFFFF",
+  border: `1px solid ${"#E4E4E7"}`,
   borderRadius: 12,
   padding: 20,
   marginBottom: 12,
@@ -67,10 +57,10 @@ const sBadge = (bg, c) => ({
 const sInput = {
   width: "100%",
   padding: "8px 12px",
-  background: D.input,
-  border: `1px solid ${D.border}`,
+  background: "#FFFFFF",
+  border: `1px solid ${"#E4E4E7"}`,
   borderRadius: 8,
-  color: D.text,
+  color: "#27272A",
   fontSize: 13,
   outline: "none",
   boxSizing: "border-box"
@@ -95,18 +85,12 @@ const CAT_ICONS = {
   other: "\u{1F527}"
 };
 const STATUS_COLORS = {
-  active: D.green,
-  maintenance: D.amber,
-  retired: D.muted,
-  sold: D.muted,
-  lost: D.red,
-  in_service: D.green
-};
-const SEV_COLORS = {
-  critical: D.red,
-  high: "#f97316",
-  medium: D.amber,
-  low: D.teal
+  active: "#15803D",
+  maintenance: "#A16207",
+  retired: "#71717A",
+  sold: "#71717A",
+  lost: "#991B1B",
+  in_service: "#15803D"
 };
 const FLEET_SECTIONS = [{
   key: "fleet",
@@ -121,7 +105,7 @@ function ConditionBar({
   rating
 }) {
   const r = rating || 5;
-  const color = r >= 8 ? D.green : r >= 5 ? D.amber : D.red;
+  const color = r >= 8 ? "#18181B" : r >= 5 ? "#52525B" : "#C8312F";
   return <div style={{
     display: "flex",
     alignItems: "center",
@@ -131,7 +115,7 @@ function ConditionBar({
       <div style={{
       flex: 1,
       height: 6,
-      background: D.input,
+      background: "#FFFFFF",
       borderRadius: 3,
       overflow: "hidden",
       minWidth: 60
@@ -145,7 +129,7 @@ function ConditionBar({
       }} />{" "}
       </div>{" "}
       <span style={{
-      fontSize: 11,
+      fontSize: 14,
       color,
       fontWeight: 500,
       minWidth: 20
@@ -160,38 +144,40 @@ function StatCard({
   color,
   sub
 }) {
-  return <div style={{
-    ...sCard,
+  return <Card style={{
     flex: "1 1 160px",
     minWidth: 140,
     textAlign: "center",
     padding: 16
-  }}>
+  }} className="p-4 mb-3">
       {" "}
       <div style={{
-      fontSize: 11,
-      color: D.muted,
-      marginBottom: 4,
-      textTransform: "uppercase",
-      letterSpacing: 0.5
+      fontSize: 14,
+      color: "#71717A",
+      marginBottom: 4
     }}>
         {label}
       </div>{" "}
       <div style={{
       fontSize: 22,
-      fontWeight: 700,
-      color: color || D.heading
+      fontWeight: 500,
+      color: color || "#09090B"
     }}>
         {value}
       </div>
       {sub && <div style={{
-      fontSize: 11,
-      color: D.muted,
+      fontSize: 14,
+      color: "#71717A",
       marginTop: 2
-    }}>{sub}</div>}
-    </div>;
+    }}>
+          {sub}
+        </div>}
+    </Card>;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// MAIN COMPONENT
+// ═══════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════
@@ -199,6 +185,9 @@ export default function EquipmentMaintenancePage({
   embedded = false,
   initialTab = "fleet"
 }) {
+  const actionRef = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const [pendingAction, setPendingAction] = useState("");
   const [tab, setTab] = useState(initialTab);
   const [toast, setToast] = useState("");
   const showToast = m => {
@@ -222,7 +211,11 @@ export default function EquipmentMaintenancePage({
   const [mileageSummary, setMileageSummary] = useState(null);
   const [dueSchedules, setDueSchedules] = useState([]);
   const [monthlyCosts, setMonthlyCosts] = useState([]);
+  const [fleetError, setFleetError] = useState("");
+  const [analyticsError, setAnalyticsError] = useState("");
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const loadFleet = useCallback(async () => {
+    setFleetError("");
     setLoading(true);
     try {
       const [eqRes, ovRes, alRes] = await Promise.all([af("/admin/equipment-maintenance"), af("/admin/equipment-maintenance/analytics/overview"), af("/admin/equipment-maintenance/alerts?status=new")]);
@@ -230,11 +223,13 @@ export default function EquipmentMaintenancePage({
       setOverview(ovRes);
       setAlerts(alRes.alerts || []);
     } catch (e) {
-      console.error(e);
+      setFleetError(e.message);
     }
     setLoading(false);
   }, []);
   const loadAnalytics = useCallback(async () => {
+    setAnalyticsLoading(true);
+    setAnalyticsError("");
     try {
       const [cRes, rRes, mRes, dRes, recRes] = await Promise.all([af("/admin/equipment-maintenance/analytics/costs"), af("/admin/equipment-maintenance/analytics/reliability"), af("/admin/equipment-maintenance/mileage/summary"), af("/admin/equipment-maintenance/schedules/due"), af("/admin/equipment-maintenance/records/recent?limit=100")]);
       setCosts(cRes.costs || []);
@@ -254,8 +249,9 @@ export default function EquipmentMaintenancePage({
         cost: byMonth[m]
       })));
     } catch (e) {
-      console.error(e);
+      setAnalyticsError(e.message);
     }
+    setAnalyticsLoading(false);
   }, []);
   useEffect(() => {
     loadFleet();
@@ -280,18 +276,27 @@ export default function EquipmentMaintenancePage({
   }, [equipment, filterCat, filterStatus, sortBy]);
   const categories = useMemo(() => [...new Set(equipment.map(e => e.category).filter(Boolean))].sort(), [equipment]);
   const dismissAlert = async id => {
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setActionError("");
+    setPendingAction(id);
     try {
-      await af(`/admin/equipment-maintenance/alerts/${id}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          status: "resolved",
-          resolved_by: "admin"
-        })
-      });
-      setAlerts(prev => prev.filter(a => a.id !== id));
-      showToast("Alert resolved");
-    } catch (e) {
-      showToast("Error resolving alert");
+      try {
+        await af(`/admin/equipment-maintenance/alerts/${id}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            status: "resolved",
+            resolved_by: "admin"
+          })
+        });
+        setAlerts(prev => prev.filter(a => a.id !== id));
+        showToast("Alert resolved");
+      } catch (e) {
+        setActionError(`Error resolving alert: ${e.message}`);
+      }
+    } finally {
+      actionRef.current = false;
+      setPendingAction("");
     }
   };
 
@@ -300,28 +305,25 @@ export default function EquipmentMaintenancePage({
     maxWidth: 1300,
     margin: "0 auto"
   }}>
-      {" "}
-      {!embedded && <AdminCommandHeader title="Fleet" icon={Truck} sections={FLEET_SECTIONS} activeKey={tab} onSectionChange={setTab} ariaLabel="Fleet section" navGridClassName="grid-cols-2" />}
-      {/* Toast */}
-      {toast && <div style={{
-      position: "fixed",
-      top: 20,
-      right: 20,
-      background: D.green,
-      color: "#fff",
-      padding: "10px 20px",
-      borderRadius: 8,
-      fontSize: 13,
-      fontWeight: 500,
-      zIndex: 9999
-    }}>
+      {actionError && <ActionFeedback error className="mb-4">
+          {actionError}
+        </ActionFeedback>}{" "}
+      {!embedded && <AdminCommandHeader title="Fleet" icon={Truck} sections={FLEET_SECTIONS} activeKey={tab} onSectionChange={setTab} ariaLabel="Fleet section" navGridClassName="grid-cols-2" variant="workspace" />}
+      {toast && <Card role="status" className="fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
           {toast}
-        </div>}
-      {tab === "fleet" && <FleetTab {...{
+        </Card>}
+      {fleetError && <ActionFeedback error onRetry={loadFleet} className="mb-4">
+          Could not load fleet: {fleetError}
+        </ActionFeedback>}
+      {analyticsError && tab === "analytics" && <ActionFeedback error onRetry={loadAnalytics} className="mb-4">
+          Could not load analytics: {analyticsError}
+        </ActionFeedback>}
+      {tab === "fleet" && !fleetError && <FleetTab {...{
       loading,
       overview,
       alerts,
       dismissAlert,
+      resolvingAlert: pendingAction,
       filtered,
       categories,
       filterCat,
@@ -335,7 +337,10 @@ export default function EquipmentMaintenancePage({
       showToast,
       loadFleet
     }} />}
-      {tab === "analytics" && <AnalyticsTab {...{
+      {tab === "analytics" && (loading || analyticsLoading) && <div className="min-h-60 py-6 text-zinc-500">
+          Loading equipment analytics…
+        </div>}
+      {tab === "analytics" && !loading && !analyticsLoading && !fleetError && !analyticsError && <AnalyticsTab {...{
       costs,
       reliability,
       mileageSummary,
@@ -349,11 +354,15 @@ export default function EquipmentMaintenancePage({
 // ═══════════════════════════════════════════════════════════════════
 // FLEET OVERVIEW TAB
 // ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// FLEET OVERVIEW TAB
+// ═══════════════════════════════════════════════════════════════════
 function FleetTab({
   loading,
   overview,
   alerts,
   dismissAlert,
+  resolvingAlert,
   filtered,
   categories,
   filterCat,
@@ -369,7 +378,7 @@ function FleetTab({
 }) {
   const isMobile = useIsMobile(768);
   if (loading) return <div style={{
-    color: D.muted,
+    color: "#71717A",
     textAlign: "center",
     padding: 40
   }}>
@@ -377,18 +386,16 @@ function FleetTab({
       </div>;
   return <>
       {/* Alert Banner */}
-      {alerts.length > 0 && <div style={{
-      ...sCard,
-      background: D.card,
-      borderColor: D.border,
+      {alerts.length > 0 && <Card style={{
+      borderColor: "#E4E4E7",
       padding: 16,
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
           {" "}
           <div style={{
         fontSize: 14,
-        fontWeight: 700,
-        color: D.red,
+        fontWeight: 500,
+        color: "#C8312F",
         marginBottom: 8
       }}>
             {alerts.length} Active Alert{alerts.length > 1 ? "s" : ""}
@@ -398,32 +405,30 @@ function FleetTab({
         alignItems: "center",
         gap: 8,
         padding: "6px 0",
-        borderBottom: `1px solid ${D.border}`
+        borderBottom: `1px solid ${"#E4E4E7"}`
       }}>
               {" "}
-              <span style={sBadge(SEV_COLORS[a.severity] || D.amber, D.white)}>
-                {a.severity}
-              </span>{" "}
+              <Badge tone="neutral">{a.severity}</Badge>{" "}
               <span style={{
           flex: 1,
           minWidth: 0,
-          fontSize: 13,
-          color: D.text
+          fontSize: 14,
+          color: "#27272A"
         }}>
                 {a.title}
               </span>{" "}
-              <button onClick={() => dismissAlert(a.id)} style={sBtn("transparent", D.muted)}>
+              <Button onClick={() => dismissAlert(a.id)} disabled={!!resolvingAlert} loading={resolvingAlert === a.id} type="button" variant="secondary" className="min-w-11">
                 Dismiss
-              </button>{" "}
+              </Button>{" "}
             </div>)}
           {alerts.length > 5 && <div style={{
-        fontSize: 11,
-        color: D.muted,
+        fontSize: 14,
+        color: "#71717A",
         marginTop: 6
       }}>
               + {alerts.length - 5} more
             </div>}
-        </div>}
+        </Card>}
 
       {/* Stats */}
       {overview && <div style={{
@@ -434,11 +439,11 @@ function FleetTab({
     }}>
           {" "}
           <StatCard label="Total Assets" value={overview.total_assets} />{" "}
-          <StatCard label="Overdue Maintenance" value={overview.overdue_maintenance} color={overview.overdue_maintenance > 0 ? D.red : D.green} />{" "}
+          <StatCard label="Overdue Maintenance" value={overview.overdue_maintenance} color={overview.overdue_maintenance > 0 ? "#C8312F" : "#18181B"} />{" "}
           <StatCard label="YTD Maintenance" value={fmt(overview.ytd_maintenance_spend)} />{" "}
           <StatCard label="YTD Mileage" value={fmtN(Math.round(overview.ytd_total_miles))} sub="miles" />{" "}
           <StatCard label="YTD Fuel" value={fmt(overview.ytd_fuel_cost)} />{" "}
-          <StatCard label="YTD IRS Deduction" value={fmt(overview.ytd_irs_deduction)} color={D.green} />{" "}
+          <StatCard label="YTD IRS Deduction" value={fmt(overview.ytd_irs_deduction)} color={"#18181B"} />{" "}
         </div>}
 
       {/* Filters */}
@@ -449,40 +454,43 @@ function FleetTab({
       marginBottom: 16
     }}>
         {" "}
-        <select value={filterCat} onChange={e => setFilterCat(e.target.value)} style={{
-        ...sInput,
-        width: "auto",
-        minWidth: 140
-      }}>
-          {" "}
-          <option value="">All Categories</option>
-          {categories.map(c => <option key={c} value={c}>
-              {c}
-            </option>)}
-        </select>{" "}
-        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
-        ...sInput,
-        width: "auto",
-        minWidth: 130
-      }}>
-          {" "}
-          <option value="">All Statuses</option>{" "}
-          <option value="active">Active</option>{" "}
-          <option value="maintenance">Maintenance</option>{" "}
-          <option value="retired">Retired</option>{" "}
-          <option value="sold">Sold</option>{" "}
-          <option value="lost">Lost</option>{" "}
-        </select>{" "}
-        <select value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
-        ...sInput,
-        width: "auto",
-        minWidth: 130
-      }}>
-          {" "}
-          <option value="name">Sort: Name</option>{" "}
-          <option value="condition">Sort: Condition</option>{" "}
-          <option value="cost">Sort: Cost</option>{" "}
-        </select>{" "}
+        <Field label="Category">
+          <Select value={filterCat} onChange={e => setFilterCat(e.target.value)} style={{
+          width: "auto",
+          minWidth: 140
+        }}>
+            {" "}
+            <option value="">All Categories</option>
+            {categories.map(c => <option key={c} value={c}>
+                {c}
+              </option>)}
+          </Select>
+        </Field>{" "}
+        <Field label="Status">
+          <Select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
+          width: "auto",
+          minWidth: 130
+        }}>
+            {" "}
+            <option value="">All Statuses</option>{" "}
+            <option value="active">Active</option>{" "}
+            <option value="maintenance">Maintenance</option>{" "}
+            <option value="retired">Retired</option>{" "}
+            <option value="sold">Sold</option>{" "}
+            <option value="lost">Lost</option>{" "}
+          </Select>
+        </Field>{" "}
+        <Field label="Sort by">
+          <Select value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
+          width: "auto",
+          minWidth: 130
+        }}>
+            {" "}
+            <option value="name">Sort: Name</option>{" "}
+            <option value="condition">Sort: Condition</option>{" "}
+            <option value="cost">Sort: Cost</option>{" "}
+          </Select>
+        </Field>{" "}
       </div>
       {/* Equipment Grid */}
       <div style={{
@@ -493,7 +501,7 @@ function FleetTab({
         {filtered.map(eq => <EquipmentCard key={eq.id} eq={eq} isExpanded={expandedId === eq.id} onToggle={() => setExpandedId(expandedId === eq.id ? null : eq.id)} showToast={showToast} loadFleet={loadFleet} />)}
       </div>
       {filtered.length === 0 && <div style={{
-      color: D.muted,
+      color: "#71717A",
       textAlign: "center",
       padding: 40
     }}>
@@ -502,6 +510,9 @@ function FleetTab({
     </>;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// EQUIPMENT CARD + EXPANDED DETAIL
+// ═══════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════
 // EQUIPMENT CARD + EXPANDED DETAIL
 // ═══════════════════════════════════════════════════════════════════
@@ -531,7 +542,7 @@ function EquipmentCard({
     ...sCard,
     cursor: "pointer",
     transition: "border-color 0.2s",
-    borderColor: overdue ? D.red : isExpanded ? D.teal : D.border,
+    borderColor: overdue ? "#991B1B" : isExpanded ? "#18181B" : "#E4E4E7",
     gridColumn: isExpanded ? "1 / -1" : undefined
   }}>
       {/* Card Header */}
@@ -562,17 +573,17 @@ function EquipmentCard({
             <span style={{
             fontSize: 15,
             fontWeight: 700,
-            color: D.heading
+            color: "#09090B"
           }}>
               {eq.name}
             </span>{" "}
-            <span style={sBadge(STATUS_COLORS[eq.status] || D.muted, D.white)}>
+            <span style={sBadge(STATUS_COLORS[eq.status] || "#71717A", "#FFFFFF")}>
               {eq.status}
             </span>{" "}
           </div>{" "}
           <div style={{
           fontSize: 11,
-          color: D.muted,
+          color: "#71717A",
           marginTop: 2
         }}>
             {eq.asset_tag && <span style={{
@@ -602,7 +613,7 @@ function EquipmentCard({
             </div>
             {nm && <div style={{
             fontSize: 11,
-            color: overdue ? D.red : D.muted
+            color: overdue ? "#991B1B" : "#71717A"
           }}>
                 {overdue ? "OVERDUE: " : "Next: "}
                 {nm.task_name}
@@ -614,7 +625,7 @@ function EquipmentCard({
           gap: 12,
           marginTop: 4,
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             {eq.assigned_tech_name !== "Unassigned" && <span>Assigned: {eq.assigned_tech_name}</span>}
             {eq.current_miles > 0 && <span>{fmtN(eq.current_miles)} mi</span>}
@@ -625,7 +636,7 @@ function EquipmentCard({
       {/* Expanded Detail */}
       {isExpanded && detail && <div style={{
       marginTop: 16,
-      borderTop: `1px solid ${D.border}`,
+      borderTop: `1px solid ${"#E4E4E7"}`,
       paddingTop: 16
     }}>
           {/* Equipment Info Grid */}
@@ -653,7 +664,7 @@ function EquipmentCard({
             <div style={{
           fontSize: 14,
           fontWeight: 700,
-          color: D.heading,
+          color: "#09090B",
           marginBottom: 8
         }}>
               Maintenance Schedules
@@ -671,41 +682,41 @@ function EquipmentCard({
                 <thead>
                   {" "}
                   <tr style={{
-                borderBottom: `1px solid ${D.border}`
+                borderBottom: `1px solid ${"#E4E4E7"}`
               }}>
                     {" "}
                     <th style={{
                   textAlign: "left",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                       Task
                     </th>{" "}
                     <th style={{
                   textAlign: "left",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                       Interval
                     </th>{" "}
                     <th style={{
                   textAlign: "left",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                       Next Due
                     </th>{" "}
                     <th style={{
                   textAlign: "left",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                       Priority
                     </th>{" "}
                     <th style={{
                   textAlign: "right",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                       Est Cost
                     </th>{" "}
@@ -719,25 +730,25 @@ function EquipmentCard({
                 if (s.interval_days) intervals.push(`${s.interval_days} days`);
                 if (s.interval_months) intervals.push(`${s.interval_months} mo`);
                 return <tr key={s.id} style={{
-                  borderBottom: `1px solid ${D.border}`,
+                  borderBottom: `1px solid ${"#E4E4E7"}`,
                   background: s.is_overdue ? "rgba(239,68,68,0.1)" : "transparent"
                 }}>
                         {" "}
                         <td style={{
                     padding: "6px 8px",
-                    color: D.text
+                    color: "#27272A"
                   }}>
                           {s.task_name}
                         </td>{" "}
                         <td style={{
                     padding: "6px 8px",
-                    color: D.muted
+                    color: "#71717A"
                   }}>
                           {intervals.join(" / ") || "--"}
                         </td>{" "}
                         <td style={{
                     padding: "6px 8px",
-                    color: s.is_overdue ? D.red : D.text
+                    color: s.is_overdue ? "#991B1B" : "#27272A"
                   }}>
                           {s.is_overdue && "OVERDUE "}
                           {s.next_due_at ? new Date(s.next_due_at).toLocaleDateString() : ""}
@@ -747,13 +758,13 @@ function EquipmentCard({
                         <td style={{
                     padding: "6px 8px"
                   }}>
-                          <span style={sBadge(s.priority === "critical" ? D.red : s.priority === "high" ? "#f97316" : D.teal, D.white)}>
+                          <span style={sBadge(s.priority === "critical" ? "#991B1B" : s.priority === "high" ? "#f97316" : "#18181B", "#FFFFFF")}>
                             {s.priority}
                           </span>
                         </td>{" "}
                         <td style={{
                     padding: "6px 8px",
-                    color: D.text,
+                    color: "#27272A",
                     textAlign: "right"
                   }}>
                           {s.estimated_cost ? fmt(s.estimated_cost) : "--"}
@@ -772,10 +783,10 @@ function EquipmentCard({
         flexWrap: "wrap"
       }}>
             {" "}
-            <button onClick={() => setRecordForm(!recordForm)} style={sBtn(D.teal, D.white)}>
+            <button onClick={() => setRecordForm(!recordForm)} style={sBtn("#18181B", "#FFFFFF")}>
               {recordForm ? "Cancel" : "Record Maintenance"}
             </button>
-            {eq.category === "vehicle" && <button onClick={() => setMileageForm(!mileageForm)} style={sBtn(D.purple, D.white)}>
+            {eq.category === "vehicle" && <button onClick={() => setMileageForm(!mileageForm)} style={sBtn("#18181B", "#FFFFFF")}>
                 {mileageForm ? "Cancel" : "Log Mileage"}
               </button>}
           </div>
@@ -804,7 +815,7 @@ function EquipmentCard({
               <div style={{
           fontSize: 14,
           fontWeight: 700,
-          color: D.heading,
+          color: "#09090B",
           marginBottom: 8
         }}>
                 Maintenance History
@@ -822,41 +833,41 @@ function EquipmentCard({
                   <thead>
                     {" "}
                     <tr style={{
-                borderBottom: `1px solid ${D.border}`
+                borderBottom: `1px solid ${"#E4E4E7"}`
               }}>
                       {" "}
                       <th style={{
                   textAlign: "left",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Date
                       </th>{" "}
                       <th style={{
                   textAlign: "left",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Task
                       </th>{" "}
                       <th style={{
                   textAlign: "left",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Type
                       </th>{" "}
                       <th style={{
                   textAlign: "left",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         By
                       </th>{" "}
                       <th style={{
                   textAlign: "right",
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Cost
                       </th>{" "}
@@ -864,37 +875,37 @@ function EquipmentCard({
                   </thead>{" "}
                   <tbody>
                     {detail.recentRecords.slice(0, 10).map(r => <tr key={r.id} style={{
-                borderBottom: `1px solid ${D.border}`
+                borderBottom: `1px solid ${"#E4E4E7"}`
               }}>
                         {" "}
                         <td style={{
                   padding: "6px 8px",
-                  color: D.text
+                  color: "#27272A"
                 }}>
                           {new Date(r.performed_at).toLocaleDateString()}
                         </td>{" "}
                         <td style={{
                   padding: "6px 8px",
-                  color: D.text
+                  color: "#27272A"
                 }}>
                           {r.task_name}
                         </td>{" "}
                         <td style={{
                   padding: "6px 8px"
                 }}>
-                          <span style={sBadge(r.maintenance_type === "repair" ? D.red : r.maintenance_type === "inspection" ? D.purple : D.teal, D.white)}>
+                          <span style={sBadge(r.maintenance_type === "repair" ? "#991B1B" : r.maintenance_type === "inspection" ? "#18181B" : "#18181B", "#FFFFFF")}>
                             {r.maintenance_type}
                           </span>
                         </td>{" "}
                         <td style={{
                   padding: "6px 8px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                           {r.performed_by || r.vendor_name || "--"}
                         </td>{" "}
                         <td style={{
                   padding: "6px 8px",
-                  color: D.text,
+                  color: "#27272A",
                   textAlign: "right"
                 }}>
                           {fmt(r.total_cost)}
@@ -908,13 +919,13 @@ function EquipmentCard({
           {/* Cost of Ownership */}
           {detail.costOfOwnership && <div style={{
         ...sCard,
-        background: D.darkCard
+        background: "#FAFAFA"
       }}>
               {" "}
               <div style={{
           fontSize: 14,
           fontWeight: 700,
-          color: D.heading,
+          color: "#09090B",
           marginBottom: 12
         }}>
                 Cost of Ownership
@@ -928,10 +939,10 @@ function EquipmentCard({
                 {" "}
                 <div>
                   <div style={{
-              color: D.muted
+              color: "#71717A"
             }}>Purchase</div>
                   <div style={{
-              color: D.heading,
+              color: "#09090B",
               fontWeight: 500
             }}>
                     {fmt(detail.costOfOwnership.purchase_price)}
@@ -939,10 +950,10 @@ function EquipmentCard({
                 </div>{" "}
                 <div>
                   <div style={{
-              color: D.muted
+              color: "#71717A"
             }}>Total Maintenance</div>
                   <div style={{
-              color: D.heading,
+              color: "#09090B",
               fontWeight: 500
             }}>
                     {fmt(detail.costOfOwnership.total_maintenance)}
@@ -950,10 +961,10 @@ function EquipmentCard({
                 </div>{" "}
                 <div>
                   <div style={{
-              color: D.muted
+              color: "#71717A"
             }}>Total Fuel</div>
                   <div style={{
-              color: D.heading,
+              color: "#09090B",
               fontWeight: 500
             }}>
                     {fmt(detail.costOfOwnership.total_fuel)}
@@ -961,10 +972,10 @@ function EquipmentCard({
                 </div>{" "}
                 <div>
                   <div style={{
-              color: D.muted
+              color: "#71717A"
             }}>Total Cost</div>
                   <div style={{
-              color: D.amber,
+              color: "#A16207",
               fontWeight: 700
             }}>
                     {fmt(detail.costOfOwnership.total_cost)}
@@ -972,10 +983,10 @@ function EquipmentCard({
                 </div>{" "}
                 <div>
                   <div style={{
-              color: D.muted
+              color: "#71717A"
             }}>Monthly Cost</div>
                   <div style={{
-              color: D.heading,
+              color: "#09090B",
               fontWeight: 500
             }}>
                     {fmt(detail.costOfOwnership.monthly_cost)}
@@ -983,10 +994,10 @@ function EquipmentCard({
                 </div>{" "}
                 <div>
                   <div style={{
-              color: D.muted
+              color: "#71717A"
             }}>Age</div>
                   <div style={{
-              color: D.heading,
+              color: "#09090B",
               fontWeight: 500
             }}>
                     {detail.costOfOwnership.age_months} months
@@ -994,10 +1005,10 @@ function EquipmentCard({
                 </div>
                 {detail.costOfOwnership.cost_per_mile && <div>
                     <div style={{
-              color: D.muted
+              color: "#71717A"
             }}>Cost/Mile</div>
                     <div style={{
-              color: D.heading,
+              color: "#09090B",
               fontWeight: 500
             }}>
                       {fmt(detail.costOfOwnership.cost_per_mile)}
@@ -1005,10 +1016,10 @@ function EquipmentCard({
                   </div>}
                 {detail.costOfOwnership.total_irs_deduction > 0 && <div>
                     <div style={{
-              color: D.muted
+              color: "#71717A"
             }}>IRS Deduction</div>
                     <div style={{
-              color: D.green,
+              color: "#15803D",
               fontWeight: 700
             }}>
                       {fmt(detail.costOfOwnership.total_irs_deduction)}
@@ -1025,7 +1036,7 @@ function EquipmentCard({
               <div style={{
           fontSize: 14,
           fontWeight: 700,
-          color: D.heading,
+          color: "#09090B",
           marginBottom: 8
         }}>
                 Mileage Log (Last 30 Days)
@@ -1039,84 +1050,84 @@ function EquipmentCard({
                 {" "}
                 <div style={{
             ...sCard,
-            background: D.darkCard,
+            background: "#FAFAFA",
             padding: 12,
             textAlign: "center"
           }}>
                   {" "}
                   <div style={{
               fontSize: 10,
-              color: D.muted
+              color: "#71717A"
             }}>
                     Total Miles
                   </div>{" "}
                   <div style={{
               fontSize: 16,
               fontWeight: 700,
-              color: D.heading
+              color: "#09090B"
             }}>
                     {fmtN(Math.round(mileage.summary.total_miles))}
                   </div>{" "}
                 </div>{" "}
                 <div style={{
             ...sCard,
-            background: D.darkCard,
+            background: "#FAFAFA",
             padding: 12,
             textAlign: "center"
           }}>
                   {" "}
                   <div style={{
               fontSize: 10,
-              color: D.muted
+              color: "#71717A"
             }}>
                     Business Miles
                   </div>{" "}
                   <div style={{
               fontSize: 16,
               fontWeight: 700,
-              color: D.teal
+              color: "#18181B"
             }}>
                     {fmtN(Math.round(mileage.summary.business_miles))}
                   </div>{" "}
                 </div>{" "}
                 <div style={{
             ...sCard,
-            background: D.darkCard,
+            background: "#FAFAFA",
             padding: 12,
             textAlign: "center"
           }}>
                   {" "}
                   <div style={{
               fontSize: 10,
-              color: D.muted
+              color: "#71717A"
             }}>
                     Fuel Cost
                   </div>{" "}
                   <div style={{
               fontSize: 16,
               fontWeight: 700,
-              color: D.amber
+              color: "#A16207"
             }}>
                     {fmt(mileage.summary.total_fuel_cost)}
                   </div>{" "}
                 </div>{" "}
                 <div style={{
             ...sCard,
-            background: D.darkCard,
+            background: "#FAFAFA",
             padding: 12,
             textAlign: "center"
           }}>
                   {" "}
                   <div style={{
               fontSize: 10,
-              color: D.muted
+              color: "#71717A"
             }}>
                     IRS Deduction
                   </div>{" "}
                   <div style={{
               fontSize: 16,
               fontWeight: 700,
-              color: D.green
+              color: "#15803D"
             }}>
                     {fmt(mileage.summary.total_irs_deduction)}
                   </div>{" "}
@@ -1124,7 +1135,7 @@ function EquipmentCard({
               </div>
               {mileage.summary.avg_mpg && <div style={{
           fontSize: 12,
-          color: D.muted,
+          color: "#71717A",
           marginBottom: 8
         }}>
                   Avg MPG: {mileage.summary.avg_mpg}
@@ -1144,51 +1155,51 @@ function EquipmentCard({
                   <thead>
                     {" "}
                     <tr style={{
-                borderBottom: `1px solid ${D.border}`,
+                borderBottom: `1px solid ${"#E4E4E7"}`,
                 position: "sticky",
                 top: 0,
-                background: D.card
+                background: "#FFFFFF"
               }}>
                       {" "}
                       <th style={{
                   textAlign: "left",
                   padding: "4px 6px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Date
                       </th>{" "}
                       <th style={{
                   textAlign: "right",
                   padding: "4px 6px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Miles
                       </th>{" "}
                       <th style={{
                   textAlign: "right",
                   padding: "4px 6px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Biz %
                       </th>{" "}
                       <th style={{
                   textAlign: "right",
                   padding: "4px 6px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Fuel
                       </th>{" "}
                       <th style={{
                   textAlign: "right",
                   padding: "4px 6px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         IRS Ded.
                       </th>{" "}
                       <th style={{
                   textAlign: "right",
                   padding: "4px 6px",
-                  color: D.muted
+                  color: "#71717A"
                 }}>
                         Jobs
                       </th>{" "}
@@ -1196,46 +1207,46 @@ function EquipmentCard({
                   </thead>{" "}
                   <tbody>
                     {mileage.logs.slice(0, 30).map(l => <tr key={l.id} style={{
-                borderBottom: `1px solid ${D.border}`
+                borderBottom: `1px solid ${"#E4E4E7"}`
               }}>
                         {" "}
                         <td style={{
                   padding: "4px 6px",
-                  color: D.text
+                  color: "#27272A"
                 }}>
                           {new Date(l.log_date).toLocaleDateString()}
                         </td>{" "}
                         <td style={{
                   padding: "4px 6px",
-                  color: D.text,
+                  color: "#27272A",
                   textAlign: "right"
                 }}>
                           {l.total_miles}
                         </td>{" "}
                         <td style={{
                   padding: "4px 6px",
-                  color: D.muted,
+                  color: "#71717A",
                   textAlign: "right"
                 }}>
                           {l.business_pct}%
                         </td>{" "}
                         <td style={{
                   padding: "4px 6px",
-                  color: D.text,
+                  color: "#27272A",
                   textAlign: "right"
                 }}>
                           {l.fuel_cost ? fmt(l.fuel_cost) : "--"}
                         </td>{" "}
                         <td style={{
                   padding: "4px 6px",
-                  color: D.green,
+                  color: "#15803D",
                   textAlign: "right"
                 }}>
                           {fmt(l.irs_deduction_amount)}
                         </td>{" "}
                         <td style={{
                   padding: "4px 6px",
-                  color: D.muted,
+                  color: "#71717A",
                   textAlign: "right"
                 }}>
                           {l.jobs_serviced || "--"}
@@ -1258,10 +1269,10 @@ function InfoRow({
   }}>
       {" "}
       <span style={{
-      color: D.muted
+      color: "#71717A"
     }}>{label}: </span>{" "}
       <span style={{
-      color: D.text
+      color: "#27272A"
     }}>{value}</span>{" "}
     </div>;
 }
@@ -1340,14 +1351,14 @@ function MaintenanceForm({
   };
   return <div style={{
     ...sCard,
-    background: D.darkCard,
+    background: "#FAFAFA",
     marginBottom: 16
   }}>
       {" "}
       <div style={{
       fontSize: 14,
       fontWeight: 700,
-      color: D.heading,
+      color: "#09090B",
       marginBottom: 12
     }}>
         Record Maintenance
@@ -1362,7 +1373,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Schedule (optional)
           </label>{" "}
@@ -1379,7 +1390,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>Type</label>{" "}
           <select value={form.maintenanceType} onChange={e => set("maintenanceType", e.target.value)} style={sInput}>
             {["scheduled", "reactive", "inspection", "repair", "upgrade", "recall"].map(t => <option key={t} value={t}>
@@ -1393,7 +1404,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Task Name *
           </label>{" "}
@@ -1403,7 +1414,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Performed By
           </label>{" "}
@@ -1413,7 +1424,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>Vendor</label>{" "}
           <input value={form.vendorName} onChange={e => set("vendorName", e.target.value)} style={sInput} />{" "}
         </div>{" "}
@@ -1421,7 +1432,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Miles at Service
           </label>{" "}
@@ -1431,7 +1442,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Hours at Service
           </label>{" "}
@@ -1441,7 +1452,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Condition Before (1-10)
           </label>{" "}
@@ -1451,7 +1462,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Condition After (1-10)
           </label>{" "}
@@ -1461,7 +1472,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Parts Cost
           </label>{" "}
@@ -1471,7 +1482,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Labor Cost
           </label>{" "}
@@ -1481,7 +1492,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Vendor Cost
           </label>{" "}
@@ -1491,7 +1502,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Downtime Hours
           </label>{" "}
@@ -1506,7 +1517,7 @@ function MaintenanceForm({
           {" "}
           <label style={{
           fontSize: 12,
-          color: D.muted,
+          color: "#71717A",
           display: "flex",
           alignItems: "center",
           gap: 4
@@ -1517,7 +1528,7 @@ function MaintenanceForm({
           </label>{" "}
           <label style={{
           fontSize: 12,
-          color: D.muted,
+          color: "#71717A",
           display: "flex",
           alignItems: "center",
           gap: 4
@@ -1533,7 +1544,7 @@ function MaintenanceForm({
               {" "}
               <label style={{
             fontSize: 11,
-            color: D.muted
+            color: "#71717A"
           }}>
                 Follow-up Date
               </label>{" "}
@@ -1543,7 +1554,7 @@ function MaintenanceForm({
               {" "}
               <label style={{
             fontSize: 11,
-            color: D.muted
+            color: "#71717A"
           }}>
                 Follow-up Notes
               </label>{" "}
@@ -1558,7 +1569,7 @@ function MaintenanceForm({
     }}>
         {" "}
         <button onClick={submit} disabled={saving || !form.taskName} style={{
-        ...sBtn(D.green, D.white),
+        ...sBtn("#15803D", "#FFFFFF"),
         opacity: saving || !form.taskName ? 0.5 : 1
       }}>
           {saving ? "Saving..." : "Save Record"}
@@ -1623,14 +1634,14 @@ function MileageForm({
   };
   return <div style={{
     ...sCard,
-    background: D.darkCard,
+    background: "#FAFAFA",
     marginBottom: 16
   }}>
       {" "}
       <div style={{
       fontSize: 14,
       fontWeight: 700,
-      color: D.heading,
+      color: "#09090B",
       marginBottom: 12
     }}>
         Log Mileage
@@ -1645,7 +1656,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>Date</label>{" "}
           <input type="date" value={form.logDate} onChange={e => set("logDate", e.target.value)} style={sInput} />{" "}
         </div>{" "}
@@ -1653,7 +1664,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Odometer Start
           </label>{" "}
@@ -1663,7 +1674,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Odometer End
           </label>{" "}
@@ -1673,7 +1684,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Personal Miles
           </label>{" "}
@@ -1683,7 +1694,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Fuel Gallons
           </label>{" "}
@@ -1693,7 +1704,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Fuel Cost ($)
           </label>{" "}
@@ -1703,7 +1714,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>
             Jobs Serviced
           </label>{" "}
@@ -1713,7 +1724,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>Logged By</label>{" "}
           <input value={form.loggedBy} onChange={e => set("loggedBy", e.target.value)} style={sInput} />{" "}
         </div>{" "}
@@ -1721,7 +1732,7 @@ function MileageForm({
           {" "}
           <label style={{
           fontSize: 11,
-          color: D.muted
+          color: "#71717A"
         }}>Notes</label>{" "}
           <input value={form.notes} onChange={e => set("notes", e.target.value)} style={sInput} />{" "}
         </div>{" "}
@@ -1729,13 +1740,13 @@ function MileageForm({
       {totalMiles > 0 && <div style={{
       marginTop: 10,
       fontSize: 12,
-      color: D.muted
+      color: "#71717A"
     }}>
           Total: {totalMiles} miles | Business:{" "}
           {totalMiles - parseFloat(form.personalMiles || 0)} miles | IRS
           Deduction:{" "}
           <span style={{
-        color: D.green,
+        color: "#15803D",
         fontWeight: 700
       }}>
             ${irsDeduction}
@@ -1746,7 +1757,7 @@ function MileageForm({
     }}>
         {" "}
         <button onClick={submit} disabled={saving || totalMiles <= 0} style={{
-        ...sBtn(D.purple, D.white),
+        ...sBtn("#18181B", "#FFFFFF"),
         opacity: saving || totalMiles <= 0 ? 0.5 : 1
       }}>
           {saving ? "Saving..." : "Save Mileage"}
@@ -1776,7 +1787,7 @@ function AnalyticsTab({
         <div style={{
         fontSize: 16,
         fontWeight: 700,
-        color: D.heading,
+        color: "#09090B",
         marginBottom: 12
       }}>
           Cost of Ownership
@@ -1791,54 +1802,54 @@ function AnalyticsTab({
         }}>
             <thead>
               <tr style={{
-              borderBottom: `1px solid ${D.border}`
+              borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
                 <th style={{
                 textAlign: "left",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                   Equipment
                 </th>
                 <th style={{
                 textAlign: "left",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                   Category
                 </th>
                 <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                   Age (mo)
                 </th>
                 <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                   Purchase
                 </th>
                 <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                   Maintenance
                 </th>
                 <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                   Monthly
                 </th>
                 <th style={{
                 textAlign: "center",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                   Condition
                 </th>
@@ -1846,15 +1857,15 @@ function AnalyticsTab({
             </thead>
             <tbody>
               {costs.map(c => <tr key={c.equipment_id} style={{
-              borderBottom: `1px solid ${D.border}`
+              borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
                   <td style={{
                 padding: "8px",
-                color: D.text
+                color: "#27272A"
               }}>
                     {CAT_ICONS[c.category] || ""} {c.equipment_name}
                     {c.asset_tag && <span style={{
-                  color: D.muted,
+                  color: "#71717A",
                   fontSize: 10,
                   marginLeft: 6
                 }}>
@@ -1863,34 +1874,34 @@ function AnalyticsTab({
                   </td>
                   <td style={{
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     {c.category}
                   </td>
                   <td style={{
                 padding: "8px",
-                color: D.text,
+                color: "#27272A",
                 textAlign: "right"
               }}>
                     {c.age_months}
                   </td>
                   <td style={{
                 padding: "8px",
-                color: D.text,
+                color: "#27272A",
                 textAlign: "right"
               }}>
                     {fmt(c.purchase_price)}
                   </td>
                   <td style={{
                 padding: "8px",
-                color: D.text,
+                color: "#27272A",
                 textAlign: "right"
               }}>
                     {fmt(c.total_maintenance)}
                   </td>
                   <td style={{
                 padding: "8px",
-                color: D.amber,
+                color: "#A16207",
                 textAlign: "right",
                 fontWeight: 500
               }}>
@@ -1905,18 +1916,18 @@ function AnalyticsTab({
             </tbody>
             {costs.length > 0 && <tfoot>
                 <tr style={{
-              borderTop: `2px solid ${D.border}`
+              borderTop: `2px solid ${"#E4E4E7"}`
             }}>
                   <td style={{
                 padding: "8px",
-                color: D.heading,
+                color: "#09090B",
                 fontWeight: 700
               }} colSpan={3}>
                     Totals
                   </td>
                   <td style={{
                 padding: "8px",
-                color: D.heading,
+                color: "#09090B",
                 fontWeight: 700,
                 textAlign: "right"
               }}>
@@ -1924,7 +1935,7 @@ function AnalyticsTab({
                   </td>
                   <td style={{
                 padding: "8px",
-                color: D.heading,
+                color: "#09090B",
                 fontWeight: 700,
                 textAlign: "right"
               }}>
@@ -1932,7 +1943,7 @@ function AnalyticsTab({
                   </td>
                   <td style={{
                 padding: "8px",
-                color: D.amber,
+                color: "#A16207",
                 fontWeight: 700,
                 textAlign: "right"
               }}>
@@ -1953,7 +1964,7 @@ function AnalyticsTab({
           <div style={{
         fontSize: 16,
         fontWeight: 700,
-        color: D.heading,
+        color: "#09090B",
         marginBottom: 12
       }}>
             Maintenance Cost Trend (Last 6 Months)
@@ -1970,7 +1981,7 @@ function AnalyticsTab({
           <div style={{
         fontSize: 16,
         fontWeight: 700,
-        color: D.heading,
+        color: "#09090B",
         marginBottom: 12
       }}>
             Reliability Ranking (Downtime Hours)
@@ -1988,41 +1999,41 @@ function AnalyticsTab({
               <thead>
                 {" "}
                 <tr style={{
-              borderBottom: `1px solid ${D.border}`
+              borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
                   {" "}
                   <th style={{
                 textAlign: "left",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Equipment
                   </th>{" "}
                   <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Incidents
                   </th>{" "}
                   <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Downtime (hrs)
                   </th>{" "}
                   <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Jobs Affected
                   </th>{" "}
                   <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Revenue Impact
                   </th>{" "}
@@ -2030,16 +2041,16 @@ function AnalyticsTab({
               </thead>{" "}
               <tbody>
                 {reliability.map(r => <tr key={r.id} style={{
-              borderBottom: `1px solid ${D.border}`
+              borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
                     {" "}
                     <td style={{
                 padding: "8px",
-                color: D.text
+                color: "#27272A"
               }}>
                       {CAT_ICONS[r.category] || ""} {r.name}{" "}
                       <span style={{
-                  color: D.muted,
+                  color: "#71717A",
                   fontSize: 10
                 }}>
                         {r.asset_tag}
@@ -2047,14 +2058,14 @@ function AnalyticsTab({
                     </td>{" "}
                     <td style={{
                 padding: "8px",
-                color: D.text,
+                color: "#27272A",
                 textAlign: "right"
               }}>
                       {r.incident_count}
                     </td>{" "}
                     <td style={{
                 padding: "8px",
-                color: D.red,
+                color: "#991B1B",
                 textAlign: "right",
                 fontWeight: 500
               }}>
@@ -2062,14 +2073,14 @@ function AnalyticsTab({
                     </td>{" "}
                     <td style={{
                 padding: "8px",
-                color: D.text,
+                color: "#27272A",
                 textAlign: "right"
               }}>
                       {r.total_jobs_affected}
                     </td>{" "}
                     <td style={{
                 padding: "8px",
-                color: D.amber,
+                color: "#A16207",
                 textAlign: "right"
               }}>
                       {fmt(r.total_revenue_impact)}
@@ -2089,7 +2100,7 @@ function AnalyticsTab({
             <div style={{
         fontSize: 16,
         fontWeight: 700,
-        color: D.heading,
+        color: "#09090B",
         marginBottom: 12
       }}>
               Fleet Mileage Summary ({mileageSummary.year})
@@ -2107,48 +2118,48 @@ function AnalyticsTab({
                 <thead>
                   {" "}
                   <tr style={{
-              borderBottom: `1px solid ${D.border}`
+              borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
                     {" "}
                     <th style={{
                 textAlign: "left",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                       Vehicle
                     </th>{" "}
                     <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                       Total Miles
                     </th>{" "}
                     <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                       Business Miles
                     </th>{" "}
                     <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                       Fuel Cost
                     </th>{" "}
                     <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                       IRS Deduction
                     </th>{" "}
                     <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                       Jobs
                     </th>{" "}
@@ -2156,16 +2167,16 @@ function AnalyticsTab({
                 </thead>{" "}
                 <tbody>
                   {mileageSummary.vehicles.map(v => <tr key={v.id} style={{
-              borderBottom: `1px solid ${D.border}`
+              borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
                       {" "}
                       <td style={{
                 padding: "8px",
-                color: D.text
+                color: "#27272A"
               }}>
                         {v.name}{" "}
                         <span style={{
-                  color: D.muted,
+                  color: "#71717A",
                   fontSize: 10
                 }}>
                           {v.asset_tag}
@@ -2173,28 +2184,28 @@ function AnalyticsTab({
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.text,
+                color: "#27272A",
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(parseFloat(v.total_miles)))}
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.teal,
+                color: "#18181B",
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(parseFloat(v.business_miles)))}
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.amber,
+                color: "#A16207",
                 textAlign: "right"
               }}>
                         {fmt(v.total_fuel_cost)}
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.green,
+                color: "#15803D",
                 textAlign: "right",
                 fontWeight: 700
               }}>
@@ -2202,7 +2213,7 @@ function AnalyticsTab({
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.text,
+                color: "#27272A",
                 textAlign: "right"
               }}>
                         {v.total_jobs}
@@ -2212,19 +2223,19 @@ function AnalyticsTab({
                 {mileageSummary.fleet_totals && <tfoot>
                     {" "}
                     <tr style={{
-              borderTop: `2px solid ${D.border}`
+              borderTop: `2px solid ${"#E4E4E7"}`
             }}>
                       {" "}
                       <td style={{
                 padding: "8px",
-                color: D.heading,
+                color: "#09090B",
                 fontWeight: 700
               }}>
                         Fleet Totals
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.heading,
+                color: "#09090B",
                 fontWeight: 700,
                 textAlign: "right"
               }}>
@@ -2232,7 +2243,7 @@ function AnalyticsTab({
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.teal,
+                color: "#18181B",
                 fontWeight: 700,
                 textAlign: "right"
               }}>
@@ -2240,7 +2251,7 @@ function AnalyticsTab({
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.amber,
+                color: "#A16207",
                 fontWeight: 700,
                 textAlign: "right"
               }}>
@@ -2248,7 +2259,7 @@ function AnalyticsTab({
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.green,
+                color: "#15803D",
                 fontWeight: 700,
                 textAlign: "right"
               }}>
@@ -2256,7 +2267,7 @@ function AnalyticsTab({
                       </td>{" "}
                       <td style={{
                 padding: "8px",
-                color: D.heading,
+                color: "#09090B",
                 fontWeight: 700,
                 textAlign: "right"
               }}>
@@ -2276,7 +2287,7 @@ function AnalyticsTab({
           <div style={{
         fontSize: 16,
         fontWeight: 700,
-        color: D.heading,
+        color: "#09090B",
         marginBottom: 12
       }}>
             Upcoming Maintenance (Next 30 Days)
@@ -2294,41 +2305,41 @@ function AnalyticsTab({
               <thead>
                 {" "}
                 <tr style={{
-              borderBottom: `1px solid ${D.border}`
+              borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
                   {" "}
                   <th style={{
                 textAlign: "left",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Equipment
                   </th>{" "}
                   <th style={{
                 textAlign: "left",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Task
                   </th>{" "}
                   <th style={{
                 textAlign: "left",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Due
                   </th>{" "}
                   <th style={{
                 textAlign: "left",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Priority
                   </th>{" "}
                   <th style={{
                 textAlign: "right",
                 padding: "8px",
-                color: D.muted
+                color: "#71717A"
               }}>
                     Est Cost
                   </th>{" "}
@@ -2336,17 +2347,17 @@ function AnalyticsTab({
               </thead>{" "}
               <tbody>
                 {dueSchedules.map(s => <tr key={s.id} style={{
-              borderBottom: `1px solid ${D.border}`,
+              borderBottom: `1px solid ${"#E4E4E7"}`,
               background: s.is_overdue ? "rgba(239,68,68,0.08)" : "transparent"
             }}>
                     {" "}
                     <td style={{
                 padding: "8px",
-                color: D.text
+                color: "#27272A"
               }}>
                       {CAT_ICONS[s.category] || ""} {s.equipment_name}
                       {s.asset_tag && <span style={{
-                  color: D.muted,
+                  color: "#71717A",
                   fontSize: 10,
                   marginLeft: 4
                 }}>
@@ -2355,16 +2366,16 @@ function AnalyticsTab({
                     </td>{" "}
                     <td style={{
                 padding: "8px",
-                color: D.text
+                color: "#27272A"
               }}>
                       {s.task_name}
                     </td>{" "}
                     <td style={{
                 padding: "8px",
-                color: s.is_overdue ? D.red : D.text
+                color: s.is_overdue ? "#991B1B" : "#27272A"
               }}>
                       {s.is_overdue && <span style={{
-                  ...sBadge(D.red, D.white),
+                  ...sBadge("#991B1B", "#FFFFFF"),
                   marginRight: 4
                 }}>
                           OVERDUE
@@ -2375,13 +2386,13 @@ function AnalyticsTab({
                 padding: "8px"
               }}>
                       {" "}
-                      <span style={sBadge(s.priority === "critical" ? D.red : s.priority === "high" ? "#f97316" : D.teal, D.white)}>
+                      <span style={sBadge(s.priority === "critical" ? "#991B1B" : s.priority === "high" ? "#f97316" : "#18181B", "#FFFFFF")}>
                         {s.priority}
                       </span>{" "}
                     </td>{" "}
                     <td style={{
                 padding: "8px",
-                color: D.text,
+                color: "#27272A",
                 textAlign: "right"
               }}>
                       {s.estimated_cost ? fmt(s.estimated_cost) : "--"}
@@ -2416,8 +2427,8 @@ function CostBarChart({
       const y = h - pct * (h - 20);
       return <g key={pct}>
             {" "}
-            <line x1={30} y1={y} x2={w} y2={y} stroke={D.border} strokeWidth={0.5} />{" "}
-            <text x={28} y={y + 4} fill={D.muted} fontSize={9} textAnchor="end">
+            <line x1={30} y1={y} x2={w} y2={y} stroke={"#E4E4E7"} strokeWidth={0.5} />{" "}
+            <text x={28} y={y + 4} fill={"#71717A"} fontSize={9} textAnchor="end">
               {fmt(maxCost * pct)}
             </text>{" "}
           </g>;
@@ -2429,11 +2440,11 @@ function CostBarChart({
       const y = h - barH;
       return <g key={d.month}>
             {" "}
-            <rect x={x} y={y} width={barW} height={barH} rx={4} fill={D.teal} opacity={0.8} />{" "}
-            <text x={x + barW / 2} y={h + 14} fill={D.muted} fontSize={10} textAnchor="middle">
+            <rect x={x} y={y} width={barW} height={barH} rx={4} fill={"#18181B"} opacity={0.8} />{" "}
+            <text x={x + barW / 2} y={h + 14} fill={"#71717A"} fontSize={10} textAnchor="middle">
               {d.month.slice(5)}
             </text>{" "}
-            <text x={x + barW / 2} y={y - 4} fill={D.text} fontSize={9} textAnchor="middle">
+            <text x={x + barW / 2} y={y - 4} fill={"#27272A"} fontSize={9} textAnchor="middle">
               {fmt(d.cost)}
             </text>{" "}
           </g>;
