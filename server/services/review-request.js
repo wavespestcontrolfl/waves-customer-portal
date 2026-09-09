@@ -2884,19 +2884,21 @@ const ReviewService = {
       // skip the row this tick (it's picked up next tick, or was superseded).
       // recordHealth: false — per-customer mutual-exclusion lock, not a
       // scheduled job; recording it would grow job_health per customer.
-      const out = await runExclusive(`review-send:${request.customer_id}`, () => this.sendSMS(request.id), { recordHealth: false });
+      const out = await runExclusive(`review-send:${request.customer_id}`, async () => {
+        const outcome = await this.sendSMS(request.id);
+        if (outcome?.refused === "approved_phone_drift") {
+          // Keep refusal cleanup under the lock so it cannot suppress a newer
+          // operator-approved resend after another caller acquires the lock.
+          const parked = await this._parkRequestVerified(request.id);
+          logger.warn(`[review] Scheduled request refused for recipient drift (requestId=${request.id} parked=${parked})`);
+        }
+        return outcome;
+      }, { recordHealth: false });
       // Only a delivered send counts (codex #4156 r1 P2): a 3-day-rule or
       // send-window hold, a lookup deferral, a suppression or a skipped
       // lock left the customer without a message.
       if (out && out.sent === true) { sent++; continue; }
       if (out && out.refused === "approved_phone_drift") {
-        // A pinned row whose recipient changed during its hold (codex #4156
-        // r4 P1): sendSMS refuses without touching the row, so with no
-        // caller to park it the due row would be re-selected every tick and
-        // could send under the stale approval if the old number came back.
-        // Park it terminally (suppress; verified) and say so.
-        const parked = await this._parkRequestVerified(request.id);
-        logger.warn(`[review] Scheduled request refused for recipient drift (requestId=${request.id} parked=${parked})`);
         refused++;
         continue;
       }
