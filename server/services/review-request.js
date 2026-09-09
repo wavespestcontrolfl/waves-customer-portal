@@ -4741,8 +4741,8 @@ const ReviewService = {
     // Mid-cadence manual-ask standdown (codex #3235 r1 P1): the owner can
     // hand-send an ask AFTER enrollment (evening of a next-morning Day-0, or
     // between Day 0 and Day 4). Scoped to evidence since the sequence
-    // started — pre-enrollment asks were already screened at enrollment, and
-    // an operator-started sequence keeps its deliberate override.
+    // started. This standdown is distinct from the 72-hour dispatch floor:
+    // an operator-started cadence still needs spacing from earlier staff asks.
     let manualAskRecent = false;
     if (seq.started_at) {
       try {
@@ -4752,6 +4752,8 @@ const ReviewService = {
         logger.warn(`[review] staff-ask lookup failed (sequenceId=${seq.id}): ${err.message}`);
       }
     }
+
+    if (manualAskRecent) return stop("manual_ask_recent");
 
     // The 3-day rule, re-checked at the dispatch boundary (owner ruling
     // 2026-09-07): the schedule computed at the last send can be overtaken —
@@ -4768,6 +4770,16 @@ const ReviewService = {
     // forces it to SMS anyway, and it is still a support message, not an ask.
     // A template-less step (the default email nudge) counts as an ask.
     const stepIsAsk = OUTREACH.isAskTemplate(stepForSpacing.templateKey);
+    let manualAskAt = null;
+    if (stepIsAsk) {
+      try {
+        manualAskAt = await this.manualReviewAskSentRecently(seq.customer_id, {
+          since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
+        });
+      } catch {
+        askLookupFailed = true;
+      }
+    }
     if (stepIsAsk && askLookupFailed) {
       // No evidence is not "no ask": an unavailable lookup (either source)
       // defers the step instead of sending inside the promised 72 h
@@ -4779,16 +4791,15 @@ const ReviewService = {
       return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
     }
     const lastAskAt = latestDeliveredAt(recentAskRows);
-    if (stepIsAsk && lastAskAt && Date.now() - lastAskAt.getTime() < ASK_SPACING_MS) {
-      let spacedAt = new Date(lastAskAt.getTime() + ASK_SPACING_MS);
+    const anchorMs = Math.max(lastAskAt ? lastAskAt.getTime() : 0, manualAskAt ? manualAskAt.getTime() : 0);
+    if (stepIsAsk && anchorMs && Date.now() - anchorMs < ASK_SPACING_MS) {
+      let spacedAt = new Date(anchorMs + ASK_SPACING_MS);
       if (stepForSpacing.weekdaysOnly) spacedAt = shiftToWeekdayMorning(spacedAt);
       await db("review_sequences")
         .where({ id: seq.id, status: "active" })
         .update({ next_run_at: spacedAt, decision: sequenceDecision({ reason: "spacing", plannedAt: spacedAt, nextEvalAt: spacedAt }), updated_at: new Date() });
       return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
     }
-    if (manualAskRecent) return stop("manual_ask_recent");
-
     const step = plan[seq.current_step] || {};
 
     // Final atomic claim right before sending: an admin Stop (or a completing

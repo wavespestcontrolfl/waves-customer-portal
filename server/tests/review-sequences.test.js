@@ -1057,6 +1057,58 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       }
     });
 
+    test.each([2, 72])('an operator-started cadence spaces from a staff ask sent %s hours BEFORE enrollment', async (hoursAgo) => {
+      jest.useFakeTimers().setSystemTime(new Date('2030-01-01T16:00:00Z'));
+      try {
+        const manualAt = new Date(Date.now() - hoursAgo * 3600000);
+        const mock = makeMock({
+          customers: [{ id: 'prior-staff-ask', first_name: 'Ana', nearest_location_id: 'sarasota' }],
+          sms_log: [{ customer_id: 'prior-staff-ask', direction: 'outbound', status: 'sent', created_at: manualAt, message_body: 'Please leave a review: https://g.page/r/example/review' }],
+        });
+        db.mockImplementation(mock);
+        const result = await ReviewService.startReviewSequence({ customerId: 'prior-staff-ask', serviceType: 'pest control', techName: 'Bea' });
+        expect(result.started).toBe(true);
+        if (hoursAgo < 72) {
+          expect(result.firstTouch).toMatchObject({ deferred: true, reason: 'spacing' });
+          expect(result.sequence.next_run_at.getTime()).toBe(manualAt.getTime() + 72 * 3600000);
+          expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+        } else {
+          expect(result.firstTouch.sent).toBe(true);
+          expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('a pre-enrollment staff ask does not space a private check-in', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'staff-checkin', first_name: 'Ana', nearest_location_id: 'sarasota' }],
+        sms_log: [{ customer_id: 'staff-checkin', direction: 'outbound', status: 'sent', created_at: new Date(Date.now() - 2 * 3600000), message_body: 'Please leave a review: https://g.page/r/example/review' }],
+      });
+      db.mockImplementation(mock);
+      const result = await ReviewService.startReviewSequence({ customerId: 'staff-checkin', serviceType: 'pest control', techName: 'Bea', plan: [{ day: 0, channel: 'sms', templateKey: 'resolution_check' }] });
+      expect(result.firstTouch.sent).toBe(true);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed 72-hour staff-ask lookup defers even when the since-enrollment lookup succeeds', async () => {
+      const mock = makeMock({ customers: [{ id: 'staff-spacing-error', nearest_location_id: 'sarasota' }] });
+      db.mockImplementation(mock);
+      const lookup = jest.spyOn(ReviewService, 'manualReviewAskSentRecently').mockImplementation(async (_id, opts) => {
+        if (opts.returnAt) throw new Error('staff lookup unavailable');
+        return false;
+      });
+      try {
+        const result = await ReviewService.startReviewSequence({ customerId: 'staff-spacing-error', serviceType: 'pest control', techName: 'Bea' });
+        expect(result.firstTouch).toMatchObject({ deferred: true, reason: 'spacing_lookup_unavailable' });
+        expect(result.sequence.next_run_at.getTime()).toBeGreaterThan(Date.now() + 25 * 60000);
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      } finally {
+        lookup.mockRestore();
+      }
+    });
+
     test('a failed staff-sent-ask lookup defers an ask step instead of sending inside 72h (codex #4141 r4 P1)', async () => {
       const mock = makeMock(fixture('seq-sl', { lastAskAgoMs: 100 * 3600000 }), { throwSelectWhen: (q) => q.table === 'sms_log' });
       db.mockImplementation(mock);
