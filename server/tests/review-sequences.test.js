@@ -3799,6 +3799,11 @@ describe('shared ask history foundation', () => {
 
   test.each([
     'Thanks for your Google review',
+    'Thanks for leaving us a Google review',
+    'Office directions: https://maps.app.goo.gl/abc123',
+    'Meet here: https://goo.gl/maps/abc123',
+    'https://maps.google.com/?q=office',
+    'Our office: https://g.page/office-location',
     'Please review your invoice: https://portal.test/pay/abc',
     'Please review and sign your agreement: https://portal.test/contract/abc',
     'Could you review the service report?',
@@ -3812,12 +3817,16 @@ describe('shared ask history foundation', () => {
 
   test.each([
     'Could you leave a Google review?',
+    'Would you mind leaving us a Google review?',
+    'https://g.page/office-slug/review',
+    'Please consider posting a Google review.',
+    'How about writing a review?',
     'Please review us when you have a moment.',
     'Share your experience in a review.',
     'A review would mean a lot: https://portal.test/l/abc123',
     'https://www.yelp.com/writeareview/biz/example',
     'https://facebook.com/example/reviews',
-    'https://maps.app.goo.gl/abc123',
+    'Please leave a review: https://maps.app.goo.gl/abc123',
   ])('request intent and review destinations count: %s', body => {
     expect(history.looksLikeReviewAsk(body)).toBe(true);
   });
