@@ -89,14 +89,17 @@ const PROMISE_PROGRESSIVE = "(?:['’](?:m|re)| is| are| am) (?:calling|texting|
 const PROMISE_RE = new RegExp(`\\b(?:${PROMISE_SUBJECT}(?:${PROMISE_MODAL} (?:call|text|email|reach out|follow up|send|get back|contact|be in touch|give you a (?:call|ring|shout)(?: back)?)|${PROMISE_PROGRESSIVE})|` + String.raw`(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back|gives? you a (?:call|ring|shout)(?: back)?)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b`, 'i');
 // Commitments are graded per clause: a negation or condition governs only the
 // promise in ITS clause ("I cannot access your schedule, so we will call you
-// back" still commits), and a trailing offer condition ("… if you would
-// like") makes the clause an offer, not a commitment.
-const COMMITMENT_CLAUSE_SPLIT_RE = /([.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b)/i;
+// back" and "I can't access that, the office will call you" still commit),
+// and an offer condition — trailing ("… if you would like") or leading before
+// a comma ("If you'd like, …") — makes the clause an offer, not a commitment.
+// A comma before a coordinator is the coordinator (", and get back to you").
+const COMMITMENT_CLAUSE_SPLIT_RE = /([.!?;]|,\s*\b(?:and|then)\b|\b(?:but|however|though|although|so|because|since|and|then)\b|,)/i;
+const OFFER_CONDITION_LEAD_RE = /^\s*(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|would you like|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
 // The subject + modal a coordinated fragment inherits: "I'll check with the
 // office and get back to you" promises the callback even though the second
 // fragment has no subject of its own.
 const SUBJECT_MODAL_RE = new RegExp(`\\b(${PROMISE_SUBJECT}(?:${PROMISE_MODAL}|['’](?:m|re)| is| are| am))\\b`, 'i');
-const COORDINATOR_RE = /^(?:and|then)$/i;
+const COORDINATOR_RE = /^,?\s*(?:and|then)$/i;
 // A Spanish bare "no" negates only the verb it precedes ("No le llamaremos"),
 // so it counts at the end of the prefix alone — "No worries, we will call
 // you" keeps its promise.
@@ -115,13 +118,14 @@ function isCommitment(text) {
       && !CONDITIONAL_OFFER_SUFFIX_RE.test(clause.slice(match.index + match[0].length));
   };
   let carried = null; // the previous clause's affirmative subject + modal
+  let offered = false; // the previous fragment was a leading offer condition
   for (let i = 0; i < parts.length; i += 2) {
     const clause = parts[i];
     const separator = i > 0 ? parts[i - 1] : '';
     const own = SUBJECT_MODAL_RE.exec(clause);
     const coordinated = COORDINATOR_RE.test(separator.trim());
-    if (commits(clause)) return true;
-    if (!own && carried && coordinated && commits(`${carried} ${clause.trim()}`)) return true;
+    if (!offered && commits(clause)) return true;
+    if (!offered && !own && carried && coordinated && commits(`${carried} ${clause.trim()}`)) return true;
     // A fragment with its own subject resets the carry; a coordinated fragment
     // without one ("… and then reach out") keeps it; any other break drops it.
     // A negation or condition before the subject, or a negation right after
@@ -129,11 +133,14 @@ function isCommitment(text) {
     // a condition inside the complement ("I'll check if the office has
     // availability and get back to you") does not.
     if (own) {
-      const negated = NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, own.index))
+      const negated = offered || NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, own.index))
         || /^\s*(?:not|never)\b/i.test(clause.slice(own.index + own[0].length));
       carried = negated ? null : own[1];
     }
     else if (!coordinated) carried = null;
+    // "If you'd like, we'll call you back": the offer condition before the
+    // comma governs the fragment after it.
+    offered = OFFER_CONDITION_LEAD_RE.test(clause) && /^\s*,/.test(parts[i + 1] || '');
   }
   return false;
 }

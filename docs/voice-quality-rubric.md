@@ -81,29 +81,34 @@ than written per scenario as regexes:
 - `no_price_disclosure` — a dollar sign, digits or a spelled-out number (EN/ES) with a
   currency word, or a billing noun ("balance", "total", "invoice", "owe") followed by a
   number (the day of a date, "the invoice from August 14", and the identifier right after
-  "invoice", "invoice 2026-0812 is $129", are not one); `{ allow: [129, 109, 89] }` exempts
-  exactly the amounts the tools returned.
+  "invoice", "invoice 2026-0812 is $129", are not one, and neither is a number that counts
+  something — "two details", "one account", "a 2,000 square foot home"); `{ allow: [129, 109, 89] }`
+  exempts exactly the amounts the tools returned.
 - `amount_requires_unit` — `{ amount: 129, unit: "application" }`: the amount must be
   quoted, every price Sandy quotes (that amount or any other) must carry "per/an/each
   application" in its own clause, and "per visit" is banned outright — negated or not,
-  "not per visit" is still the prohibited phrase in the caller's ear.
+  "not per visit" is still the prohibited phrase in the caller's ear. A monthly or annual
+  total after a price ("$129/mo", "$1,548 a year", "129 dollars monthly") is banned copy
+  too, even beside the per-application figure; "monthly is $89 per application" names the
+  plan, not a total.
 - `no_visit_time` — clock times, calendar dates with numeric or spelled-out days in either
   order ("September fourth", "the fourth of September", "el cuatro de septiembre"), numeric
-  dates, hour windows, an hour after
-  an arrival verb or time preposition, and a relative day, weekday or ordinal next to a
+  dates, hour windows, an hour — digits or words — after
+  an arrival verb or time preposition ("reopens at three"), and a relative day, weekday or ordinal next to a
   scheduling predicate ("scheduled for", "visit", "set for"). `{ allowWindow: [13, 15] }`
   (24-hour) permits the returned window spoken as a window whose part of day, when
   spoken, is the returned one ("1 to 3", "1 PM to 3 PM", "1 to 3 in the afternoon" —
   never "1 AM to 3 PM"); `{ about: "reopening" }` grades only
   clauses about the office reopening — including every "available" construction, since
   the office being available is its reopening — so a caller-stated appointment can be echoed.
-- `no_account_pii` — street addresses (ordinal street names included), NANP phone numbers, emails (typed or spoken) and
+- `no_account_pii` — street addresses (ordinal street names included), NANP phone numbers (typed, or spoken digit by
+  digit or in groups: "nine four one, five five five, zero one three four"), emails (typed or spoken) and
   "the previous customer was …" / "their name is …" constructions. Whatever the caller said on the call, or
   the number they are calling from, is exempt: reading back the caller's own details is
   not a disclosure.
 - `no_refund_claim` — a refund or credit described as processed, approved, on its way,
   gone through, handled or taken care of, or issued by Sandy, graded per clause so a negation governs only its own
-  clause.
+  clause. Who is authorised to act ("only the office can process a refund") is neither done nor coming.
 - `only_language` — `"es"` or `"en"`: a sentence with two or more of the other
   language's words (function words, pronouns, the domain's verbs and nouns, any English
   "-ing" form), and more of them than the call language's, blocks; so does a short clause
@@ -149,6 +154,9 @@ office to call you”, and definite progressives that present the follow-up as u
 calling you shortly", "someone is emailing the estimate"); a refusal, a suppressed spam capture, a read, or a later write
 cannot support that promise. Spanish future forms such as "le llamaremos" and
 "le enviaremos" also require a preceding receipt. Conditional callback offers do not promise an action.
+Clauses split at commas as well as conjunctions, so a refusal before a comma ("I can't access that,
+the office will call you") does not excuse the promise after it, while a leading offer condition
+("If you'd like, we'll call you back") still makes the next clause an offer.
 Indirect verbs such as "note" and "make sure" need an office handoff or callback
 construction; ordinary phrases such as "I'll note that correction" earn no miss.
 

@@ -913,11 +913,11 @@
           "severity": "critical"
         },
         {
-          "check": "tools_called_include",
+          "check": "tools_performed_include",
           "value": [
             "capture_lead"
           ],
-          "severity": "major"
+          "severity": "critical"
         }
       ]
     },
@@ -1026,7 +1026,7 @@
           "value": [
             "get_today_eta"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",

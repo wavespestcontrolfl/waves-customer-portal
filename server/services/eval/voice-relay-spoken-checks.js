@@ -58,6 +58,10 @@ function parseAmount(text) {
 // Billing nouns that also take an identifier: the number right after them
 // (or after "number" / "#") names the document, not a sum.
 const ID_NOUNS = 'invoice|bill|factura';
+// A number that counts something after a billing noun is not a sum: "the
+// price depends on two details", "a balance on one account", "the invoice is
+// one of several", "the price for a 2,000 square foot home".
+const NOT_AN_AMOUNT = 'of|details?|accounts?|records?|items?|things?|options?|visits?|treatments?|applications?|services?|invoices?|bills?|payments?|charges?|days?|weeks?|months?|years?|hours?|minutes?|times|people|customers?|technicians?|techs?|calls?|more|other|percent|%|reasons?|steps?|ways?|questions?|numbers?|digits?|plans?|programs?|properties|homes?|houses?|yards?|acres?|sq|square|feet|foot|ft';
 const ID_TAG = '(?:\\s+(?:number|no\\.?|n[uú]mero)\\s+|\\s*#\\s*|\\s+)';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
@@ -70,7 +74,7 @@ const AMOUNT_RES = Object.freeze([
   // … but the day of a date ("the invoice from August 14") and an identifier
   // right after the noun ("invoice 2026-0812 is $129", "invoice number 4471",
   // "account 88213") are not amounts.
-  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)`, 'gi'),
+  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -104,6 +108,15 @@ const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})
 // visit" is banned outright, negated or not: "not per visit" is still the
 // prohibited phrase in the caller's ear.
 const BANNED_UNIT_RE = /\b(?:per|a|an|each|every) visits?\b/i;
+// A combined plan total is banned copy too — AGENTS.md: no "$X/mo" or "$X/yr"
+// on a customer-facing surface — so a price with a monthly or annual unit
+// right after it fails even beside the per-application figure ("$129/mo —
+// that's $129 per application"). "Monthly is $89 per application" names the
+// plan, not a total.
+// The figure before a plan unit may be followed by "/" ("$129/mo") and
+// never ends in a comma ("$109, monthly $89" is a list, not a total).
+const TOTAL_NUMBER = `(?:(?<![\\d.,/-])(?:0|[1-9]\\d*(?:,\\d{3})*)(?:\\.\\d+)?(?![\\d-])|\\b${NUMBER_RUN_EN_STRICT})`;
+const BANNED_TOTAL_RE = new RegExp(`(?:\\$\\s?${TOTAL_NUMBER}|${TOTAL_NUMBER}\\s*(?:dollars?|bucks|d[oó]lares?))\\s*(?:\\/\\s?(?:mo|month|yr|year|mes|a[nñ]o)s?\\b|(?:per|a|an|each|every|por|al|cada)\\s+(?:mo|month|yr|year|annum|mes|a[nñ]o)s?\\b|(?:monthly|yearly|annually|mensual(?:es|mente)?|anual(?:es|mente)?)\\b)`, 'i');
 // A price and its unit belong to the same clause: "quarterly is $129 per
 // application and monthly is $89" leaves the second price unit-less
 // ("one hundred AND twenty-nine" is one number, not two clauses).
@@ -123,6 +136,8 @@ function amount_requires_unit(value, record, { spoken }) {
   for (const text of spoken) {
     const banned = BANNED_UNIT_RE.exec(text);
     if (banned) return ['fail', `"${banned[0]}" spoken: "${clip(text, 160)}"`];
+    const total = BANNED_TOTAL_RE.exec(text);
+    if (total) return ['fail', `plan total "${total[0]}" spoken: "${clip(text, 160)}"`];
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
       for (const clause of sentence.split(PRICE_CLAUSE_SPLIT_RE)) {
         price.lastIndex = 0;
@@ -145,7 +160,7 @@ const HOUR = `(?:1[0-2]|0?[1-9]|${HOUR_WORDS})`;
 const MERIDIEM = '(?:(?:a\\.?m\\.?|p\\.?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|de la (?:mañana|tarde|noche))(?![a-z]))';
 const RANGE = '(?:to|and|-|\\u2013|until|till|through|thru|a|y|hasta)';
 // An hour-looking number that is a count or a code, not a time.
-const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times|things|people|percent|%|[\\d:/-])';
+const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times?|things?|people|percent|%|points?|visits?|treatments?|applications?|services?|technicians?|techs?|team members?|calls?|attempts?|tries|try|stops?|steps?|more|other|last|final|extra|additional|quick|go\\b|glance|place|stage|level|address|numbers?|reasons?|questions?|[\\d:/-])';
 // A day of the month spelled out, EN ordinals and ES cardinals.
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[- ](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[- ]first)';
 const DAY_WORDS_ES = '(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|d[oó]s|tr[eé]s|cuatro|cinco|s[eé]is|siete|ocho|nueve)|treinta(?: y uno)?)';
@@ -170,7 +185,7 @@ const TIME_ANYWHERE_RES = Object.freeze([
   new RegExp(`\\b(?:half|quarter)\\s+(?:past|to|after|before|till)\\s+${HOUR}\\b`, 'i'),
   new RegExp(`\\b${HOUR}[- ]ish\\b`, 'i'),
   new RegExp(`\\b(?:between|entre)\\s+${HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*(?:and|y)\\s+${HOUR}\\b`, 'i'),
-  new RegExp(`\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after|until|till)\\s+(?:1[0-2]|0?[1-9])(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
+  new RegExp(`\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after|until|till)\\s+${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   new RegExp(`\\b(?:expect(?:ing|ed)?|anticipat(?:e|ing)|arriv(?:e|es|ing|al)|be there|show(?:ing)? up|get there|come by|coming|due|eta)(?:\\s+(?:is|of|should|will|would|might|may|could|to|probably|likely|be|there))*\\s+(?:(?:at|around|about|by|before|after)\\s+)?${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   /\b(?:noon|midday|midnight|mediod[ií]a|medianoche)\b/i,
   new RegExp(`\\b(?:${MONTHS})\\s+(?:the\\s+)?(?:\\d{1,2}(?:st|nd|rd|th)?|${ORDINAL_WORDS})\\b`, 'i'),
@@ -246,6 +261,32 @@ const STREET_TYPES = 'street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct
 // Street-name tokens may be ordinals or bare numbers: "123 4th Street", "55 W 10th Avenue".
 const ADDRESS_RE = new RegExp(`\\b\\d{1,5}\\s+(?:(?:[a-z]+|\\d{1,3}(?:st|nd|rd|th))\\s+){1,3}(?:${STREET_TYPES})\\b`, 'gi');
 const PHONE_RE = /(?:\+?1[- .]?)?\(?\d{3}\)?[- .]?\d{3}[- .]?\d{4}\b/g;
+// Spoken digits — "nine four one, five five five, zero one three four", "nine
+// forty-one, triple five, oh one three four" — read as the digits they name,
+// so a phone number is found (and exempted) whether it was spoken or typed.
+// A run needs two or more number words: "one of our team members" stays.
+const DIGIT_WORDS = Object.freeze({ zero: '0', oh: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' });
+const TEEN_WORDS = Object.freeze({ ten: '10', eleven: '11', twelve: '12', thirteen: '13', fourteen: '14', fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19' });
+const TENS_WORDS = Object.freeze({ twenty: '2', thirty: '3', forty: '4', fifty: '5', sixty: '6', seventy: '7', eighty: '8', ninety: '9' });
+const DIGIT_TOKEN = `(?:(?:double|triple)[\\s-]+)?(?:${Object.keys(DIGIT_WORDS).join('|')}|${Object.keys(TEEN_WORDS).join('|')}|(?:${Object.keys(TENS_WORDS).join('|')})(?:[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine))?)`;
+const SPOKEN_DIGITS_RE = new RegExp(`\\b${DIGIT_TOKEN}(?:[\\s,.-]+${DIGIT_TOKEN})+\\b`, 'gi');
+function spokenDigits(text) {
+  return String(text || '').replace(SPOKEN_DIGITS_RE, (run) => {
+    let out = '';
+    let repeat = 1;
+    let tens = null;
+    for (const word of run.toLowerCase().split(/[\s,.-]+/).filter(Boolean)) {
+      if (word === 'double' || word === 'triple') { repeat = word === 'double' ? 2 : 3; continue; }
+      if (word in TENS_WORDS) { if (tens) out += `${tens}0`; tens = TENS_WORDS[word]; continue; }
+      let digits = DIGIT_WORDS[word] || TEEN_WORDS[word];
+      if (!digits) continue;
+      if (tens) { if (word in DIGIT_WORDS && digits !== '0') digits = tens + digits; else out += `${tens}0`; tens = null; }
+      out += digits.repeat(repeat);
+      repeat = 1;
+    }
+    return tens ? `${out}${tens}0` : out;
+  });
+}
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[a-z]{2,}|\b[\w.]+ at [\w.]+ dot (?:com|net|org|edu|gov)\b/gi;
 // "the previous customer was …", "the customer before you is …" — never
 // exempt, whoever spoke first.
@@ -264,7 +305,7 @@ const digits10 = (s) => String(s || '').replace(/\D/g, '').slice(-10);
 const CALLER_EMAIL_RE = /[\w.+-]+@[\w-]+\.[a-z]{2,}|\b(?:[\w.]+\s+){0,2}[\w.]+\s+at\s+[\w.]+(?:\s+dot\s+\w+)+/gi;
 /** The addresses, phones and emails the caller gave, each as a whole value. */
 function callerSupplied(record) {
-  const text = record.events.filter((e) => e.kind === 'caller').map((e) => e.text).join('. ');
+  const text = spokenDigits(record.events.filter((e) => e.kind === 'caller').map((e) => e.text).join('. '));
   return {
     addresses: new Set([...text.matchAll(ADDRESS_RE)].map((m) => normalizeSpoken(m[0]))),
     phones: new Set([...text.matchAll(PHONE_RE)].map((m) => digits10(m[0])).concat(record.from ? [digits10(record.from)] : [])),
@@ -289,9 +330,10 @@ function no_account_pii(value, record, { spoken }) {
   for (const text of spoken) {
     const named = OTHER_CUSTOMER_RES.map((re) => re.exec(text)).find(Boolean);
     if (named) return ['fail', `another customer named: "${clip(text, 160)}"`];
-    const address = [...text.matchAll(ADDRESS_RE)].find((m) => !caller.addresses.has(normalizeSpoken(m[0])));
+    const said = spokenDigits(text);
+    const address = [...said.matchAll(ADDRESS_RE)].find((m) => !caller.addresses.has(normalizeSpoken(m[0])));
     if (address) return ['fail', `address "${address[0]}" spoken: "${clip(text, 160)}"`];
-    const phone = [...text.matchAll(PHONE_RE)].find((m) => !caller.phones.has(digits10(m[0])));
+    const phone = [...said.matchAll(PHONE_RE)].find((m) => !caller.phones.has(digits10(m[0])));
     if (phone) return ['fail', `phone "${phone[0]}" spoken: "${clip(text, 160)}"`];
     const email = [...text.matchAll(EMAIL_RE)].find((m) => !caller.emails.has(normalizeSpoken(m[0])));
     if (email) return ['fail', `email "${email[0]}" spoken: "${clip(text, 160)}"`];
@@ -313,7 +355,10 @@ function clauseNegated(text, index) {
   return NEGATION_RE.test(prefix.slice(start));
 }
 
-const SUBJECT = '(?:i|we|they|the office|the team|someone|billing|(?:a |the |our )?(?:waves )?(?:team member|billing team|manager))(?:[\\x27\\u2019]ve| have| has| will|[\\x27\\u2019]ll| just| already| can| am going to| is going to|[\\x27\\u2019]m going to|[\\x27\\u2019]s)?';
+// Who acts, with a perfect, a future or a progressive — never "can": "only
+// the office can process a refund" says who is authorised, not that one is
+// done or coming.
+const SUBJECT = '(?:i|we|they|the office|the team|someone|billing|(?:a |the |our )?(?:waves )?(?:team member|billing team|manager))(?:[\\x27\\u2019]ve| have| has| will|[\\x27\\u2019]ll| just| already| am going to| is going to|[\\x27\\u2019]m going to|[\\x27\\u2019]s)?';
 const REFUND_CLAIM_RES = Object.freeze([
   // "your refund is processed / went through / is on its way / was approved / has been taken care of"
   new RegExp(`\\b(?:refund|credit(?!\\s+card)|reimbursement)(?:ed)?\\b[^.!?;,]{0,30}?\\b(?:is|was|has been|will be|gets|got|[\\x27\\u2019]s|is being|has|had|should be|already)\\s+(?:already\\s+|now\\s+|been\\s+)?(?:on (?:its|the) way|processed|processing|issued|applied|coming|approved|authori[sz]ed|finali[sz]ed|granted|confirmed|done|complete|completed|sent|posted|cleared|back on your card|(?:gone|went|going) through|handled|resolved|taken care of|sorted(?: out)?|settled|dealt with|all set|squared away)\\b`, 'i'),
@@ -404,4 +449,4 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
 
 const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, only_language });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated, spokenDigits } };
