@@ -224,9 +224,10 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
   const completed = live.filter(row => row.status === 'completed');
   // Compare cadence positions independently of actual appointment order: an
   // exception can move past the following application. Unknown legacy
-  // positions keep the spacing measurements but cannot prove cadence drift.
-  const cadenceOrder = live.every(row => recurringCadenceDate(row))
-    ? [...live].sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b))) : [];
+  // positions keep their spacing measurements without erasing the known
+  // positions of other visits in the same series.
+  const cadenceOrder = live.filter(row => recurringCadenceDate(row))
+    .sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b)));
   const followingDates = new Map(cadenceOrder.map((row, index) => [row.id, nextCoverageDate(template, row, index, blackoutDates)]));
   const expectedDates = new Map(cadenceOrder.slice(1).map((row, index) => [row.id, followingDates.get(cadenceOrder[index].id)]));
   const paused = holds.some(hold => hold.status === 'active' && formatDateOnly(hold.starts_on) <= todayET && formatDateOnly(hold.resume_on) > todayET);
@@ -252,7 +253,7 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
   const lastCompleted = completed.at(-1);
   const next = upcoming[0];
   const nextExpectedDate = lastCompleted
-    ? followingDates.get(cadenceOrder.filter(row => row.status === 'completed').at(-1)?.id) || null
+    ? (recurringCadenceDate(lastCompleted) && followingDates.get(cadenceOrder.filter(row => row.status === 'completed').at(-1)?.id)) || null
     : recurringCadenceDate(live[0] || template);
   const issues = stopped || paused ? [] : Object.entries({
     ongoing_plan_has_no_future_visit: template.recurring_ongoing && upcoming.length === 0,
@@ -267,7 +268,7 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
     issues, lastCompletedScheduledDate: formatDateOnly(lastCompleted?.scheduled_date), nextExpectedDate,
     nextRecordedDate: formatDateOnly(next?.scheduled_date),
     nextTimedVisitDate: formatDateOnly(upcoming.find(row => row.window_start)?.scheduled_date),
-    continuationDueDate: template.recurring_ongoing ? followingDates.get(cadenceOrder.at(-1)?.id) || null : null,
+    continuationDueDate: template.recurring_ongoing && recurringCadenceDate(live.at(-1)) ? followingDates.get(cadenceOrder.at(-1)?.id) || null : null,
     upcomingVisits: upcoming.length, untimedUpcomingVisits: upcoming.filter(row => !row.window_start).length,
     overdueVisits: overdue.length,
     awaitingPlacementVisits: awaitingPlacement.length,

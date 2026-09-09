@@ -67,6 +67,24 @@ describe('recurring series coverage measurements', () => {
     expect(measure([root, unknown]).continuationDueDate).toBeNull();
   });
 
+  test('a legacy unknown exception does not erase later known cadence evidence', () => {
+    const unknown = visit('legacy', '2026-08-01', { status: 'completed', date_exception: true });
+    const result = measure([root, unknown, visit('september', '2026-09-07'), visit('december', '2026-12-07')]);
+    expect(result.intervals[0]).toMatchObject({ appointmentId: 'legacy', expectedDate: null, cadenceDate: null, driftDays: null });
+    expect(result.intervals[1]).toMatchObject({ appointmentId: 'september', expectedDate: '2026-09-07', driftDays: 0 });
+    expect(result.intervals[2]).toMatchObject({ appointmentId: 'december', expectedDate: '2026-12-07', driftDays: 0 });
+    expect(result.continuationDueDate).toBe('2027-03-01');
+    // The last completed application itself has no known cadence position.
+    expect(result.nextExpectedDate).toBeNull();
+  });
+
+  test('an unknown final exception keeps continuation unknown without erasing earlier drift', () => {
+    const result = measure([root, visit('september', '2026-09-07'), visit('legacy', '2026-12-14', { date_exception: true })]);
+    expect(result.intervals[0]).toMatchObject({ expectedDate: '2026-09-07', driftDays: 0 });
+    expect(result.intervals[1]).toMatchObject({ expectedDate: null, cadenceDate: null, driftDays: null });
+    expect(result.continuationDueDate).toBeNull();
+  });
+
   test('seasonal mosquito respects its winter gap and custom plans use their own day interval', () => {
     const seasonal = { ...root, recurring_pattern: 'seasonal_feb_oct', scheduled_date: '2026-10-05' };
     expect(measure([seasonal, visit('spring', '2027-02-01')], seasonal).intervals[0]).toMatchObject({ expectedDate: '2027-02-01', driftDays: 0 });
