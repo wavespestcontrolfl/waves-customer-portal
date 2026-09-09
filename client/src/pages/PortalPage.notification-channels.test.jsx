@@ -65,7 +65,7 @@ it('includes both reminders in the App shortcut without enabling a muted categor
   await waitFor(() => expect(reminder24()).toHaveValue('push'));
   expect(api.updateNotificationPrefs).toHaveBeenCalledWith({
     appointmentConfirmationChannel: 'push', serviceReminder72hChannel: 'push', serviceReminder24hChannel: 'push',
-    enRouteChannel: 'push', techArrivedChannel: 'push', serviceCompleteChannel: 'push', paymentConfirmationChannel: 'push', invoiceChannel: 'push', paymentIssueChannel: 'push',
+    enRouteChannel: 'push', techArrivedChannel: 'push', serviceCompleteChannel: 'push', paymentConfirmationChannel: 'push', invoiceChannel: 'push', paymentIssueChannel: 'push', requestChannel: 'push',
   });
   expect(screen.getByRole('switch', { name: '72-Hour Appointment Reminder', exact: true })).toHaveAttribute('aria-checked', 'false');
   expect(prefs).toMatchObject({ serviceReminder72h: false, smsEnabled: false, emailEnabled: false });
@@ -166,4 +166,28 @@ it('keeps the existing reminder options when app preferences are unavailable', a
   expect(within(reminder72()).queryByRole('option', { name: 'App', exact: true })).not.toBeInTheDocument();
   expect(within(reminder24()).queryByRole('option', { name: 'App', exact: true })).not.toBeInTheDocument();
   expect(api.getCustomerPushStatus).not.toHaveBeenCalled();
+});
+
+
+it('saves Request updates to App and restores Email after a failed save', async () => {
+  prefs.requestChannel = 'email';
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for request updates' });
+  await waitFor(() => expect(within(select).getByRole('option', { name: 'App', exact: true })).toBeEnabled());
+  api.updateNotificationPrefs.mockRejectedValueOnce(new Error('offline'));
+  fireEvent.change(select, { target: { value: 'push' } });
+  await waitFor(() => expect(select).toHaveValue('email'));
+  fireEvent.change(select, { target: { value: 'push' } });
+  await waitFor(() => expect(prefs.requestChannel).toBe('push'));
+  expect(api.updateNotificationPrefs).toHaveBeenLastCalledWith({ requestChannel: 'push' });
+});
+
+
+it('does not show an unconfirmed Request updates opt-out during gate rollback', async () => {
+  prefs.requestChannel = 'push';
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for request updates' });
+  api.updateNotificationPrefs.mockResolvedValueOnce({ success: true, preferences: { appPreferencesAvailable: false } });
+  fireEvent.change(select, { target: { value: 'email' } });
+  await waitFor(() => expect(select).toHaveValue('push'));
 });

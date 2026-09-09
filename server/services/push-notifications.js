@@ -250,7 +250,10 @@ class PushNotificationService {
     return summarize(results, subs.length);
   }
 
-  async sendToAdminUsers(adminUserIds, notificationForUser) {
+  // beforeDispatch runs after the subscription lookup and immediately before
+  // the first provider handoff, so a caller's durable "push started" claim
+  // is never burned by a lookup that failed or found nothing to send.
+  async sendToAdminUsers(adminUserIds, notificationForUser, { beforeDispatch = null } = {}) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
     const subs = await db('push_subscriptions as ps')
@@ -260,6 +263,9 @@ class PushNotificationService {
       .whereRaw('ps.staff_token_version = t.auth_token_version')
       .whereIn('t.role', ['admin', 'technician'])
       .select('ps.*');
+    if (subs.length && typeof beforeDispatch === 'function' && (await beforeDispatch()) === false) {
+      return { ...summarize([], subs.length), superseded: true };
+    }
     const results = [];
     for (const sub of subs) {
       const notification = typeof notificationForUser === 'function'
