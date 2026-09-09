@@ -66,6 +66,12 @@ function phoneDigits(value) {
 
 // Shared with the admin spam-disposition guard (utils/known-caller-phone).
 const { customerPhoneLookupKey, knownCallerPhoneExists } = require('../utils/known-caller-phone');
+const {
+  isVoicemailAnsweredBy,
+  precheck: voicemailTextPrecheck,
+  sendOutboundVoicemailText,
+  GATE: OUTBOUND_VOICEMAIL_SMS_GATE,
+} = require('../services/outbound-voicemail-sms');
 
 function maskPhone(value) {
   const digits = phoneDigits(value);
@@ -3143,13 +3149,17 @@ router.post('/outbound-connect', async (req, res) => {
     // 2026-06-12 at Adam's direction). FL §934.03 note: the customer leg
     // has never received a recording disclosure on outbound calls.
     const twiml = new VoiceResponse();
+    const voicemailText = outboundVoicemailTextDialOptions({
+      callLogId: rawCallLogId, customerNumber, callerIdNumber,
+    });
     const dial = twiml.dial({
       callerId: callerIdNumber,
       record: 'record-from-answer-dual',
       recordingStatusCallback: '/api/webhooks/twilio/recording-status',
       recordingStatusCallbackEvent: 'completed',
+      ...voicemailText.dial,
     });
-    dial.number(customerNumber);
+    dial.number(voicemailText.number, customerNumber);
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Outbound connect error: ${err.message}`);
@@ -3165,6 +3175,182 @@ router.post('/outbound-connect', async (req, res) => {
       link: '/admin/communications',
     });
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">Sorry, unable to connect.</Say></Response>`);
+  }
+});
+
+// =========================================================================
+// Outbound voicemail text-back (GATE_OUTBOUND_VOICEMAIL_SMS)
+//
+// With the gate ON, the customer <Number> in /outbound-connect carries Twilio
+// answering-machine detection. Twilio reports the verdict asynchronously to
+// /outbound-amd while the admin is already bridged and hearing the greeting.
+// On a machine verdict — and only when the text CAN go (gate, quiet hours,
+// 24h dedupe) — we hang up the customer leg by REST before any voicemail is
+// left, the <Dial action> (/outbound-dial-complete) tells the admin what
+// happened, and the "sorry we missed you" text goes out. When the text
+// cannot go, nothing is hung up: the admin hears the voicemail and decides,
+// exactly as before this lane.
+//
+// With the gate OFF nothing is added to the <Dial> at all — no AMD charge,
+// no extra callbacks, byte-identical TwiML to the pre-lane flow.
+// =========================================================================
+const AMD_MACHINE_DETECTED_KEY = 'voicemail_detected_at';
+
+function outboundVoicemailTextDialOptions({ callLogId, customerNumber, callerIdNumber } = {}) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled(OUTBOUND_VOICEMAIL_SMS_GATE)) return { dial: {}, number: {} };
+  const params = new URLSearchParams();
+  if (callLogId && callLogId !== 'undefined') params.set('callLogId', callLogId);
+  if (customerNumber) params.set('customerNumber', customerNumber);
+  if (callerIdNumber) params.set('callerIdNumber', callerIdNumber);
+  const qs = params.toString();
+  // Absolute, like the originator's URLs (admin-communications.js): no
+  // reliance on Twilio resolving a relative URL on the <Number> noun.
+  const base = `https://${process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com'}/api/webhooks/twilio`;
+  return {
+    dial: {
+      action: `${base}/outbound-dial-complete?${qs}`,
+      method: 'POST',
+    },
+    number: {
+      // "Enable" reports as soon as a machine is recognised (~3-4s into the
+      // greeting) — hanging up then leaves no voicemail. DetectMessageEnd
+      // would wait for the beep, by which point some carriers have already
+      // opened a recording.
+      machineDetection: 'Enable',
+      amdStatusCallback: `${base}/outbound-amd?${qs}`,
+      amdStatusCallbackMethod: 'POST',
+    },
+  };
+}
+
+async function patchCallLogMetadata(callLogId, patch) {
+  if (!callLogId || callLogId === 'undefined') return;
+  try {
+    await db('call_log').where({ id: callLogId }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
+      updated_at: new Date(),
+    });
+  } catch (e) {
+    logger.warn(`[outbound-amd] call_log metadata patch failed for ${callLogId}: ${e.code || e.name || 'db_error'}`);
+  }
+}
+
+// Hang up the CUSTOMER leg (the <Number> child call). The parent/admin leg
+// falls through to the <Dial action> which explains what happened.
+async function hangUpCustomerLeg(childCallSid) {
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  await client.calls(childCallSid).update({ status: 'completed' });
+}
+
+// POST /api/webhooks/twilio/outbound-amd — Twilio AMD verdict for the
+// customer leg. Body: CallSid (the CHILD leg), AnsweredBy, MachineDetectionDuration.
+router.post('/outbound-amd', async (req, res) => {
+  const { CallSid, AnsweredBy, MachineDetectionDuration } = req.body || {};
+  const callLogId = req.query.callLogId;
+  const customerNumber = req.query.customerNumber || null;
+  const callerIdNumber = req.query.callerIdNumber || null;
+  try {
+    await patchCallLogMetadata(callLogId, {
+      amd: {
+        answered_by: String(AnsweredBy || 'unknown').slice(0, 32),
+        duration_ms: Number.parseInt(MachineDetectionDuration, 10) || null,
+        child_call_sid: CallSid || null,
+        at: new Date().toISOString(),
+      },
+    });
+
+    if (!isVoicemailAnsweredBy(AnsweredBy)) return res.sendStatus(200);
+
+    // Decide BEFORE hanging up: if the text cannot go, leave the admin on
+    // the voicemail greeting to decide for themselves.
+    const pre = await voicemailTextPrecheck({ phone: customerNumber });
+    if (!pre.ok) {
+      logger.info(`[outbound-amd] Voicemail detected but text skipped (${pre.skipped}) — customer leg left up (call_log ${callLogId || 'n/a'})`);
+      await patchCallLogMetadata(callLogId, { voicemail_text: { outcome: 'skipped', reason: pre.skipped } });
+      return res.sendStatus(200);
+    }
+
+    // Stamp first so /outbound-dial-complete (which fires the instant the
+    // child leg drops) already sees the verdict.
+    await patchCallLogMetadata(callLogId, { [AMD_MACHINE_DETECTED_KEY]: new Date().toISOString() });
+
+    if (CallSid) {
+      try {
+        await hangUpCustomerLeg(CallSid);
+      } catch (e) {
+        // Could not hang up (leg already gone, REST error): still text — the
+        // customer will see the missed call either way and a voicemail plus
+        // a text is better than a silent missed call.
+        logger.warn(`[outbound-amd] customer-leg hangup failed for ${maskSid(CallSid)}: ${sanitizeVoiceProviderError(e.message)}`);
+      }
+    }
+
+    let row = null;
+    let customer = null;
+    if (callLogId && callLogId !== 'undefined') {
+      row = await db('call_log').where({ id: callLogId }).first('id', 'customer_id', 'to_phone').catch(() => null);
+      if (row?.customer_id) {
+        customer = await db('customers').where({ id: row.customer_id }).first('id', 'first_name').catch(() => null);
+      }
+    }
+
+    const result = await sendOutboundVoicemailText({
+      phone: customerNumber || row?.to_phone || null,
+      customerId: customer?.id || row?.customer_id || null,
+      firstName: customer?.first_name || '',
+      callLogId: row?.id || null,
+      callSid: CallSid || null,
+      callerId: callerIdNumber,
+    });
+    await patchCallLogMetadata(callLogId, {
+      voicemail_text: result.sent
+        ? { outcome: 'sent', provider_sid: result.providerMessageId || null }
+        : { outcome: 'skipped', reason: result.skipped || 'unknown', code: result.code || null },
+    });
+    if (!result.sent) {
+      logger.warn(`[outbound-amd] Customer leg hung up on voicemail but text did not send (${result.skipped}${result.code ? `:${result.code}` : ''}) for call_log ${callLogId || 'n/a'}`);
+    }
+    res.sendStatus(200);
+  } catch (err) {
+    logger.error(`Outbound AMD webhook error: ${err.message}`);
+    notifyTwilioFailure({
+      channel: 'voice',
+      direction: 'outbound',
+      phase: 'outbound_amd_webhook',
+      status: 'failed',
+      sid: CallSid,
+      errorMessage: err.message,
+      to: customerNumber,
+      link: '/admin/communications',
+    });
+    res.sendStatus(200);
+  }
+});
+
+// POST /api/webhooks/twilio/outbound-dial-complete — <Dial action> on the
+// admin leg once the customer leg ends. Tells the admin when we hung up on
+// a voicemail for them; otherwise ends the call exactly as the pre-lane
+// (action-less) <Dial> did.
+router.post('/outbound-dial-complete', async (req, res) => {
+  const twiml = new VoiceResponse();
+  try {
+    const callLogId = req.query.callLogId;
+    let detected = false;
+    if (callLogId && callLogId !== 'undefined') {
+      const row = await db('call_log').where({ id: callLogId }).first('metadata').catch(() => null);
+      const meta = foldVoiceMetadata(row?.metadata, {});
+      detected = !!meta[AMD_MACHINE_DETECTED_KEY];
+    }
+    if (detected) {
+      twiml.say({ voice: SAY_VOICE }, 'Voicemail detected. Hanging up and sending a text instead.');
+    }
+    twiml.hangup();
+    res.type('text/xml').send(twiml.toString());
+  } catch (err) {
+    logger.error(`Outbound dial-complete error: ${err.message}`);
+    twiml.hangup();
+    res.type('text/xml').send(twiml.toString());
   }
 });
 
@@ -3344,6 +3530,8 @@ router.post('/call-status', async (req, res) => {
 
 router._test = {
   stampRelayProfile,
+  outboundVoicemailTextDialOptions,
+  AMD_MACHINE_DETECTED_KEY,
   decideRecordingAttach,
   nextCallStatus,
   builtinTranscriptMayReplace,

@@ -12,6 +12,7 @@
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
+ *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -1396,6 +1397,17 @@ const gates = {
   // Off → the dropped call still opens its call-back triage card; only the
   // SMS is skipped.
   droppedCallSms: process.env.GATE_DROPPED_CALL_SMS === 'true',
+
+  // Outbound voicemail text-back (services/outbound-voicemail-sms.js): an
+  // admin click-to-call that reaches the CUSTOMER'S voicemail hangs up the
+  // customer leg before a message is left and texts "sorry we missed you"
+  // instead (owner-directed 2026-09-08 — the "did you just call me?"
+  // callbacks). Same fail-CLOSED rule as the other text-back lanes:
+  // customer-facing auto-send, explicit opt-in in every environment. Owner
+  // sets GATE_OUTBOUND_VOICEMAIL_SMS=true to go live. Off → the outbound
+  // <Dial> requests no machine detection at all (no AMD charge, no hangup,
+  // no text) — the call flow is unchanged from before this lane.
+  outboundVoicemailSms: process.env.GATE_OUTBOUND_VOICEMAIL_SMS === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,

@@ -1,0 +1,242 @@
+/**
+ * Outbound voicemail text-back (services/outbound-voicemail-sms.js).
+ *
+ * Pins the send-gate ladder in order — feature gate (fails closed), quiet
+ * hours, the 24h per-phone sms_log dedupe (read failure = fail closed), the
+ * template kill switch — and the sendCustomerMessage outcomes (real send /
+ * suppression sentinel / policy block / provider failure), plus the AMD
+ * verdict classifier the webhook keys on.
+ */
+
+jest.mock('../models/db', () => {
+  const mockDb = jest.fn();
+  mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  return mockDb;
+});
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM_real_sid' })),
+}));
+jest.mock('../services/sms-template-renderer', () => ({
+  renderSmsTemplate: jest.fn(async (key, vars) => `Hi ${vars.first_name}, sorry we missed you${vars.callback_clause}.${vars.optout_clause}`),
+}));
+jest.mock('../config/twilio-numbers', () => ({
+  tollFree: { number: '+18005550100' },
+  findByNumber: jest.fn((n) => (n === '+19412975749' || n === '+18005550100' ? { id: 'main' } : null)),
+}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const db = require('../models/db');
+const { isEnabled } = require('../config/feature-gates');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const {
+  MESSAGE_TYPE,
+  GATE,
+  isVoicemailAnsweredBy,
+  precheck,
+  sendOutboundVoicemailText,
+  _private,
+} = require('../services/outbound-voicemail-sms');
+
+const PHONE = '+19415550101';
+const MAIN_LINE = '+19412975749';
+// 2026-09-08T15:00Z = 11:00 ET (EDT) — inside the 8am–8pm send window.
+const IN_WINDOW = new Date('2026-09-08T15:00:00Z');
+// 2026-09-09T02:00Z = 22:00 ET the prior evening — outside the window.
+const OUT_OF_WINDOW = new Date('2026-09-09T02:00:00Z');
+
+let smsLogFirst;
+
+function installDb({ priorRow = undefined, firstError = null } = {}) {
+  smsLogFirst = jest.fn(async () => {
+    if (firstError) throw firstError;
+    return priorRow;
+  });
+  db.mockImplementation((table) => {
+    if (table !== 'sms_log') throw new Error(`unexpected table ${table}`);
+    const b = {};
+    b.where = jest.fn(() => b);
+    b.first = smsLogFirst;
+    return b;
+  });
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  jest.useFakeTimers({ now: IN_WINDOW, doNotFake: ['nextTick', 'setImmediate'] });
+  isEnabled.mockImplementation(() => true);
+  installDb();
+});
+
+afterEach(() => {
+  jest.useRealTimers();
+});
+
+describe('isVoicemailAnsweredBy', () => {
+  test('every machine_* verdict is voicemail; human/unknown/fax/empty are not', () => {
+    for (const v of ['machine_start', 'machine_end_beep', 'machine_end_silence', 'machine_end_other']) {
+      expect(isVoicemailAnsweredBy(v)).toBe(true);
+    }
+    for (const v of ['human', 'unknown', 'fax', '', null, undefined]) {
+      expect(isVoicemailAnsweredBy(v)).toBe(false);
+    }
+  });
+});
+
+describe('precheck — decided before the customer leg is hung up', () => {
+  test('gate is the named gate and fails closed', async () => {
+    expect(GATE).toBe('outboundVoicemailSms');
+    isEnabled.mockImplementation(() => false);
+    await expect(precheck({ phone: PHONE })).resolves.toEqual({ ok: false, skipped: 'gate_off' });
+    expect(isEnabled).toHaveBeenCalledWith('outboundVoicemailSms');
+    expect(smsLogFirst).not.toHaveBeenCalled();
+  });
+
+  test('missing phone skips without touching the DB', async () => {
+    await expect(precheck({ phone: '' })).resolves.toEqual({ ok: false, skipped: 'missing_input' });
+    expect(smsLogFirst).not.toHaveBeenCalled();
+  });
+
+  test('outside 8am–8pm ET skips before the dedupe probe', async () => {
+    await expect(precheck({ phone: PHONE, now: OUT_OF_WINDOW })).resolves.toEqual({ ok: false, skipped: 'quiet_hours' });
+    expect(smsLogFirst).not.toHaveBeenCalled();
+  });
+
+  test('a prior missed-you text to the same phone inside 24h skips', async () => {
+    installDb({ priorRow: { id: 'sms1' } });
+    await expect(precheck({ phone: '(941) 555-0101' })).resolves.toEqual({ ok: false, skipped: 'already_sent_recently' });
+    // The probe is keyed on the normalized E.164 phone + this lane's message_type.
+    const builder = db.mock.results[0].value;
+    expect(builder.where).toHaveBeenCalledWith({ to_phone: PHONE, message_type: MESSAGE_TYPE });
+    expect(builder.where).toHaveBeenCalledWith('created_at', '>=', expect.any(Date));
+    const since = builder.where.mock.calls.find((c) => c[0] === 'created_at')[2];
+    expect(IN_WINDOW.getTime() - since.getTime()).toBe(24 * 60 * 60 * 1000);
+  });
+
+  test('a dedupe read failure fails CLOSED', async () => {
+    installDb({ firstError: Object.assign(new Error('boom'), { code: 'ECONN' }) });
+    await expect(precheck({ phone: PHONE })).resolves.toEqual({ ok: false, skipped: 'dedupe_read_failed' });
+  });
+
+  test('clean path returns ok with the normalized phone', async () => {
+    await expect(precheck({ phone: '9415550101' })).resolves.toEqual({ ok: true, phone: PHONE });
+  });
+});
+
+describe('sendOutboundVoicemailText', () => {
+  test('gate off → no template render, no send', async () => {
+    isEnabled.mockImplementation(() => false);
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({ sent: false, skipped: 'gate_off' });
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('template missing/disabled is the kill switch — nothing sends', async () => {
+    renderSmsTemplate.mockResolvedValueOnce(null);
+    await expect(sendOutboundVoicemailText({ phone: PHONE, customerId: 'c1' })).resolves.toEqual({ sent: false, skipped: 'template_disabled' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('linked customer: customer audience, phone_matches_customer trust, no STOP footer, callback clause from the caller ID, reply from the main line', async () => {
+    const result = await sendOutboundVoicemailText({
+      phone: PHONE,
+      customerId: 'cust-1',
+      firstName: 'maria',
+      callLogId: 'cl-1',
+      callSid: 'CA_child',
+      callerId: MAIN_LINE,
+    });
+    expect(result).toEqual({ sent: true, providerMessageId: 'SM_real_sid' });
+
+    expect(renderSmsTemplate).toHaveBeenCalledWith(MESSAGE_TYPE, {
+      first_name: 'Maria',
+      callback_clause: ' at (941) 297-5749',
+      optout_clause: '',
+    }, { workflow: MESSAGE_TYPE, entity_type: 'customer', entity_id: 'cust-1' });
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    const input = sendCustomerMessage.mock.calls[0][0];
+    expect(input).toMatchObject({
+      to: PHONE,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'missed_call_followup',
+      customerId: 'cust-1',
+      identityTrustLevel: 'phone_matches_customer',
+      consentBasis: { status: 'transactional_allowed', source: 'outbound_voicemail_text_back' },
+      entryPoint: 'outbound_voicemail_sms',
+      metadata: {
+        original_message_type: MESSAGE_TYPE,
+        call_sid: 'CA_child',
+        call_log_id: 'cl-1',
+        fromNumber: MAIN_LINE,
+      },
+    });
+    expect(input.body).toBe('Hi Maria, sorry we missed you at (941) 297-5749.');
+  });
+
+  test('no customer record: lead audience, unverified trust, STOP footer, no customerId', async () => {
+    await sendOutboundVoicemailText({ phone: PHONE, callerId: '+15551234567' });
+    expect(renderSmsTemplate.mock.calls[0][1]).toEqual({
+      first_name: 'there',
+      callback_clause: ' at (555) 123-4567',
+      optout_clause: ' Reply STOP to opt out.',
+    });
+    const input = sendCustomerMessage.mock.calls[0][0];
+    expect(input.audience).toBe('lead');
+    expect(input.identityTrustLevel).toBe('phone_provided_unverified');
+    expect(input).not.toHaveProperty('customerId');
+    // An unmanaged caller ID never becomes the reply-from number.
+    expect(input.metadata).not.toHaveProperty('fromNumber');
+  });
+
+  test('the AI toll-free line is never the reply-from number', async () => {
+    await sendOutboundVoicemailText({ phone: PHONE, callerId: '+18005550100' });
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).not.toHaveProperty('fromNumber');
+  });
+
+  test('a suppression sentinel from the pipeline is reported as not sent', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({
+      sent: false, skipped: 'send_suppressed', code: 'gate-blocked',
+    });
+  });
+
+  test('a policy block (STOP list) is reported with its code', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED_STOP' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({
+      sent: false, skipped: 'policy_block', code: 'SUPPRESSED_STOP',
+    });
+  });
+
+  test('a provider failure is reported as provider_failed', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, code: '30006', reason: 'landline' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({
+      sent: false, skipped: 'provider_failed', code: '30006',
+    });
+  });
+
+  test('re-runs the precheck itself so a direct call is still safe', async () => {
+    installDb({ priorRow: { id: 'sms1' } });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({ sent: false, skipped: 'already_sent_recently' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('_private helpers', () => {
+  test('callbackClause formats a 10/11-digit US number and is empty otherwise', () => {
+    expect(_private.callbackClause('+19412975749')).toBe(' at (941) 297-5749');
+    expect(_private.callbackClause('9412975749')).toBe(' at (941) 297-5749');
+    expect(_private.callbackClause('+441234567890')).toBe('');
+    expect(_private.callbackClause('')).toBe('');
+    expect(_private.callbackClause(null)).toBe('');
+  });
+
+  test('normalizePhoneE164 matches the pipeline shape', () => {
+    expect(_private.normalizePhoneE164('941-555-0101')).toBe(PHONE);
+    expect(_private.normalizePhoneE164('19415550101')).toBe(PHONE);
+    expect(_private.normalizePhoneE164(PHONE)).toBe(PHONE);
+    expect(_private.normalizePhoneE164('')).toBeNull();
+  });
+});
