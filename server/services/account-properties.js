@@ -229,9 +229,10 @@ function applyPropertyPredicate(qb, scope, alias = 'scheduled_services') {
 // entries and keep each entry's FIRST visit: Map<entry.key, visit>. Same
 // reading as the visit rule — a profile with one entry owns every visit of
 // that customer; on a multi-property profile a stamped visit belongs to the
-// entry with that property, an unstamped one to the primary entry, and a
-// visit stamped to a property that is no longer listed belongs to nobody
-// (the list route would not show it under any property either).
+// entry with that property, an unstamped one to the PRIMARY entry only (a
+// profile whose primary was retired has no owner for them — exactly what
+// applyPropertyPredicate shows), and a visit stamped to a property that is
+// no longer listed belongs to nobody.
 function assignVisitsToEntries(entries, visits) {
   const byCustomer = new Map();
   for (const entry of entries) {
@@ -246,7 +247,7 @@ function assignVisitsToEntries(entries, visits) {
     let target = null;
     if (mine.length === 1) target = mine[0];
     else if (visit.property_id) target = mine.find((e) => String(e.propertyId) === String(visit.property_id)) || null;
-    else target = mine.find((e) => e.isPrimaryProperty) || mine[0];
+    else target = mine.find((e) => e.isPrimaryProperty) || null;
     if (target && !next.has(target.key)) next.set(target.key, visit);
   }
   return next;

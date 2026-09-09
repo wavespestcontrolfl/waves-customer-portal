@@ -234,6 +234,23 @@ describe('cross-tab saved-property switch', () => {
     api.getAuthProperties.mockResolvedValue(SAVED);
   });
 
+  it('a claim-less (profile-only) switch whose list reload fails resolves that profile\'s PRIMARY from the entries already held', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    api.getMe.mockResolvedValue({ id: 'cust-1' });
+    api.getAuthProperties.mockResolvedValue(SAVED);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-a');
+    // Switch to the sibling rental profile (no property claim on the minted token); the reload fails.
+    api.getMe.mockResolvedValue({ id: 'cust-9' });
+    api.selectAuthProperty.mockResolvedValue({ token: tokenFor({ customerId: 'cust-9', sessionId: 'fam-1' }), refreshToken: 'ref-z', properties: [], selected: { customerId: 'cust-9', propertyId: 'prop-z' } });
+    api.getAuthProperties.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => { await authApi.switchProperty('cust-9'); });
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-9');
+    // The unified list is retained and the rental profile's one entry is its primary.
+    expect(screen.getByTestId('selected').textContent).toBe('cust-9:prop-z');
+    api.getAuthProperties.mockResolvedValue(SAVED);
+  });
+
   it('a routine same-family rotation without a property change keeps the epoch', async () => {
     const tokA1 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 1 });
     const tokA2 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 2 });

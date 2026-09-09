@@ -4165,7 +4165,11 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
   const [rect, setRect] = useState(null);
   const ref = useRef(null);
   const popRef = useRef(null);
-  const current = properties.find((p) => p.id === currentId) || properties[0];
+  // Profile entries fall back to the first profile (today's rule). Saved-
+  // property entries never do: an unknown selection (list reloading after a
+  // switch) reads as "Select a property" rather than the wrong house.
+  const savedEntries = properties.some((p) => p.key);
+  const current = properties.find((p) => p.id === currentId) || (savedEntries ? null : properties[0]);
   const place = useCallback(() => { if (ref.current) setRect(ref.current.getBoundingClientRect()); }, []);
   useEffect(() => {
     if (!open) return undefined;
@@ -4185,7 +4189,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
       window.removeEventListener('resize', place);
     };
   }, [open, place]);
-  if (!current) return null;
+  if (!current && !savedEntries) return null;
   const label = (p) => p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property');
   const busy = !!switchingId;
   return (
@@ -4208,16 +4212,16 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
           fontFamily: FONTS.body, color: B.glassNavy, opacity: busy ? 0.7 : 1,
         }}
       >
-        <GlassTile name={current.isPrimaryProfile ? 'home' : 'building'} />
+        <GlassTile name={current?.isPrimaryProfile ? 'home' : 'building'} />
         {/* The glass theme flattens every weight inside a button to 600, so the
             hierarchy here is size + colour only — same scale as the visit
             cards (16 navy name, 14 muted detail). */}
         <span style={{ minWidth: 0, flex: 1 }}>
           <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>
-            {busy ? 'Switching…' : label(current)}
+            {busy ? 'Switching…' : (current ? label(current) : 'Select a property')}
           </span>
           <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {current.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(current) || 'No address on file'}
+            {current ? `${current.isPrimaryProfile ? 'Primary residence · ' : ''}${formatPropertyAddress(current) || 'No address on file'}` : 'Your properties are still loading'}
           </span>
         </span>
         <span style={{ display: 'inline-flex', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}>

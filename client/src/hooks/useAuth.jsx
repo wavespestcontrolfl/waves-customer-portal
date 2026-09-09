@@ -215,9 +215,15 @@ export function AuthProvider({ children }) {
             ? prev
             : { key: `${data.id}:${claimed}`, customerId: data.id, propertyId: claimed }));
         } else {
-          // No claim = the primary: a selection left over from an earlier
-          // session (or an earlier switch) must not survive the failed read.
-          setSelectedProperty(null);
+          // No claim = this profile's PRIMARY. Resolve it from the entries
+          // already held (a profile-only switch keeps the unified list, and
+          // customer.id matches no composite key), else leave the selection
+          // unavailable — never a leftover house from an earlier session.
+          const mine = (propertiesRef.current || []).filter((p) => String(p.customerId || p.id) === String(data?.id));
+          const primaryEntry = mine.find((p) => p.isPrimaryProperty) || (mine.length === 1 ? mine[0] : null);
+          setSelectedProperty(primaryEntry && primaryEntry.propertyId !== undefined
+            ? { key: primaryEntry.id, customerId: primaryEntry.customerId, propertyId: primaryEntry.propertyId }
+            : null);
         }
         // The active customer is still valid. Preserve any property list we
         // already have instead of collapsing a multi-property account to a

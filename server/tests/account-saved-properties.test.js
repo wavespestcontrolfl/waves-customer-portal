@@ -234,6 +234,17 @@ describe('assignVisitsToEntries — next visit per unified entry', () => {
     ]);
     expect([...next.entries()].map(([k, v]) => [k, v.id])).toEqual([['c1:pa', 'v1'], ['c1:pb', 'v2'], ['c9:pz', 'v5']]);
   });
+  test('a multi-property profile with NO active primary leaves unstamped visits unassigned — the list route would not show them under a secondary either', () => {
+    const noPrimary = [
+      { key: 'c1:pb', customerId: 'c1', propertyId: 'pb', isPrimaryProperty: false },
+      { key: 'c1:pc', customerId: 'c1', propertyId: 'pc', isPrimaryProperty: false },
+    ];
+    const next = assignVisitsToEntries(noPrimary, [
+      { id: 'v1', customer_id: 'c1', property_id: null },
+      { id: 'v2', customer_id: 'c1', property_id: 'pc' },
+    ]);
+    expect([...next.entries()].map(([k, v]) => [k, v.id])).toEqual([['c1:pc', 'v2']]);
+  });
 });
 
 describe('applyPropertyPredicate — the property half alone', () => {
