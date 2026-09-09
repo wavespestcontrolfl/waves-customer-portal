@@ -1145,12 +1145,16 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
-      if (require('./callback-cards').enabled()) {
+      // Rollback must not weaken proof for an attempt placed by a callback card.
+      const cardAttempt = !require('./callback-cards').enabled() && await conn('call_log')
+        .whereRaw("metadata->>'relatedCommitmentId' = ?", [commitment.id]).first('id');
+      if (require('./callback-cards').enabled() || cardAttempt) {
         if (!phone) return null;
         // A child-leg connection plus reviewed extraction of a real
         // conversation is proof. Ringing the staff phone, voicemail, and
         // an unrelated/queued text are not fulfillment of this promise.
         const connected = await conn('call_log').where('direction', 'outbound')
+          .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
           .where('created_at', '>', after).where('v2_extraction_status', 'valid')
           .whereRaw("metadata->>'relatedCommitmentId' = ?", [commitment.id])
           .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")

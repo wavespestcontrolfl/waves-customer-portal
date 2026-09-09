@@ -156,4 +156,20 @@ run('callback bridge on PostgreSQL', () => {
     if (evidence === 'conversation') expect(proof).toMatchObject({ record_id: outbound.id, basis: 'callback_customer_conversation' });
     else expect(proof).toBeNull();
   });
+
+  test.each(['conversation', 'unanswered', 'voicemail'])('gate rollback retains customer-leg proof: %s', async (evidence) => {
+    const row = await seed();
+    const [outbound] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid',
+      ai_extraction_enriched: { meta: { is_voicemail: evidence === 'voicemail' } },
+      metadata: { relatedCommitmentId: row.id, customer_leg: {
+        status: evidence === 'unanswered' ? 'no-answer' : 'completed', duration_seconds: evidence === 'unanswered' ? 0 : 90,
+      } } }).returning('id');
+    process.env.GATE_CALLBACK_CARD = 'false';
+    const source = await conn('call_log').where({ id: row.call_log_id }).first();
+    const proof = await require('../services/call-commitments').resolveFulfillment(conn, row, source);
+    if (evidence === 'conversation') expect(proof).toMatchObject({ record_id: outbound.id, basis: 'callback_customer_conversation' });
+    else expect(proof).toBeNull();
+  });
+
 });
