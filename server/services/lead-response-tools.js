@@ -28,7 +28,8 @@ async function resolveLeadSubject(input, context, conn = db, lock = false) {
   const customer = await customerQuery.first();
   if (!customer) return { error: 'Assigned customer is unavailable', validationError: true };
   const query = conn('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at');
-  if (lock) query.forUpdate();
+  if (lock === 'send') query.forNoKeyUpdate();
+  else if (lock) query.forUpdate();
   const lead = await query.first();
   if (!lead) return { error: 'Assigned lead is unavailable', validationError: true };
   if (input.phone != null) {
@@ -261,15 +262,8 @@ async function executeLeadTool(toolName, input, context) {
     // ── Response actions ────────────────────────────────────────
 
     case 'send_lead_response': {
-      // A lead an admin removed from the pipeline must never be contacted:
-      // the agent's prompt can carry a lead id captured before the delete,
-      // so re-check liveness at send time — refuse instead of texting.
-      if (input.lead_id) {
-        const liveLead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first('id');
-        if (!liveLead) return { error: 'Lead was removed from the pipeline — do not contact' };
-      }
-      const customer = await db('customers').where('id', input.customer_id).first();
-      if (!customer?.phone) return { error: 'Customer has no phone number' };
+      const customer = subject.customer;
+      if (!customer.phone) return { error: 'Customer has no phone number', validationError: true };
 
       // Routed through the customer-message middleware so consent /
       // suppression / identity / voice / segment checks all apply, and
@@ -281,6 +275,9 @@ async function executeLeadTool(toolName, input, context) {
       // entries still record so the lead doesn't disappear; we just
       // don't auto-text someone who opted out.
       const { sendCustomerMessage } = require('./messaging/send-customer-message');
+      // Canonical preparation runs without a pinned transaction. The provider
+      // invokes this local guard around only the actual SDK request, then
+      // releases its locks before global-database audit and bookkeeping.
       const result = await sendCustomerMessage({
         to: customer.phone,
         body: input.message,
@@ -288,12 +285,21 @@ async function executeLeadTool(toolName, input, context) {
         audience: 'lead',
         purpose: 'conversational',
         customerId: customer.id,
-        leadId: input.lead_id || null,
+        leadId: context.leadId,
         entryPoint: 'lead_response_auto_reply',
-        // Preserve the legacy messageType so the admin-sms-templates
-        // kill-switch (lead_response → lead_auto_reply_biz toggle) still
-        // applies when ops disables this template during an incident.
         metadata: { original_message_type: 'lead_response' },
+        withSmsHandoff: dispatch => db.transaction(async trx => {
+          const current = await resolveLeadSubject(input, context, trx, 'send');
+          if (current.error || current.customer.phone !== customer.phone) {
+            return { ok: false, code: 'LEAD_SUBJECT_CHANGED', reason: 'Assigned lead or contact changed before dispatch' };
+          }
+          await dispatch();
+          return { ok: true };
+        }),
+      }).catch(err => {
+        if (!err.providerOutcome?.sent) throw err;
+        logger.warn('[lead-agent] Response audit failed after provider acceptance', { leadId: context.leadId });
+        return err.providerOutcome;
       });
 
       // No quiet-hours requeue: lead_response_auto_reply is a
@@ -309,7 +315,7 @@ async function executeLeadTool(toolName, input, context) {
       // or fire the first_contact pipeline event, otherwise the response-
       // time SLA metric and the funnel both record a phantom contact.
       // Codex P1 follow-up to #538.
-      if (input.lead_id) {
+      await withLockedLeadSubject(input, context, async (current, trx) => {
         // Distinguish wrapper-policy blocks from provider failures so
         // incident triage doesn't see "blocked by middleware" when
         // Twilio actually had a network error. activity_type:
@@ -328,21 +334,21 @@ async function executeLeadTool(toolName, input, context) {
           : (result.blocked
               ? `Auto-response blocked by middleware (${result.code || 'unknown'})`
               : `Auto-response provider failure (${result.code || 'unknown'})`);
-        await db('lead_activities').insert({
+        await trx.transaction(sp => sp('lead_activities').insert({
           lead_id: input.lead_id,
           activity_type: activityType,
           description: activityDescription,
           performed_by: 'lead_agent',
           metadata: JSON.stringify({ audit_log_id: result.auditLogId }),
-        }).catch(() => {});
+        })).catch(() => {});
 
         // Pipeline + response-time only advance on real send — and only on
         // a still-live lead (a mid-flight delete must not be overwritten).
         if (result.sent) {
-          const lead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first();
+          const { lead } = current;
           if (lead?.first_contact_at) {
             const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
-            await db('leads').where('id', input.lead_id).whereNull('deleted_at').update({
+            await trx('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at').update({
               response_time_minutes: responseMinutes,
               status: 'contacted',
               updated_at: new Date(),
@@ -350,15 +356,14 @@ async function executeLeadTool(toolName, input, context) {
             // Funnel-row mirror (monotonic in SQL — can never downgrade a row
             // that already advanced past 'contacted'; best-effort inside).
             const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
-            await bridgeLeadFunnelStage(input.lead_id, 'contacted');
+            await bridgeLeadFunnelStage(input.lead_id, 'contacted', trx);
           }
         }
-      }
-
-      if (result.sent) {
-        const PipelineManager = require('./pipeline-manager');
-        await PipelineManager.onEvent(input.customer_id, 'first_contact');
-      }
+        if (result.sent) {
+          const PipelineManager = require('./pipeline-manager');
+          await PipelineManager.onEvent(context.customerId, 'first_contact', {}, { database: trx });
+        }
+      }).catch(() => logger.warn('[lead-agent] Response bookkeeping failed', { leadId: context.leadId }));
 
       if (result.sent) {
         // PII: ID-only logging per AGENTS.md. Customer name + phone live

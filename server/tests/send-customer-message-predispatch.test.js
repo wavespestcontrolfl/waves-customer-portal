@@ -97,6 +97,24 @@ test('no hook — the legacy pipeline is untouched', async () => {
   expect(sendViaTwilio).toHaveBeenCalledTimes(1);
 });
 
+test('lead handoff closure reaches only the provider hook, never message or audit state', async () => {
+  const withSmsHandoff = jest.fn();
+  expect((await sendCustomerMessage({ ...BASE_INPUT, entryPoint: 'lead_response_auto_reply', withSmsHandoff })).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toBe(withSmsHandoff);
+  expect(sendViaTwilio.mock.calls[0][0]).not.toHaveProperty('withSmsHandoff');
+  expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('withSmsHandoff');
+});
+
+test.each([{ channel: 'push' }, { audience: 'customer' }, { purpose: 'appointment' }, { entryPoint: 'other' }])(
+  'a handoff guard cannot silently cross another routing contract: %j', async fields => {
+    const result = await sendCustomerMessage({ ...BASE_INPUT, entryPoint: 'lead_response_auto_reply', ...fields, withSmsHandoff: jest.fn() });
+    // The existing channel contract rejects lead push before hook validation.
+    expect(result).toMatchObject({ sent: false, blocked: true,
+      code: fields.channel === 'push' ? 'CONTRACT_VIOLATION' : 'UNSUPPORTED_SMS_HANDOFF' });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  },
+);
+
 describe('invoice-specific receipt SMS evidence', () => {
   const db = require('../models/db');
   const input = { ...BASE_INPUT, audience: 'customer', customerId: 'c1', invoiceId: 'invoice-1', purpose: 'payment_receipt', metadata: { original_message_type: 'receipt' }, operatorInitiated: true };

@@ -792,6 +792,10 @@ const TwilioService = {
         // operatorInitiated flag — admin attribution is operator provenance.
         adminAttributed: Boolean(options.adminUserId),
       });
+      if (typeof options.withSmsHandoff === 'function' && pushRoute !== 'sms_only') {
+        return { success: false, preSendBlocked: true, code: 'UNSUPPORTED_SMS_HANDOFF',
+          error: 'Locked lead handoff requires SMS routing', validator: 'check_sms_handoff_authority' };
+      }
       if (pushRoute === "push_first") {
         const pushed = await PushRouting.attemptPushFirst({
           customerId: options.customerId,
@@ -830,13 +834,36 @@ const TwilioService = {
       // clearance outranks the bounced send — an insert-time default is
       // post-handoff and can postdate a START that raced the log write,
       // wrongly re-suppressing an opted-in recipient (hook P1 ×2).
-      const handoffAt = new Date();
+      let handoffAt;
       // Re-anchor the 21610 ordering timestamp at the ACTUAL provider
       // handoff (codex #3495): entry-time capture predates template/
       // customer lookups and the push-first attempt, so a START received
       // during that preparation wrongly outranked the rejection.
-      smsAttemptAt = new Date();
-      const message = await c.messages.create(msgPayload);
+      let message;
+      const dispatch = async () => {
+        handoffAt = new Date();
+        smsAttemptAt = handoffAt;
+        message = await c.messages.create(msgPayload);
+      };
+      if (typeof options.withSmsHandoff === 'function') {
+        let verdict;
+        try {
+          verdict = await options.withSmsHandoff(dispatch);
+        } catch (err) {
+          if (!message) throw err;
+          // The read-only guard may fail to commit after Twilio accepts.
+          // Preserve that known acceptance so callers cannot retry the SMS.
+          logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
+        }
+        if (!message) {
+          return { success: false, preSendBlocked: true,
+            code: verdict?.code || 'SMS_HANDOFF_CHECK_FAILED',
+            error: verdict?.reason || 'SMS handoff authority was not established',
+            validator: 'check_sms_handoff_authority' };
+        }
+      } else {
+        await dispatch();
+      }
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
       );
