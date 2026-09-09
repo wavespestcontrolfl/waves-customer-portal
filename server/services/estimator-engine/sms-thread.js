@@ -86,26 +86,36 @@ const QUOTE_HINT_RE = new RegExp(
 // "service", "cost", "rate", "lawn" (18 senders, 41 texts in the 60 days to
 // 2026-09-09) and the classifier prompt had no vendor category, so a
 // confident "quote_request: true" would mint an owed-quote bell and a DEEP
-// composer run for a sales pitch. Deliberately explicit phrasings only —
-// a homeowner never writes these ("want more details?" was dropped: a
-// prospect describing a termite problem writes it too); anything softer
-// is left to the model, which is now told vendors are not quote requests.
-const SOLICITATION_RE = new RegExp(
-  [
-    '\\b(?:exclusive|qualified|unlimited|more|extra)\\s+(?:\\w+\\s+){0,3}(?:leads?|jobs?|customers?|estimates?)\\b',
-    '\\bleads?\\s+(?:for|to)\\s+(?:you|your)\\b',
-    '\\b(?:no|zero|\\$0)\\s+(?:upfront|up-front|set-?up|monthly)\\s+(?:cost|costs|fee|fees)?',
-    '\\bfund\\s+your\\s+ads?\\b',
-    '\\bfree\\s+(?:setup|set-up|trial)\\b',
-    '\\b(?:grow|scale|book(?:ing)?\\s+more|fill)\\s+(?:your\\s+)?(?:business|schedule|calendar)\\b',
-    '\\bai\\s+receptionist\\b',
-    '\\breview\\s+system\\b',
-    '\\bconnect(?:s|ing)?\\s+(?:you|local\\s+homeowners)\\s+with\\b',
-    '\\bservice\\s+is\\s+being\\s+requested\\s+by\\b',
-    '\\b(?:reply|say|text)\\s+"?(?:stop|no|byebye|end)"?\\s+(?:if|to)\\b',
-  ].join('|'),
-  'i',
-);
+// composer run for a sales pitch.
+//
+// Marker CATEGORIES, same shape as call-spam-classifier's robocall script
+// signature: a STRONG marker is phrasing a homeowner never writes and is a
+// verdict alone; a WEAK marker is vendor-flavored but a prospect can write
+// it too ("no upfront cost?", "reply NO if you can't make it", "would you
+// like more details?") and counts only alongside another marker (codex
+// #4212 r2). Anything softer is left to the model, which is told vendors
+// are not quote requests.
+const SOLICITATION_MARKERS = [
+  { key: 'leads_pitch', strong: true, re: /\b(?:exclusive|qualified|unlimited|more|extra)\s+(?:\w+\s+){0,3}(?:leads?|jobs?|customers?|estimates?)\b|\bleads?\s+(?:for|to)\s+(?:you|your)\b/i },
+  { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
+  { key: 'grow_business', strong: true, re: /\b(?:grow|scale|book(?:ing)?\s+more|fill)\s+(?:your\s+)?(?:business|schedule|calendar)\b/i },
+  { key: 'vendor_tool', strong: true, re: /\bai\s+receptionist\b|\breview\s+system\b/i },
+  { key: 'connects_you', strong: true, re: /\bconnect(?:s|ing)?\s+(?:you|local\s+homeowners)\s+with\b/i },
+  { key: 'service_requested_by', strong: true, re: /\bservice\s+is\s+being\s+requested\s+by\b/i },
+  // "$" is not a word character, so the boundary sits inside the
+  // alternation rather than in front of it (codex r2).
+  { key: 'no_upfront', strong: false, re: /(?:\bno|\bzero|\$0)\s+(?:upfront|up-front|set-?up|monthly)\s+(?:cost|costs|fee|fees)?|\bfree\s+(?:setup|set-up|trial)\b/i },
+  { key: 'reply_directive', strong: false, re: /\b(?:reply|say|text)\s+"?(?:stop|no|byebye|end)"?\s+(?:if|to)\b/i },
+  { key: 'more_details', strong: false, re: /\b(?:want|like)\s+(?:more\s+)?details\?/i },
+];
+
+/** Pure. True when a strong marker hits, or at least two distinct weak ones. */
+function isSolicitationPitch(text) {
+  const t = String(text || '');
+  if (!t.trim()) return false;
+  const hits = SOLICITATION_MARKERS.filter((m) => m.re.test(t));
+  return hits.some((m) => m.strong) || hits.filter((m) => !m.strong).length >= 2;
+}
 
 // Markers that the sender is REPLACING the previous ask rather than
 // continuing it. Deliberately narrow — an explicit correction word plus a
@@ -132,7 +142,6 @@ async function threadQuoteSignal(body, triage = null, { hintGate = true } = {}) 
   // question ("power wash my yard") and rarely carry quote vocabulary, so
   // the cheap prefilter would hide them from the grounded scope vetoes.
   if (hintGate && !QUOTE_HINT_RE.test(text)) return { quoteRequest: false, method: 'regex' };
-  if (SOLICITATION_RE.test(text)) return { quoteRequest: false, method: 'regex_solicitation' };
   try {
     const grounded = !!triage;
     const contextBlock = grounded && triage.lines.length
@@ -393,6 +402,16 @@ async function startSmsThreadDraft({
         return result;
       }
     }
+    // A vendor pitch is never a quote request — on the primary path AND on
+    // the skipIntentGate resumes (lead-intake / clarify), with or without
+    // scope guards, before triage is loaded or a model call is spent.
+    // Terminal: a caller's legacy fallback must not draft it either
+    // (codex #4212 r1/r2).
+    if (isSolicitationPitch(triggerBody)) {
+      result.skipped = 'no_quote_intent_regex_solicitation';
+      result.terminal = true;
+      return result;
+    }
     // Grounding for the classifier (fail-open → ungrounded prompt); a
     // prechecked call reuses the pre-check's triage (may be null — that IS
     // the pre-check's fail-open outcome, reused as-is).
@@ -449,10 +468,7 @@ async function startSmsThreadDraft({
       // established request. hintGate off: resume replies rarely carry
       // quote vocabulary, and the prefilter would hide them from the veto.
       const signal = await threadQuoteSignal(triggerBody, triage, { hintGate: false });
-      // regex_solicitation: a vendor pitch landing on an active intake /
-      // clarify thread is not the customer's answer; terminal like the
-      // classifier's own vetoes (codex #4212 P1).
-      if (signal.method === 'ai_out_of_scope' || signal.method === 'ai_existing_job' || signal.method === 'regex_solicitation') {
+      if (signal.method === 'ai_out_of_scope' || signal.method === 'ai_existing_job') {
         result.skipped = `no_quote_intent_${signal.method}`;
         // Terminal for the same reason as the deterministic vetoes: the
         // grounded classifier decided this is not quotable work, so a
@@ -529,5 +545,5 @@ async function startSmsThreadDraft({
 module.exports = {
   smsThreadDraftsEnabled,
   startSmsThreadDraft,
-  _private: { threadQuoteSignal, smsOrigin, runThreadDraft, QUOTE_HINT_RE, SOLICITATION_RE },
+  _private: { threadQuoteSignal, smsOrigin, runThreadDraft, QUOTE_HINT_RE, isSolicitationPitch },
 };

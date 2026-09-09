@@ -247,7 +247,7 @@ describe('_private.threadQuoteSignal', () => {
     }));
   });
 
-  test('a vendor pitch to Waves is vetoed before any model call', async () => {
+  test('a vendor pitch to Waves is a terminal veto before triage or any model call', async () => {
     // Synthetic pitches in the shape of the lead-gen / marketing robotexts
     // the 2026-09 audit found on the location lines (vocabulary only, no
     // live payloads).
@@ -262,15 +262,24 @@ describe('_private.threadQuoteSignal', () => {
       'Do you have a google review system set up for your business yet?',
       "We're offering a 3-day trial that connects you with homeowners requesting estimates.",
       'Are you open to more booked jobs over the next 6 weeks? Reply "NO" if you need me to stop texting',
+      // two WEAK markers together
+      '$0 upfront cost for our pest marketing package. Want more details?',
     ];
     for (const body of pitches) {
-      const signal = await _private.threadQuoteSignal(body);
-      // Either the quote-hint prefilter or the solicitation veto stops it; the
-      // contract is no model call for a pitch.
-      expect(signal.quoteRequest).toBe(false);
-      expect(['regex', 'regex_solicitation']).toContain(signal.method);
+      expect(_private.isSolicitationPitch(body)).toBe(true);
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });
+      expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
+      expect(result.terminal).toBe(true);
     }
     expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('a single weak marker is a prospect\'s phrase, not a pitch', () => {
+    expect(_private.isSolicitationPitch('Can I get termite service with no upfront cost?')).toBe(false);
+    expect(_private.isSolicitationPitch('I need pest control Tuesday; reply NO if you cannot make it.')).toBe(false);
+    expect(_private.isSolicitationPitch('I have termites at my new house. Would you like more details?')).toBe(false);
+    expect(_private.isSolicitationPitch('Is there a free trial of the mosquito program?')).toBe(false);
   });
 
   test('homeowner quote asks that share vendor vocabulary still reach the classifier', async () => {
@@ -510,11 +519,23 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  test('a vendor pitch on an active clarify/intake thread is a TERMINAL veto (skipIntentGate)', async () => {
-    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false, recentTexts: [], vetoTexts: [] });
+  test('a vendor pitch on an active clarify/intake thread is a TERMINAL veto (skipIntentGate), before triage loads', async () => {
     const result = await startSmsThreadDraft({
       phone: PHONE,
       triggerBody: 'We can bring you exclusive pest control leads daily with no upfront cost.',
+      skipIntentGate: true,
+    });
+    expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
+    expect(result.terminal).toBe(true);
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockLoadTriage).not.toHaveBeenCalled();
+  });
+
+  test('the veto does not depend on scope guards (skipIntentGate, guards OFF)', async () => {
+    mockScopeGuardsEnabled.mockReturnValue(false);
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'We fund your ads and send exclusive leads. Interested?',
       skipIntentGate: true,
     });
     expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
