@@ -155,14 +155,15 @@ async function recheckDeferredSummarySms(meta, database = db) {
 // handoff to commit instead of handing the bearer link to the former
 // destination. `authorized` re-resolves the recipient from the locked rows;
 // `dispatch(trx)` is the sender's locked handoff and returns its verdict.
-// The claim and the handoff sit in one savepoint: a refusal before the
-// provider request leaves no dispatch mark behind. A throw from the handoff
-// is the provider request failing (the sender's own rechecks return
-// verdicts, they do not throw): the provider may hold the message, so the
-// dispatch mark commits and the error is rethrown as the provider outcome.
+// The dispatch mark commits on its own connection while those rows stay
+// held, so it is durable before the provider request (a process that dies
+// mid-request leaves an uncertain effect, never a reclaimable one). A
+// refusal by the sender's own rechecks before the request returns the mark
+// to its pre-dispatch state; a throw from the handoff is the provider
+// request failing and propagates with the mark in place.
 async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, authorized, dispatch }) {
   const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
-  const outcome = await db.transaction(async (trx) => {
+  return db.transaction(async (trx) => {
     await trx('customers').where({ id: customerId }).forShare().first('id');
     // FOR SHARE cannot lock an absent row. The canonical seed serializes
     // missing-row creation without inventing marketing consent or replacing
@@ -170,31 +171,17 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     await createDefaultCustomerRows(trx, customerId);
     const prefs = await trx('notification_prefs').where({ customer_id: customerId }).forShare().first();
     const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(), { db: trx });
-    if (!(await authorized(customer, prefs, trx))) return { verdict: lost };
-    let refused = null;
-    try {
-      return await trx.transaction(async (claim) => {
-        const owned = await VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: claim });
-        if (!owned) return { verdict: lost };
-        let verdict;
-        try {
-          verdict = await dispatch(claim);
-        } catch (handoffError) {
-          return { handoffError };
-        }
-        if (verdict?.ok !== true) {
-          refused = verdict || lost;
-          throw new Error('visit summary handoff refused before dispatch');
-        }
-        return { verdict };
-      });
-    } catch (err) {
-      if (refused) return { verdict: refused };
-      throw err;
-    }
+    if (!(await authorized(customer, prefs, trx))) return lost;
+    if (!(await VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: db }))) return lost;
+    const verdict = await dispatch(trx);
+    if (verdict?.ok === true) return verdict;
+    // Nothing reached the provider. If this write fails the effect stays
+    // uncertain and reaches office review, which is the safe side.
+    await db('visit_effects').where({ visit_id: visitId, effect_type: kind, claim_token: token, status: 'unknown_delivery' })
+      .update({ status: scheduled ? 'pending' : 'claimed', claimed_at: new Date(), updated_at: db.fn.now() })
+      .catch(() => {});
+    return verdict || lost;
   });
-  if (outcome.handoffError) throw outcome.handoffError;
-  return outcome.verdict;
 }
 
 // The deferred replay's recheck (visit, recipient, claim state), its dispatch
@@ -202,9 +189,12 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
 async function beginDeferredSummarySms(meta, dispatch) {
   return claimDispatchThroughHandoff({ visitId: meta.visit_id, customerId: meta.customer_id, kind: 'completion_sms',
     token: meta.visit_summary_claim_token, scheduled: true, dispatch,
-    authorized: async (_customer, prefs, trx) => {
+    authorized: async (_customer, prefs) => {
       if (prefs.sms_enabled === false || prefs.service_completed === false) return false;
-      return (await recheckDeferredSummarySms(meta, trx)).eligible;
+      // The recheck may return a proven-unsent effect to pending; that write
+      // commits on the same connection the durable dispatch mark uses, while
+      // the held customer and preference rows keep both reads current.
+      return (await recheckDeferredSummarySms(meta, db)).eligible;
     } });
 }
 
@@ -425,6 +415,25 @@ async function summaryRetryAuthorized(message, database = db) {
   return current ? { ok: true } : { ok: false, reason: 'visit_summary_recipient_changed' };
 }
 
+// The retry rail's provider request runs while the customer and preference
+// rows are held, so the recipient the fence approved is the recipient the
+// provider receives. `dispatch()` performs the request.
+async function retrySummaryThroughHandoff(message, dispatch, database = db) {
+  const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
+  if (!match || message.template_key !== 'service.visit_summary') return { ok: false, reason: 'visit_summary_unavailable' };
+  return database.transaction(async (trx) => {
+    const visit = await trx('service_visits').where({ id: match[1] }).first('customer_id');
+    if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
+    await trx('customers').where({ id: visit.customer_id }).forShare().first('id');
+    await createDefaultCustomerRows(trx, visit.customer_id);
+    await trx('notification_prefs').where({ customer_id: visit.customer_id }).forShare().first('customer_id');
+    const fence = await summaryRetryAuthorized(message, trx);
+    if (!fence.ok) return fence;
+    await dispatch();
+    return { ok: true };
+  });
+}
+
 // The provider-retry rail can resend a blocked summary recipient later. When
 // the ledger proves an accepted send again, the effect a bounce reopened
 // returns to sent and the bounce alert it raised is resolved.
@@ -498,4 +507,5 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
-  recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms };
+  recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
+  retrySummaryThroughHandoff };

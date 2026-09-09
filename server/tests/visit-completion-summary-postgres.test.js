@@ -750,6 +750,44 @@ postgres('visit summary recipient recovery', () => {
       .toMatchObject({ status: 'suppressed', last_error: null });
   });
 
+  test('the dispatch mark is durable before the provider request and survives a lost process', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    let markDuringRequest;
+    sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
+      await withSmsHandoff(async () => {
+        // Read on another connection while the handoff transaction is open.
+        markDuringRequest = await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first('status');
+        throw Object.assign(new Error('process lost mid-request'), { providerHttpStatus: undefined });
+      });
+    });
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(markDuringRequest).toMatchObject({ status: 'unknown_delivery' });
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).update({ claimed_at: new Date(0) });
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('the email retry rail holds the recipient rows through its provider request', async () => {
+    const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_email_snapshot: fixture.serviceEmail };
+    let blockedCode = null;
+    let dispatched = 0;
+    expect(await Summary.retrySummaryThroughHandoff(stored, async () => {
+      dispatched += 1;
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await trx('customers').where({ id: fixture.customerId }).update({ service_contact_email: 'moved@example.invalid' });
+      }).catch((err) => { blockedCode = err.code; });
+    })).toEqual({ ok: true });
+    expect(dispatched).toBe(1);
+    expect(blockedCode).toBe('55P03');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_email: 'moved@example.invalid' });
+    expect(await Summary.retrySummaryThroughHandoff(stored, async () => { dispatched += 1; }))
+      .toEqual({ ok: false, reason: 'visit_summary_recipient_changed' });
+    expect(dispatched).toBe(1);
+  });
+
   test.each(['sms', 'email'])('a contact edit during the %s provider request waits for the handoff to commit', async (channel) => {
     fixture.payload.items[0].body.sendCompletionSms = channel === 'sms';
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
