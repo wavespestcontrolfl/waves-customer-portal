@@ -5582,10 +5582,11 @@ export function ProtocolPanel({ service, onClose }) {
       {jobCardEnabled && (
         <div style={{ padding: "12px 16px 0" }}>
           <IntelligenceBarShell
+            key={service.id}
             context="dispatch"
             buildPageData={() => ({
-              scheduledServiceId: service.id,
-              customerId: service.customerId,
+              appointment_id: service.id,
+              customer_id: service.customerId,
               serviceType: panelServiceType,
               date: service.scheduledDate || service.date || null,
             })}

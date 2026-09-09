@@ -445,6 +445,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         appointmentId,
       });
     if (!delivered) {
+      // These App notices have durable replay owners. Other App-first
+      // families retain their existing fallback policy.
+      if (explicitPushOnly && appNotification?.push?.retryable
+        && ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType])) {
+        return { delivered: false, retryable: true, reason: 'native_provider_retryable',
+          retryAfterMs: appNotification.push.retryAfterMs || 60000 };
+      }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
       return { delivered: false };
     }

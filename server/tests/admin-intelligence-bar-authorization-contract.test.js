@@ -298,7 +298,7 @@ describe('W0B two-step execution pin', () => {
       });
       expect(res.status).toBe(200);
       expect(mockExecuteTool).toHaveBeenCalledTimes(2);
-      expect(mockExecuteTool.mock.calls[0][1].confirmed).toBeUndefined();
+      expect(mockExecuteTool.mock.calls[0][1].confirmed).toBe(false);
       expect(mockExecuteTool.mock.calls[1][1]).toEqual({ first_name: 'Test', phone: '9415550100', confirmed: true });
     });
   });
