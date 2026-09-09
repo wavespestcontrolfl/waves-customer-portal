@@ -388,17 +388,21 @@ export class ApiClient {
     });
   }
 
-  getAuthProperties() {
-    return this.request('/auth/properties');
+  // `scope: 'saved'` asks for the saved-property list (GATE_APP_PROPERTY_SCOPE);
+  // while the gate is off the server answers the profile list regardless.
+  getAuthProperties({ scope } = {}) {
+    return this.request(scope ? `/auth/properties?scope=${encodeURIComponent(scope)}` : '/auth/properties');
   }
 
-  selectAuthProperty(customerId) {
+  // propertyId (a saved property on the target profile) rides only when given,
+  // so profile-only switches keep today's exact body.
+  selectAuthProperty(customerId, propertyId = null) {
     return this.request('/auth/select-property', {
       method: 'POST',
       // Rebuild on a 401 retry: attemptRefresh rotates the credential before
       // retrying, so replaying a pre-serialized old token would revoke the
       // whole family under the server's reuse detection.
-      bodyFactory: () => JSON.stringify({ customerId, refreshToken: this.refreshToken }),
+      bodyFactory: () => JSON.stringify({ customerId, ...(propertyId ? { propertyId } : {}), refreshToken: this.refreshToken }),
     });
   }
 
@@ -432,6 +436,12 @@ export class ApiClient {
   // Every property on the account with its next visit (multi-property Visits tab).
   getAccountUpcoming() {
     return this.request('/schedule/account-next');
+  }
+
+  // Saved-property twin of getAccountUpcoming (GATE_APP_PROPERTY_SCOPE): one
+  // row per unified entry, keyed like GET /auth/properties?scope=saved.
+  getSavedPropertiesNext() {
+    return this.request('/schedule/properties-next');
   }
 
   confirmAppointment(id) {

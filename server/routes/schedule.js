@@ -33,7 +33,14 @@ const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcs
 // (codex r3 P1).
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
-const { accountPropertyIds } = require('../services/account-properties');
+const {
+  accountPropertyIds,
+  accountSavedProperties,
+  appPropertyScopeEnabled,
+  applyPropertyPredicate,
+  assignVisitsToEntries,
+  resolveSessionScope,
+} = require('../services/account-properties');
 
 router.use(authenticate);
 
@@ -100,8 +107,14 @@ router.get('/', async (req, res, next) => {
     // cutoff rolls the window an ET-evening early (scheduled_date is a DATE).
     const cutoffDate = etDateString(addETDays(new Date(), days));
 
-    const upcoming = await db('scheduled_services')
-      .where({ 'scheduled_services.customer_id': req.customerId })
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the session's selected
+    // property, or the primary. No predicate at all for gate-off and
+    // single-home customers (services/account-properties.js).
+    const scope = await resolveSessionScope(req);
+    const upcomingQuery = db('scheduled_services')
+      .where({ 'scheduled_services.customer_id': req.customerId });
+    applyPropertyPredicate(upcomingQuery, scope);
+    const upcoming = await upcomingQuery
       .whereIn('scheduled_services.status', ['pending', 'confirmed', 'rescheduled'])
       // A call-created follow-up (visit 2) is dispatch-owned until the office
       // confirms the exact time — hide the still-pending, never-confirmed row
@@ -282,8 +295,13 @@ router.get('/', async (req, res, next) => {
 // =========================================================================
 router.post('/:id/confirm', async (req, res, next) => {
   try {
-    const service = await db('scheduled_services')
-      .where({ id: req.params.id, customer_id: req.customerId })
+    // A visit at ANOTHER of the customer's properties is not this session's
+    // to confirm (same 404 shape as a foreign id — no info leak).
+    const scope = await resolveSessionScope(req);
+    const serviceQuery = db('scheduled_services')
+      .where({ id: req.params.id, customer_id: req.customerId });
+    applyPropertyPredicate(serviceQuery, scope);
+    const service = await serviceQuery
       .whereIn('status', ['pending', 'rescheduled'])
       .first();
 
@@ -359,6 +377,9 @@ router.post('/:id/reschedule', async (req, res, next) => {
     });
 
     const { preferredDate, notes } = await schema.validateAsync(req.body);
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): a visit at another of
+    // the customer's properties is not this session's to reschedule.
+    const scope = await resolveSessionScope(req);
 
     // Streamline: stop flipping the visit to status='rescheduled'. That
     // status removes the visit from dispatch and nothing ever re-books it —
@@ -376,8 +397,10 @@ router.post('/:id/reschedule', async (req, res, next) => {
     // finish before we read it. A separate durable service_requests row below
     // ensures a later queued staff write cannot erase the customer's request.
     const outcome = await db.transaction(async (trx) => {
-      const service = await trx('scheduled_services')
-        .where({ id: req.params.id, customer_id: req.customerId })
+      const serviceQuery = trx('scheduled_services')
+        .where({ id: req.params.id, customer_id: req.customerId });
+      applyPropertyPredicate(serviceQuery, scope);
+      const service = await serviceQuery
         .whereIn('status', ['pending', 'confirmed'])
         .forUpdate()
         .first();
@@ -615,10 +638,70 @@ router.get('/account-next', async (req, res, next) => {
   }
 });
 
+// Saved-property twin of /account-next (GATE_APP_PROPERTY_SCOPE): one row per
+// UNIFIED entry — (profile, saved property) — with that entry's next visit.
+// Visits are assigned by the same reading as the visit rule
+// (assignVisitsToEntries). Lean by design: key + ids + next; the client
+// already holds the entries from GET /auth/properties?scope=saved.
+// Gate off → 404 (the saved-property client never asks while dark).
+router.get('/properties-next', async (req, res, next) => {
+  try {
+    if (!appPropertyScopeEnabled()) return res.status(404).json({ error: 'Not available' });
+    const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const cutoffDate = etDateString(addETDays(new Date(), value.days));
+    const { properties: entries } = await accountSavedProperties(req);
+    const ids = [...new Set(entries.map((e) => e.customerId))];
+    const rows = ids.length ? await db('scheduled_services')
+      .whereIn('scheduled_services.customer_id', ids)
+      .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+      // Same dispatch-owned guard as GET / and GET /next.
+      .where((qb) => qb
+        .whereNull('scheduled_services.source_action')
+        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+        .orWhereNot('scheduled_services.status', 'pending')
+        .orWhere('scheduled_services.customer_confirmed', true))
+      .where('scheduled_services.scheduled_date', '>=', etDateString())
+      .where('scheduled_services.scheduled_date', '<=', cutoffDate)
+      .select(
+        'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
+        'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end',
+        'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed',
+      )
+      .orderBy('scheduled_services.scheduled_date', 'asc')
+      .orderBy('scheduled_services.window_start', 'asc') : [];
+    const nextByKey = assignVisitsToEntries(entries, rows);
+    res.json({
+      properties: entries.map((e) => {
+        const n = nextByKey.get(e.key) || null;
+        return {
+          key: e.key,
+          customerId: e.customerId,
+          propertyId: e.propertyId,
+          next: n ? {
+            id: n.id,
+            date: n.scheduled_date,
+            windowStart: n.window_start,
+            windowEnd: n.window_end,
+            serviceType: normalizeServiceType(n.service_type),
+            status: n.status,
+            customerConfirmed: n.customer_confirmed === true,
+          } : null,
+        };
+      }),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/next', async (req, res, next) => {
   try {
-    const nextService = await db('scheduled_services')
-      .where({ 'scheduled_services.customer_id': req.customerId })
+    const scope = await resolveSessionScope(req);
+    const nextQuery = db('scheduled_services')
+      .where({ 'scheduled_services.customer_id': req.customerId });
+    applyPropertyPredicate(nextQuery, scope);
+    const nextService = await nextQuery
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
       // Same dispatch-owned guard as the list above: a still-pending,
       // never-confirmed call-created follow-up can't surface as the

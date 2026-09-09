@@ -15,6 +15,8 @@ const {
   accountSavedProperties,
   resolveSessionScope,
   scopeVisitsToProperty,
+  applyPropertyPredicate,
+  assignVisitsToEntries,
   appPropertyScopeEnabled,
 } = require('../services/account-properties');
 
@@ -196,5 +198,55 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
     // A claim the customer does not own is not among the rows → primary.
     const foreign = await resolveSessionScope({ customerId: 'cust-1', propertyId: 'prop-of-someone-else' });
     expect(foreign.property.id).toBe('prop-a');
+  });
+});
+
+describe('assignVisitsToEntries — next visit per unified entry', () => {
+  const ENTRIES = [
+    { key: 'c1:pa', customerId: 'c1', propertyId: 'pa', isPrimaryProperty: true },
+    { key: 'c1:pb', customerId: 'c1', propertyId: 'pb', isPrimaryProperty: false },
+    { key: 'c9:pz', customerId: 'c9', propertyId: 'pz', isPrimaryProperty: true },
+  ];
+  test('unstamped → primary; stamped → its entry; retired stamp → nobody; lone-entry profile owns everything; first visit wins', () => {
+    const next = assignVisitsToEntries(ENTRIES, [
+      { id: 'v1', customer_id: 'c1', property_id: null },
+      { id: 'v2', customer_id: 'c1', property_id: 'pb' },
+      { id: 'v3', customer_id: 'c1', property_id: 'pa' }, // later than v1 → primary keeps v1
+      { id: 'v4', customer_id: 'c1', property_id: 'retired' },
+      { id: 'v5', customer_id: 'c9', property_id: 'something-else' }, // lone entry owns it regardless of stamp
+      { id: 'v6', customer_id: 'c-unknown', property_id: null },
+    ]);
+    expect([...next.entries()].map(([k, v]) => [k, v.id])).toEqual([['c1:pa', 'v1'], ['c1:pb', 'v2'], ['c9:pz', 'v5']]);
+  });
+});
+
+describe('applyPropertyPredicate — the property half alone', () => {
+  function rec() {
+    const calls = [];
+    const qb = {
+      where: jest.fn((a, b) => {
+        if (typeof a === 'function') { const inner = rec(); a.call(inner.qb, inner.qb); calls.push(['where(fn)', inner.calls]); }
+        else calls.push(['where', a, b]);
+        return qb;
+      }),
+      orWhereNull: jest.fn((col) => { calls.push(['orWhereNull', col]); return qb; }),
+    };
+    return { qb, calls };
+  }
+  test('adds nothing when disabled, single, or property-less; adds the rule (with the NULL leg for the primary) otherwise, on the given alias', () => {
+    for (const scope of [
+      { customerId: 'c1', enabled: false, multi: true, property: { id: 'pa', is_primary: true } },
+      { customerId: 'c1', enabled: true, multi: false, property: { id: 'pa', is_primary: true } },
+      { customerId: 'c1', enabled: true, multi: true, property: null },
+      null,
+    ]) {
+      const r = rec(); applyPropertyPredicate(r.qb, scope); expect(r.calls).toEqual([]);
+    }
+    const primary = rec();
+    applyPropertyPredicate(primary.qb, { customerId: 'c1', enabled: true, multi: true, property: { id: 'pa', is_primary: true } }, 'ss');
+    expect(primary.calls).toEqual([['where(fn)', [['where', 'ss.property_id', 'pa'], ['orWhereNull', 'ss.property_id']]]]);
+    const secondary = rec();
+    applyPropertyPredicate(secondary.qb, { customerId: 'c1', enabled: true, multi: true, property: { id: 'pb', is_primary: false } });
+    expect(secondary.calls).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'pb']]]]);
   });
 });

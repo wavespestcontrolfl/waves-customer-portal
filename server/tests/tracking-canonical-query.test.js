@@ -36,6 +36,29 @@ describe('canonical customer tracker query', () => {
     expect(sql).not.toContain('service_tracking');
   });
 
+  test('a saved-property scope narrows the canonical tracker to that property (primary also owns unstamped rows)', () => {
+    const secondary = build(db, 'cust-1', {
+      activeOnly: true, today: '2026-05-05', nowIso: '2026-05-05T12:00:00.000Z',
+      scope: { customerId: 'cust-1', enabled: true, multi: true, property: { id: 'prop-b', is_primary: false } },
+    }).toSQL();
+    expect(secondary.sql).toMatch(/"scheduled_services"\."property_id" = \?/);
+    expect(secondary.sql).not.toMatch(/"property_id" is null/);
+    expect(secondary.bindings).toEqual(expect.arrayContaining(['cust-1', 'prop-b']));
+
+    const primary = build(db, 'cust-1', {
+      activeOnly: true, today: '2026-05-05', nowIso: '2026-05-05T12:00:00.000Z',
+      scope: { customerId: 'cust-1', enabled: true, multi: true, property: { id: 'prop-a', is_primary: true } },
+    }).toSQL();
+    expect(primary.sql).toMatch(/\("scheduled_services"\."property_id" = \? or "scheduled_services"\."property_id" is null\)/);
+
+    // Gate off / single property: no property predicate at all — today's SQL.
+    const off = build(db, 'cust-1', {
+      activeOnly: true, today: '2026-05-05', nowIso: '2026-05-05T12:00:00.000Z',
+      scope: { customerId: 'cust-1', enabled: false, multi: false, property: null },
+    }).toSQL();
+    expect(off.sql).not.toContain('property_id');
+  });
+
   test('/today scope permits today scheduled trackers', () => {
     const { sql, bindings } = build(db, 'cust-2', {
       todayOnly: true,

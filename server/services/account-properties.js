@@ -180,7 +180,7 @@ async function resolveSessionScope(req, knex = db) {
   const rows = await knex('customer_properties')
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
-    .select('id', 'is_primary', 'label', 'relationship', 'occupancy_type', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+    .select('id', 'is_primary', 'label', 'relationship', 'occupancy_type', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
   const property = (req.propertyId && rows.find((r) => String(r.id) === String(req.propertyId)))
     || rows.find((r) => r.is_primary === true)
     || rows[0]
@@ -194,13 +194,49 @@ async function resolveSessionScope(req, knex = db) {
 // only when the scope is enabled AND the customer has 2+ active properties.
 function scopeVisitsToProperty(qb, scope, alias = 'scheduled_services') {
   qb.where(`${alias}.customer_id`, scope.customerId);
-  if (!scope.enabled || !scope.multi || !scope.property) return qb;
+  return applyPropertyPredicate(qb, scope, alias);
+}
+
+// The property half of the visit rule alone — for queries that already carry
+// their own customer predicate (the schedule list, confirm/reschedule
+// lookups, the tracking canonical query). No-op unless the scope is enabled
+// AND the customer has 2+ active properties, so gate-off and single-home
+// queries stay byte-identical to today's.
+function applyPropertyPredicate(qb, scope, alias = 'scheduled_services') {
+  if (!scope || !scope.enabled || !scope.multi || !scope.property) return qb;
   const column = `${alias}.property_id`;
   const { id, is_primary: isPrimary } = scope.property;
   return qb.where(function () {
     this.where(column, id);
     if (isPrimary === true) this.orWhereNull(column);
   });
+}
+
+// Distribute visit rows (ordered date asc, window asc) onto the unified
+// entries and keep each entry's FIRST visit: Map<entry.key, visit>. Same
+// reading as the visit rule — a profile with one entry owns every visit of
+// that customer; on a multi-property profile a stamped visit belongs to the
+// entry with that property, an unstamped one to the primary entry, and a
+// visit stamped to a property that is no longer listed belongs to nobody
+// (the list route would not show it under any property either).
+function assignVisitsToEntries(entries, visits) {
+  const byCustomer = new Map();
+  for (const entry of entries) {
+    const key = String(entry.customerId);
+    if (!byCustomer.has(key)) byCustomer.set(key, []);
+    byCustomer.get(key).push(entry);
+  }
+  const next = new Map();
+  for (const visit of visits) {
+    const mine = byCustomer.get(String(visit.customer_id)) || [];
+    if (!mine.length) continue;
+    let target = null;
+    if (mine.length === 1) target = mine[0];
+    else if (visit.property_id) target = mine.find((e) => String(e.propertyId) === String(visit.property_id)) || null;
+    else target = mine.find((e) => e.isPrimaryProperty) || mine[0];
+    if (target && !next.has(target.key)) next.set(target.key, visit);
+  }
+  return next;
 }
 
 module.exports = {
@@ -210,5 +246,7 @@ module.exports = {
   accountSavedProperties,
   resolveSessionScope,
   scopeVisitsToProperty,
+  applyPropertyPredicate,
+  assignVisitsToEntries,
   _test: { savedPropertyEntry, selectedEntryFor },
 };

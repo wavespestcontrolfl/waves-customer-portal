@@ -44,6 +44,19 @@ function tokenSessionIdentity(token) {
   }
 }
 
+// Selected saved property baked into the session JWT (GATE_APP_PROPERTY_SCOPE;
+// server/middleware/auth.js `propertyId` claim). Null when the token carries
+// none (profile scope, or the primary).
+export function tokenPropertyId(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
+    return payload.propertyId == null ? null : String(payload.propertyId);
+  } catch {
+    return null;
+  }
+}
+
 // Same ASYMMETRIC semantics as api.js sameRequestSession: only the OLD
 // (current) side wildcards — a legacy token with no sessionId upgrading
 // into a durable family via its first routine refresh is the same session,
@@ -54,6 +67,39 @@ function sameSessionFamily(a, b) {
   return !!a && !!b
     && a.customerId === b.customerId
     && (a.sessionId === null || a.sessionId === b.sessionId);
+}
+
+// Saved-property entries (GET /auth/properties?scope=saved, GATE_APP_PROPERTY_SCOPE)
+// rendered through the client property shape every switcher already uses
+// (id / profileLabel / isPrimaryProfile / address / tier), keyed by the entry
+// key so three saved properties on one profile stay distinct. The label is
+// what the picker, the chips and the Visits header print.
+export function savedPropertyDisplayLabel(entry) {
+  if (entry.label && entry.label !== 'Primary') return entry.label;
+  if (entry.isPrimaryProperty) {
+    return entry.profileLabel && entry.profileLabel !== 'Primary' ? entry.profileLabel : 'Home';
+  }
+  // Secondary saved property: the street keeps two "Family home" entries apart.
+  return entry.address?.line1 || 'Property';
+}
+
+export function toClientProperty(entry) {
+  return {
+    ...entry,
+    id: entry.key,
+    profileLabel: savedPropertyDisplayLabel(entry),
+    // "Primary residence" (home tile) = the primary profile's primary property.
+    isPrimaryProfile: entry.isPrimaryProfile === true && entry.isPrimaryProperty === true,
+  };
+}
+
+// Pure: the /auth/properties payload → { scope, properties, selected }.
+// A profile-list answer (gate off, or an older server) keeps today's shape.
+export function applyPropertyPayload(data) {
+  if (data?.scope === 'saved') {
+    return { scope: 'saved', properties: (data.properties || []).map(toClientProperty), selected: data.selected || null };
+  }
+  return { scope: 'profile', properties: data?.properties || [], selected: null };
 }
 
 function authErrorCopy(err) {
@@ -72,6 +118,18 @@ export function AuthProvider({ children }) {
   const [customer, setCustomer] = useState(null);
   const [properties, setProperties] = useState([]);
   const [propertiesError, setPropertiesError] = useState(null);
+  // Saved-property scope: which list shape `properties` holds ('profile' |
+  // 'saved') and the session's current selection { key, customerId, propertyId }.
+  const [propertyScope, setPropertyScope] = useState('profile');
+  const propertyScopeRef = useRef('profile');
+  const [selectedProperty, setSelectedProperty] = useState(null);
+  const adoptPropertyPayload = (data) => {
+    const payload = applyPropertyPayload(data);
+    propertyScopeRef.current = payload.scope;
+    setPropertyScope(payload.scope);
+    setProperties(payload.properties);
+    setSelectedProperty(payload.selected);
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
@@ -124,9 +182,9 @@ export function AuthProvider({ children }) {
       customerRef.current = data;
       setCustomer(data);
       try {
-        const propertyData = await api.getAuthProperties();
+        const propertyData = await api.getAuthProperties({ scope: 'saved' });
         if (sessionEpochRef.current !== epoch) return;
-        setProperties(propertyData.properties || []);
+        adoptPropertyPayload(propertyData);
         setPropertiesError(null);
       } catch (propertyErr) {
         // Same staleness rule as the success path: if the session changed
@@ -225,7 +283,13 @@ export function AuthProvider({ children }) {
       // this tab's in-flight flows (e.g. a property switch mid-await) —
       // that identity is still current (Codex #2859 r1+r2+r3).
       const familyChanged = !sameSessionFamily(tokenSessionIdentity(api.token), tokenSessionIdentity(token));
-      if (familyChanged) setSessionEpoch(++sessionEpochRef.current);
+      // A same-profile SAVED-PROPERTY switch in another tab rotates the
+      // family but changes the token's propertyId. The selection this tab
+      // shows must follow it, and a property list still in flight from
+      // BEFORE the switch must not land afterwards and paint the previous
+      // selection — so it counts as an identity transition for the epoch.
+      const propertyChanged = tokenPropertyId(api.token) !== tokenPropertyId(token);
+      if (familyChanged || propertyChanged) setSessionEpoch(++sessionEpochRef.current);
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not
@@ -336,9 +400,9 @@ export function AuthProvider({ children }) {
     // session's property list or surface its error.
     const epoch = sessionEpochRef.current;
     try {
-      const data = await api.getAuthProperties();
+      const data = await api.getAuthProperties({ scope: 'saved' });
       if (sessionEpochRef.current !== epoch) return false;
-      setProperties(data.properties || []);
+      adoptPropertyPayload(data);
       setPropertiesError(null);
       return true;
     } catch (err) {
@@ -349,11 +413,17 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const switchProperty = async (customerId) => {
+  // target: a profile id (string — every shipped caller) or a saved-property
+  // pair { customerId, propertyId } (GATE_APP_PROPERTY_SCOPE). A same-profile
+  // property switch re-issues the tokens with the new claim; every read then
+  // re-scopes exactly as a profile switch does.
+  const switchProperty = async (target) => {
+    const { customerId, propertyId = null } = typeof target === 'string' ? { customerId: target } : (target || {});
+    if (!customerId) return false;
     setError(null);
     try {
       const epoch = sessionEpochRef.current;
-      const data = await api.selectAuthProperty(customerId);
+      const data = await api.selectAuthProperty(customerId, propertyId);
       // Signed out (or superseded by another transition) while the switch
       // was in flight — the response must not restore credentials. The
       // server has revoked the family on logout, so the returned tokens are
@@ -363,14 +433,27 @@ export function AuthProvider({ children }) {
       api.setTokens(data.token, data.refreshToken);
       // Re-point this device's push subscription at the newly selected
       // customer — otherwise pushes keep flowing to the previous property.
-      repostNativePushToken();
+      // (The subscription follows the customer ROW; a same-profile saved-
+      // property switch keeps it.)
+      if (String(customerId) !== String(customerRef.current?.id)) repostNativePushToken();
       // The token now points at the TARGET property — the old customer must
       // not keep rendering (and firing actions) against it if the reload
       // hits a transient failure. Go pending until the target customer
       // loads; loadCustomer's retry branch keeps it pending on failure.
       customerRef.current = null;
       setLoading(true);
-      setProperties(data.properties || []);
+      // The switch response carries the PROFILE list (shipped-client shape).
+      // Under the saved-property scope the unified list is re-read by
+      // loadCustomer (GET /auth/properties?scope=saved); adopting the profile
+      // list here would collapse three saved properties into one entry.
+      if (propertyScopeRef.current !== 'saved') setProperties(data.properties || []);
+      // The switch response names the selection by ids; the entry key the
+      // page compares against is derived the same way the server keys its
+      // list (`customerId:propertyId`, or `:profile` for a row-less profile).
+      if (data.selected) {
+        const sel = data.selected;
+        setSelectedProperty({ ...sel, key: sel.key || `${sel.customerId}:${sel.propertyId || 'profile'}` });
+      }
       setPropertiesError(null);
       await loadCustomer();
       return true;
@@ -386,6 +469,8 @@ export function AuthProvider({ children }) {
       sessionEpoch,
       properties,
       propertiesError,
+      propertyScope,
+      selectedProperty,
       loading,
       error,
       isAuthenticated: !!customer,

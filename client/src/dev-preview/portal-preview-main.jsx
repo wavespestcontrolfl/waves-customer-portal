@@ -44,6 +44,21 @@ const day = (n) => iso(addDays(n));
 const PERSONA = new URLSearchParams(window.location.search).get('persona') || 'active';
 const CANCELLED = PERSONA === 'cancelled';
 const RESTART_MODE = new URLSearchParams(window.location.search).get('restart') || 'ready';
+// ?properties=saved renders the saved-property scope (GATE_APP_PROPERTY_SCOPE):
+// one profile with three saved properties — the picker, the per-property
+// chips and the Visits header driven by the unified list. ?selected=<key>
+// picks the entry the session is scoped to (default: the primary).
+const SAVED_PROPERTIES = new URLSearchParams(window.location.search).get('properties') === 'saved';
+const SAVED_ENTRIES = [
+  { key: 'cust-demo-1:prop-demo-a', customerId: 'cust-demo-1', propertyId: 'prop-demo-a', isPrimaryProfile: true, profileLabel: 'Primary', isPrimaryProperty: true, label: 'Primary', relationship: 'own_home', occupancyType: 'owner_occupied', tier: 'Silver', address: { line1: '1200 Palm Row Ct', line2: null, city: 'Parrish', state: 'FL', zip: '34219' } },
+  { key: 'cust-demo-1:prop-demo-b', customerId: 'cust-demo-1', propertyId: 'prop-demo-b', isPrimaryProfile: true, profileLabel: 'Primary', isPrimaryProperty: false, label: null, relationship: 'family_home', occupancyType: 'family_occupied', tier: 'Silver', address: { line1: '418 Oak Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' } },
+  { key: 'cust-demo-1:prop-demo-c', customerId: 'cust-demo-1', propertyId: 'prop-demo-c', isPrimaryProfile: true, profileLabel: 'Primary', isPrimaryProperty: false, label: 'Lake house', relationship: 'family_home', occupancyType: 'family_occupied', tier: 'Silver', address: { line1: '77 Pine Ct', line2: null, city: 'Palmetto', state: 'FL', zip: '34221' } },
+];
+let SAVED_SELECTED_KEY = new URLSearchParams(window.location.search).get('selected') || SAVED_ENTRIES[0].key;
+const savedSelected = () => {
+  const e = SAVED_ENTRIES.find((x) => x.key === SAVED_SELECTED_KEY) || SAVED_ENTRIES[0];
+  return { key: e.key, customerId: e.customerId, propertyId: e.propertyId };
+};
 
 // ── demo persona: Jordan Rivera (fictional) ────────────────────────────────
 const CUSTOMER = {
@@ -308,13 +323,28 @@ Object.assign(api, {
   getWateringPlan: async () => ({ available: false }),
   // auth
   getMe: async () => CUSTOMER,
-  getAuthProperties: async () => ({
-    properties: [{
-      id: 'cust-demo-1',
-      profileLabel: 'Home',
-      isPrimary: true,
-      address: { line1: '1200 Palm Row Ct', city: 'Parrish', state: 'FL', zip: '34219' },
-    }],
+  getAuthProperties: async () => (SAVED_PROPERTIES
+    ? { scope: 'saved', properties: SAVED_ENTRIES, selected: savedSelected() }
+    : {
+      properties: [{
+        id: 'cust-demo-1',
+        profileLabel: 'Home',
+        isPrimary: true,
+        address: { line1: '1200 Palm Row Ct', city: 'Parrish', state: 'FL', zip: '34219' },
+      }],
+    }),
+  // Saved-property switch: same customer, new selection; the real route
+  // re-issues the tokens — the harness only moves the selection.
+  selectAuthProperty: async (_customerId, propertyId) => {
+    const e = SAVED_ENTRIES.find((x) => x.propertyId === propertyId) || SAVED_ENTRIES[0];
+    SAVED_SELECTED_KEY = e.key;
+    return { token: 'preview-token', refreshToken: 'preview-refresh', customer: CUSTOMER, properties: [], selected: savedSelected() };
+  },
+  getSavedPropertiesNext: async () => ({
+    properties: SAVED_ENTRIES.map((e, i) => ({
+      key: e.key, customerId: e.customerId, propertyId: e.propertyId,
+      next: CANCELLED || i === 2 ? null : { id: `svc-demo-${i}`, date: addDays(7 + i * 9).slice(0, 10), windowStart: i === 0 ? '09:00:00' : '13:00:00', windowEnd: i === 0 ? '11:00:00' : '15:00:00', serviceType: i === 0 ? 'Quarterly Pest Control' : 'Mosquito Treatment', status: 'confirmed', customerConfirmed: i === 0 },
+    })),
   }),
 
   // schedule — reservice/overlayHandoff mirror the streamline payload

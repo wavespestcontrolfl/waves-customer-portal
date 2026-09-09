@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const { applyPropertyPredicate, resolveSessionScope } = require('../services/account-properties');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -238,6 +239,11 @@ function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
     )
     .where({ 'scheduled_services.customer_id': customerId })
     .whereNotNull('scheduled_services.track_view_token');
+  // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the tracker for the
+  // house the customer is viewing. The pin/ETA logic below already prefers
+  // the visit's own stamped geocode, so a secondary property's visit maps to
+  // that property without further change.
+  if (opts.scope) applyPropertyPredicate(q, opts.scope);
 
   if (requireUnexpiredToken) {
     q.where('scheduled_services.track_token_expires_at', '>=', nowIso);
@@ -362,7 +368,8 @@ router.get('/maps-key', (req, res) => {
 // =========================================================================
 router.get('/active', async (req, res, next) => {
   try {
-    const canonical = await findCanonicalScheduledService(req.customerId, { activeOnly: true });
+    const scope = await resolveSessionScope(req);
+    const canonical = await findCanonicalScheduledService(req.customerId, { activeOnly: true, scope });
     if (canonical) {
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
       const formatted = formatScheduledTracker(canonical, tech, req.customer);
@@ -435,7 +442,8 @@ router.get('/active', async (req, res, next) => {
 // =========================================================================
 router.get('/today', async (req, res, next) => {
   try {
-    const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true });
+    const scope = await resolveSessionScope(req);
+    const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true, scope });
     if (canonical) {
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
       const formatted = formatScheduledTracker(canonical, tech, req.customer);
