@@ -31,7 +31,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { generateRecap, smsRecap } = require('./completion-recap');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { invalidateServiceReportPdfCache } = require('./service-report/pdf-storage');
-const { buildReportIdentitySnapshot, canonicalProductId } = require('./service-report/report-identity-snapshot');
+const { buildReportIdentitySnapshot, canonicalProductId, resolveVisitAddress } = require('./service-report/report-identity-snapshot');
 const { approvedReportProductFacts } = require('./service-report/report-data');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { isValidRateUnit } = require('./inventory-units');
@@ -81,6 +81,11 @@ async function loadServiceWithCustomer(serviceId, knex = db) {
       'customers.first_name',
       'customers.last_name',
       'customers.phone as cust_phone',
+      'customers.address_line1 as cust_address_line1',
+      'customers.address_line2 as cust_address_line2',
+      'customers.city as cust_city',
+      'customers.state as cust_state',
+      'customers.zip as cust_zip',
     )
     .first();
 }
@@ -199,6 +204,17 @@ async function buildRecapContext(serviceId, knex = db) {
       serviceType: svc.service_type,
       status: svc.status,
       scheduledDate: svc.scheduled_date,
+      propertyId: svc.property_id ?? null,
+      address: resolveVisitAddress({
+        visit: svc,
+        customer: {
+          address_line1: svc.cust_address_line1,
+          address_line2: svc.cust_address_line2,
+          city: svc.cust_city,
+          state: svc.cust_state,
+          zip: svc.cust_zip,
+        },
+      }),
       hasPhone: !!svc.cust_phone,
       category: profile?.category || null,
     },

@@ -39,6 +39,7 @@ import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
+import { completionDraftKey } from "../../lib/completion-drafts";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -840,10 +841,6 @@ export function completionWillReview({
   reviewSuppressionReason = null,
 } = {}) {
   return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
-}
-
-function completionDraftKey(serviceId) {
-  return `waves_completion_draft_${serviceId}`;
 }
 
 // A completed visit whose REQUIRED completion-invoice mint failed (503

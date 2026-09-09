@@ -16,6 +16,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
+import useServiceRecapDraft from '../hooks/useServiceRecapDraft';
 
 const PALETTES = {
   dark: {
@@ -248,6 +249,42 @@ export default function ServiceRecapModal({
     return m;
   }, [products]);
 
+  const [restoredNames, setRestoredNames] = useState({});
+  const missingSelections = [...selected].filter((id) => !productById.has(id));
+  const record = ctx?.existingRecord;
+  const recordIdentity = !ctx || !selectionAuthoritative.current || loadError ? null : JSON.stringify([
+    ctx.service?.status ?? null,
+    ctx.service?.serviceType ?? null,
+    ctx.service?.customerId ?? null,
+    ctx.service?.scheduledDate ?? null,
+    ctx.service?.propertyId ?? null,
+    ctx.service?.address ?? null,
+    record ? [record.id, record.status, record.technician_notes, (record.products || []).map((p) => JSON.stringify([
+      p.product_id, p.product_name, p.product_category, p.active_ingredient, p.moa_group, p.application_rate, p.rate_unit,
+    ])).sort()] : null,
+  ]);
+  const draft = useServiceRecapDraft(serviceId, !loading && !loadError, {
+    note, message, rates, sendText, includeComms,
+    selectedProducts: [...selected].map((id) => ({ id, name: productById.get(id)?.name || restoredNames[id] || String(id) })),
+  }, recordIdentity);
+  const restoreDraft = () => {
+    if (draft.restoreError) return;
+    const saved = draft.candidate;
+    setNote(saved.note || '');
+    setMessage(saved.message || '');
+    setRates(saved.rates || {});
+    setSendText(saved.sendText === true && !!ctx?.service?.hasPhone);
+    setIncludeComms(saved.includeComms !== false);
+    setSelected(new Set(saved.selectedProducts.map((p) => p.id)));
+    setRestoredNames(Object.fromEntries(saved.selectedProducts.map((p) => [p.id, p.name])));
+    draft.restored();
+  };
+  const close = () => {
+    if (submitInFlight.current) return;
+    if (draft.storageError && !window.confirm('This draft is not saved on this device. Close and lose these changes?')) return;
+    onClose?.();
+  };
+
   const toggleProduct = useCallback((id) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -298,7 +335,7 @@ export default function ServiceRecapModal({
   }, [base, note, includeComms, request, selected, productById]);
 
   const handleSubmit = useCallback(async () => {
-    if (submitInFlight.current) return;
+    if (submitInFlight.current || draft.candidate || missingSelections.length) return;
     const willSend = sendText && !!message.trim() && !!ctx?.service?.hasPhone;
     if (willSend) {
       const name = ctx?.service?.customerName || 'the customer';
@@ -360,13 +397,14 @@ export default function ServiceRecapModal({
           sendSms: willSend,
         }),
       });
+      draft.finish();
       onCompleted?.(result);
     } catch (err) {
       setError(err?.message || 'Could not complete recap');
       setSubmitting(false);
       submitInFlight.current = false;
     }
-  }, [base, ctx, message, note, onCompleted, productById, rates, request, selected, sendText]);
+  }, [base, ctx, draft, message, missingSelections.length, note, onCompleted, productById, rates, request, selected, sendText]);
 
   const timeline = (ctx?.timeline || []).filter((t) => t.to_status !== 'pending');
 
@@ -374,7 +412,7 @@ export default function ServiceRecapModal({
     <div
       role="dialog"
       aria-modal="true"
-      onClick={onClose}
+      onClick={close}
       style={{
         position: 'fixed', inset: 0, zIndex: 1000, background: P.overlay,
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
@@ -406,7 +444,8 @@ export default function ServiceRecapModal({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={close}
+            disabled={submitting}
             aria-label="Close"
             style={{
               border: 'none', background: 'transparent', color: P.muted,
@@ -421,6 +460,15 @@ export default function ServiceRecapModal({
           <div style={{ padding: 24, color: P.red, fontSize: 14 }}>{loadError}</div>
         ) : (
           <div style={{ padding: '14px 18px calc(18px + env(safe-area-inset-bottom, 0px))' }}>
+            {draft.candidate && <div role="status" style={{ color: P.text, marginBottom: 16 }}>
+              <p>A saved draft is available for this visit.</p>
+              {draft.restoreError && <p role="alert">{draft.restoreError}</p>}
+              <button type="button" disabled={!!draft.restoreError} onClick={restoreDraft}>Restore draft</button>{' '}
+              <button type="button" onClick={draft.discard}>Discard draft</button>
+            </div>}
+            {draft.saved && <p role="status" style={{ color: P.muted }}>Draft saved on this device. Not submitted.</p>}
+            {draft.storageError && <p role="alert" style={{ color: P.red }}>{draft.storageError}</p>}
+            <fieldset disabled={submitting || !!draft.candidate} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
             {/* Timeline */}
             {timeline.length > 0 && (
               <div style={{
@@ -493,6 +541,10 @@ export default function ServiceRecapModal({
                 recorded rate is what the tech actually applied, not the
                 catalog default it starts from. Products with no known unit
                 (no catalog default, nothing recorded) record no rate. */}
+            {missingSelections.map((id) => <div key={id} role="alert" style={{ color: P.red, marginBottom: 16 }}>
+              Unavailable product from draft: {restoredNames[id] || id}. Review the actual treatment before completing.
+              <button type="button" onClick={() => toggleProduct(id)}>Remove {restoredNames[id] || id}</button>
+            </div>)}
             {[...selected].some((id) => rates[id]?.unit) && (
               <div style={{
                 background: P.card, border: `1px solid ${P.border}`, borderRadius: 12,
@@ -607,7 +659,7 @@ export default function ServiceRecapModal({
             <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
               <button
                 type="button"
-                onClick={onClose}
+                onClick={close}
                 disabled={submitting}
                 style={{
                   flex: '0 0 auto', border: `1px solid ${P.border}`, background: 'transparent',
@@ -620,7 +672,7 @@ export default function ServiceRecapModal({
               <button
                 type="button"
                 onClick={handleSubmit}
-                disabled={submitting}
+                disabled={submitting || !!missingSelections.length}
                 style={{
                   flex: 1, border: 'none', background: P.green, color: '#fff',
                   borderRadius: 10, padding: '12px 18px', fontSize: 15, fontWeight: 700,
@@ -635,6 +687,7 @@ export default function ServiceRecapModal({
                     : 'Complete Service'}
               </button>
             </div>
+            </fieldset>
           </div>
         )}
       </div>
