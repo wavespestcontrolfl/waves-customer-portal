@@ -15,6 +15,10 @@ function requireManager(actor) {
 function baseRow(data, actor) {
   return { id: data.id, created_by: actor.id, input_hash: hash(data) };
 }
+function calendarRow(row, fields) {
+  if (!row) return row;
+  return { ...row, ...Object.fromEntries(fields.map(field => [field, dateOnly(row[field])])) };
+}
 async function replay(conn, table, data, actor) {
   const prior = await conn(table).where({ id: data.id }).first();
   if (prior && (prior.input_hash !== hash(data) || prior.created_by !== actor.id)) reject('This request identifier was already used. Reload before saving.', 409);
@@ -30,7 +34,7 @@ async function employee(conn, id, { lock = false } = {}) {
   return person;
 }
 function ruleAt(conn, date) {
-  return conn('field_program_rules').where('effective_date', '<=', date).orderBy('effective_date', 'desc').first();
+  return conn('field_program_rules').where('effective_date', '<=', date).orderBy('effective_date', 'desc').first().then(row => calendarRow(row, ['effective_date']));
 }
 function levelAt(conn, id, date) {
   return conn('field_program_levels').where({ technician_id: id }).where('effective_date', '<=', date).orderBy('effective_date', 'desc').first();
@@ -48,7 +52,7 @@ async function saveRule(input, actor) {
   return db.transaction(async trx => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['field-program-rules']);
     const prior = await replay(trx, 'field_program_rules', data, actor);
-    if (prior) return prior;
+    if (prior) return calendarRow(prior, ['effective_date']);
     const last = await trx('field_program_rules').orderBy('effective_date', 'desc').first();
     if (last && data.effective_date <= dateOnly(last.effective_date)) reject('Append a later effective definition; earlier definitions are retained.', 409);
     const keys = data.service_rules.map(row => row.service_key);
@@ -56,7 +60,7 @@ async function saveRule(input, actor) {
     if (keys.some(key => !catalog.includes(key))) reject('Choose service keys from the current service catalog.');
     const [row] = await trx('field_program_rules').insert({ ...baseRow(data, actor), label: data.label, effective_date: data.effective_date, definition: ruleDefinition(data) }).returning('*');
     await audit(trx, 'field_program_rules', row, actor);
-    return row;
+    return calendarRow(row, ['effective_date']);
   });
 }
 
@@ -66,13 +70,13 @@ async function saveLevel(input, actor) {
   return db.transaction(async trx => {
     const person = await employee(trx, data.technician_id, { lock: true });
     const prior = await replay(trx, 'field_program_levels', data, actor);
-    if (prior) return prior;
+    if (prior) return calendarRow(prior, ['effective_date']);
     if (person.employment_status !== 'active') reject('Only active employees can receive a new simulation level.', 409);
     const last = await trx('field_program_levels').where({ technician_id: data.technician_id }).orderBy('effective_date', 'desc').first();
     if (last && data.effective_date <= dateOnly(last.effective_date)) reject('Append a later effective level; earlier levels are retained.', 409);
     const [row] = await trx('field_program_levels').insert({ ...data, ...baseRow(data, actor) }).returning('*');
     await audit(trx, 'field_program_levels', row, actor);
-    return row;
+    return calendarRow(row, ['effective_date']);
   });
 }
 
@@ -84,7 +88,7 @@ async function saveAllocation(input, actor) {
   return db.transaction(async trx => {
     if (!await trx('customers').where({ id: data.customer_id }).forUpdate().first('id')) reject('Customer not found.', 404);
     const prior = await replay(trx, 'field_credit_allocations', data, actor);
-    if (prior) return prior;
+    if (prior) return calendarRow(prior, ['coverage_start', 'coverage_end']);
     if (!await trx('services').where({ service_key: data.service_key }).first('id')) reject('Service key not found.', 404);
     if (data.property_id && !await trx('customer_properties').where({ id: data.property_id, customer_id: data.customer_id }).first('id')) reject('The property does not belong to this customer.');
     const owners = await allocationCustomers(trx, data.customer_id);
@@ -93,7 +97,7 @@ async function saveAllocation(input, actor) {
     if (overlap) reject('An allocation already covers this service and period. Use its original scheduled count.', 409);
     const [row] = await trx('field_credit_allocations').insert({ ...data, ...baseRow(data, actor) }).returning('*');
     await audit(trx, 'field_credit_allocations', row, actor);
-    return row;
+    return calendarRow(row, ['coverage_start', 'coverage_end']);
   });
 }
 
@@ -113,7 +117,7 @@ async function visitFacts(conn, id, lock = false) {
   const visit = await (lock ? query.forUpdate() : query).first('id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_key_snapshot', 'service_type', 'scheduled_date', 'status', 'is_callback');
   if (!visit) reject('Service not found.', 404);
   const catalog = visit.service_id ? await conn('services').where({ id: visit.service_id }).first('service_key') : null;
-  return { ...visit, service_key: visit.service_key_snapshot || catalog?.service_key || null, service_date: dateOnly(visit.scheduled_date) };
+  return { ...calendarRow(visit, ['scheduled_date']), service_key: visit.service_key_snapshot || catalog?.service_key || null, service_date: dateOnly(visit.scheduled_date) };
 }
 
 async function validateServiceEvidence(conn, data, visit, last) {
@@ -167,7 +171,7 @@ async function saveServiceEvidence(input, actor) {
   return db.transaction(async trx => {
     const visit = await visitFacts(trx, data.service_id, true);
     const prior = await replay(trx, 'field_service_evidence', data, actor);
-    if (prior) return prior;
+    if (prior) return calendarRow(prior, ['service_date']);
     const last = await trx('field_service_evidence').where({ service_id: visit.id }).orderBy('revision', 'desc').first() || {
       id: null, allocation_id: null, revision: 0, technician_id: visit.technician_id,
       service_date: visit.service_date, service_key: visit.service_key, service_label: visit.service_type, facts: data,
@@ -201,7 +205,7 @@ async function saveServiceEvidence(input, actor) {
       });
     }
     await audit(trx, 'field_service_evidence', row, actor);
-    return row;
+    return calendarRow(row, ['service_date']);
   });
 }
 
@@ -212,7 +216,7 @@ async function saveBusinessEvidence(input, actor) {
   return db.transaction(async trx => {
     const estimate = await trx('estimates').where({ id: data.estimate_id }).forUpdate().first('id', 'status', 'accepted_at');
     const prior = await replay(trx, 'field_business_evidence', data, actor);
-    if (prior) return prior;
+    if (prior) return calendarRow(prior, ['accepted_date']);
     if (!estimate?.accepted_at || estimate.status !== 'accepted') reject('Use an accepted estimate with an acceptance date.');
     await employee(trx, data.technician_id, { lock: true });
     const last = await trx('field_business_evidence').where({ estimate_id: data.estimate_id }).orderBy('revision', 'desc').first() || {
@@ -230,7 +234,7 @@ async function saveBusinessEvidence(input, actor) {
     const rule = last.rule_id ? { id: last.rule_id } : await ruleAt(trx, accepted);
     const [row] = await trx('field_business_evidence').insert({ ...baseRow(data, actor), estimate_id: data.estimate_id, technician_id: data.technician_id, base_id: data.base_id, revision: last.revision + 1, accepted_date: accepted, rule_id: rule?.id || null, facts: data }).returning('*');
     await audit(trx, 'field_business_evidence', row, actor);
-    return row;
+    return calendarRow(row, ['accepted_date']);
   });
 }
 
@@ -242,14 +246,14 @@ async function saveAssessment(input, actor) {
   return db.transaction(async trx => {
     await employee(trx, data.technician_id, { lock: true });
     const prior = await replay(trx, 'field_promotion_assessments', data, actor);
-    if (prior) return prior;
+    if (prior) return calendarRow(prior, ['assessed_date']);
     if (data.previous_id) {
       const previous = await trx('field_promotion_assessments').where({ id: data.previous_id, technician_id: data.technician_id, to_role: data.to_role }).first();
       if (!previous || dateOnly(previous.assessed_date) > data.assessed_date) reject('Reassessment must follow this employee’s assessment for the same next step.');
     }
     const [row] = await trx('field_promotion_assessments').insert({ ...baseRow(data, actor), technician_id: data.technician_id, previous_id: data.previous_id, assessed_date: data.assessed_date, from_role: data.from_role, to_role: data.to_role, rubric_version: data.rubric_version, assessment: data, result }).returning('*');
     await audit(trx, 'field_promotion_assessments', row, actor);
-    return row;
+    return calendarRow(row, ['assessed_date']);
   });
 }
 
@@ -296,10 +300,10 @@ async function loadOverview(conn, technicianId, selectedMonth) {
   const today = etDateString(new Date());
   const [entries, levels, rule, assessments, businesses, reviews, statements] = await Promise.all([
     serviceRows(conn, technicianId, range),
-    conn('field_program_levels').where({ technician_id: technicianId }).orderBy('effective_date', 'desc'),
+    conn('field_program_levels').where({ technician_id: technicianId }).orderBy('effective_date', 'desc').then(rows => rows.map(row => calendarRow(row, ['effective_date']))),
     ruleAt(conn, range.start),
     conn('field_promotion_assessments as a').join('technicians as assessor', 'assessor.id', 'a.created_by')
-      .where('a.technician_id', technicianId).select('a.*', 'assessor.name as assessor_name').orderBy('a.assessed_date', 'desc').orderBy('a.created_at', 'desc').limit(100),
+      .where('a.technician_id', technicianId).select('a.*', 'assessor.name as assessor_name').orderBy('a.assessed_date', 'desc').orderBy('a.created_at', 'desc').limit(100).then(rows => rows.map(row => calendarRow(row, ['assessed_date']))),
     currentOnly(conn('field_business_evidence as b').where('b.technician_id', technicianId)
       .where('b.accepted_date', '>=', range.start).where('b.accepted_date', '<', range.end).select('b.*'), 'field_business_evidence', 'b').orderBy('b.accepted_date', 'desc').orderBy('b.estimate_id').limit(5001),
     conn('review_incentive_payouts').where({ technician_id: technicianId })
@@ -358,7 +362,7 @@ async function setup() {
   const [people, services, rules] = await Promise.all([
     db('technicians').whereNot('employment_status', 'prospective').whereIn('role', ['admin', 'technician']).select('id', 'name', 'employment_status').orderBy('name'),
     db('services').whereNotNull('service_key').select('service_key', 'name', 'category').orderBy('name'),
-    db('field_program_rules').orderBy('effective_date', 'desc'),
+    db('field_program_rules').orderBy('effective_date', 'desc').then(rows => rows.map(row => calendarRow(row, ['effective_date']))),
   ]);
   return { people, services, rules, program: PROGRAM };
 }
@@ -370,19 +374,19 @@ async function visitOptions(technicianId, selectedMonth) {
     .where('ss.technician_id', technicianId).where('ss.scheduled_date', '>=', range.start).where('ss.scheduled_date', '<', range.end)
     .where(q => q.where('ss.status', 'completed').orWhereNotNull('ss.actual_end_time').orWhereNotNull('ss.completed_at'))
     .select('ss.id', 'ss.customer_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status', db.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'))
-    .orderBy('ss.scheduled_date', 'desc').limit(500);
+    .orderBy('ss.scheduled_date', 'desc').limit(500).then(rows => rows.map(row => calendarRow(row, ['scheduled_date'])));
 }
 
 async function evidenceDetail(serviceId) {
   const visit = await visitFacts(db, serviceId);
   const owners = await allocationCustomers(db, visit.customer_id);
   const [revisions, allocations, returns] = await Promise.all([
-    db('field_service_evidence').where({ service_id: serviceId }).orderBy('revision', 'desc'),
-    db('field_credit_allocations').whereIn('customer_id', owners).where({ property_id: visit.property_id, service_key: visit.service_key }).orderBy('coverage_start', 'desc'),
+    db('field_service_evidence').where({ service_id: serviceId }).orderBy('revision', 'desc').then(rows => rows.map(row => calendarRow(row, ['service_date']))),
+    db('field_credit_allocations').whereIn('customer_id', owners).where({ property_id: visit.property_id, service_key: visit.service_key }).orderBy('coverage_start', 'desc').then(rows => rows.map(row => calendarRow(row, ['coverage_start', 'coverage_end']))),
     db('scheduled_services as ss').leftJoin('services as s', 's.id', 'ss.service_id')
       .where({ 'ss.customer_id': visit.customer_id, 'ss.property_id': visit.property_id, 'ss.status': 'completed' }).whereNot('ss.id', visit.id)
       .where('ss.scheduled_date', '>=', visit.service_date).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
-      .select('ss.id', 'ss.service_type', 'ss.scheduled_date').orderBy('ss.scheduled_date', 'desc').limit(200),
+      .select('ss.id', 'ss.service_type', 'ss.scheduled_date').orderBy('ss.scheduled_date', 'desc').limit(200).then(rows => rows.map(row => calendarRow(row, ['scheduled_date']))),
   ]);
   return { visit, revisions, allocations, returns };
 }
