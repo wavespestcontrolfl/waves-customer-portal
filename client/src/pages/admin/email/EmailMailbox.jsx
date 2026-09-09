@@ -108,7 +108,7 @@ function EmailMessageRow({ email, mailbox, editor, onOpen }) {
       <Button variant="ghost" onClick={(event) => handleStar(event, email)} disabled={Boolean(pendingAction)} loading={pendingAction === `star:${email.id}`} aria-label={`${email.is_starred ? "Unstar" : "Star"} ${email.subject || "email"}`} aria-pressed={Boolean(email.is_starred)} className="my-2 ml-1 shrink-0 self-start px-2">
         <Star size={18} fill={email.is_starred ? "currentColor" : "none"} aria-hidden />
       </Button>
-      <button type="button" onClick={(event) => onOpen(event, email)} aria-pressed={isSelected}
+      <button type="button" onClick={(event) => onOpen(event, email)} aria-expanded={isSelected} aria-controls={isSelected ? `email-conversation-${email.id}` : undefined}
         className="u-focus-ring min-w-0 flex-1 appearance-none border-0 bg-transparent px-3 py-4 text-left text-ui-body">
         <span className="sr-only">Open email:</span>
         <span className="flex flex-col items-start gap-1">
@@ -148,7 +148,7 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
   }, [email.gmail_thread_id, thread]);
   const extractedData = emailDetails(email), category = email.classification, categoryLabel = CATEGORY_LABELS[category];
   const sender = email.from_name || email.from_address;
-  return <section aria-label="Selected email" className="min-w-0 overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+  return <section id={`email-conversation-${email.id}`} aria-label="Selected email" className="min-w-0 overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
     <div className="space-y-3 border-b-hairline border-zinc-200 p-4">
       <Button variant="ghost" onClick={onBack} className="gap-2 xl:hidden"><ArrowLeft size={16} aria-hidden />Back to inbox</Button>
       <h2 ref={headingRef} tabIndex={-1} className="m-0 u-focus-ring break-words text-18 font-medium leading-[1.35]">{email.subject || "(no subject)"}</h2>
@@ -198,6 +198,13 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
       <EmailReply active={active} sender={sender} mailbox={mailbox} editor={editor} />
     </div>
   </section>;
+}
+
+function LinkedEmailError({ mailbox, onBack }) {
+  return <div className="min-h-48 space-y-3 rounded-md border-hairline border-zinc-200 bg-white p-6">
+    {mailbox.selectedEmail && <Button variant="ghost" onClick={onBack} className="gap-2"><ArrowLeft size={16} aria-hidden />Back to inbox</Button>}
+    <ActionFeedback error onRetry={mailbox.retrySelection}>The linked email is unavailable.</ActionFeedback>
+  </div>;
 }
 
 export function EmailInbox({ active, mailbox, editor }) {
@@ -255,7 +262,7 @@ export function EmailInbox({ active, mailbox, editor }) {
           <Button variant="secondary" onClick={() => setPage((current) => current + 1)} disabled={page >= Math.ceil(total / 50) || mailbox.inboxState.loading || mailbox.inboxState.error}>Next</Button>
         </div>}
       </section>
-      {mailbox.messageState.error ? <div className="min-h-48 rounded-md border-hairline border-zinc-200 bg-white p-6"><ActionFeedback error onRetry={mailbox.retrySelection}>The linked email is unavailable.</ActionFeedback></div>
+      {mailbox.messageState.error ? <LinkedEmailError mailbox={mailbox} onBack={backToInbox} />
         : mailbox.messageState.loading && !selected ? <div role="status" className="min-h-48 rounded-md border-hairline border-zinc-200 bg-white p-6">Loading linked email…</div>
         : selected ? <EmailConversation active={active} mailbox={mailbox} editor={editor} onBack={backToInbox} />
         : <div className="hidden min-h-80 flex-col items-center justify-center rounded-md border-hairline border-zinc-200 bg-white p-8 text-center xl:flex">

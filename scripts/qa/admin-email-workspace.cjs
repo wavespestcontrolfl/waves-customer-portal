@@ -169,6 +169,23 @@ async function main() {
       await shot(page, 'reactivation-retry-390');
       await page.close();
     });
+    if (!baseline) await scenario('Mobile inbox escape after a retained message refresh fails', async () => {
+      const { page, state } = await openPage(390);
+      await inbox(page); await openMail(page);
+      await page.getByRole('textbox', { name: 'Reply', exact: true }).fill('Keep this reply after returning');
+      await channel(page, 'SMS').click();
+      state.fail.add(`/admin/email/message/${a.id}`);
+      await channel(page, 'Email').click();
+      await page.getByText('The linked email is unavailable.', { exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
+      await row(page).waitFor();
+      await openMail(page, b);
+      await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
+      await openMail(page);
+      assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Keep this reply after returning');
+      await shot(page, 'retained-message-error-return-390');
+      await page.close();
+    });
     if (!baseline) {
       await scenario('Older email dates stay Eastern in a UTC browser', async () => {
         const { page, state } = await openPage(1440, { timezone: 'UTC' });

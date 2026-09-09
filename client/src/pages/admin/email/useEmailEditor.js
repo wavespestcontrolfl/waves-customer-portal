@@ -189,7 +189,11 @@ export default function useEmailEditor(userId) {
       } });
       if (!draftSession.saved) return;
     }
-    updateEmailSendAttempt(draftSession, key, null, attempt.id);
+    if (updateEmailSendAttempt(draftSession, key, null, attempt.id)) {
+      const kind = key === "compose" ? "compose" : "reply";
+      setSendFeedback(current => kind === "reply" && current.reply?.messageId !== attempt.replyId
+        ? current : { ...current, [kind]: null });
+    }
   };
 
   const handleAiDraft = async (email, isSelected) => {
