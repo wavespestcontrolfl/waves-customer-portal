@@ -137,24 +137,35 @@ function workDuration(stop, fallback = 60) {
  * making prefixes prunable: the clock only moves forward, so no suffix can
  * rescue a missed window.
  */
-function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, reportLate = false) {
+function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
+  legMinutes, bufferMinutes = 0, blockedIntervals = [], reportLate = false,
+} = {}) {
   const lat = parseFloat(stop.lat);
   const lng = parseFloat(stop.lng);
   let travel = 0;
   let prev = state.prev;
+  let departMin = state.clock;
   if (lat && lng) {
-    travel = RouteOptimizer.fallbackLegMetrics(
-      RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng),
-    ).minutes || 0;
+    for (let attempt = 0; attempt <= blockedIntervals.length; attempt++) {
+      travel = legMinutes ? legMinutes(prev, stop, departMin) : RouteOptimizer.fallbackLegMetrics(
+        RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng),
+      ).minutes || 0;
+      if (!Number.isFinite(travel) || travel < 0) return null;
+      if (state.visited && (prev.lat !== lat || prev.lng !== lng)) travel += bufferMinutes;
+      const blocked = blockedIntervals.find(block => departMin < block.endMin && departMin + travel > block.startMin);
+      if (!blocked) break;
+      departMin = blocked.endMin;
+    }
     prev = { lat, lng };
   }
-  let startMin = state.clock + travel;
+  let startMin = departMin + travel;
   const range = effectiveWindowRange(stop);
-  if (range) {
-    if (startMin > range.endMin && !reportLate) return null;
-    startMin = Math.max(startMin, range.startMin);
+  if (range) startMin = Math.max(startMin, range.startMin);
+  for (const block of blockedIntervals) {
+    if (startMin < block.endMin && startMin + workDuration(stop) > block.startMin) startMin = block.endMin;
   }
-  return { clock: startMin + workDuration(stop), prev, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+  if (range && startMin > range.endMin && !reportLate) return null;
+  return { clock: startMin + workDuration(stop), prev, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
 }
 
 /** Repair the demonstrated null-position insertion defect. Keep the relative
@@ -191,20 +202,35 @@ function computeChronologicalRepair(RouteOptimizer, stops) {
  * null means at least one promise (or the requested day end) cannot be kept. */
 function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
   startMin = 8 * 60, origin = RouteOptimizer.HQ, dayEndMin = Infinity, reportLate = false,
+  includeReturnInFinish = false, legMinutes, bufferMinutes = 0, blockedIntervals = [],
 } = {}) {
+  if (blockedIntervals.some(block => !Number.isFinite(block.startMin) || !Number.isFinite(block.endMin) || block.endMin <= block.startMin)) return null;
+  blockedIntervals = [...blockedIntervals].sort((a, b) => a.startMin - b.startMin);
   let state = { clock: startMin, prev: origin, travelMin: 0, waitingMin: 0 };
   const arrivals = [];
   for (const stop of seq) {
-    state = advanceSim(RouteOptimizer, rangeForStop, state, stop, reportLate);
+    state = advanceSim(RouteOptimizer, rangeForStop, state, stop, { legMinutes, bufferMinutes, blockedIntervals, reportLate });
     if (!state || state.clock > dayEndMin) return null;
     arrivals.push({ id: stop.id, arrivalMin: state.arrivalMin, departureMin: state.clock,
       ...(reportLate ? { lateMinutes: Math.max(0, state.arrivalMin - (rangeForStop(stop)?.endMin ?? Infinity)) } : {}),
     });
   }
-  const returnMin = RouteOptimizer.fallbackLegMetrics(
-    RouteOptimizer.haversine(state.prev.lat, state.prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng),
-  ).minutes || 0;
-  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin, finishMin: state.clock, returnAtMin: state.clock + returnMin };
+  let returnDeparture = state.clock;
+  let returnMin;
+  for (let attempt = 0; attempt <= blockedIntervals.length; attempt++) {
+    returnMin = legMinutes ? legMinutes(state.prev, RouteOptimizer.HQ, returnDeparture) : RouteOptimizer.fallbackLegMetrics(
+      RouteOptimizer.haversine(state.prev.lat, state.prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng),
+    ).minutes || 0;
+    if (!Number.isFinite(returnMin) || returnMin < 0) return null;
+    const blocked = blockedIntervals.find(block => returnDeparture < block.endMin && returnDeparture + returnMin > block.startMin);
+    if (!blocked) break;
+    returnDeparture = blocked.endMin;
+  }
+  const returnFinishMin = returnDeparture + returnMin;
+  if (includeReturnInFinish && returnFinishMin > dayEndMin) return null;
+  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin + returnDeparture - state.clock,
+    finishMin: includeReturnInFinish ? returnFinishMin : state.clock,
+    serviceFinishMin: state.clock, returnFinishMin, returnAtMin: returnFinishMin };
 }
 
 /** Exhaustive backbone-preserving interleaving search with prefix pruning.
