@@ -258,7 +258,7 @@ describe("CallIntelligencePanel", () => {
   it("colours an overdue open commitment as an alert and a kept one as strong", () => {
     expect(commitmentStatusTone({ status: "open", due_at: "2000-01-01T00:00:00Z" })).toBe("alert");
     expect(commitmentStatusTone({ status: "open", due_at: null })).toBe("neutral");
-    expect(commitmentStatusTone({ status: "open", due_at: "2000-01-01T00:00:00Z", snoozed_until: "2999-01-01T00:00:00Z" })).toBe("neutral");
+    expect(commitmentStatusTone({ status: "open", due_at: "2000-01-01T00:00:00Z", effective_due_at: "2999-01-01T00:00:00Z" })).toBe("neutral");
     expect(commitmentStatusTone({ status: "fulfilled" })).toBe("strong");
   });
 });

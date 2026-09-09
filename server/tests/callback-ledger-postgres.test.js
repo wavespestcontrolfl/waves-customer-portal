@@ -54,7 +54,10 @@ run('callback ledger on PostgreSQL', () => {
   test('existing, human-created and edited callbacks receive deadlines without the notification worker', async () => {
     const ledger = require('../services/call-commitments');
     const existing = await seed({ callback_due_at: null });
+    // A plain read (the Intelligence Bar tool, the integrations worker) writes nothing.
     await ledger.listOpenCommitments(trx);
+    expect((await trx('call_commitments').where({ id: existing.id }).first()).callback_due_at).toBeNull();
+    await ledger.listOpenCommitments(trx, { prepare: true });
     expect((await trx('call_commitments').where({ id: existing.id }).first()).callback_due_at).not.toBeNull();
     const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
     const added = await ledger.addHumanCommitment(trx, existing.call_log_id, {
@@ -98,7 +101,7 @@ run('callback ledger on PostgreSQL', () => {
     expect(customer).toBeTruthy();
     const mine = await seed({ callback_due_at: null });
     await trx('call_log').where({ id: mine.call_log_id }).update({ customer_id: customer.id });
-    const [row] = await ledger.listOpenCommitments(trx, { customerId: customer.id, kind: 'callback' });
+    const [row] = await ledger.listOpenCommitments(trx, { customerId: customer.id, kind: 'callback', prepare: true });
     expect(row.id).toBe(mine.id);
     expect(row.callback_due_at).not.toBeNull();
     expect((await trx('call_commitments').where({ id: mine.id }).first()).callback_due_at).not.toBeNull();
@@ -120,7 +123,7 @@ run('callback ledger on PostgreSQL', () => {
     const mine = new Set(batch.map((b) => b.id));
     const seen = [];
     for (let offset = 0, more = true; more;) {
-      const page = await ledger.listOpenCommitments(trx, { kind: 'callback', limit: 101, offset, now });
+      const page = await ledger.listOpenCommitments(trx, { kind: 'callback', limit: 101, offset, prepare: true, now });
       more = page.length > 100;
       seen.push(...page.slice(0, 100).map((r) => r.id).filter((id) => mine.has(id)));
       offset += 100;
@@ -129,7 +132,7 @@ run('callback ledger on PostgreSQL', () => {
     expect(new Set(seen).size).toBe(210);
     expect(staff).toBeTruthy();
     // The rows left undated by the first walk are prepared by the next first-page read.
-    await ledger.listOpenCommitments(trx, { kind: 'callback', limit: 1, offset: 0, now });
+    await ledger.listOpenCommitments(trx, { kind: 'callback', limit: 1, offset: 0, prepare: true, now });
     expect(Number((await trx('call_commitments').whereIn('id', [...mine]).whereNull('callback_due_at').count('id as n').first()).n)).toBe(0);
   }, 180000); // 210 remote preparation transactions
 

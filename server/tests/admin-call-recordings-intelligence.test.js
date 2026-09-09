@@ -221,11 +221,11 @@ describe('GET /commitments/open — the Owed queue', () => {
       expect(body.enabled).toBe(true);
     });
     // limit + 1: the probe row behind has_more.
-    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: false });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: false, prepare: true });
     // hints=0: the refresh candidates come from the UNFILTERED page, so a
     // hint the facts no longer support gets cleared instead of hiding the
     // row for good.
-    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true, prepare: true });
     expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
     expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(3);
   });
