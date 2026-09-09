@@ -13,6 +13,9 @@ import { markUsageSource } from "../../lib/adminUsage";
 import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS } from "../../config/adminNavigation";
 import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
+import { UiSurface } from "../../components/ui";
+import { WorkspaceGroup } from "../../components/admin/AdminWorkspaceNavigation";
+import useAdminNavigation from "../../hooks/useAdminNavigation";
 
 // The Settings leaves this page lists inline: every entry of the former
 // mobile Settings index whose destination is NOT already a nav row or tab
@@ -27,6 +30,7 @@ const NAV_PATHS = new Set(
 const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter(
   (sec) => !NAV_PATHS.has(sec.to.split("?")[0]) || sec.to.includes("?tab="),
 );
+const MOBILE_PRIMARY_IDS = new Set(ADMIN_MOBILE_TABS.map(({ id }) => id));
 
 export default function MorePage() {
   const navigate = useNavigate();
@@ -40,6 +44,7 @@ export default function MorePage() {
   const outletContext = useOutletContext();
   const currentRole = outletContext?.user?.role || null;
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
+  const navigation = useAdminNavigation();
 
   if (!isMobile) return <Navigate to="/admin" replace />;
 
@@ -51,17 +56,26 @@ export default function MorePage() {
     navigate("/admin/login", { replace: true });
   };
 
-  const visibleSettingsLeaves = SETTINGS_LEAVES.filter(
+  const workspaceSettings = navigation?.groups.find(({ id }) => id === 'settings')?.items
+    .filter(({ id }) => id !== 'settings').map(({ id, label, path, adminOnly }) => ({ key: id, label, to: path, adminOnly })) || [];
+  const visibleSettingsLeaves = [...workspaceSettings, ...SETTINGS_LEAVES].filter(
     (sec) => currentRole === "admin" || !sec.adminOnly,
   );
+  const mobileWorkspaces = navigation?.groups.filter(({ id }) => id !== 'settings').map((group) => {
+    const items = group.items.filter(({ id }) => !MOBILE_PRIMARY_IDS.has(id));
+    return { ...group, items, target: items.includes(group.target) ? group.target : undefined };
+  }).filter(({ items }) => items.length);
 
   return (
     <div className="md:hidden pb-4">
       {/* No extra padding wrapper: the shell already pads the page 16px, so
           a px-4/pt-4 here inset the header card 32px — visibly narrower than
           the full-bleed lists beneath it. */}
-      <AdminCommandHeader title="Settings" icon={Settings} sticky={false} />
-      {ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => {
+      <AdminCommandHeader title="Settings" icon={Settings} sticky={false} variant={navigation ? 'workspace' : undefined} />
+      {navigation ? <UiSurface className="space-y-1 border-y border-zinc-200 py-3" density="comfortable">
+        <h2 className="m-0 px-4 py-2 text-14 font-medium text-zinc-500">Workspaces</h2>
+        {mobileWorkspaces.map((group) => <WorkspaceGroup key={group.id} group={group} source="more" />)}
+      </UiSurface> : ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => {
         const visibleItems = items
           .filter((item) => !item.adminOnly || currentRole === "admin")
           .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled));
@@ -106,8 +120,8 @@ export default function MorePage() {
       {visibleSettingsLeaves.length > 0 && (
         <section className="mt-2">
           {" "}
-          <div className="px-4 py-2 text-12 font-medium uppercase tracking-label text-zinc-500">
-            Settings
+          <div className={navigation ? "px-4 py-2 text-14 font-medium text-zinc-500" : "px-4 py-2 text-12 font-medium uppercase tracking-label text-zinc-500"}>
+            {navigation ? 'Preferences' : 'Settings'}
           </div>{" "}
           <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
             {visibleSettingsLeaves.map(({ key, to, label }) => (
@@ -160,7 +174,7 @@ export default function MorePage() {
             <button
               type="button"
               onClick={handleLogout}
-              className="w-full flex items-center gap-3 px-4 h-14 active:bg-alert-bg text-alert-fg"
+              className={navigation ? "w-full flex items-center gap-3 px-4 h-14 active:bg-zinc-100 text-zinc-600" : "w-full flex items-center gap-3 px-4 h-14 active:bg-alert-bg text-alert-fg"}
             >
               {" "}
               <LogOut size={20} strokeWidth={1.75} className="shrink-0" />{" "}

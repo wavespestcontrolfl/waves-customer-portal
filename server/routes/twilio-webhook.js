@@ -1,3 +1,4 @@
+const { lockSmsPhone } = require('../utils/customer-comms-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -363,10 +364,13 @@ router.post('/sms', async (req, res) => {
       } catch { /* never block the STOP path */ }
       try {
         if (customer) {
-          await db('notification_prefs')
-            .insert({ customer_id: customer.id, sms_enabled: false })
-            .onConflict('customer_id')
-            .merge({ sms_enabled: false });
+          await db.transaction(async trx => {
+            await lockSmsPhone(trx, normalizedFrom || From);
+            await trx('notification_prefs')
+              .insert({ customer_id: customer.id, sms_enabled: false })
+              .onConflict('customer_id')
+              .merge({ sms_enabled: false });
+          });
         }
         logger.info(`[sms-optout] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} opted out of SMS via ${optCommand.detectionMethod}`);
       } catch (e) { logger.error(`[sms-optout] Failed to update prefs: ${e.message}`); }
@@ -602,7 +606,11 @@ router.post('/sms', async (req, res) => {
             }
           } else {
             try {
-              await applyStartDerivedState(db, { failLoud: false });
+              await db.transaction(async trx => {
+                await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optInPhone]);
+                const standing = await trx('messaging_suppression').where({ phone: optInPhone }).first('active');
+                if (standing?.active === false) await applyStartDerivedState(trx, { failLoud: true });
+              });
             } catch (e) { logger.error(`[sms-optin] derived-state fallback failed: ${e.message}`); }
           }
         }
