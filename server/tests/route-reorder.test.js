@@ -191,6 +191,20 @@ describe('near-term null-position repair', () => {
       saved_meters: 0, distance_change_meters: 0, before_window_feasible: false, after_window_feasible: true });
   });
 
+  test.each([false, true])('repairs every stop beyond the Google cap without calling Google (event mode: %s)', async eventMode => {
+    process.env.GATE_ROUTE_REORDER = 'true';
+    const early = Array.from({ length: 23 }, (_, index) => stop(`early-${index}`, {
+      route_order: index + 1, window_start: '08:00', estimated_duration_minutes: 5,
+    }));
+    stopsByDate[BAND[0]] = [...early, ...repairDay().map(row => ({
+      ...row, route_order: row.route_order == null ? null : row.route_order + early.length,
+    }))];
+    const result = eventMode ? await runRouteRepairAfterChange({ dates: [BAND[0]], now: NOW }) : await runRouteReorder({ now: NOW });
+    expect(result.applied).toBe(1);
+    expect(trxUpdates.map(row => row.id)).toEqual([...early.map(row => row.id), 'one', 'new', 'later']);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+  });
+
   test.each(['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'])('%s off retains the near-term freeze', async gate => {
     delete process.env[gate];
     expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
@@ -329,14 +343,23 @@ test('FAIL CLOSED + FAIL LOUD: unreadable reminder status freezes the day AND de
   expect(ledger.failures).toContainEqual(expect.objectContaining({ date: '2026-08-17', reason: 'REMINDER_STATUS_UNKNOWN' }));
 });
 
-test('>25 geocoded stops for one tech-day is SKIPPED and LOGGED, never truncated', async () => {
+test.each([false, true])('>25 stops without a safe repair are never sent to Google (repair gate: %s)', async repairGate => {
+  if (repairGate) {
+    process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  }
   stopsByDate['2026-08-18'] = Array.from({ length: 26 }, (_, i) => stop(`s${i}`, { lng: i + 1 }));
-  const res = await runRouteReorder({ now: NOW });
-  expect(res.applied).toBe(0);
-  expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
-  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('25-waypoint cap'));
-  const ledger = JSON.parse(ledgerInserts[0].result);
-  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'OVER_WAYPOINT_CAP', geocoded: 26 }));
+  try {
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(0);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('25-waypoint cap'));
+    const ledger = JSON.parse(ledgerInserts[0].result);
+    expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'OVER_WAYPOINT_CAP', geocoded: 26 }));
+  } finally {
+    delete process.env.GATE_ROUTE_REORDER_REPAIR;
+    delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  }
 });
 
 test('savings are computed under ONE model — an order no shorter than the current one applies nothing', async () => {
