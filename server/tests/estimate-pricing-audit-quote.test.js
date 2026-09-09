@@ -466,6 +466,38 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(roach.cogs.visitsPerYear).toBe(3);
   });
 
+  test.each([
+    // Measured quantities are a pricing basis: a quarterly 14,768 sq ft line
+    // is four visits, not 59,072 (GH codex P1 on #4305).
+    ['sqft', 14768, 'quarterly', 4, 4459.92],
+    ['acre', 25.8, 'monthly', 12, 30960],
+    ['hour', 6, 'quarterly', 4, 240],
+    // Count units still multiply the visits performed.
+    ['each', 3, 'quarterly', 12, 120],
+    [undefined, 3, 'quarterly', 12, 120],
+  ])('a recurring %s line with quantity %s scales COGS visits only by service counts', async (unit, quantity, frequency, visits, annual) => {
+    const unitPrice = { sqft: 0.0755, acre: 100, hour: 10, each: 10, undefined: 10 }[unit];
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-unit', status: 'sent', monthly_total: '0', annual_total: String(annual), onetime_total: '0',
+      estimate_data: {
+        proposal: { enabled: true, buildings: [{ name: 'Slab', lineItems: [{ description: 'Perimeter treatment', frequency, unitPrice, quantity, ...(unit ? { unit } : {}), taxable: false }] }] },
+      },
+    });
+    const line = audit.lines.find((l) => /perimeter/i.test(l.label));
+    expect(line).toMatchObject({ cadence: 'recurring', price: annual, visitsPerYear: visits });
+    expect(line.cogs.visitsPerYear).toBe(visits);
+    expect(line.quoted.quantity).toBe(quantity);
+    if (unit) expect(line.quoted.unit).toBe(unit);
+  });
+  test.each([['sqft', 1200, 1], ['lb', 2.5, 1], ['each', 40, 40], [undefined, 40, 40]])('a one-time %s line with quantity %s performs %s service units', async (unit, quantity, visits) => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-unit-once', status: 'sent', monthly_total: '0', annual_total: '0', onetime_total: '100',
+      estimate_data: {
+        proposal: { enabled: true, buildings: [{ name: 'Grove', lineItems: [{ description: 'Soil treatment', frequency: 'one_time', unitPrice: 1, quantity, ...(unit ? { unit } : {}), taxable: false }] }] },
+      },
+    });
+    expect(audit.lines.find((l) => /soil/i.test(l.label)).cogs.visitsPerYear).toBe(visits);
+  });
   test('authored one-time quantity scales COGS units (revenue already folds it in)', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-qty', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '2000.00',

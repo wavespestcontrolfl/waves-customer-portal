@@ -59,7 +59,7 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
-const { proposalExpiry, hasFixedBidValidity, assertBidSendDate, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
+const { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
@@ -1252,11 +1252,13 @@ router.post('/:id/send', async (req, res, next) => {
             ['estimate-group-send', String(estimate.estimate_group_id)],
           );
         }
-        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true, sendAt: scheduledTime });
+        // Fixed holds are judged at the first scheduler tick the job can
+        // reach, not the requested minute (GH codex P2 on #4309).
+        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true, sendAt: earliestScheduledDelivery(scheduledTime) });
         if (blockingSibling) return { blockingSibling };
         await assertReviewedEstimateGroup(trx, estimate, req.body?.groupVersions);
         const lockedRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
-        assertBidSendDate(lockedRow, scheduledTime);
+        assertBidScheduleDate(lockedRow, scheduledTime);
         if (req.body?.expectedEditVersion && estimateEditVersion(lockedRow) !== req.body.expectedEditVersion) {
           return { stale: true };
         }

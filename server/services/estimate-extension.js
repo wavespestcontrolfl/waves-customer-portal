@@ -136,12 +136,27 @@ async function extensionDeliverableUnderGate(database, estimate) {
 // A group is one quoted offer: never extend its ordinary rows while leaving
 // a fixed-date property behind. The public offer and POST use this same
 // preflight before claiming a grant; a failed sibling read also blocks it.
+//
+// This judges the group's TERMS, not what the extension would revive, so it
+// reads every live sibling — an in-flight 'sending' row whose claim is
+// committed and awaiting the provider, a scheduled or draft one, and the
+// published/expired ones — rather than revivableSiblingsQuery's subset.
+// Otherwise an ordinary sibling could be extended (and the customer told)
+// while a fixed bid mid-send publishes with a different deadline (GH codex
+// P1 on #4309).
+const FIXED_SIBLING_STATUSES = ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'];
 async function fixedBidBlocksExtension(database, estimate) {
-  const { hasFixedBidValidity } = require('./proposal-bid');
+  const { hasFixedBidValidity, FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
   if (hasFixedBidValidity(estimate)) return true;
   if (!estimate?.estimate_group_id) return false;
   try {
-    const siblings = await revivableSiblingsQuery(database, estimate).select('estimate_data');
+    const siblings = await database('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereNull('archived_at')
+      .whereIn('status', FIXED_SIBLING_STATUSES)
+      .whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)
+      .select('estimate_data');
     return siblings.some(hasFixedBidValidity);
   } catch { return true; }
 }

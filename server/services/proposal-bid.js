@@ -19,6 +19,21 @@ function assertBidSendDate(estimate, at = new Date()) {
   const expiry = proposalExpiry(estimate);
   if (expiry && expiry < at) throw Object.assign(new Error('The bid validity date has passed. Update Valid through in the proposal builder before sending.'), { statusCode: 409 });
 }
+// The scheduled-send worker claims due rows on five-minute wall-clock ticks
+// (scheduler.js `*/5 * * * *`), so a 23:58 ET schedule is first claimed at
+// 00:00 — after a fixed bid's day has ended, when the delivery-time check
+// refuses it and nobody is sent anything. Scheduling therefore validates the
+// earliest moment the worker can actually deliver (GH codex P2 on #4309).
+const SCHEDULED_SEND_TICK_MS = 5 * 60 * 1000;
+function earliestScheduledDelivery(scheduledTime, tickMs = SCHEDULED_SEND_TICK_MS) {
+  return new Date(Math.ceil(new Date(scheduledTime).getTime() / tickMs) * tickMs);
+}
+function assertBidScheduleDate(estimate, scheduledTime) {
+  const expiry = proposalExpiry(estimate);
+  if (!expiry) return;
+  assertBidSendDate(estimate, scheduledTime);
+  if (expiry < earliestScheduledDelivery(scheduledTime)) throw Object.assign(new Error('The scheduled time is too close to the end of the bid validity day; scheduled sends run every five minutes. Choose an earlier time or update Valid through in the proposal builder.'), { statusCode: 409 });
+}
 function decimalValid(value, { min = 0, max = 99999999.99 } = {}) {
   if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return false;
   const n = Number(value);
@@ -75,4 +90,4 @@ function normalizeProjectCosting(raw) {
     })),
   };
 }
-module.exports = { proposalExpiry, hasFixedBidValidity, assertBidSendDate, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields, normalizeProjectCosting };
+module.exports = { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, SCHEDULED_SEND_TICK_MS, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields, normalizeProjectCosting };

@@ -7,7 +7,7 @@ const { PDFDocument } = require('pdf-lib');
 const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
-const { proposalExpiry, assertBidSendDate, validateBidFields, normalizeProjectCosting } = require('../services/proposal-bid');
+const { proposalExpiry, assertBidSendDate, validateBidFields, normalizeProjectCosting, assertBidScheduleDate, earliestScheduledDelivery } = require('../services/proposal-bid');
 const { computeProjectCosts, roundCents } = require('../../shared/proposal-bid.cjs');
 const { mapFormPrices, buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
 
@@ -82,6 +82,16 @@ describe('fixed bid validity', () => {
     expect(proposalExpiry(row).toISOString()).toBe(expected);
     expect(estimateExpiresAt(() => new Date('2026-09-01T12:00:00Z'), row).toISOString()).toBe(expected);
     expect(estimateExpiresAt(() => new Date('2026-09-20T12:00:00Z'), row).toISOString()).toBe(expected);
+  });
+  test('scheduled sends are judged at the first five-minute scheduler tick they can reach', () => {
+    expect(earliestScheduledDelivery(new Date('2026-09-23T03:55:00.000Z')).toISOString()).toBe('2026-09-23T03:55:00.000Z');
+    expect(earliestScheduledDelivery(new Date('2026-09-23T03:55:00.001Z')).toISOString()).toBe('2026-09-23T04:00:00.000Z');
+    expect(earliestScheduledDelivery(new Date('2026-09-23T03:58:30.000Z')).toISOString()).toBe('2026-09-23T04:00:00.000Z');
+    const row = estimate([line('a', 1, 10)], { validThrough: '2026-09-22' });
+    expect(() => assertBidScheduleDate(row, new Date('2026-09-23T03:55:00Z'))).not.toThrow();
+    expect(() => assertBidScheduleDate(row, new Date('2026-09-23T03:58:00Z'))).toThrow(/too close to the end of the bid validity day/);
+    expect(() => assertBidScheduleDate(row, new Date('2026-09-23T04:00:00Z'))).toThrow(/validity date has passed/);
+    expect(() => assertBidScheduleDate(estimate([line('a', 1, 10)]), new Date('2026-09-23T03:58:00Z'))).not.toThrow();
   });
   test('retains the seven-day legacy send window and rejects expired or impossible bid dates', () => {
     expect(estimateExpiresAt(() => new Date('2026-09-01T12:00:00Z')).toISOString()).toBe('2026-09-08T12:00:00.000Z');

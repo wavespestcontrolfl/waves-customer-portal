@@ -919,6 +919,11 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
 // frequency-aware annualization via annualizedAmount).
 function normalizeProposalLines(estimate) {
   const { normalizeProposal, annualizedAmount, OCCURRENCES_PER_YEAR } = require('./estimate-proposal');
+  // Measured quantities (sq ft, acres, lb, gal, hours…) are a pricing basis,
+  // not a visit count: 14,768 sq ft quarterly is four visits, not 59,072.
+  // Only count units (each/trip) and legacy unit-less lines scale the COGS
+  // visits (GH codex P1 on #4305).
+  const { proposalLineServiceCount } = require('../../shared/proposal-bid.cjs');
   const proposal = normalizeProposal(estimate);
   if (!proposal || proposal.enabled !== true) return [];
   const lines = [];
@@ -949,9 +954,9 @@ function normalizeProposalLines(estimate) {
         // amount already folds quantity in (the canonical normalizer
         // multiplies unitPrice × quantity) — the units performed must
         // scale COGS the same way as the recurring branch (GH codex P1).
-        const quantity = Math.max(1, Number(item.quantity) || 1);
+        const serviceCount = proposalLineServiceCount(item);
         push(item.description || building.name, 'one_time', item.amount,
-          quantity > 1 ? { visitsPerYear: quantity } : {});
+          serviceCount > 1 ? { visitsPerYear: serviceCount } : {});
       }
       else {
         // COGS visits must match the annualized revenue occurrences —
@@ -961,10 +966,11 @@ function normalizeProposalLines(estimate) {
         const occurrences = item.frequency === 'per_application'
           ? Number(item.visitsPerYear) || 0
           : OCCURRENCES_PER_YEAR[item.frequency] || 0;
-        const quantity = Math.max(1, Number(item.quantity) || 1);
+        const quantity = Math.max(0, Number(item.quantity) || 0);
+        const serviceCount = proposalLineServiceCount(item);
         push(item.description || building.name, 'recurring', annualizedAmount(item), {
-          quoted: { frequency: item.frequency, quantity, amountPerOccurrence: item.amount, ...(item.visitsPerYear ? { visitsPerYear: item.visitsPerYear } : {}) },
-          ...(occurrences > 0 ? { visitsPerYear: occurrences * quantity } : {}),
+          quoted: { frequency: item.frequency, quantity, ...(item.unit ? { unit: item.unit } : {}), amountPerOccurrence: item.amount, ...(item.visitsPerYear ? { visitsPerYear: item.visitsPerYear } : {}) },
+          ...(occurrences > 0 ? { visitsPerYear: occurrences * serviceCount } : {}),
         });
       }
     }

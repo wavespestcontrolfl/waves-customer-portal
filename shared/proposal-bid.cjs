@@ -16,6 +16,15 @@ const BID_FORM_PROFILES = {
   north_port_pr27_02: { label: 'North Port PR27-02 · quote form', page: 15, minimumValidThrough: '2026-12-21', rows: { product: 'Product', application: 'Application', other: 'Additional item', freight: 'Freight' } },
   cove_termite: { label: 'Cove + Willoughby · termite bid form', page: 3, rows: { apartments: 'Apartment buildings', clubhouse: 'Clubhouse', garages: 'Garages / maintenance' } },
 };
+// Only these units count discrete service units; every other unit (area,
+// length, weight, volume, time, lump sum) is a pricing basis whose quantity
+// must not multiply per-visit costs. A line with no unit keeps the legacy
+// "quantity is a count" reading.
+const PROPOSAL_COUNT_UNITS = ['each', 'trip'];
+const proposalLineServiceCount = (line) => {
+  if (line.unit && !PROPOSAL_COUNT_UNITS.includes(line.unit)) return 1;
+  return Math.max(1, Number(line.quantity) || 1);
+};
 const roundDecimal = (value, places = 4) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
@@ -56,4 +65,4 @@ function computeProjectCosts(costing, totals) {
   return { cost, revenue, profit, marginPercent: costsComplete && revenue > 0 ? roundDecimal(profit / revenue * 100, 2) : null, byCategory, costsComplete };
 }
 
-module.exports = { PROPOSAL_UNITS, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, computeProjectCosts };
+module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, computeProjectCosts };
