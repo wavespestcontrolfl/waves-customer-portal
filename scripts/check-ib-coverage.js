@@ -83,10 +83,13 @@ function frontendSourceCensus(source, relative) {
   const ast = parser.parse(source, { sourceType: 'unambiguous', plugins: ['jsx', 'typescript'] });
     walk(ast, (node, parents) => {
       if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
+      // `import('../pages/admin/X')` loads a module; it is not a request.
+      if (node.callee.type === 'Import') return;
       const callee = named(node.callee);
       const verbRequest = callee.match(/^(?:admin|api)(?:\.|_)?(get|post|put|patch|delete)(?:Strict)?$/i);
       const verbCall = verbRequest || callee.match(/(?:^|\.)(?:admin|api)?(get|post|put|patch|delete)(?:Strict)?$/i);
-      const requestCall = /(?:fetch|request|(?:^|\.)api)$/i.test(callee);
+      // React state setters (`setLinkRequest`) share the suffix but perform no request.
+      const requestCall = /(?:fetch|request|(?:^|\.)api)$/i.test(callee) && !/(?:^|\.)set[A-Z]\w*$/.test(callee);
       const localExport = callee === 'URL.createObjectURL' && relative.includes('/admin/');
       const endpoint = normalizedEndpoint(expressionText(node.arguments[0]));
       // Literal admin paths stay visible even through an unfamiliar wrapper.
@@ -151,7 +154,7 @@ function checkCoverage(current, manifest, policy, baselineProof = new Set()) {
       && previous.evidence.every(value => typeof value === 'string' && value.trim())
       && ['permission', 'approval', 'inputsAndEffects'].every(key => typeof previous[key] === 'string'
         && previous[key].trim() && previous[key].trim() !== 'requires_action_review');
-    const exception = previous.status === 'reviewed_exception'
+    const exception = ['reviewed_exception', 'reviewed_unmapped'].includes(previous.status)
       && ['review', 'reason'].every(key => typeof previous.exception?.[key] === 'string' && previous.exception[key].trim());
     if ((implemented || exception) && previous.reviewedFingerprint === action.fingerprint) continue;
     if (previous.status !== 'unmapped' || previous.baselineFingerprint !== action.fingerprint || !baselineProof.has(`${action.id}:${action.fingerprint}`)) {
@@ -214,10 +217,17 @@ function main() {
   const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
   const policy = JSON.parse(fs.readFileSync(path.join(ROOT, 'server/services/intelligence-bar/action-policy.json'), 'utf8'));
   const errors = checkCoverage(current, manifest, policy, verifiedBaselineProof(current, manifest));
-  const unsupported = manifest.actions.filter(a => !['verified', 'reviewed_exception'].includes(a.status)).length;
-  console.log(`IB coverage: ${manifest.actions.length} recorded UI sites; ${unsupported} unsupported/unverified. ${errors.length} new/changed unmapped sites.`);
+  const { recorded, unsupported } = coverageCounts(manifest.actions);
+  console.log(`IB coverage: ${recorded} recorded UI sites; ${unsupported} unsupported/unverified. ${errors.length} new/changed unmapped sites.`);
   errors.forEach(error => console.error(error));
   process.exitCode = errors.length ? 1 : 0;
+}
+
+function coverageCounts(actions) {
+  return {
+    recorded: actions.length,
+    unsupported: actions.filter(a => !['verified', 'reviewed_exception'].includes(a.status)).length,
+  };
 }
 
 function compactManifest(manifest) {
@@ -228,4 +238,4 @@ function compactManifest(manifest) {
 }
 
 if (require.main === module) main();
-module.exports = { frontendCensus, frontendSourceCensus, backendCensus, checkCoverage, verifiedBaselineProof, normalizedEndpoint, compactManifest };
+module.exports = { frontendCensus, frontendSourceCensus, backendCensus, checkCoverage, coverageCounts, verifiedBaselineProof, normalizedEndpoint, compactManifest };

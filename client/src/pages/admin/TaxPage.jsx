@@ -73,7 +73,7 @@ function Badge({ children, color, small, fontSize }) {
         borderRadius: 9999,
         // fontSize override: newer surfaces hold the repo's 14px floor
         // without disturbing the legacy tabs' compact badges
-        fontSize: fontSize || (small ? 10 : 11),
+        fontSize: fontSize || 11, // UI audit F0373: compact badges hold the 11px floor
         fontWeight: 500,
         background: `${color || D.muted}22`,
         color: color || D.muted,
@@ -312,11 +312,11 @@ function TaxRatesTab() {
               <div style={{ fontSize: 11, color: D.muted }}>
                 Zone: {r.serviceZone}
               </div>{" "}
-              <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>
+              <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
                 Effective: {fmtD(r.effectiveDate)}
               </div>
               {r.notes && (
-                <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+                <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
                   {r.notes}
                 </div>
               )}
@@ -475,7 +475,7 @@ function ServiceTaxabilityTab() {
             </Badge>
           )}
           {s.flStatuteRef && (
-            <span style={{ fontSize: 10, color: "#64748b" }}>
+            <span style={{ fontSize: 11, color: "#64748b" }}>
               {s.flStatuteRef}
             </span>
           )}
@@ -651,7 +651,7 @@ function EquipmentTab() {
         >
           {" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Name *
             </div>
             <input
@@ -661,7 +661,7 @@ function EquipmentTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Make/Model
             </div>
             <input
@@ -673,7 +673,7 @@ function EquipmentTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Category
             </div>{" "}
             <select
@@ -698,7 +698,7 @@ function EquipmentTab() {
             </select>
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Purchase Date
             </div>
             <input
@@ -711,7 +711,7 @@ function EquipmentTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Cost *
             </div>
             <input
@@ -725,7 +725,7 @@ function EquipmentTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Method
             </div>{" "}
             <select
@@ -1134,7 +1134,7 @@ function ExpensesTab() {
         >
           {" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Category
             </div>{" "}
             <select
@@ -1154,7 +1154,7 @@ function ExpensesTab() {
             </select>
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Description *
             </div>
             <input
@@ -1166,7 +1166,7 @@ function ExpensesTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Amount *
             </div>
             <input
@@ -1180,7 +1180,7 @@ function ExpensesTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Date *
             </div>
             <input
@@ -1193,7 +1193,7 @@ function ExpensesTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Vendor
             </div>
             <input
@@ -1283,7 +1283,7 @@ function ExpensesTab() {
               <span style={{ fontFamily: MONO, fontSize: 11, color: D.green }}>
                 {fmtM(c.deductible)} deductible
               </span>{" "}
-              <span style={{ fontSize: 10, color: D.muted }}>
+              <span style={{ fontSize: 11, color: D.muted }}>
                 {c.count} items
               </span>{" "}
             </div>
@@ -1724,7 +1724,7 @@ function AdvisorTab() {
                       : "1px solid transparent",
                   borderRadius: 4,
                   padding: "3px 8px",
-                  fontSize: 10,
+                  fontSize: 11,
                   color: alertFilter === s ? D.heading : D.muted,
                   cursor: "pointer",
                   textTransform: "capitalize",
@@ -1800,7 +1800,7 @@ function AdvisorTab() {
                       borderRadius: 4,
                       padding: "3px 10px",
                       color: "#fff",
-                      fontSize: 10,
+                      fontSize: 11,
                       cursor: "pointer",
                     }}
                   >
@@ -1816,7 +1816,7 @@ function AdvisorTab() {
                       borderRadius: 4,
                       padding: "3px 10px",
                       color: "#fff",
-                      fontSize: 10,
+                      fontSize: 11,
                       cursor: "pointer",
                     }}
                   >
@@ -1832,7 +1832,7 @@ function AdvisorTab() {
                       borderRadius: 4,
                       padding: "3px 8px",
                       color: D.muted,
-                      fontSize: 10,
+                      fontSize: 11,
                       cursor: "pointer",
                     }}
                   >
@@ -1979,7 +1979,7 @@ function AdvisorTab() {
                       Action: {rc.action_required}
                     </div>
                   )}
-                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
                     {rc.source}{" "}
                     {rc.effective_date && `· Effective ${rc.effective_date}`}
                   </div>{" "}
@@ -2090,7 +2090,7 @@ function AdvisorTab() {
                     </span>
                   )}
                   {d.irs_reference && (
-                    <span style={{ fontSize: 10, color: D.muted }}>
+                    <span style={{ fontSize: 11, color: D.muted }}>
                       {d.irs_reference}
                     </span>
                   )}
@@ -2546,7 +2546,7 @@ function MileageTab() {
         <div style={{ display: "flex", gap: 6, alignItems: "flex-end" }}>
           {" "}
           <div>
-            <label style={{ fontSize: 10, color: D.muted, display: "block" }}>
+            <label style={{ fontSize: 11, color: D.muted, display: "block" }}>
               Date
             </label>
             <input
@@ -2559,7 +2559,7 @@ function MileageTab() {
             />
           </div>{" "}
           <div>
-            <label style={{ fontSize: 10, color: D.muted, display: "block" }}>
+            <label style={{ fontSize: 11, color: D.muted, display: "block" }}>
               From
             </label>
             <input
@@ -2572,7 +2572,7 @@ function MileageTab() {
             />
           </div>{" "}
           <div>
-            <label style={{ fontSize: 10, color: D.muted, display: "block" }}>
+            <label style={{ fontSize: 11, color: D.muted, display: "block" }}>
               To
             </label>
             <input
@@ -2585,7 +2585,7 @@ function MileageTab() {
             />
           </div>{" "}
           <div>
-            <label style={{ fontSize: 10, color: D.muted, display: "block" }}>
+            <label style={{ fontSize: 11, color: D.muted, display: "block" }}>
               Miles
             </label>
             <input
@@ -2697,7 +2697,7 @@ function MileageTab() {
                   <th
                     key={h}
                     style={{
-                      fontSize: 10,
+                      fontSize: 11,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: 1,
@@ -3921,7 +3921,7 @@ function AccountsReceivableTab() {
                   <th
                     key={h}
                     style={{
-                      fontSize: 10,
+                      fontSize: 11,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: 1,
@@ -4026,7 +4026,7 @@ function AccountsReceivableTab() {
                             borderRadius: 4,
                             padding: "3px 10px",
                             color: D.amber,
-                            fontSize: 10,
+                            fontSize: 11,
                             fontWeight: 500,
                             cursor:
                               sending === inv.id ? "not-allowed" : "pointer",
@@ -5277,7 +5277,7 @@ export default function TaxPage() {
               >
                 Download Tax Package
               </button>{" "}
-              <div style={{ fontSize: 10, color: D.muted }}>
+              <div style={{ fontSize: 11, color: D.muted }}>
                 ZIP with all CSVs + README
               </div>{" "}
             </div>{" "}

@@ -371,6 +371,9 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         scheduledServiceId: svc.id,
         callSid: null,
         keepOpenForQuote,
+        // The converter derives "is this an assessment" from the row itself
+        // (an assessment is not a win — owner ruling 2026-09-08).
+        booking: svc,
       });
       if (converted === null) {
         coreLegsOk = false;

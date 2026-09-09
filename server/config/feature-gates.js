@@ -12,6 +12,7 @@
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
+ *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -23,6 +24,10 @@
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
+ *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
+ *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
+ *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the
+ *     same day, before any send. Leave dark; do not re-enable without a new owner ruling.
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
@@ -39,6 +44,7 @@
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
+ *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
@@ -89,6 +95,7 @@
  *     the conjunction; the flip checklist is all three vars.)
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
+ *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -97,11 +104,25 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Admin-only fixed test pair for one explicitly configured customer; opt-in everywhere.
+  customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
+  // Customer iOS icon count; opt-in everywhere, with request-time route checks.
+  customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
   // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
   composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
   // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
   // logGateStatus only; consumers use gateEnvValue at CALL time.
   lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
+  // GATE_APP_PROPERTY_SCOPE: the customer app scopes visits and appointment
+  // texts by SAVED PROPERTY (customer_properties) instead of by sibling
+  // profile (docs/multi-property-model.md, "App property scope"). Off: the
+  // session's propertyId claim is ignored (req.propertyId null),
+  // GET /auth/properties answers the profile list, and select-property
+  // ignores propertyId — tonight's behavior exactly. Registered for
+  // logGateStatus; consumers read it at CALL time (gateEnvValue).
+  appPropertyScope: gateEnvValue('GATE_APP_PROPERTY_SCOPE'),
+  // Registered for startup logging; the planner decides both gates per operation.
+  lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -743,6 +764,8 @@ const gates = {
   // also requires GATE_SMS_OPERATIONAL_ACTIONS_SINCE (an offset ISO instant)
   // so enabling this lane never applies the historical training corpus.
   smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
+  // Separate activation for commitment capture, follow-up bells and staff closure.
+  smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
@@ -1209,6 +1232,13 @@ const gates = {
   // lead path (existing-customer or content-veto'd voicemails with concrete
   // service intent + callback number). Bell only — no customer comms.
   voicemailCallbackAlert: process.env.GATE_VOICEMAIL_CALLBACK_ALERT === 'true',
+  // Missed-call bell for numbers with NO customer on file (new prospects who
+  // hung up at the voicemail greeting). Bell only — no customer comms. Ships
+  // dark; the bell stays customers-only until the owner flips it.
+  missedCallUnknownCallers: process.env.GATE_MISSED_CALL_UNKNOWN_CALLERS === 'true',
+  // Admin bell when one number places 3+ inbound calls inside 3 hours
+  // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.
+  repeatCallerBell: process.env.GATE_REPEAT_CALLER_BELL === 'true',
   // Nightly self-audit: samples recent calls, strong-model re-read, drift
   // metrics to call_audit_findings; alerts ONLY on threshold breach.
   callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
@@ -1278,6 +1308,7 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
@@ -1388,6 +1419,17 @@ const gates = {
   // Off → the dropped call still opens its call-back triage card; only the
   // SMS is skipped.
   droppedCallSms: process.env.GATE_DROPPED_CALL_SMS === 'true',
+
+  // Outbound voicemail text-back (services/outbound-voicemail-sms.js): an
+  // admin click-to-call that reaches the CUSTOMER'S voicemail hangs up the
+  // customer leg before a message is left and texts "sorry we missed you"
+  // instead (owner-directed 2026-09-08 — the "did you just call me?"
+  // callbacks). Same fail-CLOSED rule as the other text-back lanes:
+  // customer-facing auto-send, explicit opt-in in every environment. Owner
+  // sets GATE_OUTBOUND_VOICEMAIL_SMS=true to go live. Off → the outbound
+  // <Dial> requests no machine detection at all (no AMD charge, no hangup,
+  // no text) — the call flow is unchanged from before this lane.
+  outboundVoicemailSms: process.env.GATE_OUTBOUND_VOICEMAIL_SMS === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
@@ -1654,6 +1696,14 @@ const gates = {
   // except one admin notification on regression. Enable with
   // GATE_CALL_REPLAY_EVAL=true.
   callReplayEval: isProd ? process.env.GATE_CALL_REPLAY_EVAL === 'true' : true,
+
+  // Weekly voice relay conversation eval — replays the synthetic-caller
+  // scenario fixture (server/fixtures/voice-relay-eval/) through the LIVE
+  // Sandy conversation loop and the pinned judge, in a child process (the
+  // per-scenario gates it sets never reach this process). Notifications and
+  // ordinary judge telemetry may write; synthetic conversations cannot.
+  // Explicit opt-in in every environment: GATE_VOICE_RELAY_EVAL=true.
+  voiceRelayEval: process.env.GATE_VOICE_RELAY_EVAL === 'true',
 
   // Estimate "Show your work" — public estimate page trust block: property
   // facts with friendly data-source labels, the county parcel match line,
@@ -1924,6 +1974,15 @@ const gates = {
   // gateEnvValue (flip needs no redeploy). Kill switch: unset
   // GATE_ROUTE_REORDER_WINDOW_FIT.
   routeReorderWindowFit: gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT'),
+
+  // Null-position repair through the existing writer. Keeps customer promises
+  // and positioned-stop order; requires drive calibration and the reorder gate.
+  // Explicit opt-in in every environment.
+  routeReorderRepair: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
+
+  // Planned route measurements and candidate-specific gap checks in the
+  // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
+  scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),
 
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
@@ -2318,6 +2377,9 @@ const gates = {
   // never changes neighbours' promises or sends notifications. Call-time
   // kill switch in scheduling/arrival-route.js; off in every environment.
   adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
+  // Shared 08:00–18:00 capacity, catalog durations and complete-route booking.
+  // Dark in every environment; callers read at operation time. Owner activation.
+  schedulingCapacity: gateEnvValue('GATE_SCHEDULING_CAPACITY'),
 
   // Call property-role classification (2026-08-15): the extraction classifies
   // each property a call discusses (occupancy + which one is the caller's
@@ -2365,6 +2427,10 @@ const gates = {
   // the listing can never disagree with what /query actually does.
   // (gateEnvValue is a hoisted function declaration, safe to call here.)
   ibThreads: gateEnvValue('GATE_IB_THREADS'),
+
+  // Platform-wide IB discovery/execution. Dark until explicitly enabled;
+  // existing confirmation and role gates remain mandatory on every request.
+  ibPlatform: gateEnvValue('GATE_IB_PLATFORM'),
 
   // Tips from your tech (scope + owner decisions 2026-09-01): the completion
   // screen's searchable tip picker (replacing the free-text Observations /

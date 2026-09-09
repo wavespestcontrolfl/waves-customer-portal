@@ -324,6 +324,8 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     const localExpectedFp = expectedAccountFingerprint || localSnapshot?.accountFingerprint || null;
     const updated = await db.transaction(async (trx) => {
       const locked = await trx('google_reviews').where({ id: reviewId }).forUpdate().first();
+      const lockedReason = guard && locked ? await guard(locked) : null;
+      if (lockedReason) throw new ReviewReplyError(CODES.STALE, `Reply not saved: ${lockedReason}`, { status: 409 });
       if (localExpectedFp) {
         let nowFp = null;
         try {

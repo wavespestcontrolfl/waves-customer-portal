@@ -183,7 +183,7 @@ const sBtn = (bg, color, isMobile) => ({
   letterSpacing: "0.04em",
 });
 const sBadge = (bg, color) => ({
-  fontSize: 10,
+  fontSize: 12, // UI audit F0373: chips are 12px per the contract
   padding: "2px 8px",
   borderRadius: 4,
   background: bg,

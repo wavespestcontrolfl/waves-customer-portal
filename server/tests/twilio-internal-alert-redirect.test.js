@@ -149,6 +149,16 @@ describe('Twilio internal admin alert redirect', () => {
     expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 
+  test.each([{ policySilenced: true }, { suppressed: true }])('preserves intentional alert suppression: %j', async outcome => {
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0 }, ...outcome });
+    const result = await TwilioService.sendSMS(process.env.ADAM_PHONE, 'Synthetic owner alert', { messageType: 'internal_alert' });
+    expect(result).toMatchObject({ success: true, suppressed: true });
+    expect(result.notificationUndelivered).toBeUndefined();
+    expect(result.notificationError).toBeUndefined();
+    expect(auditInternalAdminAlertDeliveryIssue).not.toHaveBeenCalled();
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+  });
+
   test('blocks internal_alert SMS to unknown recipients by default', async () => {
     const result = await TwilioService.sendSMS(
       '+19415550123',
@@ -182,7 +192,7 @@ describe('Twilio internal admin alert redirect', () => {
     expect(triggerNotification).toHaveBeenCalledWith('internal_admin_alert', expect.objectContaining({
       title: 'SMS guard blocked outbound message',
       body: expect.stringContaining('Reason: unsubstituted_variable'),
-      link: '/admin/sms-templates',
+      link: '/admin/communications#tab=templates',
       originalMessageType: 'sms_guard_blocked',
       originalToMasked: '***0123',
     }));
