@@ -6816,7 +6816,7 @@ export default function EstimateToolViewV2({
               )}
             </section>
             <section tabIndex={-1} id="estimate-pricing" className="estimate-workflow-section space-y-4" aria-label="Pricing and terms">
-            <h2 className="text-20 font-semibold">Pricing & terms</h2>
+            <h2 className="text-18 font-medium">Pricing & terms</h2>
             <label className="block text-14 font-medium">Customer-visible notes
               <textarea className={`${INPUT_CLS} h-24 mt-2 py-2`} value={form.notes || ""} onChange={(event) => set("notes", event.target.value)} />
             </label>
@@ -6980,7 +6980,7 @@ export default function EstimateToolViewV2({
             )}
             </section>
             <section tabIndex={-1} id="estimate-review" className="estimate-workflow-section space-y-4" aria-label="Review and send">
-            <h2 className="text-20 font-semibold">Review & send</h2>
+            <h2 className="text-18 font-medium">Review & send</h2>
             {saveError && <p role="alert" className="text-14 text-alert-fg">{saveError}</p>}
             {/* Action buttons */}
             <div
@@ -7137,7 +7137,7 @@ export default function EstimateToolViewV2({
                 <Card className="p-5">
                   {" "}
                   <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                    <h2 className="text-18 font-semibold">Pricing summary</h2>
+                    <h2 className="text-18 font-medium">Pricing summary</h2>
                     <Button variant="secondary" onClick={previewCustomerEstimate} disabled={generateBusy || !savedId}>
                       <ExternalLink size={16} aria-hidden /> Preview saved estimate
                     </Button>
@@ -7145,8 +7145,8 @@ export default function EstimateToolViewV2({
                   <p className="text-14 text-zinc-600 mb-4">{savedId ? "Saved pricing. Preview shows the customer document." : "Working pricing. Save this version before previewing or sending."}</p>
                   {presentQuoteRequired ? <p role="status" className="text-14 mb-4">This scope requires a quote review before a firm price can be sent.</p> : (
                     <dl className="grid grid-cols-2 gap-3 mb-4 text-14">
-                      <div><dt className="text-zinc-600">Recurring monthly equivalent</dt><dd className="text-20 font-semibold">{fmt(E.recurring?.grandTotal || 0)}</dd></div>
-                      <div><dt className="text-zinc-600">One-time and setup charges</dt><dd className="text-20 font-semibold">{fmt(E.oneTime?.total || 0)}</dd></div>
+                      <div><dt className="text-zinc-600">Recurring monthly equivalent</dt><dd className="text-22 font-medium u-nums">{fmt(E.recurring?.grandTotal || 0)}</dd></div>
+                      <div><dt className="text-zinc-600">One-time and setup charges</dt><dd className="text-22 font-medium u-nums">{fmt(E.oneTime?.total || 0)}</dd></div>
                     </dl>
                   )}
                   <p className="text-14 text-zinc-600 mb-4">Service cadence, per-application amounts and payment choices appear in the saved customer preview.</p>

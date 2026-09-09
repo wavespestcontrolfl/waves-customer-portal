@@ -6,6 +6,8 @@ import json
 import plistlib
 import subprocess
 import tempfile
+import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -13,7 +15,40 @@ from pathlib import Path
 BUNDLE_ID = "com.wavespestcontrol.portal"
 
 
-def configure(project_dir):
+def configure_badge(project_dir, objects, target):
+    """Install the local bridge into the generated CocoaPods app, idempotently."""
+    storyboard = project_dir / "App/Base.lproj/Main.storyboard"
+    tree = ET.parse(storyboard)
+    controller = tree.find(f".//viewController[@id='{tree.getroot().get('initialViewController')}']")
+    if controller is None or controller.get("customClass") not in ("CAPBridgeViewController", "WavesBridgeViewController"):
+        raise ValueError("Integrate WavesBadge with the existing custom bridge controller before setup")
+    groups = [value for value in objects.values() if value.get("isa") == "PBXGroup" and value.get("path") == "App"]
+    phases = [objects[key] for key in target["buildPhases"] if objects[key].get("isa") == "PBXSourcesBuildPhase"]
+    if len(groups) != 1 or len(phases) != 1:
+        raise ValueError("Expected one App source group and build phase")
+    group, phase = groups[0], phases[0]
+    name = "WavesBadgePlugin.swift"
+    source = Path(__file__).resolve().parents[2] / "client/resources" / name
+    contents = source.read_bytes()
+    refs = [key for key in group["children"] if objects[key].get("path") == name]
+    if len(refs) > 1:
+        raise ValueError("Duplicate WavesBadge source references")
+    ref = refs[0] if refs else uuid.uuid4().hex[:24].upper()
+    if not refs:
+        objects[ref] = {"isa": "PBXFileReference", "lastKnownFileType": "sourcecode.swift", "path": name, "sourceTree": "<group>"}
+        group["children"].append(ref)
+    if not any(objects[key].get("fileRef") == ref for key in phase["files"]):
+        build_ref = uuid.uuid4().hex[:24].upper()
+        objects[build_ref] = {"isa": "PBXBuildFile", "fileRef": ref}
+        phase["files"].append(build_ref)
+    controller.set("customClass", "WavesBridgeViewController")
+    controller.set("customModule", "App")
+    controller.set("customModuleProvider", "target")
+    (project_dir / "App" / name).write_bytes(contents)
+    tree.write(storyboard, encoding="utf-8", xml_declaration=True)
+
+
+def configure(project_dir, badge=False):
     project_dir = Path(project_dir).resolve()
     project_file = project_dir / "App.xcodeproj/project.pbxproj"
     project = json.loads(subprocess.check_output([
@@ -64,6 +99,8 @@ def configure(project_dir):
     attributes = objects[project["rootObject"]].setdefault("attributes", {})
     target_attributes = attributes.setdefault("TargetAttributes", {}).setdefault(target_id, {})
     target_attributes.setdefault("SystemCapabilities", {})["com.apple.Push"] = {"enabled": 1}
+    if badge:
+        configure_badge(project_dir, objects, target)
     for path, value in entitlements.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plistlib.dumps(value, sort_keys=False))
@@ -113,13 +150,14 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     configure_parser = commands.add_parser("configure")
     configure_parser.add_argument("project_dir")
+    configure_parser.add_argument("--badge", action="store_true", help="Install the customer unread-badge bridge")
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("app_or_ipa")
     verify_parser.add_argument("--environment", choices=("development", "production"), default="production")
     args = parser.parse_args()
     try:
         if args.command == "configure":
-            configure(args.project_dir)
+            configure(args.project_dir, badge=args.badge)
         else:
             verify(args.app_or_ipa, args.environment)
     except (ValueError, OSError, subprocess.CalledProcessError, plistlib.InvalidFileException, zipfile.BadZipFile) as error:

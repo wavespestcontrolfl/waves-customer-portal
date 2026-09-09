@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
+import { clearNativeBadge } from '../native/nativeBadge';
 
 const AuthContext = createContext(null);
 
@@ -95,6 +96,7 @@ export function AuthProvider({ children }) {
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       loadCustomer();
     } else {
+      void clearNativeBadge();
       setLoading(false);
     }
     return () => {
@@ -117,6 +119,8 @@ export function AuthProvider({ children }) {
       // property switch, cross-tab adoption) — a load for the NEW epoch is
       // already running; applying this one would paint a stale identity.
       if (sessionEpochRef.current !== epoch) return;
+      // Cancelled accounts never mount the bell, including on a fresh launch.
+      if (data?.cancelled === true) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
       try {
@@ -275,6 +279,7 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    void clearNativeBadge();
     // Invalidate every in-flight auth response (property switch, /auth/me)
     // — without this, a delayed switch response re-writes tokens after
     // sign-out and walks the user back into the portal.

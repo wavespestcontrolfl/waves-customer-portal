@@ -198,9 +198,11 @@ function normalizeNullableBoolean(value) {
   return null;
 }
 
-// Occupancy vocabulary — pinned to the customer_properties PG enum and the
-// extraction schema's occupancy enum (schema 1.9.0). Re-declared here rather
-// than imported: utils must not require services.
+// Occupancy vocabulary — pinned to the extraction schema's occupancy enum
+// (schema 1.9.0), which is a SUBSET of customer_properties OCCUPANCY_TYPES:
+// 'family_occupied' is office-set only (customer-properties.js) and is not
+// something a call classifies, so it is deliberately absent here.
+// Re-declared rather than imported: utils must not require services.
 const CALL_OCCUPANCY_TYPES = new Set([
   'owner_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown',
 ]);
