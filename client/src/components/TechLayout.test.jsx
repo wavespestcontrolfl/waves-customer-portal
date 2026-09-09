@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import {
   MemoryRouter,
   Outlet,
@@ -57,6 +57,12 @@ describe('TechLayout staff-session verification', () => {
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each(['/tech?visit=row%3Atwo', '/TECH/?visit=row%3Atwo', '/TECH/PROTOCOLS/?visit=row%3Atwo'])('retains the unauthenticated sign-in destination %s', (path) => {
+    renderTech(path);
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(screen.getByText(`Staff login /admin/login?next=${encodeURIComponent(path)}`)).toBeInTheDocument();
   });
 
   it('does not treat the retired adminToken storage key as a staff session', () => {
