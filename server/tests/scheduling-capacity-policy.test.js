@@ -1,10 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { serviceFamilyPreference, defaultTimeWindow } = require('../services/auto-dispatch/service-category');
+const { serviceFamilyPreference, defaultTimeWindow, timeWindowForPreferenceKey } = require('../services/auto-dispatch/service-category');
 const { withSchedulingDuration } = require('../services/service-library');
 const { capacityForServices, capacityFromReservation, windowForCapacityService } = require('../services/combined-visit-capacity');
 const RouteOptimizer = require('../services/route-optimizer');
+const { placementFitsShift } = require('../services/scheduling/policy');
 
 const date = '2027-01-15';
 const now = new Date('2027-01-01T12:00:00Z');
@@ -38,6 +39,14 @@ test('service-family preference is finite, weighted by work, and unknown work st
   expect(serviceFamilyPreference(lawn, 'Consultation')).toBe(0);
   expect(serviceFamilyPreference([], 'Lawn Care')).toBe(0);
   expect(defaultTimeWindow('Lawn Care')).toBeNull();
+});
+
+test('every afternoon anchor leaves room for the two-hour arrival promise', () => {
+  const window = timeWindowForPreferenceKey('afternoon');
+  const starts = [13, 14, 15, 16, 17].map(hour => hour * 60)
+    .filter(start => start >= window.startMin && start < window.endMin);
+  expect(starts).toEqual([13, 14, 15, 16].map(hour => hour * 60));
+  expect(starts.every(start => placementFitsShift(start, start + 30))).toBe(true);
 });
 
 test.each([['2027-01-15', '2027-01-15T13:00:00.000Z'], ['2027-07-15', '2027-07-15T12:00:00.000Z']])('Google uses the appointment departure in Eastern time: %s', async (day, departure) => {

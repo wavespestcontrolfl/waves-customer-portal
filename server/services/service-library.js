@@ -532,16 +532,25 @@ async function updateService(id, data, { audit } = {}) {
     || ['base_price', 'price_range_min', 'price_range_max']
       .some((key) => data[key] !== undefined && numOrNull(update[key]) !== numOrNull(before[key]));
   if (pricingChanged) assertPricingConsistency({ ...before, ...update });
+  const durationKeys = ['min_duration_minutes', 'default_duration_minutes', 'max_duration_minutes'];
+  const displayed = withSchedulingDuration(before);
+  const durationChanged = durationKeys.some(key => update[key] !== undefined
+    && numOrNull(update[key]) !== numOrNull(displayed[key]));
+  // Full-form clients echo the displayed policy. Preserve the raw defaults
+  // unless a duration actually changed; partial edits retain effective bounds.
+  if (displayed !== before) {
+    for (const key of durationKeys) {
+      if (!durationChanged) delete update[key];
+      else if (update[key] === undefined) update[key] = displayed[key];
+    }
+  }
+  if (durationChanged) update.scheduling_duration_policy = null;
   const operationalChanged = [
     'min_duration_minutes', 'default_duration_minutes', 'max_duration_minutes',
     'requires_follow_up', 'follow_up_interval_days',
-  ].some((key) => data[key] !== undefined
+  ].some((key) => update[key] !== undefined
     && JSON.stringify(update[key] ?? null) !== JSON.stringify(before[key] ?? null));
   if (operationalChanged) assertOperationalConsistency({ ...before, ...update });
-  if (['min_duration_minutes', 'default_duration_minutes', 'max_duration_minutes']
-    .some(key => data[key] !== undefined && numOrNull(update[key]) !== numOrNull(before[key]))) {
-    update.scheduling_duration_policy = null;
-  }
 
   let archiveReferences = null;
   if (update.is_archived === true && before.is_archived !== true) {

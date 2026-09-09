@@ -94,7 +94,8 @@ function defaultTimeWindow(serviceType) {
 function timeWindowForPreferenceKey(key) {
   if (!key || key === 'no_preference') return null;
   if (key === 'afternoon' && require('../scheduling/policy').capacityEnabled()) {
-    return { ...TIME_WINDOWS.afternoon, endMin: 18 * 60, label: '1:00–6:00 PM' };
+    // Half-open anchor range: the final 16:00 start promises arrival by 18:00.
+    return { ...TIME_WINDOWS.afternoon, endMin: 17 * 60, label: '1:00–6:00 PM' };
   }
   return TIME_WINDOWS[key] || null;
 }
