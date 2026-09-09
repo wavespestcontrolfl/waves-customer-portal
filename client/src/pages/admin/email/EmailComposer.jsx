@@ -7,6 +7,8 @@ import { D } from "./emailStyles";
 import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
 import { appendStaticLinkClause } from "../../../lib/composerLinks";
 
+import EmailSendOutcome from "./EmailSendOutcome";
+
 export default function EmailComposer({ active, editor, onSent }) {
   const {
     composeForm,
@@ -28,7 +30,7 @@ export default function EmailComposer({ active, editor, onSent }) {
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
   const sendDisabled =
-    composeSending || !composeForm.to.trim() || !composeForm.body.trim();
+    composeSending || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
 
   // Debounced customer lookup for the "To" field. Searches by name or
   // partial email via the customers list endpoint and keeps only matches
@@ -377,6 +379,7 @@ export default function EmailComposer({ active, editor, onSent }) {
         >
           {recoveryNotice}
         </p>
+        {!composeSending && <EmailSendOutcome attempt={editor.sendAttempts.compose} onResolve={outcome => editor.reconcileSend("compose", outcome)} />}
         <EmailQuickLinks active={active && showCompose} recipient={composeForm.to}
           disabled={composeSending}
           onInsert={(link) => setComposeForm((form) => ({
