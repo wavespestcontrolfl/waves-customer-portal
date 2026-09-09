@@ -33,12 +33,29 @@ const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcs
 // (codex r3 P1).
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
-const { accountPropertyIds } = require('../services/account-properties');
+const {
+  accountPropertyIds,
+  accountSavedProperties,
+  appPropertyScopeEnabled,
+  applyPropertyPredicate,
+  assignVisitsToEntries,
+  isSecondarySelection,
+  resolveSessionScope,
+  resolvedScopePayload,
+} = require('../services/account-properties');
 
 router.use(authenticate);
 
 const listQuerySchema = Joi.object({
   days: Joi.number().integer().min(1).max(365).default(90),
+  // allProperties=1 (GATE_APP_PROPERTY_SCOPE): the CUSTOMER's whole schedule
+  // as a NARROW coverage projection — service identity and dates only, no
+  // windows, technician, confirm state or reschedule/calendar bearer links.
+  // WaveGuard coverage is per customer (owner ruling 2026-06-29), so the My
+  // Plan tab's coverage evidence must see the services at every house, but
+  // a session scoped to one house must never recover the other houses'
+  // actionable links through this client-controlled flag (codex #4207).
+  allProperties: Joi.boolean().truthy('1').falsy('0').default(false),
 });
 
 function calendarUrlFor(row, now = new Date()) {
@@ -95,13 +112,20 @@ router.get('/', async (req, res, next) => {
   try {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { days } = value;
+    const { days, allProperties } = value;
     // ET calendar day, matching the etDateString() lower bound below — a UTC
     // cutoff rolls the window an ET-evening early (scheduled_date is a DATE).
     const cutoffDate = etDateString(addETDays(new Date(), days));
 
-    const upcoming = await db('scheduled_services')
-      .where({ 'scheduled_services.customer_id': req.customerId })
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the session's selected
+    // property, or the primary. No predicate at all for gate-off and
+    // single-home customers (services/account-properties.js) — nor for a
+    // plan-coverage read (allProperties), which must see every house.
+    const scope = allProperties ? null : await resolveSessionScope(req);
+    const upcomingQuery = db('scheduled_services')
+      .where({ 'scheduled_services.customer_id': req.customerId });
+    applyPropertyPredicate(upcomingQuery, scope);
+    const upcoming = await upcomingQuery
       .whereIn('scheduled_services.status', ['pending', 'confirmed', 'rescheduled'])
       // A call-created follow-up (visit 2) is dispatch-owned until the office
       // confirms the exact time — hide the still-pending, never-confirmed row
@@ -137,6 +161,54 @@ router.get('/', async (req, res, next) => {
     // says nothing about billing.
     const cancellable = await hasCancellableWork(req.customerId);
 
+    if (allProperties) {
+      // Coverage projection only (see listQuerySchema): nothing actionable —
+      // returned BEFORE the re-service tie-in and the per-row grouped-visit /
+      // calendar verdicts below, which cost one or two queries per visit and
+      // feed only the actionable payload (GitHub codex r10 P2).
+      return res.json({
+        coverageOnly: true,
+        hasCancellableWork: cancellable,
+        reservice: null,
+        overlayHandoff: false,
+        upcoming: upcoming.map((s) => ({
+          id: s.id,
+          date: s.scheduled_date,
+          // Arrival windows stay: the Year-at-a-glance calendar prints them
+          // (a time of day is not a cross-house action).
+          windowStart: s.window_start,
+          windowEnd: s.window_end,
+          serviceType: normalizeServiceType(s.service_type),
+          status: s.status,
+          isRecurring: s.is_recurring === true,
+          isCallback: s.is_callback === true,
+          waveguardQualifying: portalRowQualifiesForWaveGuard({
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          }),
+          serviceFamily: portalRowWaveGuardFamily({
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          }),
+          serviceDisplayName: (() => {
+            if (!s.catalog_service_name) return null;
+            const withCatalog = portalRowWaveGuardFamily({
+              service_type: s.service_type,
+              service_key: s.catalog_service_key,
+              service_name: s.catalog_service_name,
+              catalog_billing_type: s.catalog_billing_type,
+            });
+            const labelOnly = portalRowWaveGuardFamily({ service_type: s.service_type });
+            return withCatalog && withCatalog !== labelOnly ? normalizeServiceType(s.catalog_service_name) : null;
+          })(),
+        })),
+      });
+    }
+
     // Self-serve re-service tie-in (GATE_RESERVICE_SELF_SERVE): when the
     // customer's LIVE plan state grants a lane, the portal offers the same
     // standing /reservice/:token page the office texts (services/
@@ -147,9 +219,15 @@ router.get('/', async (req, res, next) => {
     // the portal simply doesn't render the CTA. Best-effort: a lookup
     // failure must not break the schedule list.
     let reservice = null;
+    // The self-serve re-service page books at the customer's PRIMARY address,
+    // so under a secondary saved-property selection the handoff is withheld
+    // (codex #4207 r1g P1): offering it would book house A from house B's
+    // screen. The overlay then files a notify-only ticket as before the
+    // streamline; a property-carrying re-service link is a follow-up.
+    const secondarySelection = isSecondarySelection(scope);
     try {
       const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
-      if (reserviceSelfServeEnabled()) {
+      if (!secondarySelection && reserviceSelfServeEnabled()) {
         const customer = await db('customers')
           .where({ id: req.customerId })
           .whereNull('deleted_at')
@@ -184,7 +262,13 @@ router.get('/', async (req, res, next) => {
         : g === true ? await groupedCalendarVerdict(s.visit_id) : null);
     }
 
+
     res.json({
+      // The selection this read was actually scoped to (GATE_APP_PROPERTY_SCOPE):
+      // the client compares it with what it shows and re-reads the property
+      // list on a mismatch (a house retired mid-session, a gate flip) instead
+      // of acting on these visits under another house's label.
+      propertyScope: resolvedScopePayload(scope),
       hasCancellableWork: cancellable,
       reservice,
       // Streamline (owner ruling 2026-08-08): when true, the Request Service
@@ -282,8 +366,13 @@ router.get('/', async (req, res, next) => {
 // =========================================================================
 router.post('/:id/confirm', async (req, res, next) => {
   try {
-    const service = await db('scheduled_services')
-      .where({ id: req.params.id, customer_id: req.customerId })
+    // A visit at ANOTHER of the customer's properties is not this session's
+    // to confirm (same 404 shape as a foreign id — no info leak).
+    const scope = await resolveSessionScope(req);
+    const serviceQuery = db('scheduled_services')
+      .where({ id: req.params.id, customer_id: req.customerId });
+    applyPropertyPredicate(serviceQuery, scope);
+    const service = await serviceQuery
       .whereIn('status', ['pending', 'rescheduled'])
       .first();
 
@@ -320,6 +409,11 @@ router.post('/:id/confirm', async (req, res, next) => {
         // since the read misses (knex renders null as IS NULL) and the
         // customer refreshes, instead of a stale confirm landing.
         visit_id: service.visit_id || null,
+        // The observed PROPERTY too (codex #4207 r1): staff can move the
+        // visit to another of the customer's houses between the scoped read
+        // and this write; a confirm scoped to the old house must then miss,
+        // not land on the newly assigned property.
+        property_id: service.property_id || null,
       })
       .update({
         status: 'confirmed',
@@ -359,6 +453,9 @@ router.post('/:id/reschedule', async (req, res, next) => {
     });
 
     const { preferredDate, notes } = await schema.validateAsync(req.body);
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): a visit at another of
+    // the customer's properties is not this session's to reschedule.
+    const scope = await resolveSessionScope(req);
 
     // Streamline: stop flipping the visit to status='rescheduled'. That
     // status removes the visit from dispatch and nothing ever re-books it —
@@ -376,8 +473,10 @@ router.post('/:id/reschedule', async (req, res, next) => {
     // finish before we read it. A separate durable service_requests row below
     // ensures a later queued staff write cannot erase the customer's request.
     const outcome = await db.transaction(async (trx) => {
-      const service = await trx('scheduled_services')
-        .where({ id: req.params.id, customer_id: req.customerId })
+      const serviceQuery = trx('scheduled_services')
+        .where({ id: req.params.id, customer_id: req.customerId });
+      applyPropertyPredicate(serviceQuery, scope);
+      const service = await serviceQuery
         .whereIn('status', ['pending', 'confirmed'])
         .forUpdate()
         .first();
@@ -624,10 +723,72 @@ router.get('/account-next', async (req, res, next) => {
   }
 });
 
+// Saved-property twin of /account-next (GATE_APP_PROPERTY_SCOPE): one row per
+// UNIFIED entry — (profile, saved property) — with that entry's next visit.
+// Visits are assigned by the same reading as the visit rule
+// (assignVisitsToEntries). Lean by design: key + ids + next; the client
+// already holds the entries from GET /auth/properties?scope=saved.
+// Gate off → 404 (the saved-property client never asks while dark).
+router.get('/properties-next', async (req, res, next) => {
+  try {
+    if (!appPropertyScopeEnabled()) return res.status(404).json({ error: 'Not available' });
+    const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const cutoffDate = etDateString(addETDays(new Date(), value.days));
+    const { properties: entries } = await accountSavedProperties(req);
+    const ids = [...new Set(entries.map((e) => e.customerId))];
+    const rows = ids.length ? await db('scheduled_services')
+      .whereIn('scheduled_services.customer_id', ids)
+      .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+      // Same dispatch-owned guard as GET / and GET /next.
+      .where((qb) => qb
+        .whereNull('scheduled_services.source_action')
+        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+        .orWhereNot('scheduled_services.status', 'pending')
+        .orWhere('scheduled_services.customer_confirmed', true))
+      .where('scheduled_services.scheduled_date', '>=', etDateString())
+      .where('scheduled_services.scheduled_date', '<=', cutoffDate)
+      .select(
+        'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
+        'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end',
+        'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed',
+      )
+      .orderBy('scheduled_services.scheduled_date', 'asc')
+      .orderBy('scheduled_services.window_start', 'asc') : [];
+    const nextByKey = assignVisitsToEntries(entries, rows);
+    res.json({
+      properties: entries.map((e) => {
+        const n = nextByKey.get(e.key) || null;
+        return {
+          key: e.key,
+          customerId: e.customerId,
+          propertyId: e.propertyId,
+          next: n ? {
+            id: n.id,
+            date: n.scheduled_date,
+            windowStart: n.window_start,
+            windowEnd: n.window_end,
+            serviceType: normalizeServiceType(n.service_type),
+            status: n.status,
+            customerConfirmed: n.customer_confirmed === true,
+          } : null,
+        };
+      }),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/next', async (req, res, next) => {
   try {
-    const nextService = await db('scheduled_services')
-      .where({ 'scheduled_services.customer_id': req.customerId })
+    // Same allProperties escape hatch as GET / (plan-coverage evidence).
+    const allProperties = ['1', 'true'].includes(String(req.query?.allProperties || '').toLowerCase());
+    const scope = allProperties ? null : await resolveSessionScope(req);
+    const nextQuery = db('scheduled_services')
+      .where({ 'scheduled_services.customer_id': req.customerId });
+    applyPropertyPredicate(nextQuery, scope);
+    const nextService = await nextQuery
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
       // Same dispatch-owned guard as the list above: a still-pending,
       // never-confirmed call-created follow-up can't surface as the
@@ -644,7 +805,23 @@ router.get('/next', async (req, res, next) => {
       .first();
 
     if (!nextService) {
-      return res.json({ next: null });
+      return res.json({ propertyScope: allProperties ? undefined : resolvedScopePayload(scope), next: null });
+    }
+    if (allProperties) {
+      // Coverage projection only — no reschedule/calendar bearer links.
+      return res.json({
+        coverageOnly: true,
+        next: {
+          id: nextService.id,
+          date: nextService.scheduled_date,
+          windowStart: nextService.window_start,
+          windowEnd: nextService.window_end,
+          serviceType: normalizeServiceType(nextService.service_type),
+          status: nextService.status,
+          isRecurring: nextService.is_recurring === true,
+          isCallback: nextService.is_callback === true,
+        },
+      });
     }
     // Same group-aware posture as the list payload (codex #3609 r25 P2).
     const nextGroupedVerdict = nextService.visit_id ? await require('./reschedule-public').groupedVisit(nextService) : false;
@@ -653,6 +830,7 @@ router.get('/next', async (req, res, next) => {
       : nextGroupedVerdict === true ? await groupedCalendarVerdict(nextService.visit_id) : null;
 
     res.json({
+      propertyScope: resolvedScopePayload(scope),
       next: {
         id: nextService.id,
         date: nextService.scheduled_date,
