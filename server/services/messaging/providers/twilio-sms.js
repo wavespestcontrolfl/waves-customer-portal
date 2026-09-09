@@ -112,7 +112,8 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
       skipPushRouting: Boolean(input.metadata?.appFallbackReason),
       notificationEventKey: input.metadata?.notificationEventKey,
       invoiceId: input.invoiceId,
-      requestNotification: input.metadata?.appOnly ? { id: input.metadata.service_request_id, updatedAt: input.metadata.request_updated_at } : undefined,
+      requestNotification: input.metadata?.appOnly ? { id: input.metadata.service_request_id,
+        status: input.metadata.request_status } : undefined,
       messageType,
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.

@@ -39,6 +39,9 @@ test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD'])('preserve
   expect(JSON.parse(queued[0].metadata)).toMatchObject({ ...sent.metadata, entry_point: 'request_app_deferred', refresh_customer_phone: true });
   expect(await recheckDeferredReplay('request_app_deferred', JSON.parse(queued[0].metadata))).toEqual({ eligible: true });
   request.updated_at = '2026-09-09T12:01:00Z';
+  request.admin_notes = 'Technician assigned';
+  expect(await recheckDeferredReplay('request_app_deferred', JSON.parse(queued[0].metadata))).toEqual({ eligible: true });
+  request.status = 'resolved';
   expect(await recheckDeferredReplay('request_app_deferred', JSON.parse(queued[0].metadata))).toMatchObject({ eligible: false });
 });
 
@@ -56,6 +59,7 @@ test.each(['admin', 'cancellation', 'measurement_review', 'cta', 'inactive', 'em
 test('each request transition has its own event identity', async () => {
   await RequestApp.send({ customerId: 'customer-1', request, received: true });
   request.updated_at = '2026-09-09T12:01:00Z';
+  request.status = 'acknowledged';
   await RequestApp.send({ customerId: 'customer-1', request });
   expect(sendCustomerMessage.mock.calls.map(([input]) => input.customerInitiated)).toEqual([true, false]);
   expect(new Set(sendCustomerMessage.mock.calls.map(([input]) => input.metadata.notificationEventKey)).size).toBe(2);
@@ -64,6 +68,6 @@ test('each request transition has its own event identity', async () => {
 test('an unknown replay state fails closed and remains retryable', async () => {
   readFailed = true;
   expect(await recheckDeferredReplay('request_app_deferred', {
-    customer_id: 'customer-1', service_request_id: request.id, request_updated_at: updatedAt,
+    customer_id: 'customer-1', service_request_id: request.id, request_status: request.status, request_updated_at: updatedAt,
   })).toMatchObject({ eligible: false, retryable: true });
 });

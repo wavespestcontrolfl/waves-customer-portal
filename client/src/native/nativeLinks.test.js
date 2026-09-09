@@ -69,4 +69,12 @@ describe('nativeLinks', () => {
     expect(navigateToCustomerUrl('/admin', navigationLocation)).toBe(false);
     expect(assign).toHaveBeenCalledTimes(1);
   });
+
+  it('navigates again when a later notice opens the same request', () => {
+    const assign = vi.fn();
+    const navigationLocation = { ...loc, pathname: '/',
+      search: '?tab=dashboard&requestId=request-1&requestEvent=status-1', hash: '', assign };
+    expect(navigateToCustomerUrl('/?tab=dashboard&requestId=request-1&requestEvent=status-2', navigationLocation)).toBe(true);
+    expect(assign).toHaveBeenCalledWith('https://portal.wavespestcontrol.com/?tab=dashboard&requestId=request-1&requestEvent=status-2');
+  });
 });

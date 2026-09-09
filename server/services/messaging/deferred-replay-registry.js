@@ -80,7 +80,7 @@ const REGISTRY = {
     async recheck(meta) {
       try {
         const request = await require('../request-app-notifications')
-          .loadEligibleRequest(meta.customer_id, meta.service_request_id, meta.request_updated_at);
+          .loadEligibleRequest(meta.customer_id, meta.service_request_id, meta.request_status);
         return request ? { eligible: true } : { eligible: false, reason: 'request-unavailable-or-updated' };
       } catch (err) { return failClosed('request-app', meta.service_request_id, err); }
     },

@@ -4,11 +4,13 @@ const { CTA_REQUEST_SOURCES } = require('./cta-service-request');
 
 // Shared by the immediate sender, deferred replay and final App boundary.
 // Internal requests and cancelled-account flows must never gain a portal CTA.
-async function loadEligibleRequest(customerId, requestId, updatedAt) {
+async function loadEligibleRequest(customerId, requestId, status) {
   const request = await db('service_requests').where({ id: requestId, customer_id: customerId }).first();
   if (!request || request.source === 'admin' || CTA_REQUEST_SOURCES.includes(request.source)
     || ['cancellation', 'measurement_review'].includes(request.category)) return null;
-  if (!updatedAt || new Date(request.updated_at).getTime() !== new Date(updatedAt).getTime()) return null;
+  // Notes and assignment edits restamp updated_at without another notice.
+  // Only a different status supersedes the queued customer update.
+  if (!status || request.status !== status) return null;
   const customer = await db('customers').where({ id: customerId }).first('active', 'deleted_at');
   return customer?.active && !customer.deleted_at ? request : null;
 }
@@ -17,7 +19,7 @@ async function send({ customerId, request, received = false }) {
   if (!gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') || !request?.id) return;
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first('request_channel');
   if (prefs?.request_channel !== 'push') return;
-  if (!(await loadEligibleRequest(customerId, request.id, request.updated_at))) return;
+  if (!(await loadEligibleRequest(customerId, request.id, request.status))) return;
   const customer = await db('customers').where({ id: customerId }).first('phone');
   if (!customer?.phone) return;
   const type = received ? 'service_request_received' : 'service_request_updated';
@@ -25,7 +27,8 @@ async function send({ customerId, request, received = false }) {
     : 'There is an update to your service request. Open the app to view its status.';
   const metadata = {
     original_message_type: type, appOnly: true, customer_initiated: received,
-    service_request_id: request.id, request_updated_at: new Date(request.updated_at).toISOString(),
+    service_request_id: request.id, request_status: request.status,
+    request_updated_at: new Date(request.updated_at).toISOString(),
     notificationEventKey: `request:${request.id}:${type}:${new Date(request.updated_at).toISOString()}`,
   };
   const result = await require('./messaging/send-customer-message').sendCustomerMessage({

@@ -430,3 +430,13 @@ test.each(['no_fresh_device', 'preference_changed', 'app_gate_off'])('App-only r
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
   expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
 });
+
+test('request delivery forwards the queued status and transition identity to the final App guard', async () => {
+  const notificationEventKey = 'request:request-1:updated:transition-1';
+  expect(await sendCustomerMessage({ ...input, purpose: 'support_resolution', metadata: {
+    appOnly: true, original_message_type: 'service_request_updated',
+    service_request_id: 'request-1', request_status: 'acknowledged', notificationEventKey,
+  } })).toMatchObject({ sent: true, channel: 'push' });
+  expect(Twilio.sendSMS.mock.calls[0][2]).toMatchObject({ explicitPushOnly: true,
+    requestNotification: { id: 'request-1', status: 'acknowledged' }, notificationEventKey });
+});

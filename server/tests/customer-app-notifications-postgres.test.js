@@ -115,6 +115,14 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('notification_prefs').where({ customer_id: outsider }).first()).toBeUndefined();
   });
 
+  test.each([['email', 'push'], ['push', 'email']])('profile merge preserves a request Email choice: %s + %s', async (winner, loser) => {
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ request_channel: winner });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel: loser });
+    const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
+    await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({ request_channel: 'email' });
+  });
+
   const prefsUrl = '/api/notifications/preferences?appPreferences=1';
   async function http(method, url, body, authenticated = true) {
     const response = await fetch(baseUrl + url, { method,
@@ -177,7 +185,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       subject: 'QA resolved request', status: 'resolved', created_at: new Date('2025-01-01'), updated_at });
     const input = { customerId: property, to: '+19415550101', body: 'Request update',
       messageType: 'service_request_updated', explicitPushOnly: true, notificationEventKey: `request:${id}`,
-      requestNotification: { id, updatedAt: updated_at.toISOString() } };
+      requestNotification: { id, status: 'resolved' } };
     const routing = require('../services/messaging/push-channel-routing');
     expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
     expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
@@ -185,6 +193,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(require('../services/conversations').recordTouchpoint).not.toHaveBeenCalled();
     const notice = await mockPg('notifications').where({ recipient_id: property }).first();
     expect(notice.link).toContain(`requestId=${id}`);
+    expect(new URL(notice.link, 'https://example.invalid').searchParams.get('requestEvent')).toBe(input.notificationEventKey);
     const result = await get(`/api/requests?requestId=${id}`);
     expect(result.status).toBe(200);
     expect(result.body.requests).toMatchObject([{ id, status: 'resolved' }]);
@@ -195,6 +204,32 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await get(`/api/requests?requestId=${id}`)).body.requests).toEqual([]);
     expect((await routing.attemptPushFirst(input)).blocked).toBe(true);
     expect((await get('/api/requests?requestId=invalid')).status).toBe(400);
+  });
+
+  test('request status replay survives note edits and rechecks status before final delivery', async () => {
+    await device(); await put({ requestChannel: 'push' });
+    const [request] = await mockPg('service_requests').insert({ customer_id: property,
+      category: 'general', subject: 'QA status update', status: 'acknowledged' }).returning('*');
+    const meta = { customer_id: property, service_request_id: request.id, request_status: request.status,
+      request_updated_at: request.updated_at.toISOString() };
+    const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+    await mockPg('service_requests').where({ id: request.id }).update({ admin_notes: 'Assignment adjusted',
+      updated_at: new Date(request.updated_at.getTime() + 60000) });
+    expect(await recheckDeferredReplay('request_app_deferred', meta)).toEqual({ eligible: true });
+    const routing = require('../services/messaging/push-channel-routing');
+    const input = { customerId: property, to: '+19415550101', body: 'Request update',
+      messageType: 'service_request_updated', explicitPushOnly: true, notificationEventKey: `request:${request.id}:status-1`,
+      requestNotification: { id: request.id, status: request.status } };
+    expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
+    const first = await mockPg('notifications').where({ recipient_id: property }).first();
+    await mockPg('service_requests').where({ id: request.id }).update({ status: 'resolved' });
+    expect(await recheckDeferredReplay('request_app_deferred', meta)).toMatchObject({ eligible: false });
+    expect((await routing.attemptPushFirst(input)).blocked).toBe(true);
+    expect((await routing.attemptPushFirst({ ...input, notificationEventKey: `request:${request.id}:status-2`,
+      requestNotification: { ...input.requestNotification, status: 'resolved' } })).delivered).toBe(true);
+    const notices = await mockPg('notifications').where({ recipient_id: property });
+    expect(notices).toHaveLength(2);
+    expect(notices.find((row) => row.id !== first.id).link).not.toBe(first.link);
   });
 
   test('new choices require readiness and store account channels separately from charged-profile receipts', async () => {

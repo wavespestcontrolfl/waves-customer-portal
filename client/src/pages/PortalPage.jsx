@@ -5064,7 +5064,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, paddingTop: 16 }}>
                 <div style={{ flex: '1 1 220px', minWidth: 0 }}>
                   <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Request updates</div>
-                  <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Open received requests and status updates in the app. Existing email confirmations continue.</div>
+                  <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Get request status updates in the app. Existing email confirmations continue.</div>
                 </div>
                 <select aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
                   disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}

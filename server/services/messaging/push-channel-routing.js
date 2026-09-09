@@ -388,10 +388,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       if (PREF_CHANNEL_COLUMN[messageType] === 'request_channel') {
         try {
           const request = requestNotification && await require('../request-app-notifications')
-            .loadEligibleRequest(customerId, requestNotification.id, requestNotification.updatedAt);
+            .loadEligibleRequest(customerId, requestNotification.id, requestNotification.status);
           if (!request) return { delivered: false, blocked: true, reason: 'request_unavailable' };
           presentation = { title: messageType === 'service_request_received' ? 'Request received' : 'Request update',
-            link: `/?tab=dashboard&requestId=${encodeURIComponent(request.id)}`, category: 'service' };
+            link: `/?tab=dashboard&requestId=${encodeURIComponent(request.id)}&requestEvent=${encodeURIComponent(notificationEventKey)}`, category: 'service' };
         } catch {
           return { delivered: false, retryable: true, reason: 'request_lookup_failed' };
         }
