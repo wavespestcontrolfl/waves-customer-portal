@@ -1063,12 +1063,17 @@ router.post('/sms', async (req, res) => {
       }).catch((e) => logger.warn(`[tech-line] text notify failed: ${e.message}`));
     }
 
-    // Notify Adam of regular inbound SMS. Domain/van tracking leads use the
-    // admin notification dispatcher above instead of owner SMS. Skip this
-    // legacy owner forward when the sms_reply bell/push above already fired
-    // (known customers) — for owner phones it is redirected to the SAME admin
-    // notification, so sending both raised a duplicate. Unknown senders have no
-    // customer match (sms_reply never fires), so they still get this alert.
+    // Unknown senders (and a known customer whose bell above did not land)
+    // ring the SAME sms_reply bell + push. This used to be an owner SMS
+    // forward ("📩 New SMS") sent as internal_alert — TwilioService redirects
+    // owner-phone internal alerts into the internal_admin_alert trigger, which
+    // the admin bell policy denylists (bells are for customer communication,
+    // owner ruling 2026-08-28), so from 2026-08-06 every first text from an
+    // unknown number to a location line rang nobody (audit 2026-09-09: six
+    // real prospects in a month reached only the nightly digest). A stranger
+    // texting a Waves line IS customer communication; sms_reply is the
+    // allowlisted trigger for it. Domain/van tracking leads ring new_lead
+    // above instead.
     // Per-sender rate limit for UNKNOWN senders: spam robotext threads from
     // one number raised a separate owner alert per message (19 alerts from a
     // single roof-repair thread, 2026-07). One alert per unknown sender per
@@ -1093,17 +1098,13 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
-        const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
-        const mediaText = inboundMedia.length
-          ? `\nMedia: ${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`
-          : '';
-        await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"${mediaText}`,
-          { messageType: 'internal_alert' }
-        );
-      } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
+        await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
+      } catch (e) {
+        if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
+        else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
+      }
     }
 
     // Van wrap tracking — new lead flow
@@ -1848,20 +1849,23 @@ router.post('/status', async (req, res) => {
  * (throws { alreadyRead }), re-check right before the push leaves, and
  * retire the SID-scoped bell if the thread was read while it was written.
  */
+// customer may be null (unknown sender): the bell then carries the masked
+// phone as its name and links to the inbox list — there is no thread id
+// to deep-link and no customer-scoped read mark to write.
 async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
   const { triggerNotification } = require('../services/notification-triggers');
   const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
     .then((r) => r?.is_read !== true).catch(() => true); // fail open: unknown → still ring
   if (!(await unifiedStillUnread())) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
   const stats = await triggerNotification('sms_reply', {
-    fromName: `${customer.first_name} ${customer.last_name}`,
+    fromName: customer ? `${customer.first_name} ${customer.last_name}` : null,
     fromPhone: From,
     message,
-    threadId: customer.id,
+    threadId: customer?.id || null,
     twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
   }, { beforePush: unifiedStillUnread });
   try {
-    if (!(await unifiedStillUnread())) {
+    if (customer && !(await unifiedStillUnread())) {
       await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
     }
   } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
