@@ -91,6 +91,8 @@ async function lockSmsPhone(trx, phone) {
   await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [normalized]);
 }
 
+// The callback covers final authority reads and the SDK call only. Provider
+// preparation and error recorders use separate connections and run outside it.
 async function withSmsConsentLock(dbh, { phone, customerId }, fn) {
   if (!customerId) throw new Error('SMS authority requires a customer');
   return dbh.transaction(async (trx) => {
