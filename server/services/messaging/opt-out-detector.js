@@ -51,9 +51,9 @@ const STOP_CONFIRMATION_TEMPLATE =
   "You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.";
 
 // A vendor can offer the recipient a reply instruction without asking Waves
-// to stop. Remove only that instruction when screening an enforced pitch;
-// any separate request elsewhere in the text must still win.
-const REPLY_OPT_OUT_INSTRUCTION = /\b(?:reply|respond|text|say)\s+(?:with\s+)?["']?(?:no|stop|unsubscribe)["']?\s+(?:if\s+you\s+(?:want|need)(?:\s+(?:me|us))?\s+to\s+|to\s+)(?:stop\s+(?:texting|messaging|texts?|messages?|sms)(?:\s+(?:you|me))?|unsubscribe|opt\s*out)\b/gi;
+// to stop. Only a complete instruction starting a sentence or line can be
+// removed; narrated attempts and requests elsewhere must still win.
+const REPLY_OPT_OUT_INSTRUCTION = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+(?:if\s+you\s+(?:want|need)(?:\s+(?:me|us))?\s+to\s+|to\s+)(?:stop\s+(?:texting|messaging|texts?|messages?|sms)(?:\s+(?:you|me))?|unsubscribe|opt\s*out)\b(?=\s*(?:[.!?;\r\n]|$))/gi;
 
 function normalizeBody(body) {
   return String(body || '')
@@ -78,7 +78,7 @@ function compactKeyword(body) {
 
 function detectSmsOptCommand(body, { ignoreReplyInstructions = false } = {}) {
   const normalized = normalizeBody(ignoreReplyInstructions
-    ? normalizeBody(body).replace(REPLY_OPT_OUT_INSTRUCTION, '') : body);
+    ? String(body || '').replace(REPLY_OPT_OUT_INSTRUCTION, '$1') : body);
   if (!normalized) return { action: null };
 
   const tapbackStripped = stripTapbackPrefix(normalized);

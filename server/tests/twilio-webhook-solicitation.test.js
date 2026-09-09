@@ -237,6 +237,9 @@ test.each(['location', 'domain_tracking', 'van_tracking', 'tech_line'])(
 test.each([
   "Please stop texting me. I don't have any leads for you.",
   'We have exclusive leads. Please remove me from your list.',
+  'I already tried to reply STOP to stop messages about exclusive leads, but you keep texting me.',
+  'Your instructions told me to text STOP to stop messages about exclusive leads.',
+  'Reply STOP to stop messages about exclusive leads did not work when I tried it.',
   `${PITCH}. Please stop texting me.`,
   'STOP',
 ])('a real opt-out outranks pitch markers in enforcement mode: %s', async (body) => {
@@ -255,6 +258,22 @@ test('a rental-service request remains actionable with enforcement enabled', asy
   await receive('We manage several rentals and can fill your schedule; please quote pest control');
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
   expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict.enforced).toBe(false);
+  expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+  expect(sendSMS).toHaveBeenCalledTimes(1);
+});
+
+test.each([
+  'I have two leads for you: my neighbors both need pest control. Can you quote them?',
+  'I have more lawn leads for you from my neighbors. Can you quote them?',
+])('a genuine referral remains unread and reaches ordinary handling in enforcement mode: %s', async (body) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  await receive(body);
+  expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
+  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+  expect(row.is_read).not.toBe(true);
+  expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: false, method: 'model', enforced: false });
+  expect(recordSuppression).not.toHaveBeenCalled();
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
   expect(sendSMS).toHaveBeenCalledTimes(1);
 });

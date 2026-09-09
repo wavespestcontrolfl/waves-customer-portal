@@ -113,6 +113,9 @@ test.each([
   "Please stop texting me. I don't have any leads for you.",
   'We have exclusive leads. Please remove me from your list.',
   'Wrong number, we have exclusive leads.',
+  'I already tried to reply STOP to stop messages about exclusive leads, but you keep texting me.',
+  'Your instructions told me to text STOP to stop messages about exclusive leads.',
+  'Reply STOP to stop messages about exclusive leads did not work when I tried it.',
   'START', 'HELP',
 ])('genuine consent/support commands bypass enforcement: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
@@ -124,4 +127,14 @@ test('a model failure in enforcement mode keeps ordinary handling', async () => 
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   mockDispatch.mockRejectedValue(new Error('timeout'));
   expect(await screenInboundSms({ body: SOFT_PITCH })).toMatchObject({ solicitation: false, enforced: false });
+});
+
+test.each([
+  'I have two leads for you: my neighbors both need pest control. Can you quote them?',
+  'I have more lawn leads for you from my neighbors. Can you quote them?',
+])('a neighbor referral reaches the model before any enforcement: %s', async (body) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
+  expect(await screenInboundSms({ body })).toMatchObject({ solicitation: false, method: 'model', enforced: false });
+  expect(mockDispatch).toHaveBeenCalledTimes(1);
 });

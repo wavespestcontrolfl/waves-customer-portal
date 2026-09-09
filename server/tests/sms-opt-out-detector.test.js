@@ -29,6 +29,8 @@ describe('SMS opt-out detector', () => {
     'Reply STOP to stop messages',
     'Text “STOP” to stop texting you',
     'Say NO if you want us to stop messaging you',
+    'We have exclusive leads. Reply STOP to stop messages.',
+    'We have exclusive leads\nReply STOP to stop messages',
   ])('can exclude a vendor reply instruction while keeping legacy detection: %s', (body) => {
     expect(detectSmsOptCommand(body).action).toBe('opt_out');
     expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
@@ -40,6 +42,9 @@ describe('SMS opt-out detector', () => {
     'Reply NO if you need me to stop texting. Please stop texting me.',
     'Reply NO if you need me to stop texting; do not contact me again.',
     'Wrong number. Reply STOP to stop messages.',
+    'I already tried to reply STOP to stop messages about exclusive leads, but you keep texting me.',
+    'Your instructions told me to text STOP to stop messages about exclusive leads.',
+    'Reply STOP to stop messages about exclusive leads did not work when I tried it.',
     'STOP',
     'Disliked "STOP"',
   ])('preserves a real opt-out even when reply instructions are excluded: %s', (body) => {
