@@ -399,6 +399,7 @@ function deliverArrival(channel, ctx) {
 }
 
 const TwilioService = {
+  isKnownOwnerPhone,
   // =========================================================================
   // PHONE VERIFICATION (Login via OTP)
   // =========================================================================

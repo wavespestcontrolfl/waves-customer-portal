@@ -16,6 +16,7 @@ const { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isCourtesyOnly, 
 const { publicPortalUrl } = require('../utils/portal-url');
 const { properCase } = require('../utils/name-case');
 const { applyContactNormalization } = require('../utils/intake-normalize');
+const { phoneMatchDigits } = require('../utils/phone');
 
 // Admin alert recipient — must be a real cell, never one of our own Twilio
 // numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
@@ -61,38 +62,43 @@ function maskPhone(phone) {
 //   - an ACTIVE suppression row: a recipient the provider bounced with
 //     21610 or a pre-portal opt-out has nothing in sms_log, yet their START
 //     must clear that row (codex P0).
-// Last-10-digit match: outbound rows are E.164 but older manual sends may
-// carry local formatting. Fails OPEN to eligible on any query error so a
-// real STOP is always honored.
+// Domestic formatting variants share an identity; international numbers keep
+// their full country code. Query errors preserve real consent handling.
 async function hasOutboundHistory(phone) {
-  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
-  if (digits.length !== 10) return false;
-  const last10 = (col) => `right(regexp_replace(coalesce(${col}, ''), '\\D', '', 'g'), 10) = ?`;
+  const variants = phoneMatchDigits(phone);
+  if (!variants.length) return false;
+  const fullDigits = (col) => db.raw(`regexp_replace(coalesce(${col}, ''), '[^0-9]', '', 'g')`);
   try {
-    // internal_alert AND admin_alert are operator alerts, never
-    // customer-facing (twilio.js isInternalAdminAlertType) — in both stores.
+    // Reuse the outbound service's operator identity so an untyped/manual
+    // office alert cannot establish customer-facing SMS history. An existing
+    // suppression still counts below, allowing an operator's START to clear it.
+    const operator = TwilioService.isKnownOwnerPhone(phone)
+      || phoneMatchDigits(process.env.ADMIN_ALERT_PHONE).some((value) => variants.includes(value));
     const notInternal = (col) => function notInternalAlert() { this.whereNotIn(col, ['internal_alert', 'admin_alert']).orWhereNull(col); };
-    const sent = await db('sms_log')
-      .where({ direction: 'outbound' })
-      .whereIn('status', ['queued', 'sent', 'delivered'])
-      .whereRaw(last10('to_phone'), [digits])
-      .where(notInternal('message_type'))
-      .first('id');
-    if (sent) return true;
-    // Unified fallback: a send whose legacy log write was lost. A later
-    // bounce rewrites delivery_status, so a failed/undelivered/blocked row
-    // is not evidence either (null = never updated = accepted at send).
-    const unified = await db('messages')
-      .join('conversations', 'conversations.id', 'messages.conversation_id')
-      .where({ 'messages.channel': 'sms', 'messages.direction': 'outbound' })
-      .whereRaw(last10('conversations.contact_phone'), [digits])
-      .where(function accepted() { this.whereNotIn('messages.delivery_status', ['failed', 'undelivered', 'blocked', 'canceled']).orWhereNull('messages.delivery_status'); })
-      .where(notInternal('messages.message_type'))
-      .first('messages.id');
-    if (unified) return true;
+    if (!operator) {
+      const sent = await db('sms_log')
+        .where({ direction: 'outbound' })
+        .whereIn('status', ['queued', 'sent', 'delivered'])
+        .whereIn(fullDigits('to_phone'), variants)
+        .whereRaw("COALESCE(from_phone, '') <> 'push' AND COALESCE(metadata->>'channel', '') <> 'push'")
+        .where(notInternal('message_type'))
+        .first('id');
+      if (sent) return true;
+      // A push-only unified touchpoint is deliberately threaded as SMS but
+      // has no Twilio SID. Require actual provider evidence for this fallback.
+      const unified = await db('messages')
+        .join('conversations', 'conversations.id', 'messages.conversation_id')
+        .where({ 'messages.channel': 'sms', 'messages.direction': 'outbound' })
+        .whereIn(fullDigits('conversations.contact_phone'), variants)
+        .whereRaw("messages.twilio_sid ~ '^(SM|MM)[0-9a-fA-F]{32}$'")
+        .where(function accepted() { this.whereNotIn('messages.delivery_status', ['failed', 'undelivered', 'blocked', 'canceled']).orWhereNull('messages.delivery_status'); })
+        .where(notInternal('messages.message_type'))
+        .first('messages.id');
+      if (unified) return true;
+    }
     const suppressed = await db('messaging_suppression')
       .where({ active: true })
-      .whereRaw(last10('phone'), [digits])
+      .whereIn(fullDigits('phone'), variants)
       .first('id');
     return Boolean(suppressed);
   } catch (err) {
@@ -409,7 +415,7 @@ router.post('/sms', async (req, res) => {
     // stored service contact (spouse / tenant / manager slot) is a known
     // recipient whose sends may sit on the account's conversation with a
     // null contact_phone — the relationship check covers them (codex r2).
-    const complianceEligible = Boolean(customer) || isAiNumber
+    const complianceEligible = isAiNumber
       || Boolean(await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From).catch(() => true))
       || await hasOutboundHistory(From);
     const optCommand = complianceEligible ? detectSmsOptCommand(Body) : { action: null };

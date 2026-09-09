@@ -9,9 +9,11 @@ jest.mock('../models/db', () => {
     whereNot: jest.fn(() => q), orWhereNull: jest.fn(() => q), join: jest.fn(() => q),
     first: jest.fn(async () => { if (state.fail) throw new Error('db down'); return state.results.shift() ?? null; }),
   };
-  return jest.fn((table) => { state.tables.push(table); return q; });
+  const db = jest.fn((table) => { state.tables.push(table); return q; });
+  db.raw = jest.fn((sql) => sql);
+  return db;
 });
-jest.mock('../services/twilio', () => ({}));
+jest.mock('../services/twilio', () => ({ isKnownOwnerPhone: jest.fn(() => false) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/validators/suppression', () => ({ recordSuppression: jest.fn(), clearSuppression: jest.fn() }));
 jest.mock('../services/messaging/opt-out-detector', () => ({ detectSmsOptCommand: jest.fn(() => ({ action: null })) }));
@@ -46,6 +48,16 @@ describe('hasOutboundHistory — who may receive a STOP/HELP/START reply', () =>
   test('an active suppression row counts so START can clear it', async () => {
     state.results = [null, null, { id: 'sup-1' }];
     expect(await hasOutboundHistory('+19415551234')).toBe(true);
+  });
+
+  test('untyped operator alerts cannot establish customer history, while suppression still can', async () => {
+    const twilio = require('../services/twilio');
+    twilio.isKnownOwnerPhone.mockReturnValueOnce(true);
+    expect(await hasOutboundHistory('+19415550199')).toBe(false);
+    expect(state.tables).toEqual(['messaging_suppression']);
+    state.results = [{ id: 'suppression-1' }];
+    twilio.isKnownOwnerPhone.mockReturnValueOnce(true);
+    expect(await hasOutboundHistory('+19415550199')).toBe(true);
   });
 
   test('an unusable number is never eligible', async () => {
