@@ -10626,6 +10626,11 @@ export function CompletionPanel({
   // it; it withdraws suggestions from the rows as they stand at failure time.
   const selectedProductsRef = useRef([]);
   selectedProductsRef.current = selectedProducts;
+  // The visit whose plan this session has resolved at least once. Until then
+  // a governed draft's saved application mode is a suggestion no plan of this
+  // session stands behind, whether the draft is restored after the initial
+  // failure or before a still-pending request fails (pre-push audit P1).
+  const lawnPlanVerifiedRef = useRef(null);
   // Treatment Zone mapper (owner 2026-07-22): the same tracer the tech portal
   // has — admin closeouts can trace where we sprayed without switching apps.
   const [zoneMapOpen, setZoneMapOpen] = useState(false);
@@ -12561,6 +12566,7 @@ export function CompletionPanel({
     const timer = setTimeout(() => adminFetch(endpoint, request)
       .then((data) => {
         if (cancelled) return;
+        lawnPlanVerifiedRef.current = service.id;
         setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id });
         const blocks =
           data?.plan?.propertyGate?.blocks ||
@@ -12626,7 +12632,7 @@ export function CompletionPanel({
           // product payload exactly as a successful refresh does: an
           // untouched generated report described the old quantities and
           // must not ride along beside the changed rows (Codex r12 P1).
-          const withdrawn = withdrawLawnPlanSuggestions(selectedProductsRef.current);
+          const withdrawn = withdrawLawnPlanSuggestions(selectedProductsRef.current, { planUnverified: lawnPlanVerifiedRef.current !== service.id });
           if (JSON.stringify(withdrawn) !== JSON.stringify(selectedProductsRef.current)) {
             invalidateGeneratedReportOnTypedEdit();
             setSelectedProducts(withdrawn);
@@ -12950,7 +12956,7 @@ export function CompletionPanel({
     // suggestions saved under an earlier plan, and the reconcile effect stays
     // off during a plan error — withdraw them exactly as the failed request
     // does for rows it can see (Codex r8 P1).
-    const restoreProducts = (rows) => (treatmentPlanError ? withdrawLawnPlanSuggestions(rows, { planUnverified: true }) : rows);
+    const restoreProducts = (rows) => (treatmentPlanError ? withdrawLawnPlanSuggestions(rows, { planUnverified: lawnPlanVerifiedRef.current !== service.id }) : rows);
     setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {

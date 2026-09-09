@@ -502,6 +502,29 @@ it('a draft restored during a plan outage withdraws the suggestions saved under 
   expect(totals().map((_, index) => methodOf(index).value)).toEqual(['broadcast_spray', 'broadcast_spray']);
 });
 
+it('a governed draft restored before a delayed initial plan failure withdraws its saved application mode when that request fails', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[0], { target: { value: '9' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts[0].totalAmount).toBe('9'));
+  view.unmount();
+  delayPlan = true;
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '10']));
+  await waitFor(() => expect(planResolvers).toHaveLength(1));
+  // The request this restore raced was the visit's first: its failure leaves
+  // the saved method unverified exactly as a restore after the failure would
+  // (pre-push audit P1 on Codex r12).
+  failPlan = true;
+  await act(async () => { planResolvers[0](); });
+  await screen.findByText('Lawn plan unavailable.');
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
+  expect(totals().map(input => within(input.parentElement).getAllByRole('combobox')[2].value)).toEqual(['', '']);
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+});
+
 it('changing only the rate unit withdraws a plan-suggested rate and total instead of relabeling them, and returning to the plan unit restores them', async () => {
   enableDefaults();
   mount();
