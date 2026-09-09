@@ -1,46 +1,21 @@
+import { Button } from "../../../components/ui/Button";
+import { Field } from "../../../components/ui/Field";
+import { Input } from "../../../components/ui/Input";
 import EmailReply from "./EmailReply";
 import { D } from "./emailStyles";
 
 function buildSandboxedEmailHtml(html) {
   return `<!doctype html>
-<html> <head> <base target="_blank"> <meta charset="utf-8"> <style>body { margin: 0; padding: 0; color: #27272A; font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow-wrap: anywhere; }
-      img { max-width: 100%; height: auto; }
-      table { max-width: 100%; }
-      a { color: #18181B; }
-    </style> </head> <body>${html || ""}</body>
-</html>`;
+<html><head><base target="_blank"><meta charset="utf-8"><style>
+body { margin: 0; padding: 0; color: #27272A; font: 14px/1.6 Roboto, system-ui, sans-serif; overflow-wrap: anywhere; }
+img { max-width: 100%; height: auto; } table { max-width: 100%; } a { color: #18181B; }
+</style></head><body>${html || ""}</body></html>`;
 }
 
 function EmailBody({ html, text }) {
-  if (html) {
-    return (
-      <iframe
-        title="Email body"
-        sandbox="allow-popups allow-popups-to-escape-sandbox"
-        srcDoc={buildSandboxedEmailHtml(html)}
-        style={{
-          width: "100%",
-          height: 360,
-          border: "none",
-          background: "transparent",
-        }}
-      />
-    );
-  }
-
-  return (
-    <div
-      style={{
-        fontSize: 13,
-        color: D.text,
-        lineHeight: 1.6,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-      }}
-    >
-      {text || ""}
-    </div>
-  );
+  if (html) return <iframe title="Email body" sandbox="allow-popups allow-popups-to-escape-sandbox"
+    srcDoc={buildSandboxedEmailHtml(html)} className="h-[360px] w-full border-0 bg-transparent" />;
+  return <div className="whitespace-pre-wrap break-words text-ui-body text-ink-primary">{text || ""}</div>;
 }
 
 const CATEGORY_COLORS = {
@@ -82,242 +57,60 @@ const AUTO_ACTION_LABELS = {
 };
 
 function timeAgo(dateStr) {
-  const d = new Date(dateStr);
-  const now = new Date();
-  const diff = (now - d) / 1000;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const date = new Date(dateStr), seconds = (Date.now() - date) / 1000;
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`;
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" });
 }
 
 export function EmailSummary({ stats, digest }) {
-  return (
-    <>
-      {/* Daily digest card */}
-      {digest && digest.total_received > 0 && (
-        <div
-          style={{
-            background: D.card,
-            borderRadius: 10,
-            padding: "14px 20px",
-            border: `1px solid ${D.border}`,
-            marginBottom: 16,
-            display: "flex",
-            gap: 24,
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
-          {" "}
-          <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
-            Today
-          </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted }}>
-            {" "}
-            <span
-              style={{
-                color: D.text,
-                fontFamily: "'JetBrains Mono', monospace",
-              }}
-            >
-              {digest.total_received}
-            </span>{" "}
-            received
-          </div>
-          {[
-            {
-              label: "leads created",
-              value: digest.leads_created,
-              color: D.green,
-            },
-            {
-              label: "spam quarantined",
-              value: digest.spam_quarantined ?? digest.spam_blocked,
-              color: D.red,
-            },
-            {
-              label: "invoices",
-              value: digest.invoices_processed,
-              color: D.purple,
-            },
-            {
-              label: "domains blocked",
-              value: digest.domains_blocked_today,
-              color: D.amber,
-            },
-          ]
-            .filter((item) => item.value > 0)
-            .map((item) => (
-              <div key={item.label} style={{ fontSize: 12, color: item.color }}>
-                {" "}
-                <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                  {item.value}
-                </span>
-                {item.label}
-              </div>
-            ))}
-        </div>
-      )}
-      {/* Stats bar */}
-      {stats && (
-        <div style={{ display: "flex", gap: 16, marginBottom: 20 }}>
-          {[
-            {
-              label: "Unread",
-              value: stats.unread,
-              color: stats.unread > 0 ? D.red : D.muted,
-            },
-            { label: "Today", value: stats.today, color: D.teal },
-            { label: "Vendor", value: stats.vendor, color: D.purple },
-            { label: "Total", value: stats.total, color: D.muted },
-          ].map((s) => (
-            <div
-              key={s.label}
-              style={{
-                background: D.card,
-                borderRadius: 8,
-                padding: "12px 20px",
-                border: `1px solid ${D.border}`,
-                flex: 1,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  fontSize: 22,
-                  fontWeight: 700,
-                  color: s.color,
-                  fontFamily: "'JetBrains Mono', monospace",
-                }}
-              >
-                {s.value}
-              </div>{" "}
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                {s.label}
-              </div>{" "}
-            </div>
-          ))}
-        </div>
-      )}
-    </>
-  );
+  return <div className="mb-5 space-y-3">
+    {digest && digest.total_received > 0 && <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border-hairline border-zinc-200 bg-white p-4 text-ui-body text-ink-secondary">
+      <span className="font-medium text-ink-primary">Today</span>
+      <span><span className="u-nums text-ink-primary">{digest.total_received}</span> received</span>
+      {[
+        { label: "leads created", value: digest.leads_created },
+        { label: "spam quarantined", value: digest.spam_quarantined ?? digest.spam_blocked },
+        { label: "invoices", value: digest.invoices_processed },
+        { label: "domains blocked", value: digest.domains_blocked_today },
+      ].filter((item) => item.value > 0).map((item) => <span key={item.label}><span className="u-nums text-ink-primary">{item.value}</span> {item.label}</span>)}
+    </div>}
+    {stats && <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {[
+        { label: "Unread", value: stats.unread }, { label: "Today", value: stats.today },
+        { label: "Vendor", value: stats.vendor }, { label: "Total", value: stats.total },
+      ].map((item) => <div key={item.label} className="rounded-md border-hairline border-zinc-200 bg-white p-4">
+        <dt className="text-ui-caption text-ink-secondary">{item.label}</dt>
+        <dd className="u-nums mt-1 text-18 leading-[1.35] font-medium">{item.value ?? "—"}</dd>
+      </div>)}
+    </dl>}
+  </div>;
 }
 
 export function BlockedSenders({ mailbox }) {
-  const { blocked, blockInput, setBlockInput, handleBlock, handleUnblock } =
-    mailbox;
-  return (
-    <div>
-      {/* Block input */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-        {" "}
-        <input
-          value={blockInput}
-          onChange={(e) => setBlockInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleBlock()}
-          placeholder="Block domain or email (e.g. spammer.com or bad@example.com)"
-          style={{
-            flex: 1,
-            padding: "10px 14px",
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            color: D.text,
-            fontSize: 13,
-            outline: "none",
-          }}
-        />{" "}
-        <button
-          onClick={handleBlock}
-          style={{
-            padding: "10px 20px",
-            background: D.red,
-            color: "#fff",
-            border: "none",
-            borderRadius: 8,
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: "pointer",
-          }}
-        >
-          Block
-        </button>{" "}
-      </div>
-      {/* Blocked list */}
-      <div
-        style={{
-          background: D.card,
-          borderRadius: 12,
-          border: `1px solid ${D.border}`,
-          overflow: "hidden",
-        }}
-      >
-        {blocked.length === 0 ? (
-          <div
-            style={{
-              padding: 40,
-              textAlign: "center",
-              color: D.muted,
-              fontSize: 14,
-            }}
-          >
-            No blocked senders
-          </div>
-        ) : (
-          blocked.map((b) => (
-            <div
-              key={b.id}
-              style={{
-                padding: "12px 20px",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                borderBottom: `1px solid ${D.border}`,
-              }}
-            >
-              {" "}
-              <div>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 13,
-                    color: D.heading,
-                    fontWeight: 500,
-                  }}
-                >
-                  {b.domain || b.email_address}
-                </div>{" "}
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                  {b.reason}{" "}
-                  {b.blocked_count > 0 &&
-                    `\u2014 ${b.blocked_count} emails caught`}
-                  <span style={{ marginLeft: 8 }}>
-                    {timeAgo(b.created_at)}
-                  </span>{" "}
-                </div>{" "}
-              </div>{" "}
-              <button
-                onClick={() => handleUnblock(b.id)}
-                style={{
-                  padding: "5px 14px",
-                  fontSize: 11,
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: "transparent",
-                  color: D.muted,
-                  cursor: "pointer",
-                }}
-              >
-                Unblock
-              </button>{" "}
-            </div>
-          ))
-        )}
-      </div>{" "}
+  const { blocked, blockInput, setBlockInput, handleBlock, handleUnblock } = mailbox;
+  return <section aria-label="Blocked senders" className="space-y-4">
+    <div className="flex flex-wrap items-end gap-2 rounded-md border-hairline border-zinc-200 bg-white p-4">
+      <Field label="Domain or email to block" className="min-w-0 flex-1">
+        <Input value={blockInput} onChange={(event) => setBlockInput(event.target.value)}
+          onKeyDown={(event) => event.key === "Enter" && handleBlock()}
+          placeholder="example.com or name@example.com" />
+      </Field>
+      <Button variant="danger" onClick={handleBlock}>Block</Button>
     </div>
-  );
+    <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+      {blocked.length === 0 ? <p className="p-8 text-center text-ink-secondary">No blocked senders</p>
+        : <ul>{blocked.map((entry) => <li key={entry.id} className="flex items-start justify-between gap-3 border-b-hairline border-zinc-200 p-4 last:border-b-0">
+          <div className="min-w-0 break-words">
+            <p className="font-medium">{entry.domain || entry.email_address}</p>
+            <p className="mt-1 text-ui-caption text-ink-secondary">{entry.reason}{entry.blocked_count > 0 && ` — ${entry.blocked_count} emails caught`} <span className="u-nums">{timeAgo(entry.created_at)}</span></p>
+          </div>
+          <Button variant="secondary" onClick={() => handleUnblock(entry.id)} className="shrink-0">Unblock</Button>
+        </li>)}</ul>}
+    </div>
+  </section>;
 }
 
 function EmailMessage({ active, email, mailbox, editor }) {

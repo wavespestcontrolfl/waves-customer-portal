@@ -209,10 +209,10 @@ describe("Email draft and navigation preservation", () => {
     loadResponses["daily-digest"] = () => response({ total_received: 17, leads_created: 2, invoices_processed: 4, domains_blocked_today: 0, ...spam });
     mount();
     expect(await screen.findByText("received")).toHaveTextContent("17 received");
-    expect(screen.getByText("leads created")).toHaveTextContent("2leads created");
-    expect(screen.getByText("invoices", { exact: true })).toHaveTextContent("4invoices");
+    expect(screen.getByText("leads created")).toHaveTextContent("2 leads created");
+    expect(screen.getByText("invoices", { exact: true })).toHaveTextContent("4 invoices");
     expect(screen.queryByText("domains blocked")).not.toBeInTheDocument();
-    if (visible) expect(screen.getByText("spam quarantined")).toHaveTextContent("3spam quarantined");
+    if (visible) expect(screen.getByText("spam quarantined")).toHaveTextContent("3 spam quarantined");
     else expect(screen.queryByText("spam quarantined")).not.toBeInTheDocument();
   });
 
