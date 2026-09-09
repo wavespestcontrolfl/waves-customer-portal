@@ -304,7 +304,7 @@ describe('estimate manual acceptance', () => {
       table: 'estimates',
       clause: { id: estimate.id },
       statusList: { column: 'status', values: ['sent', 'viewed'] },
-      rawClause: '(expires_at IS NULL OR expires_at >= NOW())',
+      rawClause: require('../services/estimate-manual-acceptance').MANUAL_ACCEPT_ACTIVE_SQL,
       patch: {
         status: 'accepted',
         accepted_at: 'NOW',
@@ -791,6 +791,24 @@ describe('estimate manual acceptance', () => {
 
     expect(updates).toEqual([]);
     expect(inserts).toEqual([]);
+  });
+
+  test('rejects a grouped fixed bid past its OWN validity date even while its token is still viewable (pre-push codex P1 on #4309)', async () => {
+    const estimate = {
+      id: 'estimate-fixed-lapsed',
+      status: 'sent',
+      customer_id: 'customer-fixed-lapsed',
+      expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { proposal: { enabled: true, validThrough: '2020-01-01' } },
+    };
+    const { database, updates, inserts } = makeDb(estimate);
+    await expect(markEstimateManuallyAccepted({ estimateId: estimate.id, database }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/validity date has passed/) });
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+    const { MANUAL_ACCEPT_ACTIVE_SQL } = require('../services/estimate-manual-acceptance');
+    expect(MANUAL_ACCEPT_ACTIVE_SQL).toMatch(/validThrough/);
   });
 
   test('rejects unresolved manager approval before closing estimates accepted', async () => {
