@@ -11,7 +11,6 @@
 .c360-embedded > .c360-panel > * { flex-shrink: 0; }
 .c360-embedded :is(.text-10, .text-11, .text-12, .text-13, .u-label) { font-size: 14px; line-height: 1.55; }
 .c360-embedded :is(input, textarea, select) { min-width: 0; font-size: 16px; }
-.c360-embedded button:not([role="switch"]) { min-height: 40px; }
 .c360-embedded .u-label { letter-spacing: 0; text-transform: none; }
 .c360-workspace-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 18px 24px; padding: 24px 28px; }
 .c360-workspace-identity { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
@@ -53,7 +52,7 @@
 .c360-embedded .c360-overview-billing .flex { flex-wrap: wrap; }
 .c360-embedded .c360-property-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .c360-embedded .c360-billing-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.c360-embedded .c360-tab-content > div > .u-label { margin-top: 20px; margin-bottom: 13px; font-size: 18px; color: #27272a; }
+.c360-embedded .c360-section-heading { margin-top: 20px; margin-bottom: 13px; font-size: 18px; color: #27272a; }
 .c360-activity { min-width: 0; }
 .c360-activity-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e4e4e7; }
 .c360-activity-toolbar > select { width: auto; max-width: 64%; height: 38px; padding: 0 5px; border: 0; background: #fff; color: #52525b; font-size: 14px; }
@@ -227,7 +226,7 @@
   .customer-directory-table td[data-label]::before { content: attr(data-label); color: #71717a; }
   .customer-directory-attention > span { grid-column: 2; }
   .customer-directory-actions { position: absolute; top: 16px; right: 16px; }
-  .customer-directory-table .customer-directory-editor { display: block; }
+  .customer-directory-table .customer-directory-editor { display: block; padding: 0; }
   .customer-directory-table .customer-directory-editor > td { padding: 0 16px 16px; }
 }
 @media (min-width: 768px) and (max-width: 1100px) {

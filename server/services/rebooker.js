@@ -2321,6 +2321,11 @@ class SmartRebooker {
         }
       }
 
+      // The call/proposal guard runs on the locked series before its first write.
+      if (typeof options.moveGuard === 'function') {
+        const guardedService = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first();
+        await options.moveGuard({ trx, technicianId: siblings[droppedIdx].technician_id, service: guardedService });
+      }
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
         const sib = siblings[i];

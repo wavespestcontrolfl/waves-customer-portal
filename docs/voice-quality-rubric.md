@@ -3,8 +3,8 @@
 `npm run eval:voice-relay` runs 28 synthetic-caller scenarios through the live
 `RelayConversation` loop: Sandy's prompt, model, registered tools and turn handling.
 It evaluates deterministic checks and prints the recorded conversation for review.
-This stage has no judge, scheduler or notification channel. A passing result means
-its deterministic checks passed; review conversational quality from the transcript.
+By default only deterministic checks run. Select `--judge` for the optional transcript
+judge. The weekly schedule is opt-in; manual runs do not notify unless `--notify` is given.
 
 ## Run it
 
@@ -13,20 +13,22 @@ Run the CLI in a dedicated process with `ANTHROPIC_API_KEY` for Sandy's model:
 ```sh
 npm run eval:voice-relay
 npm run eval:voice-relay -- --only=booking-happy-path,slot-gone
+npm run eval:voice-relay -- --judge
 npm run eval:voice-relay -- --fixture=path/to/scenarios.json
 ```
 
 The npm command prints JSON. Running `node server/scripts/run-voice-relay-eval.js`
 without `--json` prints a compact report. Exit codes: 0 for passing checks, 1 for
-failed checks or replay errors, 2 when the replay cannot run. A provider outage
+repeated failed checks or replay errors, 3 when the eval is inconclusive, and 2
+when the runner crashes before producing a result. A provider outage
 that prevents every scenario from completing a model round is inconclusive and
-exits 2. Manual execution calls Sandy's model and incurs normal provider usage.
+exits 3. Manual execution calls Sandy's model and incurs normal provider usage.
 
 ## Fixture contracts
 
 `server/fixtures/voice-relay-eval/scenarios.json` supplies caller context, office
 hours, tool results, gates, interruptions, reconnect context and model failures.
-All callers are synthetic. The scenario `spec` contains notes for manual review.
+All callers are synthetic. The scenario `spec` contains the hand-authored grading contract and notes for review.
 
 The harness validates tool arguments against the live registered schemas without
 coercion. A fixture response can match inputs with `when`; strings are case-insensitive
@@ -44,6 +46,12 @@ plus a verified caller, the live release conditions for an earlier segment. A
 exposes as its customer id — without one a "matched" caller would be graded unmatched. An `ok: false` response stands in for a thrown tool failure: it performs no fixture
 side effects, earns no receipt, and counts toward the relay's provider-failure handoff.
 A refusal the live tool returns as text (a redacted schedule, missing sizing) stays `ok`.
+There is no bare receipt marker: only an answer that performs its tool's live effect
+(`capture`, `booking`, `reservice`, `transfer`) is a receipt. The dedupe answer is
+`reservice: "existing"` — the ticket already on file, nothing performed, evidence for the
+one follow-up the answer directs.
+`spec` and `judge` are executable contracts, validated key by key at lint (unknown or
+mistyped fields are refused), because the judge grades against exactly what they say.
 Every scripted turn is `{ caller }` with an optional `interrupt` (`true`, `{ words }`
 or `{ heard }`); any other key is a lint error.
 
@@ -167,7 +175,8 @@ construction; ordinary phrases such as "I'll note that correction" earn no miss.
 
 The harness replaces tool execution and refuses database access during a conversation.
 It never calls `end()`, writes a lead or booking, reconciles a call log, saves a
-transcript, sends a notification or starts a cron. Capture-floor and callback writers
+transcript, writes business records. Manual runs suppress every notification channel unless
+`--notify` is present. The scheduler runs the harness in a child process. Capture-floor and callback writers
 are stubbed to refuse. Each scenario restores its gate environment after running.
 An unfixtured tool, database attempt or real provider error is a replay error.
 
@@ -175,7 +184,60 @@ Local tests use an SDK double and exercise the live conversation loop without mo
 or database calls. They cover fixture validation, privacy, receipt ordering, fresh-slot
 recovery, interrupts, reconnection, bounded tool results and provider failures.
 The historical calibration of the earlier combined PR predates these contracts and
-does not establish a baseline for this manual-only stage.
+does not establish a baseline for this split implementation.
+
+## Optional transcript judge
+
+`--judge` runs after every conversation finishes, with at most four verdicts in flight.
+It uses the registered `TEXT_POLICIES.voiceJudge` policy on the `voice_relay_judge`
+lane. `MODEL_VOICE_JUDGE` pins the primary independently of the moving quality tiers;
+the registered OpenAI fallback keeps results available but marks every check advisory.
+A fallback verdict cannot change pass/fail. Each verdict records the served provider,
+model, fallback status and a SHA of the complete prompt template and output schema.
+
+The judge receives the caller context Sandy saw — the account block and, when the
+scenario seeds one, the recent-text data turn — the standing instructions she ran
+under (the frozen system prompt minus the caller block, as grounding data), the exact
+per-turn clock blocks, earlier call segments and complete tool results (the reviewable
+record clips them; the judge does not). Hidden grading notes cannot ground an agent
+claim. Only new agent speech is graded after a reconnect. The pinned judge's
+forbidden claims are critical failures; action/fact checks use the scenario's major
+severity and adjudication setting, while empathy, brevity and tone affect quality.
+
+If no scenario receives a verdict, the run is inconclusive (exit 3). If some verdicts
+are unavailable, the run fails verification (exit 1), even when deterministic checks
+pass. Running without `--judge` makes no judge calls. Judge calls use the ordinary
+LLM dispatcher and may write ledger/trace rows when those gates are enabled; the
+conversation still refuses database access. No live judge calibration was run for
+this split. Tests inject verdicts and exercise dispatch, fallback, grounding and
+aggregation without calling model providers or a database.
+
+## Scheduled runs and notification delivery
+
+`GATE_VOICE_RELAY_EVAL=true` opts in to Monday at 03:50 America/New_York. It is
+off by default in every environment. The scheduler uses the existing `runExclusive`
+lock and launches `--json --judge --notify` in a child process, keeping the scenario
+gates and relay-module patches out of the server handling calls. Unset the gate or
+set it to `false` to stop future runs. No gate was enabled for this implementation.
+
+The wrapper retries a failed run once. A pass on retry is marked flaky and emits
+no alert. Repeated failure preserves the result and produces one admin
+`eval_regression` bell plus the existing ops digest/email channel. An inconclusive
+retry retains the first observed failure; an initial inconclusive attempt is reported
+without a retry. The same notification path reports a crashed or timed-out child.
+The eight-hour child ceiling covers every allowed model round (up to six
+20-second streams per caller turn), judge budgets and one retry, with time
+left for fixture-tool timeouts; a hung child is killed before releasing its exclusive lock.
+
+Operational delivery reuses the call-extraction eval helpers and `deliverOpsDigest`.
+`EVAL_REGRESSION_EMAIL=off` disables the email/digest channel. A failed bell insert
+is recorded as `notificationError` after the other channel is attempted; it does
+not turn a finished evaluation into a crash. `--notify` gates the bell, email and
+in-app digest together. The call-extraction manual CLI now uses that same explicit
+notification suppression, including when in-app digest delivery is enabled.
+
+Tests inject the child runner, replay outcomes and notification senders; no live
+cron, provider call, notification or database write was used for verification.
 
 ## Known gaps in the named checks
 

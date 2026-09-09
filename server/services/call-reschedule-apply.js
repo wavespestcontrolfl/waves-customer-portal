@@ -16,7 +16,7 @@
  *   - V2 extraction is valid, not spam, not voicemail, scheduling.status is
  *     reschedule_requested, the agent committed the booking, and the
  *     scheduling_window confidence clears MIN_SCHEDULING_CONFIDENCE
- *   - confirmed_start_at is a real future instant on the hour or half hour
+ *   - confirmed_start_at is a real future instant exactly on the hour
  *   - exactly ONE live visit (pending/confirmed/rescheduled, not dispatch-
  *     owned pending, not grouped) of that customer sits within
  *     CANDIDATE_SPAN_DAYS of the target date — two candidates is ambiguous,
@@ -42,10 +42,11 @@
  * callRescheduleApply); the processor never blocks on this step.
  */
 
-const logger = require('./logger');
 const { etParts, etDateString, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
+const { addressKey } = require('./customer-properties');
 
 const MIN_SCHEDULING_CONFIDENCE = 0.8;
 // A visit within this many days of the requested date is a candidate for
@@ -95,7 +96,7 @@ function skip(reason, extra = {}) {
  * rows (already filtered to LIVE_STATUSES by the loader); `now` is the
  * clock the future-instant check uses.
  */
-function planRescheduleFromCall({ v2, call, customer, candidates = [], appointmentCreated = false, now = new Date() } = {}) {
+function planRescheduleFromCall({ v2, call, customer, properties = [], candidates = [], appointmentCreated = false, now = new Date() } = {}) {
   if (!v2 || typeof v2 !== 'object') return skip('no_v2_extraction');
   if (appointmentCreated) return skip('pipeline_created_appointment');
   if (v2.meta?.is_spam === true) return skip('spam');
@@ -122,11 +123,28 @@ function planRescheduleFromCall({ v2, call, customer, candidates = [], appointme
   if (Number.isNaN(target.getTime())) return skip('unparseable_confirmed_start');
   if (target.getTime() <= now.getTime()) return skip('confirmed_start_in_past');
   const parts = etParts(target);
-  if (parts.minute !== 0 && parts.minute !== 30) return skip('off_grid_start_time');
+  if (!confirmedStartOnTheHour(scheduling.confirmed_start_at) || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
+  if (!hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return skip('ungrounded_agent_commitment');
   const newDate = etDateString(target);
   const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
+  if (etWallClockOfConfirmedStart(scheduling.confirmed_start_at) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
 
-  const nearby = candidates.filter((row) => {
+  const saved = properties.filter((p) => p.active !== false);
+  const primaryKey = customer.address_line1 ? addressKey(customer) : null;
+  const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
+  const stated = v2.property?.service_address || {};
+  const targetKey = statesNewAddress(v2)
+    ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
+      city: stated.city, zip: stated.postal_code }) : null)
+    : (knownKeys.size === 1 ? [...knownKeys][0] : null);
+  if (!targetKey || !knownKeys.has(targetKey)) return skip('property_needs_review');
+  const atProperty = candidates.filter((row) => {
+    if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
+    const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
+      address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
+    return key === targetKey;
+  });
+  const nearby = atProperty.filter((row) => {
     const d = dateOnly(row.scheduled_date);
     return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
   });
@@ -151,10 +169,11 @@ function planRescheduleFromCall({ v2, call, customer, candidates = [], appointme
     : null;
 
   if (currentDate === newDate && currentStart === newStart) {
-    return { action: 'already_at_requested_time', visitId: visit.id, newDate, newWindow: { start: newStart, end: newEnd }, interiorNote };
+    return { action: 'already_at_requested_time', propertyKey: targetKey, visitId: visit.id, newDate, newWindow: { start: newStart, end: newEnd }, interiorNote };
   }
   return {
     action: 'apply',
+    propertyKey: targetKey,
     visitId: visit.id,
     dateMove: currentDate !== newDate,
     from: { date: currentDate, start: currentStart, end: hhmm(visit.window_end) },
@@ -170,7 +189,8 @@ async function loadCandidates(conn, customerId, now = new Date()) {
     .whereIn('status', LIVE_STATUSES)
     .where('scheduled_date', '>=', etDateString(now))
     .orderBy('scheduled_date', 'asc')
-    .select('id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'status', 'source_action', 'visit_id', 'internal_notes', 'is_recurring');
+    .select('id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'status', 'source_action', 'visit_id', 'internal_notes', 'is_recurring',
+      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
 }
 
 // Resolve the call's open reschedule cards and re-sync review_status —
@@ -212,112 +232,92 @@ async function stampSkipOnCards(conn, callLogId, plan) {
  * fences the pass (a peer that reclaimed the call owns the outcome). Never
  * throws for business reasons — returns { outcome, reason?, visitId? }.
  */
-async function applyCallReschedule({ conn, call, customerId, v2, procGeneration = null, appointmentCreated = false, now = new Date(), rebooker = null } = {}) {
+async function applyCallReschedule({ conn, call, procGeneration = null, appointmentCreated = false, now = new Date(), rebooker = null } = {}) {
   if (!conn || !call?.id) return { outcome: 'skipped', reason: 'missing_context' };
-
-  // Ownership fence: the generation this pass stamped must still be the
-  // call's, with no live token (same rule as call-commitments).
-  if (procGeneration != null) {
-    const owned = await conn('call_log').where({ id: call.id, processing_generation: procGeneration }).whereNull('processing_token').first('id');
-    if (!owned) return { outcome: 'skipped', reason: 'superseded_by_newer_pass' };
+  const settled = await conn('call_log').where({ id: call.id }).whereNull('processing_token')
+    .modify((q) => { if (procGeneration != null) q.where('processing_generation', procGeneration); }).first();
+  if (!settled) return { outcome: 'skipped', reason: 'superseded_by_newer_pass' };
+  if (!settled.customer_id || settled.customer_id !== call.customer_id) return { outcome: 'skipped', reason: 'customer_link_changed' };
+  const v2 = settled.v2_extraction_status === 'valid' ? settled.ai_extraction_enriched : null;
+  const prior = await conn('activity_log').where({ action: ACTIVITY_ACTION })
+    .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('id');
+  if (prior) {
+    const cardsResolved = await resolveRescheduleCards(conn, call.id, 'This request was already applied from the call.');
+    return { outcome: 'skipped', reason: 'already_applied', cardsResolved };
   }
-
-  // Idempotency: a reprocess of the same call must not move the visit twice.
-  const prior = await conn('activity_log')
-    .where({ action: ACTIVITY_ACTION })
-    .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)])
-    .first('id');
-  if (prior) return { outcome: 'skipped', reason: 'already_applied' };
-
-  const effectiveCustomerId = call.customer_id || customerId || null;
-  const customer = effectiveCustomerId
-    ? await conn('customers').where({ id: effectiveCustomerId }).first('id', 'phone')
-    : null;
-  const candidates = effectiveCustomerId ? await loadCandidates(conn, effectiveCustomerId, now) : [];
-  const plan = planRescheduleFromCall({
-    v2,
-    call: { ...call, customer_id: call.customer_id || effectiveCustomerId },
-    customer,
-    candidates,
-    appointmentCreated,
-    now,
-  });
-
+  const customer = await conn('customers').where({ id: settled.customer_id }).first();
+  const properties = await conn('customer_properties').where({ customer_id: settled.customer_id, active: true }).select('*');
+  const candidates = await loadCandidates(conn, settled.customer_id, now);
+  const plan = planRescheduleFromCall({ v2, call: settled, customer, properties, candidates, appointmentCreated, now });
   if (plan.action === 'skip') {
-    if (plan.reason !== 'not_a_reschedule' && plan.reason !== 'no_v2_extraction') {
-      try { await stampSkipOnCards(conn, call.id, plan); } catch (err) { logger.warn(`[call-reschedule] skip stamp failed for call ${call.id}: ${err.message}`); }
-    }
+    if (plan.reason !== 'not_a_reschedule' && plan.reason !== 'no_v2_extraction') await stampSkipOnCards(conn, call.id, plan);
     return { outcome: 'skipped', reason: plan.reason, visitId: plan.visitId || null };
   }
-
-  if (plan.action === 'already_at_requested_time') {
-    const n = await resolveRescheduleCards(conn, call.id, `Visit ${plan.visitId} already at the requested time (${plan.newDate} ${plan.newWindow.start}); nothing to move.`);
-    return { outcome: 'noop', reason: 'already_at_requested_time', visitId: plan.visitId, cardsResolved: n };
-  }
-
-  const mover = rebooker || require('./rebooker');
   const visit = candidates.find((r) => r.id === plan.visitId);
-  await mover.reschedule(
-    plan.visitId,
-    plan.newDate,
-    { start: plan.newWindow.start, end: plan.newWindow.end },
-    RESCHEDULE_REASON_CODE,
-    INITIATED_BY,
-    {
-      keepStatus: true,
-      // A same-day window edit is single-row by the rebooker's own rule; pin
-      // it explicitly so a cadence visit never fans out to its series from a
-      // phone call. A date move on a recurring visit follows the owner's
-      // "schedule follows the last treatment" ruling via the default policy.
-      ...(plan.dateMove ? {} : { seriesPolicy: 'single' }),
-      // CAS on the row as read: a concurrent operator move between our read
-      // and the write surfaces as the rebooker's SLOT/409 instead of a
-      // silent overwrite.
-      expect: {
-        scheduled_date: dateOnly(visit.scheduled_date),
-        window_start: visit.window_start,
-        window_end: visit.window_end,
-      },
-    },
-  );
-
-  const callDay = etCalendarDayOf(call.created_at || now);
-  if (plan.interiorNote) {
-    const line = `Call ${callDay}: ${plan.interiorNote}`;
-    const existing = visit.internal_notes ? String(visit.internal_notes).trimEnd() : '';
-    if (!existing.includes(plan.interiorNote)) {
-      await conn('scheduled_services').where({ id: plan.visitId }).update({
-        internal_notes: existing ? `${existing}\n${line}` : line,
-        updated_at: new Date(),
+  let cardsResolved = 0;
+  const note = `Applied from the call: visit ${plan.visitId} at ${plan.newDate} ${plan.newWindow.start}. No customer message sent.`;
+  // The mover holds the visit/series locks before invoking this guard. Its
+  // call fence, note, activity and card resolution commit with the move.
+  const writeDecision = async ({ trx, service }) => {
+    await lockTriageCall(trx, call.id);
+    const current = await trx('call_log').where({ id: call.id }).forUpdate().first();
+    if (!current || current.processing_token || current.customer_id !== settled.customer_id
+      || Number(current.processing_generation) !== Number(settled.processing_generation)
+      || current.v2_extraction_status !== 'valid'
+      || JSON.stringify(current.ai_extraction_enriched) !== JSON.stringify(v2)
+      || current.transcription !== settled.transcription) {
+      throw Object.assign(new Error('The call changed before its reschedule could apply'), { code: 'CALL_RESCHEDULE_CHANGED' });
+    }
+    const applied = await trx('activity_log').where({ action: ACTIVITY_ACTION })
+      .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('id');
+    if (applied) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_RESCHEDULE_ALREADY_APPLIED' });
+    const handled = await trx('triage_items').where({ call_log_id: call.id, resolution_source: 'human' })
+      .whereIn('reason_code', CARD_REASON_CODES).whereIn('status', ['resolved', 'dismissed']).first('id');
+    const moved = await trx('reschedule_log').where({ scheduled_service_id: visit.id })
+      .where('created_at', '>', settled.created_at).first('id');
+    if (handled || moved) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
+    const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
+    const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
+    const checked = planRescheduleFromCall({ v2, call: current, customer: latestCustomer, properties: latestProperties,
+      candidates: [{ ...visit, ...service }], appointmentCreated, now });
+    const unchanged = service && dateOnly(service.scheduled_date) === dateOnly(visit.scheduled_date)
+      && ['customer_id', 'property_id', 'status', 'source_action', 'visit_id', 'is_recurring', 'window_start', 'window_end', 'estimated_duration_minutes']
+        .every((key) => (service[key] ?? null) === (visit[key] ?? null));
+    if (!unchanged || checked.action !== plan.action || checked.visitId !== plan.visitId || checked.propertyKey !== plan.propertyKey) {
+      throw Object.assign(new Error('The visit changed before its reschedule could apply'), { code: 'CALL_RESCHEDULE_CHANGED' });
+    }
+    if (plan.interiorNote) {
+      await trx('scheduled_services').where({ id: visit.id }).update({
+        internal_notes: trx.raw("CASE WHEN strpos(COALESCE(internal_notes, ''), ?) > 0 THEN internal_notes ELSE concat_ws(E'\\n', NULLIF(internal_notes, ''), ?::text) END",
+          [plan.interiorNote, `Call ${etCalendarDayOf(settled.created_at)}: ${plan.interiorNote}`]),
       });
     }
-  }
-
-  const moveText = plan.dateMove
-    ? `${plan.from.date} ${plan.from.start || '--'} → ${plan.newDate} ${plan.newWindow.start}`
-    : `${plan.from.start || '--'} → ${plan.newWindow.start} on ${plan.newDate}`;
-  await conn('activity_log').insert({
-    customer_id: effectiveCustomerId,
-    action: ACTIVITY_ACTION,
-    description: `Visit moved from the customer's call (${moveText})${plan.interiorNote ? '; access note added' : ''}. No customer message sent.`,
-    metadata: JSON.stringify({
-      call_log_id: String(call.id),
-      scheduled_service_id: String(plan.visitId),
-      from: plan.from,
-      to: { date: plan.newDate, ...plan.newWindow },
-      interior_note_added: !!plan.interiorNote,
-      processing_generation: procGeneration,
-    }),
-  });
-
-  let cardsResolved = 0;
+    await trx('activity_log').insert({ customer_id: settled.customer_id, action: ACTIVITY_ACTION, description: note,
+      metadata: JSON.stringify({ call_log_id: String(call.id), scheduled_service_id: String(visit.id),
+        from: plan.from || null, to: { date: plan.newDate, ...plan.newWindow }, interior_note_added: !!plan.interiorNote,
+        processing_generation: current.processing_generation }) });
+    cardsResolved = await resolveRescheduleCards(trx, call.id, note);
+  };
   try {
-    cardsResolved = await resolveRescheduleCards(conn, call.id, `Applied from the call: visit ${plan.visitId} moved ${moveText}. No customer message sent.`);
+    if (plan.action === 'already_at_requested_time') {
+      await conn.transaction(async (trx) => {
+        const service = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
+        await writeDecision({ trx, service });
+      });
+      return { outcome: 'noop', reason: 'already_at_requested_time', visitId: visit.id, cardsResolved };
+    }
+    await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, INITIATED_BY, {
+      keepStatus: true, ...(plan.dateMove ? {} : { seriesPolicy: 'single' }), moveGuard: writeDecision,
+      expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
+        estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
+        property_id: visit.property_id, status: visit.status, visit_id: visit.visit_id, source_action: visit.source_action, is_recurring: visit.is_recurring },
+    });
   } catch (err) {
-    logger.warn(`[call-reschedule] card resolve failed for call ${call.id} (visit moved): ${err.message}`);
+    const reasons = { CALL_RESCHEDULE_CHANGED: 'changed_before_apply', CALL_RESCHEDULE_HANDLED: 'handled_after_call', CALL_RESCHEDULE_ALREADY_APPLIED: 'already_applied' };
+    if (!reasons[err.code]) throw err;
+    return { outcome: 'skipped', reason: reasons[err.code], visitId: visit.id };
   }
-  logger.info(`[call-reschedule] call ${call.id}: visit ${plan.visitId} moved ${moveText}; cards resolved=${cardsResolved}`);
-  return { outcome: 'applied', visitId: plan.visitId, newDate: plan.newDate, newWindow: plan.newWindow, cardsResolved };
+  return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow, cardsResolved };
 }
 
 module.exports = {

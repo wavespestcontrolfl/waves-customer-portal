@@ -25,6 +25,8 @@ describe('saved estimate send confirmation',()=>{
   expect(fetcher.mock.calls.filter(([,o])=>o?.method==='POST')).toHaveLength(0);
   fireEvent.click(confirm);fireEvent.click(confirm);
   await waitFor(()=>expect(fetcher.mock.calls.filter(([,o])=>o?.method==='POST')).toHaveLength(1));
+  expect(screen.getByRole('button',{name:'Confirm send'})).toHaveAttribute('aria-busy','true');
+  expect(confirm).toBeDisabled();
   const body=JSON.parse(fetcher.mock.calls.find(([,o])=>o?.method==='POST')[1].body);
   expect(body).toMatchObject({sendMethod:'sms',expectedEditVersion:preview.editVersion,messageVersion:preview.messageVersion});
   finish({ok:true,status:200,json:async()=>({sent:true,channels:{sms:{ok:true,real:true}}})});

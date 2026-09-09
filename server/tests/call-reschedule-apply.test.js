@@ -13,11 +13,15 @@ const {
   INITIATED_BY,
 } = require('../services/call-reschedule-apply');
 
-const NOW = new Date('2026-09-08T19:20:00Z'); // 3:20 PM ET
+const NOW = new Date('2026-09-22T19:20:00Z'); // 3:20 PM ET
 const CUSTOMER_ID = 'c0000000-0000-4000-8000-000000000001';
 const CALL_ID = 'a0000000-0000-4000-8000-000000000001';
 const VISIT_ID = '70000000-0000-4000-8000-000000000001';
 const PHONE = '+15555550101';
+const ADDRESS = { address_line1: '100 Example Street', city: 'Bradenton', zip: '34205' };
+const QUOTE = 'We will see you on Thursday September 24 at 12 PM.';
+const FRIDAY_QUOTE = 'We will see you on Friday September 25 at 10 AM.';
+const MORNING_QUOTE = 'We will see you on Thursday September 24 at 9 AM.';
 
 function v2(overrides = {}) {
   const base = {
@@ -32,7 +36,11 @@ function v2(overrides = {}) {
     },
     property: { access_notes: 'Caller requested that the interior be serviced as well.' },
   };
-  return deepMerge(base, overrides);
+  const merged = deepMerge(base, overrides);
+  if (!Object.hasOwn(overrides, 'evidence')) merged.evidence = [{ field_path: '/scheduling/agent_committed_booking', speaker: 'agent',
+    quote: merged.scheduling.confirmed_start_at === '2026-09-25T10:00:00-04:00' ? FRIDAY_QUOTE
+      : merged.scheduling.confirmed_start_at === '2026-09-24T09:00:00-04:00' ? MORNING_QUOTE : QUOTE }];
+  return merged;
 }
 
 function deepMerge(a, b) {
@@ -45,16 +53,38 @@ function deepMerge(a, b) {
 
 const call = (overrides = {}) => ({
   id: CALL_ID, customer_id: CUSTOMER_ID, direction: 'inbound', from_phone: PHONE, to_phone: '+15555550100',
-  created_at: new Date('2026-09-08T19:07:24Z'), ...overrides,
+  created_at: new Date('2026-09-22T19:07:24Z'), transcription: `Agent: ${QUOTE}\nAgent: ${FRIDAY_QUOTE}\nAgent: ${MORNING_QUOTE}\nCaller: Thank you.`, ...overrides,
 });
-const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...overrides });
+const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...ADDRESS, ...overrides });
 const visit = (overrides = {}) => ({
-  id: VISIT_ID, scheduled_date: new Date('2026-09-24T00:00:00Z'), window_start: '09:00:00', window_end: '10:00:00',
+  id: VISIT_ID, customer_id: CUSTOMER_ID, property_id: null, scheduled_date: new Date('2026-09-24T00:00:00Z'), window_start: '09:00:00', window_end: '10:00:00',
   estimated_duration_minutes: null, status: 'pending', source_action: null, visit_id: null, internal_notes: null, is_recurring: true,
   ...overrides,
 });
 
 describe('planRescheduleFromCall', () => {
+  test.each(['2026-09-24T12:30:00-04:00', '2026-09-24T12:00:30-04:00', '2026-09-24T12:00:00.500-04:00'])('rejects off-hour instant %s', (confirmed_start_at) => {
+    expect(planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at } }), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('off_grid_start_time');
+  });
+
+  test('agent evidence must ground to the same slot and an affirmative agent turn', () => {
+    const args = { v2: v2(), call: call(), customer: customer(), candidates: [visit()], now: NOW };
+    expect(planRescheduleFromCall({ ...args, v2: v2({ evidence: [] }) }).reason).toBe('ungrounded_agent_commitment');
+    expect(planRescheduleFromCall({ ...args, call: call({ transcription: `Caller: ${QUOTE}\nAgent: We will check.` }) }).reason).toBe('ungrounded_agent_commitment');
+    expect(planRescheduleFromCall({ ...args, call: call({ transcription: `Caller: Can you come?\nAgent: If we have space. ${QUOTE}` }) }).reason).toBe('ungrounded_agent_commitment');
+    expect(planRescheduleFromCall({ ...args, v2: v2({ scheduling: { confirmed_start_at: '2026-09-24T13:00:00-04:00' } }) }).reason).toBe('ungrounded_agent_commitment');
+    expect(planRescheduleFromCall({ ...args, v2: v2({ scheduling: { confirmed_start_at: '2026-09-24T12:00:00-05:00' } }) }).reason).toBe('inconsistent_start_offset');
+  });
+
+  test('a stated saved property scopes the visit; an unstated property on a multi-property account stays open', () => {
+    const properties = [{ id: 'a', ...ADDRESS }, { id: 'b', ...ADDRESS, address_line1: '200 Example Street' }];
+    const args = { v2: v2(), call: call(), customer: customer(), properties, candidates: [visit({ property_id: 'a' })], now: NOW };
+    expect(planRescheduleFromCall(args).reason).toBe('property_needs_review');
+    const stated = v2({ property: { service_address: { street_line_1: '200 Example Street', city: ADDRESS.city, postal_code: ADDRESS.zip } } });
+    expect(planRescheduleFromCall({ ...args, v2: stated }).reason).toBe('no_visit_on_books');
+    expect(planRescheduleFromCall({ ...args, v2: stated, candidates: [...args.candidates, visit({ id: 'b-visit', property_id: 'b' })] })).toMatchObject({ action: 'apply', visitId: 'b-visit' });
+  });
+
   test('applies a same-day time move on the single matching visit, keeping the duration', () => {
     const plan = planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit()], now: NOW });
     expect(plan).toMatchObject({
@@ -139,7 +169,7 @@ describe('planRescheduleFromCall', () => {
 });
 
 // ── applier against a mocked connection ─────────────────────────────────
-function makeConn({ owned = true, prior = null, cust = customer(), visits = [visit()], openCards = 1, remaining = 0 } = {}) {
+function makeConn({ owned = true, prior = null, cust = customer(), visits = [visit()], properties = [], extraction = v2(), settledCall = {}, handled = false, moved = false, openCards = 1, remaining = 0 } = {}) {
   const writes = { updates: [], inserts: [] };
   const builder = (table) => {
     const state = { table, where: [], whereIn: [], updateArg: null };
@@ -149,19 +179,25 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
       whereNull() { return q; },
       whereRaw() { return q; },
       orderBy() { return q; },
-      count() { return q; },
+      count() { state.counted = true; return q; },
+      forUpdate() { return q; },
+      forShare() { return q; },
+      modify(fn) { fn(q); return q; },
       select() { return q; },
       update(arg) { state.updateArg = arg; writes.updates.push({ table, arg, where: state.where, whereIn: state.whereIn }); return q; },
       returning() { return Promise.resolve(Array.from({ length: table === 'triage_items' ? openCards : 1 }, (_, i) => ({ id: `card-${i}` }))); },
       insert(row) { writes.inserts.push({ table, row }); return Promise.resolve([{ id: 'act-1' }]); },
       first() {
-        if (table === 'call_log') return Promise.resolve(owned ? { id: CALL_ID } : undefined);
+        if (table === 'call_log') return Promise.resolve(owned ? { ...call(), processing_generation: 3, processing_token: null, v2_extraction_status: 'valid', ai_extraction_enriched: extraction, ...settledCall } : undefined);
         if (table === 'activity_log') return Promise.resolve(prior);
         if (table === 'customers') return Promise.resolve(cust);
-        if (table === 'triage_items') return Promise.resolve({ n: remaining });
+        if (table === 'triage_items') return Promise.resolve(state.counted ? { n: remaining } : (handled ? { id: 'handled-card' } : undefined));
+        if (table === 'reschedule_log') return Promise.resolve(moved ? { id: 'later-move' } : undefined);
+        if (table === 'scheduled_services') return Promise.resolve(visits[0]);
         return Promise.resolve(undefined);
       },
       then(resolve, reject) {
+        if (table === 'customer_properties') return Promise.resolve(properties).then(resolve, reject);
         if (table === 'scheduled_services' && state.updateArg == null) return Promise.resolve(visits).then(resolve, reject);
         if (state.updateArg != null) return Promise.resolve(1).then(resolve, reject);
         return Promise.resolve([]).then(resolve, reject);
@@ -173,14 +209,43 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
   conn.raw = (sql, bindings) => ({ sql, bindings });
   conn.transaction = async (fn) => fn(conn);
   conn.writes = writes;
+  conn.visits = visits;
   return conn;
 }
 
 describe('applyCallReschedule', () => {
+  test.each([null, 'another-customer'])('a finalized link edit to %s cannot use the stale customer', async (customer_id) => {
+    const conn = makeConn({ settledCall: { customer_id } });
+    const rebooker = { reschedule: jest.fn() };
+    expect(await applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'skipped', reason: 'customer_link_changed' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test.each([{ handled: true }, { moved: true }])('a later staff decision is checked on the move transaction: %j', async (state) => {
+    const conn = makeConn(state);
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: conn, service: conn.visits[0] })) };
+    expect(await applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'skipped', reason: 'handled_after_call' });
+    expect(conn.writes.inserts).toHaveLength(0);
+  });
+
+  test('a link edit after planning is caught before the move writes', async () => {
+    const settledCall = {};
+    const conn = makeConn({ settledCall });
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      settledCall.customer_id = null;
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+    }) };
+    expect(await applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'skipped', reason: 'changed_before_apply' });
+    expect(conn.writes.inserts).toHaveLength(0);
+  });
+
   test('moves the visit through the rebooker, notes the interior request, logs, resolves cards, sends nothing', async () => {
     const conn = makeConn();
-    const rebooker = { reschedule: jest.fn().mockResolvedValue({ success: true }) };
-    const result = await applyCallReschedule({ conn, call: call(), customerId: CUSTOMER_ID, v2: v2(), procGeneration: 3, now: NOW, rebooker });
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    const result = await applyCallReschedule({ conn, call: call(), procGeneration: 3, now: NOW, rebooker });
 
     expect(result).toMatchObject({ outcome: 'applied', visitId: VISIT_ID, newDate: '2026-09-24', newWindow: { start: '12:00', end: '13:00' }, cardsResolved: 1 });
     expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
@@ -191,7 +256,8 @@ describe('applyCallReschedule', () => {
     expect(by.length).toBeLessThanOrEqual(20);
 
     const noteUpdate = conn.writes.updates.find((u) => u.table === 'scheduled_services');
-    expect(noteUpdate.arg.internal_notes).toMatch(/^Call 2026-09-08: Caller requested that the interior/);
+    expect(noteUpdate.arg.internal_notes.sql).toContain('concat_ws');
+    expect(noteUpdate.arg.internal_notes.bindings[1]).toMatch(/^Call 2026-09-22: Caller requested that the interior/);
 
     const activity = conn.writes.inserts.find((i) => i.table === 'activity_log');
     expect(activity.row.action).toBe(ACTIVITY_ACTION);
@@ -208,34 +274,41 @@ describe('applyCallReschedule', () => {
   });
 
   test('a date move does not pin seriesPolicy single (owner cadence ruling applies)', async () => {
-    const conn = makeConn();
-    const rebooker = { reschedule: jest.fn().mockResolvedValue({ success: true }) };
-    await applyCallReschedule({ conn, call: call(), v2: v2({ scheduling: { confirmed_start_at: '2026-09-25T10:00:00-04:00' } }), now: NOW, rebooker });
+    const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: '2026-09-25T10:00:00-04:00' } }) });
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
     expect(rebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('seriesPolicy');
   });
 
   test('review_status stays open when other cards remain', async () => {
     const conn = makeConn({ remaining: 2 });
-    const rebooker = { reschedule: jest.fn().mockResolvedValue({ success: true }) };
-    await applyCallReschedule({ conn, call: call(), v2: v2(), now: NOW, rebooker });
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
     expect(conn.writes.updates.find((u) => u.table === 'call_log').arg.review_status).toBe('open');
   });
 
-  test('superseded pass and already-applied call both stand down before any write', async () => {
+  test('superseded passes stand down and applied calls retry card resolution', async () => {
     const rebooker = { reschedule: jest.fn() };
     const lost = makeConn({ owned: false });
-    expect(await applyCallReschedule({ conn: lost, call: call(), v2: v2(), procGeneration: 2, now: NOW, rebooker })).toEqual({ outcome: 'skipped', reason: 'superseded_by_newer_pass' });
+    expect(await applyCallReschedule({ conn: lost, call: call(), procGeneration: 2, now: NOW, rebooker })).toEqual({ outcome: 'skipped', reason: 'superseded_by_newer_pass' });
     const dup = makeConn({ prior: { id: 'act-0' } });
-    expect(await applyCallReschedule({ conn: dup, call: call(), v2: v2(), now: NOW, rebooker })).toEqual({ outcome: 'skipped', reason: 'already_applied' });
+    expect(await applyCallReschedule({ conn: dup, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'skipped', reason: 'already_applied', cardsResolved: 1 });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
     expect(lost.writes.updates).toHaveLength(0);
-    expect(dup.writes.updates).toHaveLength(0);
+    expect(dup.writes.updates.find((u) => u.table === 'triage_items').arg.status).toBe('resolved');
+    expect(dup.writes.inserts).toHaveLength(0);
   });
 
   test('a skip stamps the open card payload with the reason and leaves it open', async () => {
     const conn = makeConn({ visits: [] });
     const rebooker = { reschedule: jest.fn() };
-    const result = await applyCallReschedule({ conn, call: call(), v2: v2(), now: NOW, rebooker });
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
     expect(result).toMatchObject({ outcome: 'skipped', reason: 'no_visit_on_books' });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
     const stamp = conn.writes.updates.find((u) => u.table === 'triage_items');
@@ -244,17 +317,17 @@ describe('applyCallReschedule', () => {
   });
 
   test('a non-reschedule call writes nothing at all', async () => {
-    const conn = makeConn();
-    const result = await applyCallReschedule({ conn, call: call(), v2: v2({ scheduling: { status: 'confirmed' } }), now: NOW, rebooker: { reschedule: jest.fn() } });
+    const conn = makeConn({ extraction: v2({ scheduling: { status: 'confirmed' } }) });
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker: { reschedule: jest.fn() } });
     expect(result.reason).toBe('not_a_reschedule');
     expect(conn.writes.updates).toHaveLength(0);
     expect(conn.writes.inserts).toHaveLength(0);
   });
 
   test('already at the requested time: no move, cards resolved as moot', async () => {
-    const conn = makeConn();
+    const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00' } }) });
     const rebooker = { reschedule: jest.fn() };
-    const result = await applyCallReschedule({ conn, call: call(), v2: v2({ scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00' } }), now: NOW, rebooker });
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
     expect(result).toMatchObject({ outcome: 'noop', reason: 'already_at_requested_time', cardsResolved: 1 });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
   });
@@ -262,7 +335,7 @@ describe('applyCallReschedule', () => {
   test('a rebooker refusal propagates (the processor step logs it non-blocking) and no activity row is written', async () => {
     const conn = makeConn();
     const rebooker = { reschedule: jest.fn().mockRejectedValue(Object.assign(new Error('slot taken'), { statusCode: 409 })) };
-    await expect(applyCallReschedule({ conn, call: call(), v2: v2(), now: NOW, rebooker })).rejects.toThrow('slot taken');
+    await expect(applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).rejects.toThrow('slot taken');
     expect(conn.writes.inserts).toHaveLength(0);
   });
 });

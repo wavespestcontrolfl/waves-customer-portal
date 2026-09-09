@@ -247,6 +247,90 @@ describe('_private.threadQuoteSignal', () => {
     }));
   });
 
+  test('a vendor pitch to Waves is a terminal veto before triage or any model call', async () => {
+    // Synthetic pitches in the shape of the lead-gen / marketing robotexts
+    // the 2026-09 audit found on the location lines (vocabulary only, no
+    // live payloads).
+    const pitches = [
+      'Hey Waves, our holiday deal for home-service leads gets you a free setup, no monthly cost, and we fund your ads.',
+      "Hi Waves, we're running a 3 day UNLIMITED leads trial. Homeowners are requesting estimates.",
+      'I can bring you 3-5 exclusive turf and lawn leads daily with no upfront cost. Interested?',
+      'looking for one local home service company that can handle 5-15 more jobs over the next 8 weeks... just say "byebye" if you want me to stop',
+      'Hello Waves, your service is being requested by a property management group for area jobs. 2 min to apply',
+      'Just checking in about leads for $55 each. No upfront fees and no ad spend.',
+      "curious if you've ever thought about having an ai receptionist to answer calls when you're busy on site",
+      'Do you have a google review system set up for your business yet?',
+      "We're offering a 3-day trial that connects you with homeowners requesting estimates.",
+      'Are you open to more booked jobs over the next 6 weeks? Reply "NO" if you need me to stop texting',
+      // two WEAK markers together
+      '$0 upfront cost for our pest marketing package. Want more details?',
+      '$0 upfront cost. Reply NO to opt out.',
+      'Our service has $0 upfront cost. Reply NO to opt out.',
+    ];
+    for (const body of pitches) {
+      expect(_private.isSolicitationPitch(body)).toBe(true);
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });
+      expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
+      expect(result.terminal).toBe(true);
+    }
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('a single weak marker is a prospect\'s phrase, not a pitch', () => {
+    expect(_private.isSolicitationPitch('Can I get termite service with no upfront cost?')).toBe(false);
+    expect(_private.isSolicitationPitch('I need pest control Tuesday; reply NO if you cannot make it.')).toBe(false);
+    expect(_private.isSolicitationPitch('I have termites at my new house. Would you like more details?')).toBe(false);
+    expect(_private.isSolicitationPitch('Is there a free trial of the mosquito program?')).toBe(false);
+    expect(_private.isSolicitationPitch('I have more jobs and need extra estimates for pest control.')).toBe(false);
+    expect(_private.isSolicitationPitch('I manage more customers who need pest control estimates.')).toBe(false);
+    expect(_private.isSolicitationPitch('Can you handle more lawn jobs or handle extra pest estimates?')).toBe(false);
+  });
+
+  test.each([
+    'We can provide more lawn leads.',
+    'We have extra qualified pest leads.',
+    'Our network offers exclusive lawn jobs.',
+    'We provide unlimited estimates for contractors.',
+  ])('explicit lead-generation wording stands alone: %s', (body) => {
+    expect(_private.isSolicitationPitch(body)).toBe(true);
+  });
+
+  test('homeowner quote asks that share vendor vocabulary still reach the classifier and draft pipeline', async () => {
+    const asks = [
+      'Do you have any availability for a one-time service? I need a rate for a rat problem.',
+      'How much do you charge for a monthly pest plan? No contract preferred.',
+      'Can you give me a free estimate on lawn treatment for my new house?',
+      'We manage a rental and need pest control for a rat problem, please let me know your price or quote first.',
+      'I have termites at my new house. Would you like more details?',
+      'Can I get termite service with no upfront cost?',
+      'Can I get more estimates for my other rentals?',
+      'Could you provide extra estimates for pest control at my other properties?',
+      'I need pest control for more jobs at my rentals. Can you quote them?',
+      'I have extra lawn jobs at my rentals. How much would you charge?',
+      'Can I get a quote for termite service? I can connect you with the property manager for access.',
+      'Pest control service is being requested by our tenant. Can you send an estimate?',
+      'I need more estimates for pest control at my other rentals. Would you like more details?',
+      'Your AI receptionist said you would send me a quote for termite treatment.',
+      'Can you handle more lawn jobs at my rentals? Would you like more details?',
+      'Can I get termite service with no upfront cost? Reply NO if you cannot do that.',
+      'I tried to request an estimate but the link leads to your home page.',
+      'Can you handle more pest jobs with no upfront cost?',
+      'Can I get termite service with no upfront cost? Would you like more details?',
+    ];
+    for (const body of asks) {
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });
+      expect(result.started).toBe(true);
+      await result.draftPromise;
+    }
+    expect(mockDispatch).toHaveBeenCalledTimes(asks.length);
+    expect(mockNotify).toHaveBeenCalledTimes(asks.length);
+    expect(mockRunDraftPipeline).toHaveBeenCalledTimes(asks.length);
+    for (const call of mockDispatch.mock.calls) {
+      expect(call[1].text).toContain('business-to-business pitch TO Waves');
+    }
+  });
+
   test('low classifier confidence is not a quote request', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { quote_request: true, confidence: 0.4 } });
     const signal = await _private.threadQuoteSignal('price?');
@@ -463,6 +547,30 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     mockDeterministicOutOfScope.mockImplementation((text) => /power wash/i.test(text));
     const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much?' });
     expect(result.skipped).toBe('out_of_scope_service_thread');
+    expect(result.terminal).toBe(true);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a vendor pitch on an active clarify/intake thread is a TERMINAL veto (skipIntentGate), before triage loads', async () => {
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'We can bring you exclusive pest control leads daily with no upfront cost.',
+      skipIntentGate: true,
+    });
+    expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
+    expect(result.terminal).toBe(true);
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockLoadTriage).not.toHaveBeenCalled();
+  });
+
+  test('the veto does not depend on scope guards (skipIntentGate, guards OFF)', async () => {
+    mockScopeGuardsEnabled.mockReturnValue(false);
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'We fund your ads and send exclusive leads. Interested?',
+      skipIntentGate: true,
+    });
+    expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
     expect(result.terminal).toBe(true);
     expect(mockDispatch).not.toHaveBeenCalled();
   });

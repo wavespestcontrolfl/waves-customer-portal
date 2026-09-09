@@ -122,6 +122,10 @@ const LeadResponseAgent = {
       logger.warn('[lead-agent] Missing LEAD_AGENT_ENVIRONMENT_ID (or ANTHROPIC_ENVIRONMENT_ID) — skipping agent processing');
       return null;
     }
+    if (!lead?.leadId || !lead?.customerId) {
+      logger.warn('[lead-agent] Skipping lead without assigned customer', { leadId: lead?.leadId || null });
+      return { skipped: true, error: 'Agent processing requires an assigned lead and customer' };
+    }
 
     const startTime = Date.now();
 
@@ -189,6 +193,7 @@ const LeadResponseAgent = {
           const toolName = data.name;
           const toolInput = data.input || {};
           const toolUseId = data.id;
+          const toolContext = { leadId: lead.leadId, customerId: lead.customerId, sessionId, toolUseId };
 
           logger.info(`[lead-agent] Tool: ${toolName}`);
 
@@ -204,19 +209,27 @@ const LeadResponseAgent = {
           if (toolName === 'send_lead_response' && criticalFailures.length > 0) {
             logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Queueing draft for human review.`);
             try {
-              await executeLeadTool('queue_for_adam', {
+              const queued = await executeLeadTool('queue_for_adam', {
                 lead_id: lead.leadId,
                 customer_id: lead.customerId,
                 reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Please review and follow up.`,
                 draft_response: toolInput.message || '',
-              });
+              }, toolContext);
+              if (queued?.queued !== true) throw new Error(queued?.error || 'Draft was not saved');
               toolResult = {
+                ...queued,
                 sent: false,
                 queued: true,
                 autoSendSuppressed: true,
                 note: 'Queued for human review due to missing context; no fallback SMS sent.',
               };
-              actionTaken = 'auto_send_suppressed_queued';
+              if (isToolFailure(queued)) {
+                failed = true;
+                toolError = queued.error || 'Owner alert delivery failed';
+                if (!queued.validationError) leadToolBreaker.recordFailure();
+              } else {
+                actionTaken = 'auto_send_suppressed_queued';
+              }
             } catch (err) {
               toolResult = { error: `Human-review queue failed: ${err.message}` };
               failed = true;
@@ -230,11 +243,11 @@ const LeadResponseAgent = {
             if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
           } else {
             try {
-              toolResult = await executeLeadTool(toolName, toolInput);
+              toolResult = await executeLeadTool(toolName, toolInput, toolContext);
               if (isToolFailure(toolResult)) {
                 failed = true;
                 toolError = toolResult.error || 'tool returned error';
-                leadToolBreaker.recordFailure();
+                if (!toolResult.validationError) leadToolBreaker.recordFailure();
                 if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
               } else {
                 leadToolBreaker.recordSuccess();
@@ -248,7 +261,7 @@ const LeadResponseAgent = {
                 if (toolName === 'send_lead_response' && toolResult && toolResult.sent === true) {
                   actionTaken = 'auto_sent';
                 }
-                if (toolName === 'queue_for_adam') actionTaken = 'queued_for_adam';
+                if (toolName === 'queue_for_adam' && toolResult?.queued === true) actionTaken = 'queued_for_adam';
               }
             } catch (err) {
               toolResult = { error: `Tool failed: ${err.message}` };
