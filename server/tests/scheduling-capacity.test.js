@@ -90,3 +90,16 @@ test('unknown coordinates, active work and unassigned blockers cannot create cap
   const live = context([stop('active', 480, 60, { status: 'on_site' })], { now: new Date('2027-01-15T14:00:00Z') });
   expect(evaluateArrivalPlacement(live, options()).reason).toBe('route_unverified');
 });
+
+
+test.each([540, 960])('capacity at 16:00 is independent of another technician booking at minute %i', start => {
+  const input = context([stop('other-tech', start, 60, { technician_id: 'other' })]);
+  expect(evaluateArrivalPlacement(input, options()).feasible).toBe(true);
+  delete process.env.GATE_SCHEDULING_CAPACITY;
+  expect(evaluateArrivalPlacement(input, options()).feasible).toBe(false);
+});
+
+test('capacity still rejects overlapping unassigned work and an overloaded selected technician', () => {
+  expect(evaluateArrivalPlacement(context([stop('unassigned', 960, 60, { technician_id: null })]), options()).feasible).toBe(false);
+  expect(evaluateArrivalPlacement(context([stop('own', 480, 600)]), options()).feasible).toBe(false);
+});

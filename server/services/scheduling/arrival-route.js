@@ -233,11 +233,11 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       returnTooLate = true;
       continue;
     }
-    // Unassigned work and other-tech bookings retain their existing fixed
-    // occupancy, including the final drive home. Never turn unknown locations
-    // into a zero-minute trip.
-    const fixed = rows.filter(row => row.technician_id !== target.technician_id
-      || (!capacity && row.reservation_expires_at != null));
+    // Capacity models the selected technician's route; unassigned work still
+    // blocks it, including the drive home. Legacy placement keeps its shared
+    // occupancy rule for other technicians and live holds.
+    const fixed = rows.filter(row => capacity ? row.technician_id == null
+      : row.technician_id !== target.technician_id || row.reservation_expires_at != null);
     const hitsFixed = simulation.arrivals.some((arrival, index) => fixed.some(row => {
       if (row.id === arrival.id || row.status === 'completed') return false;
       const start = minuteOfDay(row.window_start);
@@ -262,8 +262,8 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     ? { ...fail, reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` }
     : fail;
   const { simulation, order, usedLegs } = winner;
-  // Keep the tech-blind occupancy guard: unassigned visits, other-tech work,
-  // and live holds have NOT been proven movable by this route simulation.
+  // Fixed blockers remain immovable; selected-technician holds are included
+  // in the capacity route alongside that technician's appointments.
   const arrival = simulation.arrivals.find(row => row.id === target.id);
   const baselineDrive = routeDriveMinutes(currentOrder(pending), origin);
   return {
