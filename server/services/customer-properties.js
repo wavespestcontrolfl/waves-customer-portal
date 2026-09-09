@@ -726,7 +726,7 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
 // Relationships that record the property as something other than the home
 // the customer lives in. Occupancy may still read 'unknown' for them, so the
 // relationship is checked in its own right before a promotion.
-const NON_RESIDENCE_RELATIONSHIPS = new Set(['rental_owned', 'managed_for_client']);
+const NON_RESIDENCE_RELATIONSHIPS = new Set(['rental_owned', 'family_home', 'managed_for_client']);
 
 function primaryPropertyUnavailable(target, customer) {
   if (target.is_primary) return { message: 'This property is already primary', code: 'already_primary' };
@@ -738,7 +738,7 @@ function primaryPropertyUnavailable(target, customer) {
     return { message: 'Primary requires an owner-occupied or unclassified residential property.', code: 'primary_role_unavailable' };
   }
   if (NON_RESIDENCE_RELATIONSHIPS.has(String(target.relationship || '').trim().toLowerCase())) {
-    return { message: 'This property is recorded as a rental or a client-managed property. Correct its relationship before making it primary.', code: 'primary_role_unavailable' };
+    return { message: 'This property is recorded as a rental, a family member’s home or a client-managed property. Correct its relationship before making it primary.', code: 'primary_role_unavailable' };
   }
   if (!['address_line1', 'city', 'state', 'zip'].every(field => String(target[field] || '').trim())) {
     return { message: 'Complete the street, city, state and ZIP before making this property primary.', code: 'property_incomplete' };
@@ -841,24 +841,31 @@ async function changePrimaryProperty(customerId, propertyId, options = {}) {
 
 // Settled visits (completed, cancelled, skipped, rescheduled, no-show) with no
 // saved service address are rendered by the report loaders from the account
-// address (COALESCE(ss.service_address_line1, customers.address_line1)). The
+// address (each report component independently falls back to customers). The
 // role-proposal pin deliberately leaves them alone, so before a manual primary
 // change moves the account address they are stamped with the address they
-// were serviced at. Fill-only, and never a visit whose estimate targets
-// another property.
+// were serviced at. Fill-only, including compatible partial stamps, and never
+// a visit whose saved components or estimate target another property.
 async function preserveSettledVisitAddresses(trx, customerId, oldPrimary) {
   if (!oldPrimary) return;
   const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
   const { estimateQuotesCustomerAddress } = require('./estimate-property-linkage');
+  const stamp = {
+    service_address_line1: oldPrimary.address_line1,
+    service_address_line2: oldPrimary.address_line2 || '',
+    service_address_city: oldPrimary.city || '',
+    service_address_state: oldPrimary.state || 'FL',
+    service_address_zip: oldPrimary.zip || '',
+  };
   const visits = trx('scheduled_services')
     .where({ customer_id: customerId })
     .where(function () { this.whereNull('property_id').orWhere('property_id', oldPrimary.id); })
-    .whereNull('service_address_line1')
+    .where(function () { for (const column of Object.keys(stamp)) this.orWhereNull(column); })
     .whereIn('status', TERMINAL_VISIT_STATUSES);
   const legacyEstimates = await trx('estimates').whereNull('property_id')
     .whereIn('id', visits.clone().select('source_estimate_id')).select('id', 'address');
   const otherEstimateIds = legacyEstimates.filter(estimate => !estimateQuotesCustomerAddress(estimate.address, oldPrimary)).map(estimate => estimate.id);
-  await visits
+  const candidates = await visits
     .modify(query => {
       if (otherEstimateIds.length) query.where(q => q.whereNull('source_estimate_id').orWhereNotIn('source_estimate_id', otherEstimateIds));
     })
@@ -867,13 +874,17 @@ async function preserveSettledVisitAddresses(trx, customerId, oldPrimary) {
         .whereRaw('estimates.id = scheduled_services.source_estimate_id')
         .whereNotNull('property_id').whereNot('property_id', oldPrimary.id));
     })
-    .update({
+    .orderBy('id').forUpdate().select('*');
+  const normalizers = { service_address_line1: streetKey, service_address_city: normStreet,
+    service_address_state: normStreet, service_address_zip: normalizeZip };
+  const oldUnit = unitKey(oldPrimary.address_line2) || streetEmbeddedUnitKey(oldPrimary.address_line1);
+  const compatible = candidates.filter(visit =>
+    Object.entries(normalizers).every(([column, normalize]) => visit[column] == null || normalize(visit[column]) === normalize(stamp[column]))
+    && [unitKey(visit.service_address_line2), streetEmbeddedUnitKey(visit.service_address_line1)].filter(Boolean).every(unit => unit === oldUnit));
+  if (!compatible.length) return;
+  await trx('scheduled_services').whereIn('id', compatible.map(visit => visit.id)).update({
       property_id: oldPrimary.id,
-      service_address_line1: oldPrimary.address_line1,
-      service_address_line2: oldPrimary.address_line2 || null,
-      service_address_city: oldPrimary.city,
-      service_address_state: oldPrimary.state || 'FL',
-      service_address_zip: oldPrimary.zip,
+      ...Object.fromEntries(Object.entries(stamp).map(([column, value]) => [column, trx.raw('COALESCE(??, ?)', [column, value])])),
       lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude ?? null]),
       lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude ?? null]),
       updated_at: new Date(),
