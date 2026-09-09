@@ -34,6 +34,17 @@ exports.up = async function up(knex) {
     t.jsonb('findings').notNullable().defaultTo('[]'); // after the naming gate
     t.jsonb('severities').nullable();
     t.jsonb('scores_raw').nullable();
+    // The AI scores exactly as presented to the technician: legacy units,
+    // seasonally adjusted at /assess. Immutable; /confirm calibrates the
+    // technician's corrections against this snapshot, never the assessment
+    // row a confirm rewrites — a complete run without it is not comparable.
+    t.jsonb('scores_adjusted').nullable();
+    // The known-visit context the call received (season, month, region,
+    // grass, irrigation, turf height, prior summary) — the prompt snapshot a
+    // replay can prove against; the technician's free-text notes are never
+    // stored, only whether the call had them.
+    t.jsonb('vision_context').nullable();
+    t.boolean('technician_notes_present').notNullable().defaultTo(false);
     t.text('observations').nullable();
     t.jsonb('raw_response').nullable();
     t.integer('tokens_in').nullable();

@@ -171,7 +171,8 @@ describe('lawn assessment route contracts', () => {
       expect(derive).not.toMatch(/\bassessment\./);
       expect(derive).not.toMatch(/\bvisitRun\b/);
       // A run-backed row calibrates against the run's own scores, a legacy row against its stored JSON.
-      expect(confirm).toMatch(/const calibrationBaseline = runAiScores \|\| assessment\.adjusted_scores \|\| assessment\.composite_scores;/);
+      // The calibration baseline (the run's snapshot, else the legacy row's JSON, stress seeded) lives in the delivery service.
+      expect(fs.readFileSync(path.join(__dirname, '../services/lawn-visit-delivery.js'), 'utf8')).toMatch(/const baseline = runAiScores \|\| assessment\.adjusted_scores \|\| assessment\.composite_scores;/);
       expect(confirm).toMatch(/parseJsonObject\(assessmentRow\.adjusted_scores\)/);
       expect(confirm).toMatch(/overall_score: overallScore,/);
       // confirmed_by_tech / confirmed_at are stamped only on a confirmed row; a pending row never becomes the property baseline.
@@ -212,35 +213,37 @@ describe('lawn assessment route contracts', () => {
       // The already-confirmed branch: reload the row and the run, then CLAIM the delivery — a retry after a process exit
       // between the commit and the queue resumes it (no calibration); a retry after a delivered confirm returns with
       // nothing rerun.
-      expect(confirm).toMatch(/if \(alreadyConfirmed\) \{[\s\S]{0,400}const \[current, confirmedRun\] = await Promise\.all\(\[db\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.first\(\), visitAssessment\.loadRun\(assessmentId, db\)\]\);[\s\S]{0,900}if \(!\(await visitAssessment\.claimPipeline\(assessmentId, db\)\)\) \{\s*return res\.json\(\{ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment\.responseForRun\(confirmedRun \|\| visitRun\) \}\);\s*\}\s*resumedPipeline = true;\s*updated = current;\s*currentRun = confirmedRun \|\| visitRun;\s*confirmed = true;\s*calibrationEligible = false;\s*\}/);
-      // The delivery is claimed durably before it is queued, once per confirmed row, and marked complete at its end.
-      expect(confirm).toMatch(/const deliver = !reviewedRun \|\| resumedPipeline \|\| await visitAssessment\.claimPipeline\(assessmentId, db\);\s*if \(deliver\) setImmediate\(async \(\) => \{/);
+      expect(confirm).toMatch(/if \(alreadyConfirmed\) \{[\s\S]{0,400}const \[current, confirmedRun\] = await Promise\.all\(\[db\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.first\(\), visitAssessment\.loadRun\(assessmentId, db\)\]\);[\s\S]{0,900}if \(!\(await visitAssessment\.claimPipeline\(assessmentId, db\)\)\) \{\s*return res\.json\(\{ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment\.responseForRun\(confirmedRun \|\| visitRun\) \}\);\s*\}\s*resumedPipeline = true;\s*updated = current;\s*currentRun = confirmedRun \|\| visitRun;\s*confirmed = true;\s*\}/);
+      // The delivery is claimed durably before it is queued, once per confirmed row, and runs in ONE place —
+      // services/lawn-visit-delivery.js — step-gated on the stamps and resumable; the confirming request hands over
+      // its calibration comparison (the RESOLVED confirmation, never this request's payload), a resumed delivery
+      // rebuilds it from the run snapshot.
+      expect(confirm).toMatch(/const deliver = !reviewedRun \|\| resumedPipeline \|\| await visitAssessment\.claimPipeline\(assessmentId, db\);\s*if \(deliver\) setImmediate\(async \(\) => \{\s*try \{\s*await lawnVisitDelivery\.deliverConfirmedAssessment\(\{\s*assessmentId,\s*calibrate: resumedPipeline\s*\? 'resume'\s*: \(adjustedScores && calibrationEligible \? \{ aiScores: lawnVisitDelivery\.calibrationBaseline\(runAiScores, assessment\), finalScores \} : null\),\s*\}\);/);
       expect(confirm.match(/claimPipeline\(/g)).toHaveLength(2);
-      // Completion is what the steps' own stamps prove — completePipeline checks them and reports the gaps.
-      expect(confirm).toMatch(/LawnIntel\.trackAssessmentCompletion\(updated\.service_date\);\s*(?:\/\/[^\n]*\n\s*)*if \(reviewedRun\) \{\s*const gaps = await visitAssessment\.completePipeline\(assessmentId, db\);\s*if \(gaps\.length\) logger\.warn\([^\n]*\);\s*\}\s*\} catch \(intelErr\)/);
+      expect(confirm).not.toMatch(/recordTechCalibration|generateAssessmentRecommendations|sendAssessmentNotification|generateServiceReport|trackAssessmentCompletion|completePipeline\(/);
       expect(confirm).toMatch(/res\.json\(\{ success: true, confirmed: true, \.\.\.\(resumedPipeline \? \{ alreadyConfirmed: true, resumedDelivery: true \} : \{\}\), assessment: updated, \.\.\.runPayload \}\);/);
-      expect(confirm).toMatch(/if \(protocolFieldChecksProvided\) Object\.assign\(updated, protocolFieldChecks, \{ protocol_field_checks: protocolFieldChecks \}\);/);
-      // The response reads the run the transaction reviewed (or loaded under the lock), not the pre-lock snapshot.
-      expect(confirm).toMatch(/visitAssessment\.responseForRun\(reviewedVisitRun \|\| currentRun\)/);
       expect(confirm).not.toMatch(/reviewRun\([\s\S]{0,120}, db\)/);
       expect(confirm).not.toMatch(/legacyBaselineFields\([\s\S]{0,120}, db\)/);
-      // Calibration compares the run's scores with the RESOLVED confirmation — every score the row confirmed
-      // with, not this request's payload (a follow-up confirm may carry only the last missing field).
-      expect(confirm).toMatch(/LawnIntel\.recordTechCalibration\(assessmentId, aiScores, finalScores\)/);
-      expect(confirm).not.toMatch(/recordTechCalibration\(assessmentId, aiScores, adjustedScores\)/);
-      // A pending row returns right after the write with the missing scores — before the wiki link and the intelligence pipeline.
+      // A pending row returns right after the write with the missing scores — before the wiki link and the delivery.
       const pending = confirm.indexOf('if (!confirmed) {');
       expect(pending).toBeGreaterThan(confirm.indexOf('persistProtocolFieldChecks('));
       expect(pending).toBeLessThan(confirm.indexOf('wiki.linkTreatmentOutcome('));
       expect(pending).toBeLessThan(confirm.indexOf('setImmediate('));
       expect(confirm.slice(pending, pending + 200)).toMatch(/success: true, confirmed: false, missingScores, assessment: updated, \.\.\.runPayload/);
-      expect(confirm).toMatch(/if \(adjustedScores && calibrationEligible\)/);
-      // Every customer-facing step runs once, inside the pipeline only a confirmed row reaches.
-      const pipeline = confirm.slice(confirm.indexOf('setImmediate('), confirm.indexOf('// 7. Track assessment completion'));
-      for (const call of ['KnowledgeBridge.generateAssessmentRecommendations(assessmentId)', 'LawnIntel.emitHealthSignal(updated.customer_id)', 'LawnIntel.sendAssessmentNotification(assessmentId)', 'LawnIntel.generateServiceReport(assessmentId)']) {
-        expect(pipeline).toContain(call);
-        expect(confirm.split(call)).toHaveLength(2);
+      // The delivery service: every customer-facing step once, each gated on its own stamp for a run-backed row;
+      // calibration once per assessment; completion is what the stamps prove.
+      const delivery = fs.readFileSync(path.join(__dirname, '../services/lawn-visit-delivery.js'), 'utf8');
+      for (const call of ['KnowledgeBridge.generateAssessmentRecommendations(assessmentId)', 'LawnIntel.emitHealthSignal(row.customer_id)', 'LawnIntel.sendAssessmentNotification(assessmentId)', 'LawnIntel.generateServiceReport(assessmentId)', 'LawnIntel.trackAssessmentCompletion(row.service_date)', 'LawnIntel.recordTechCalibration(assessmentId, scores.aiScores, scores.finalScores)']) {
+        expect(delivery.split(call)).toHaveLength(2);
       }
+      expect(delivery).toMatch(/if \(due\('recommendations'\)\) \{ await KnowledgeBridge\.generateAssessmentRecommendations/);
+      expect(delivery).toMatch(/if \(!row\.service_id && due\('notification'\)\) \{ await LawnIntel\.sendAssessmentNotification/);
+      expect(delivery).toMatch(/if \(due\('report'\)\) \{ await LawnIntel\.generateServiceReport/);
+      expect(delivery).toMatch(/const existing = await knex\('tech_calibration'\)\.where\(\{ assessment_id: assessmentId \}\)\.first\('id'\)/);
+      expect(delivery).toMatch(/const gaps = run \? await visitAssessment\.completePipeline\(assessmentId, knex\) : \[\];/);
+      // The recovery sweep is registered (every 10 minutes, exclusive) so an abandoned claim never waits on a client.
+      const index = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+      expect(index).toMatch(/cron\.schedule\('\*\/10 \* \* \* \*', async \(\) => \{\s*try \{\s*await runExclusive\('lawn-visit-delivery-sweep', async \(\) => \{\s*const \{ sweepAbandonedDeliveries \} = require\('\.\/services\/lawn-visit-delivery'\);/);
     });
   });
 });

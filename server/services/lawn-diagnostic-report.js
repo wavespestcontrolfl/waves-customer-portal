@@ -617,7 +617,7 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // a low-confidence finding never lets prose name the species (Codex #4149
 // r11 — sedge, clover and spurge were missing; r12 — plural-aware, as the
 // label patterns are unbounded substrings).
-const SUMMARY_CAUSE_RE = /\b(chinch|large patch(?:es)?|brown patch(?:es)?|gr[ae]y leaf|dollar spots?|rhizoctonia|take[-\s]?all|fungus|fungal|diseases?|leaf spots?|mold|mildew|insects?|pests?|grubs?|caterpillars?|worms?|armyworms?|sod\s?webworms?|nutsedge|sedges?|crabgrass|dollarweed|clovers?|spurges?|drought|water stress|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
+const SUMMARY_CAUSE_RE = /\b(chinch|large patch(?:es)?|brown patch(?:es)?|gr[ae]y leaf|dollar spots?|rhizoctonia|take[-\s]?all|fungus|fungal|diseases?|leaf spots?|mold|mildew|insects?|pests?|grubs?|caterpillars?|worms?|armyworms?|sod\s?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|drought|water stress|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -845,6 +845,12 @@ module.exports = {
   safeConditionLabel,
   safeCustomerSummary,
   SUMMARY_CAUSE_RE,
+  // The PII pieces of scrubCustomerText, for a consumer that must keep
+  // agronomic wording intact (the eval's prior-summary fixture).
+  CUSTOMER_TEXT_URL,
+  CUSTOMER_TEXT_EMAIL,
+  CUSTOMER_TEXT_PHONE,
+  STREET_ADDRESS,
   lowerConfidence,
   CONDITION_LABEL_VALUES,
   MINIMAL_SAFE_SUMMARY,

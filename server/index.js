@@ -1377,6 +1377,23 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
           }
         }, { timezone: 'America/New_York' });
 
+        // Lawn visit-assessment delivery recovery: a confirmed run-backed
+        // assessment whose customer delivery was never claimed or whose claim
+        // went stale without completing is resumed here (no-op without the
+        // claim columns; rows confirmed in the last two minutes are left to
+        // their own request).
+        cron.schedule('*/10 * * * *', async () => {
+          try {
+            await runExclusive('lawn-visit-delivery-sweep', async () => {
+              const { sweepAbandonedDeliveries } = require('./services/lawn-visit-delivery');
+              const result = await sweepAbandonedDeliveries();
+              if (result.candidates) logger.info(`[cron] lawn visit delivery sweep: ${JSON.stringify(result)}`);
+            });
+          } catch (err) {
+            logger.error(`[cron] lawn visit delivery sweep failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+
         cron.schedule('0 4 * * 0', async () => {
           try {
             await runExclusive('assessment-analytics-weekly', async () => {

@@ -14,6 +14,7 @@ const lawnAssessment = require('../services/lawn-assessment');
 const visitAssessment = require('../services/lawn-visit-assessment');
 const KnowledgeBridge = require('../services/knowledge-bridge');
 const LawnIntel = require('../services/lawn-intelligence');
+const lawnVisitDelivery = require('../services/lawn-visit-delivery');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
@@ -1207,7 +1208,6 @@ router.post('/confirm', async (req, res, next) => {
       updated = current;
       currentRun = confirmedRun || visitRun;
       confirmed = true;
-      calibrationEligible = false;
     }
     if (protocolFieldChecksProvided) Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
 
@@ -1244,70 +1244,21 @@ router.post('/confirm', async (req, res, next) => {
     // Knowledge Bridge + Lawn Intelligence: fire all async intelligence (non-blocking).
     // A run-backed row's delivery is claimed durably first (see the resume
     // branch above); a legacy row delivers as before.
+    // The delivery itself lives in services/lawn-visit-delivery.js — the one
+    // place it runs, step-gated and resumable (the recovery sweep resumes an
+    // abandoned claim from there too). A run-backed row's delivery is claimed
+    // durably first; a legacy row delivers as before. The confirming request
+    // hands over its calibration comparison; a resumed delivery rebuilds it
+    // from the run snapshot.
     const deliver = !reviewedRun || resumedPipeline || await visitAssessment.claimPipeline(assessmentId, db);
     if (deliver) setImmediate(async () => {
       try {
-        // 1. FAWN weather context
-        await LawnIntel.attachWeather(assessmentId);
-
-        // 3. Tech calibration — record AI vs tech score differences. A
-        //    run-backed row compares against the run's own answer (the
-        //    assessment row's JSON may carry a pending confirm's entries).
-        if (adjustedScores && calibrationEligible) {
-          const calibrationBaseline = runAiScores || assessment.adjusted_scores || assessment.composite_scores;
-          const aiScores = calibrationBaseline
-            ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
-            : {};
-          // Legacy pre-stress_damage baselines have no stress in the AI JSON, so the
-          // calibration would write ai_stress_damage=null and skip the delta. Seed it
-          // the same way the UI/confirm fallback does — min(fungus, thatch, 95) — so a
-          // tech's Stress correction on a legacy row records a real delta, not zero.
-          if (aiScores && aiScores.stress_damage == null) {
-            const f = Number(aiScores.fungus_control);
-            const t = Number(aiScores.thatch_level);
-            const parts = [f, t, 95].filter(Number.isFinite);
-            if (parts.length > 1) aiScores.stress_damage = Math.min(...parts);
-          }
-          // The technician's side is the RESOLVED confirmation — every score
-          // the row confirmed with, including overrides an earlier confirm of
-          // an incomplete run already saved — not this request's payload,
-          // which may carry only the last missing field (Codex #4150 r7).
-          await LawnIntel.recordTechCalibration(assessmentId, aiScores, finalScores);
-        }
-
-        // Customer-facing steps — a run-backed row reaches here only once it
-        // confirmed with every score (the pending return above).
-        // 2. AI recommendations from Knowledge Bridge (Claudeopedia + Wiki)
-        await KnowledgeBridge.generateAssessmentRecommendations(assessmentId);
-
-        // 4. Lawn health → customer health signal
-        await LawnIntel.emitHealthSignal(updated.customer_id);
-
-        // 5. Standalone lawn assessments (fallback customer picker, no
-        //    scheduled service — service_id is null) have no later completion
-        //    SMS at all, so they still get the standalone "lawn health report
-        //    ready" notification. Assessments linked to a service do NOT: that
-        //    visit's completion text is a short link to the report, and the
-        //    score lives on the report (owner ruling 2026-08-01 retired the
-        //    score fold-in). This step runs after recommendation generation
-        //    (step 2) so the standalone notification's tip is populated.
-        if (!updated.service_id) {
-          await LawnIntel.sendAssessmentNotification(assessmentId);
-        }
-
-        // 6. Auto-generate service report
-        await LawnIntel.generateServiceReport(assessmentId);
-
-        // 7. Track assessment completion
-        await LawnIntel.trackAssessmentCompletion(updated.service_date);
-
-        // Delivered — as far as the steps' own stamps prove it: a step that
-        // swallowed its failure leaves its stamp missing, the claim stays
-        // open, and a retry resumes the delivery once the claim is stale.
-        if (reviewedRun) {
-          const gaps = await visitAssessment.completePipeline(assessmentId, db);
-          if (gaps.length) logger.warn(`[lawn-assessment] delivery for ${assessmentId} left incomplete (${gaps.join(', ')}) — a retry may resume it`);
-        }
+        await lawnVisitDelivery.deliverConfirmedAssessment({
+          assessmentId,
+          calibrate: resumedPipeline
+            ? 'resume'
+            : (adjustedScores && calibrationEligible ? { aiScores: lawnVisitDelivery.calibrationBaseline(runAiScores, assessment), finalScores } : null),
+        });
       } catch (intelErr) {
         logger.error(`[lawn-assessment] Intelligence pipeline failed (non-blocking): ${intelErr.message}`);
       }
