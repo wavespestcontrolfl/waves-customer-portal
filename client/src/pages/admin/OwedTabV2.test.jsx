@@ -22,6 +22,7 @@ const rows = () => [
 
 let calls;
 beforeEach(() => {
+  vi.spyOn(Date, "now").mockReturnValue(new Date("2026-09-05T15:00:00Z").getTime());
   calls = [];
   localStorage.setItem("waves_admin_token", "t");
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
@@ -33,6 +34,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   window.location.hash = "";
 });
 
