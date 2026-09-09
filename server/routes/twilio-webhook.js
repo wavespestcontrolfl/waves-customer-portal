@@ -1098,7 +1098,10 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    // The AI assistant line answers its own unknown senders (and escalates
+    // on its own terms below) — its ordinary chatbot turns must not page
+    // staff (codex #4210 P1).
+    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !isAiNumber && !knownInboundNotified && !repeatUnknownSender && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
       } catch (e) {
@@ -1865,8 +1868,10 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
     twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
   }, { beforePush: unifiedStillUnread });
   try {
-    if (customer && !(await unifiedStillUnread())) {
-      await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
+    // Post-insert race: the thread was opened while the bell was being
+    // written. Retire it by SID — that works for unlinked threads too.
+    if (!(await unifiedStillUnread())) {
+      await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer?.id || null, twilioSid: MessageSid });
     }
   } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
   return stats;

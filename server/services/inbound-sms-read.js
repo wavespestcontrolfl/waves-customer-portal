@@ -72,6 +72,14 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   // 3. Bell cross-clear — only threads with nothing unread left, bells that
   //    existed at entry, through the notification service.
   let notificationsCleared = 0;
+  // 3a. By message SID first: an unknown-sender thread has no customer_id,
+  //     so the customer-scoped clear below can never reach its bells; the
+  //     bell carries the SID it rang for (codex #4210 P2).
+  if (mirrorSids.length) {
+    try {
+      notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: mirrorSids, before: now, role });
+    } catch (e) { logger.warn(`[inbound-sms-read] bell clear by sid failed: ${e.message}`); }
+  }
   try {
     const convIds = new Set(convs);
     if (ids.length) {

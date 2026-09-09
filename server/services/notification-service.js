@@ -452,16 +452,20 @@ const NotificationService = {
   // recipient/role scoping as every other admin read. `before` bounds to bells
   // that existed when the read request entered; `twilioSid` narrows to the
   // single bell written for one inbound message.
-  async markInboundSmsReadAdmin({ customerId, before = new Date(), twilioSid = null, role } = {}) {
-    if (!customerId) return 0;
+  // Retires inbound_sms bells. By customer (the thread deep-link) and/or
+  // by the message SID(s) the bell was written for — an unknown-sender
+  // bell has no customer, so the SID is its only handle (codex #4210 P2).
+  async markInboundSmsReadAdmin({ customerId, before = new Date(), twilioSid = null, twilioSids = null, role } = {}) {
+    const sids = [...(twilioSids || []), ...(twilioSid ? [twilioSid] : [])].filter(Boolean);
+    if (!customerId && !sids.length) return 0;
     let q = scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin', category: 'inbound_sms' }),
       role,
     )
       .whereNull('read_at')
-      .where('link', `/admin/communications?thread=${customerId}`)
       .where('created_at', '<=', before);
-    if (twilioSid) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ?", [twilioSid]);
+    if (customerId) q = q.where('link', `/admin/communications?thread=${customerId}`);
+    if (sids.length) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [sids]);
     return q.update({ read_at: new Date() });
   },
 
