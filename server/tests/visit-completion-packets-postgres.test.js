@@ -138,13 +138,17 @@ postgres('visit completion packet records on PostgreSQL', () => {
     jest.clearAllMocks();
     chargeInvoiceWithSavedCard.mockReset();
     require('../services/stripe').savedCardChargeSuppressesAlternateCollection.mockImplementation((err) => err?.code === 'STRIPE_AMBIGUOUS_OUTCOME');
+    // The canonical sender's locked handoff: the caller's claim runs inside
+    // withSmsHandoff and its verdict decides whether anything sends.
     sendCustomerMessage.mockImplementation(async (input) => {
-      const allowed = await input.preDispatchCheck();
-      return allowed.ok ? { sent: true, providerMessageId: 'fixture-sms' } : { blocked: true };
+      const allowed = await input.withSmsHandoff(async () => ({ ok: true }));
+      return allowed.ok ? { sent: true, providerMessageId: 'fixture-sms' } : { blocked: true, code: allowed.code };
     });
+    // The email library's equivalent boundary around its provider request.
     require('../services/email-template-library').sendTemplate.mockImplementation(async (input) => {
-      const allowed = await input.onQueued({ id: randomUUID() });
-      return allowed ? { sent: true } : { aborted: true };
+      let dispatched = false;
+      const allowed = await input.withProviderHandoff(async () => { dispatched = true; });
+      return dispatched && allowed.ok ? { sent: true } : { sent: false, aborted: true };
     });
 
     require('../services/notification-triggers').triggerNotification.mockReset().mockResolvedValue({ suppressed: true });
