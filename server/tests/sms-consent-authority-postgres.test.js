@@ -5,14 +5,14 @@ jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: j
 
 const { randomUUID } = require('node:crypto');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
-const connection = process.env.DATABASE_URL;
+const SKIP = !process.env.DATABASE_URL;
 const deferred = () => {
   let resolve;
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 };
 
-(connection ? describe : describe.skip)('SMS consent authority with two PostgreSQL connections', () => {
+(SKIP ? describe.skip : describe)('SMS consent authority with two PostgreSQL connections', () => {
   const customerId = randomUUID();
   const phone = '+19415550149';
   const input = { customerId, to: phone, channel: 'sms', audience: 'lead', purpose: 'conversational' };
@@ -23,7 +23,7 @@ const deferred = () => {
   let saveHandler;
 
   beforeAll(async () => {
-    const url = new URL(connection);
+    const url = new URL(process.env.DATABASE_URL);
     const qa = process.env.WAVES_LOCAL_DEV === '1' && process.env.WAVES_WORKTREE_ID
       && url.pathname === `/waves_qa_${process.env.WAVES_WORKTREE_ID.replaceAll('-', '')}`;
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';

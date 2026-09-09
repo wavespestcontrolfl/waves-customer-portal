@@ -118,7 +118,7 @@ function normalizeContactInput(contact = {}) {
 const CHANNEL_VALUES = ['sms', 'email', 'both'];
 const APP_CHANNEL_KEYS = new Set([
   'appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel',
-  'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel',
+  'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel',
 ]);
 
 function appPreferencesAvailable(req) {
@@ -232,6 +232,7 @@ function preferencePayload(prefs = {}, { includeChannels = true, appPreferences 
         pushEnabled: prefs.push_enabled !== false,
         serviceCompleteChannel: channelValue(prefs.service_complete_channel, true),
         invoiceChannel: channelValue(prefs.invoice_channel, true),
+        paymentIssueChannel: channelValue(prefs.payment_issue_channel, true),
       } : {}),
     } : {}),
   };
@@ -308,6 +309,7 @@ const ACCOUNT_PREF_LABELS = {
   techArrivedChannel: 'Tech Arrived Alert — Delivery',
   serviceCompleteChannel: 'Service Complete Report — Delivery',
   invoiceChannel: 'Invoices — Delivery',
+  paymentIssueChannel: 'Payment Problems — Delivery',
   billingReminderChannel: 'Billing Reminder — Delivery',
   paymentConfirmationChannel: 'Payment Confirmation — Delivery',
 };
@@ -322,6 +324,7 @@ const CHANNEL_PREF_KEYS = new Set([
   'techArrivedChannel',
   'serviceCompleteChannel',
   'invoiceChannel',
+  'paymentIssueChannel',
   'billingReminderChannel',
   'paymentConfirmationChannel',
 ]);
@@ -353,6 +356,7 @@ const DB_FIELD_BY_PREF = {
   techArrivedChannel: 'tech_arrived_channel',
   serviceCompleteChannel: 'service_complete_channel',
   invoiceChannel: 'invoice_channel',
+  paymentIssueChannel: 'payment_issue_channel',
   billingReminderChannel: 'billing_channel',
   paymentConfirmationChannel: 'payment_receipt_channel',
 };
@@ -560,6 +564,7 @@ router.put('/preferences', async (req, res, next) => {
       techArrivedChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
       serviceCompleteChannel: Joi.string().valid('sms', 'push'),
       invoiceChannel: Joi.string().valid('sms', 'push'),
+      paymentIssueChannel: Joi.string().valid('sms', 'push'),
       billingReminderChannel: Joi.string().valid(...CHANNEL_VALUES),
       paymentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
     }).min(1);
