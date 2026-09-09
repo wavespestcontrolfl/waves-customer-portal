@@ -134,6 +134,8 @@ test.each([
   'I have more lawn leads for you from my neighbors. Can you quote them?',
   'I can send you more pest-control leads from my neighbors. Can you quote them?',
   'We can provide you with more lawn leads from our neighbors who need service.',
+  'My neighbors need service. I can send you more pest-control leads; can you quote them?',
+  'I can provide you with more lawn leads. They are my neighbors and need quotes.',
 ])('a neighbor referral reaches the model before any enforcement: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });

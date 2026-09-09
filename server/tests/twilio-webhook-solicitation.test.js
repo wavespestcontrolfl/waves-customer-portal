@@ -205,6 +205,8 @@ test.each([
   ['location', PITCH], ['domain_tracking', PITCH], ['van_tracking', PITCH], ['tech_line', PITCH],
   ['location', 'We can send you more pest-control leads.'],
   ['location', 'We can provide you with more lawn leads.'],
+  ['location', 'We provide you with unlimited estimates for local contractors.'],
+  ['location', 'I can offer you qualified pest-control customers.'],
 ])(
   'an enforced pitch on a %s line persists read without replies or downstream work: %s', async (type, body) => {
     process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
@@ -271,6 +273,8 @@ test.each([
   'I have more lawn leads for you from my neighbors. Can you quote them?',
   'I can send you more pest-control leads from my neighbors. Can you quote them?',
   'We can provide you with more lawn leads from our neighbors who need service.',
+  'My neighbors need service. I can send you more pest-control leads; can you quote them?',
+  'I can provide you with more lawn leads. They are my neighbors and need quotes.',
 ])('a genuine referral remains unread and reaches ordinary handling in enforcement mode: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   await receive(body);
