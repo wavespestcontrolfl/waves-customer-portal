@@ -53,6 +53,7 @@ export const ADMIN_NAV_ITEMS = {
     label: "Dashboard",
     icon: LayoutDashboard,
     mobileTabIcon: Home,
+    keywords: ["home", "overview"],
     // server/routes/admin-dashboard.js is requireAdmin — the page is a wall
     // of 403s for any other role. Technicians land on /admin/schedule.
     adminOnly: true,
@@ -70,18 +71,21 @@ export const ADMIN_NAV_ITEMS = {
     icon: ClipboardList,
     adminOnly: true,
     workspacePath: "/admin/pipeline?tab=leads",
+    keywords: ["leads", "opportunities"],
     views: [{ id: "estimates", label: "Estimates", path: "/admin/pipeline?tab=estimates" }],
   },
   schedule: {
     id: "schedule",
     path: "/admin/schedule",
     label: "Schedule",
+    keywords: ["dispatch", "calendar", "appointments", "board"],
     icon: Calendar,
   },
   staff: {
     id: "staff",
     path: "/admin/timetracking",
     label: "Staff",
+    keywords: ["time tracking", "timesheets"],
     icon: Clock,
   },
   services: {
@@ -110,6 +114,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "communications",
     path: "/admin/communications",
     label: "Communications",
+    keywords: ["messages", "sms", "calls", "email", "inbox"],
     icon: MessageSquare,
     mobileTabLabel: "Messages",
   },
@@ -131,6 +136,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "ppc",
     path: "/admin/ppc",
     label: "PPC",
+    keywords: ["ads", "paid search", "advertising"],
     icon: Megaphone,
     adminOnly: true,
   },
@@ -240,6 +246,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/billing-recovery",
     label: "Recovery",
     workspaceLabel: "Needs attention",
+    keywords: ["billing recovery", "missing invoices", "overdue"],
     icon: Banknote,
     adminOnly: true,
   },
@@ -264,6 +271,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/tax",
     label: "Taxes",
     workspaceLabel: "Books & taxes",
+    keywords: ["bookkeeping", "accounting"],
     icon: Receipt,
     adminOnly: true,
   },
@@ -387,7 +395,7 @@ export const ADMIN_WORKSPACE_DESTINATIONS = Object.values(ADMIN_NAV_ITEMS)
   .filter(({ id }) => id !== "more")
   .flatMap((item) => [
     { ...item, label: item.workspaceLabel || item.label, path: item.workspacePath || item.path },
-    ...(item.views || []).map((view) => ({ ...item, ...view })),
+    ...(item.views || []).map((view) => ({ ...item, keywords: [], ...view })),
   ]);
 
 const WORKSPACE_GROUPS = [
@@ -417,6 +425,19 @@ export function getAdminWorkspaceGroups(role, flags = {}) {
     const target = items.find(({ id }) => id === group.target);
     return { ...group, items, target, icon: group.icon || target?.icon };
   }).filter(({ items }) => items.length);
+}
+
+// Page names only: this index never queries customer records, calls the
+// assistant, or records the operator's search text.
+export function searchAdminWorkspacePages(groups, query) {
+  const normalize = (value) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const normalized = normalize(query);
+  const words = normalized.split(/\s+/).filter(Boolean);
+  return groups.flatMap((group) => group.items.map((item) => ({ ...item, groupLabel: group.label })))
+    .filter((item) => {
+      const text = normalize([item.label, ADMIN_NAV_ITEMS[item.id]?.label || '', item.groupLabel, item.path, ...(item.keywords || [])].join(' '));
+      return words.every((word) => text.includes(word));
+    }).sort((a, b) => Number(normalize(b.label).startsWith(normalized)) - Number(normalize(a.label).startsWith(normalized)));
 }
 
 // Pipeline consumes its query when selecting a tab. Prefer the page's rendered

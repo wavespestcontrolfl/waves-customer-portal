@@ -8,7 +8,7 @@ const finding = (overrides = {}) => ({
   ...overrides,
 });
 const answer = (overrides = {}) => ({
-  photo_quality: [{ photo: 1, quality: 'adequate', issue: '' }, { photo: 2, quality: 'poor', issue: 'blurred' }, { photo: 7, quality: 'adequate', issue: '' }],
+  photo_quality: [{ photo: 1, quality: 'adequate', issue: '' }, { photo: 2, quality: 'poor', issue: 'blurred' }],
   grass_type: 'st_augustine',
   findings: [finding(), finding({ finding_id: 'F2', name: 'Chinch bug damage', confidence: 'low' })],
   severities: {
