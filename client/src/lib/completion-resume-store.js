@@ -114,7 +114,9 @@ export function pruneCompletionResumeBodies(isOwed, now = Date.now()) {
     .then((keys) => Promise.all(
       (Array.isArray(keys) ? keys : [])
         .map((key) => String(key))
-        .filter((key) => !isOwed(key))
+        // Visit drafts share this photo-capable store. They have no legacy
+        // per-service resume marker and remain until the stop is finished.
+        .filter((key) => !key.startsWith('visit:') && !isOwed(key))
         .map((key) => rowFor(key).then((row) => (
           row && now - Number(row.storedAt || 0) < PRUNE_GRACE_MS
             ? false

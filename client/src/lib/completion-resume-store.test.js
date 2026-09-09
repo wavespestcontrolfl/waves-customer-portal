@@ -41,6 +41,14 @@ beforeEach(() => {
 });
 
 describe("completion resume store (IndexedDB)", () => {
+  it("keeps prepared visit forms and photos when a legacy completion panel prunes its markers", async () => {
+    const draft = { visitId: 'visit-1', key: 'visit-key', forms: { 'svc-1': { body: committedBody() } } };
+    await putCompletionResumeBody('visit:visit-1', draft, Date.now() - PRUNE_GRACE_MS * 10);
+    await pruneCompletionResumeBodies(() => false);
+    expect(await getCompletionResumeBody('visit:visit-1')).toEqual(draft);
+    await deleteCompletionResumeBody('visit:visit-1');
+    expect(await getCompletionResumeBody('visit:visit-1')).toBeNull();
+  });
   it("round-trips a photo-bearing body byte-for-byte", async () => {
     const body = committedBody();
     expect(await putCompletionResumeBody("svc-1", body)).toBe(true);

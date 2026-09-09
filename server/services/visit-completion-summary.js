@@ -17,9 +17,10 @@ async function ensureVisitSummaryToken(packetId, database = db) {
       const packet = await trx('visit_completion_packets').where({ id: packetId }).first();
       if (!packet || !['processing', 'done'].includes(packet.status)) throw new Error('Packet unavailable');
       const visit = await trx('service_visits').where({ id: packet.visit_id }).forUpdate().first();
-      if (!visit || visit.summary_token_revoked_at || !['closing', 'closed'].includes(visit.status)) {
+      if (!visit || !['closing', 'closed'].includes(visit.status)) {
         throw new Error('Visit unavailable');
       }
+      if (visit.summary_token_revoked_at) return null;
       const pending = await trx('visit_completion_packet_items').where({ packet_id: packet.id })
         .whereNot('status', 'done').first('id');
       if (pending) throw new Error('Member reports are still pending');
@@ -361,7 +362,7 @@ async function reconcileSummaryEmailBounce(message, database = db) {
     .update({ status: 'unknown_delivery', last_error: 'provider_bounce', updated_at: database.fn.now() }).returning('id');
   if (!flipped.length) return { reconciled: false };
   const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');
-  const member = await database('scheduled_services').where({ visit_id: visitId }).orderBy('id').first('id', 'technician_id');
+  const member = packet ? await VisitGroups.recordedPacketMember(packet.id, database) : null;
   if (packet && member) {
     // Same transaction as the effect flip: a webhook that fails after this
     // point rolls both back, and SendGrid's redelivery cannot leave an alert
@@ -442,7 +443,8 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
     await database('customers').where({ id: visit.customer_id }).first(), { db: database },
   );
   const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
-  const member = await database('scheduled_services').where({ visit_id: visit.id }).orderBy('id').first();
+  // A recorded member owns the effects; retained history never qualifies.
+  const member = await VisitGroups.recordedPacketMember(packet.id, database);
   const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
   const summary = token ? await getVisitCompletionSummary(token, database) : null;
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })

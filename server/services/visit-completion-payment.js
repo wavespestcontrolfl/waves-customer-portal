@@ -158,7 +158,8 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
     }
     return { state: invoice.status, invoiceId: invoice.id };
   }
-  const member = await database('scheduled_services').where({ visit_id: visit.id }).orderBy('id').first();
+  // A recorded member owns the payment effect; retained history never qualifies.
+  const member = await VisitGroups.recordedPacketMember(packet.id, database);
   const claim = await VisitGroups.claimVisitNotification(member, 'visit_payment');
   let terminalReason = null;
   if (claim?.state !== 'owner') {

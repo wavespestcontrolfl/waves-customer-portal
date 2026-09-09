@@ -1,5 +1,28 @@
 # Public route contracts
 
+## Combined visit summary
+
+`GET /api/visit-summary/:token` (`server/routes/visit-summary-public.js`) and
+the `/visit/:token` React shell use a 64-character lowercase hex bearer token.
+The API format-gates before any database read, hashes the token for lookup,
+and returns the same 404 for malformed, unknown, revoked, or ineligible links.
+Only issued, non-revoked links on closing/closed visits with a complete,
+identity-matched saved packet resolve. Backfilled and withheld service reports
+are excluded. The payload contains the service date and each visible service's
+record id, type, outcome, and existing report link; no technician notes,
+access codes, customer contact details, prices, invoice tokens, or payments.
+
+The API and shell share the existing public report limiter (20 requests/minute
+per IP). Privacy headers (`no-store`, `noindex`, and `no-referrer`) precede the
+limiter; the API also stamps them before the global API limiter. Tokens are
+redacted by the shared URL logger. `GATE_VISIT_CLOSEOUT` controls new packet
+creation, not issued links: disabling it does not revoke customer summaries.
+The admin-only `POST /api/admin/visit-closeouts/:visitId/revoke-summary`
+sets `service_visits.summary_token_revoked_at`; reads immediately refuse the
+link and future dispatch checks refuse it. Revocation does not block packet
+recovery or alter individual report/receipt tokens. The page
+only opens each service's existing report; it adds no write or ask endpoint.
+
 Security contract for every route the portal serves with NO session auth
 at all: token-gated customer surfaces, machine-to-machine webhooks, and
 the anonymous public API. Routes behind the customer JWT (`authenticate`,
