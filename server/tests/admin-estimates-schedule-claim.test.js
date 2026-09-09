@@ -126,8 +126,9 @@ describe('schedule-send atomic claim', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test.each([
-    ['draft', '2099-12-22T05:00:00Z', 409], ['scheduled', '2099-12-22T05:00:00Z', 409],
-    ['send_failed', '2099-12-22T05:00:00Z', 409], ['draft', '2099-12-22T04:59:59Z', 200],
+    ...['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'expired'].flatMap(status => [
+      [status, '2099-12-22T05:00:00Z', 409], [status, '2099-12-22T04:59:59.999Z', 200],
+    ]),
     ['accepted', '2099-12-22T05:00:00Z', 200],
   ])('checks a %s sibling against the scheduled send time %s', async (status, scheduledAt, expected) => {
     const sibling = { id: 'synthetic-bid-sibling', status, pricing_authority: 'SERVER',

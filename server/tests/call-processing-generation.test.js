@@ -561,7 +561,7 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     const ext = fs.readFileSync(path.join(__dirname, '../services/estimate-extension.js'), 'utf8');
     expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');");
     expect(ext.split('.whereRaw(REPRICE_PENDING_ABSENT_SQL)').length - 1).toBe(2);
-    const guarded = ext.slice(ext.indexOf('const updated = await db(\'estimates\')'), ext.indexOf('.update(updates);'));
+    const guarded = ext.slice(ext.indexOf('const updated = await trx(\'estimates\')'), ext.indexOf('.update(updates);'));
     expect(guarded).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
   });
 });

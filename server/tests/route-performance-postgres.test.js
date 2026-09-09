@@ -2,7 +2,9 @@ jest.mock('../models/db', () => ({}));
 const { randomUUID } = require('node:crypto');
 const { getRoutePerformance } = require('../services/scheduling/route-performance');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
-const postgres = process.env.DATABASE_URL ? describe : describe.skip;
+const { buildCloseoutRequirementsSnapshot } = require('../services/service-closeout-requirements');
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
 
 postgres('recorded route evidence on isolated PostgreSQL', () => {
   let database;
@@ -94,5 +96,42 @@ postgres('recorded route evidence on isolated PostgreSQL', () => {
     expect(result.missingBaselineRoutes).toContainEqual({ date: past, technicianId: otherTech });
     expect(result.unbaselinedCompletedVisits).toBeGreaterThanOrEqual(1);
     expect(result.plans.find(plan => plan.technicianId === technicianId).stops[0].arrivalOutcome).toBe('day_or_technician_changed');
+  });
+
+  test('duration cohorts use the committed frozen identity, need no baseline and exclude callbacks and included work', async () => {
+    const frozenServiceId = randomUUID();
+    const closeoutRequirements = buildCloseoutRequirementsSnapshot({ serviceId: frozenServiceId,
+      requiresServiceReport: false, source: 'catalog' }, { now: parseETDateTime(`${past}T14:00`) });
+    const canonical = await trx('service_records').where('scheduled_service_id', jobId).first('id');
+    await trx('service_records').where('id', canonical.id).update({
+      structured_notes: JSON.stringify({ timeOnSite: '45:00', closeoutRequirements }),
+    });
+    await trx('service_completion_attempts').insert({ service_id: jobId, idempotency_key: randomUUID(),
+      status: 'succeeded', service_record_id: canonical.id });
+    await trx('service_records').insert({ customer_id: customerId, technician_id: technicianId,
+      scheduled_service_id: jobId, service_date: past, service_type: 'Later recap', created_at: new Date(Date.now() + 1000),
+      structured_notes: JSON.stringify({ timeOnSite: 1 }) });
+    await trx('route_optimization_planner_runs').where('id', ledgerId).update({ created_at: new Date() });
+    const before = await trx('scheduled_services').where('id', jobId).first();
+    const result = await getRoutePerformance({ from: past, to: past }, trx);
+    expect(result.durationReferences).toMatchObject({ automaticApplication: false,
+      byService: expect.arrayContaining([expect.objectContaining({ serviceId: frozenServiceId, samples: 1,
+        status: 'insufficient_samples', medianMinutes: null, observedMinimumMinutes: 45 })]) });
+    expect(await trx('scheduled_services').where('id', jobId).first()).toEqual(before);
+    for (const flags of [{ is_callback: true }, { is_callback: false, followup_included: true }]) {
+      await trx('scheduled_services').where('id', jobId).update(flags);
+      const filtered = (await getRoutePerformance({ from: past, to: past }, trx)).durationReferences;
+      expect(filtered.byService.some(group => group.serviceId === frozenServiceId)).toBe(false);
+      expect(filtered.excluded.callback_or_included_followup).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  test.each([-3, 0, 1])('duration exclusions omit a baseline visit moved outside past work (offset %i)', async offset => {
+    const target = etDateString(addETDays(new Date(), offset));
+    await trx('scheduled_services').where('id', jobId).update({ scheduled_date: target, is_callback: true });
+    const range = { from: past, to: etDateString(addETDays(new Date(), 2)) };
+    const before = (await getRoutePerformance(range, trx)).durationReferences;
+    await trx('scheduled_services').where('id', jobId).update({ status: 'cancelled' });
+    expect((await getRoutePerformance(range, trx)).durationReferences).toEqual(before);
   });
 });

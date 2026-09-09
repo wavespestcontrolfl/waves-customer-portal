@@ -220,6 +220,35 @@ describe('commercial bid authoring', () => {
       expect(dataOf().proposal.validThrough).toBe('2099-12-31');
     }
   });
+  test.each(['draft', 'scheduled', 'send_failed', 'sent', 'viewed'].flatMap(status => [
+    [status, '2099-12-22T04:59:59.999Z', 200], [status, '2099-12-22T05:00:00Z', 409],
+  ]))('editing a %s sibling respects the group send at %s', async (status, sendAt, expected) => {
+    Object.assign(row, { status, estimate_group_id: 'synthetic-group',
+      estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
+    const before = structuredClone(row);
+    db.mockImplementation(table => {
+      const builder = estimateDatabase(table);
+      const originalWhere = builder.where;
+      let pendingSchedule = false;
+      builder.where = jest.fn((key, operator, value) => {
+        if (key?.status === 'scheduled' && key.estimate_group_id === row.estimate_group_id) pendingSchedule = true;
+        if (pendingSchedule && key === 'scheduled_at') {
+          expect(operator).toBe('>');
+          builder.first = jest.fn(async () => new Date(sendAt) > value ? { id: 'scheduled-sibling' } : null);
+          return builder;
+        }
+        return originalWhere(key, operator);
+      });
+      return builder;
+    });
+    const response = await invoke('/:id/proposal', 'put', { proposal: proposal() });
+    expect(response.statusCode).toBe(expected);
+    if (expected === 409) {
+      expect(response.body.error).toMatch(/group’s scheduled send date/);
+      expect(mutations).toHaveLength(0);
+      expect(row).toEqual(before);
+    }
+  });
   test('an older editor omitting validity preserves the saved price hold', async () => {
     gateEnvValue.mockReturnValue(false);
     row.status = 'draft'; row.estimate_data = { proposal: proposal() };

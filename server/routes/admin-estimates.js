@@ -406,17 +406,21 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
   // link-visible scope (sending / sent / viewed while unexpired, accepted /
   // declined always; GH codex P1 r6 + uncapped P1 r19), so a SERVER anchor
   // is never delivered beside an unverified price the link would show.
+  // Fixed holds remain blockers after expiry (including the sweep’s expired
+  // status) so the query cannot
+  // silently drop a promised property before the validity check runs.
   let query = database('estimates')
     .where({ estimate_group_id: estimate.estimate_group_id })
     .whereNot({ id: estimate.id })
     .whereNull('archived_at')
     .where((q) => q
       .where((publishable) => publishable.whereIn('status', ['draft', 'scheduled', 'send_failed']).whereNull('price_locked_at'))
-      .orWhere((visible) => applyLinkVisibleSiblingScope(visible)));
+      .orWhere((visible) => applyLinkVisibleSiblingScope(visible))
+      .orWhere((fixed) => fixed.whereIn('status', ['sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
-    if (sendAt && ['draft', 'scheduled', 'send_failed'].includes(sibling.status) && !sibling.price_locked_at) {
+    if (sendAt && ['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
       assertBidSendDate(sibling, sendAt);
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
@@ -1835,7 +1839,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
     // gate before this send hands the customer the group link. Same verdict
     // the schedule route applied at request time; here it runs under the
     // group lock on the rows the claims below will actually publish beside.
-    const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend });
+    const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend, sendAt: new Date() });
     if (blockingSibling) {
       const err = new Error(blockingSiblingMessage(blockingSibling, 'sending this group (the group link shows every property together)'));
       err.statusCode = blockingSibling.statusCode;
@@ -4154,7 +4158,7 @@ router.put('/:id/proposal', async (req, res, next) => {
         .where((q) => q.where({ status: 'sending' }).orWhereRaw(`NOT (${DELIVERY_CLAIM_NOT_LIVE_SQL})`))
         .first('id');
       if (inFlightMember) throw retry('This multi-property group is being sent right now — wait a moment and retry.');
-      if (authoredExpiry && ['draft', 'scheduled', 'send_failed'].includes(locked.status)) {
+      if (authoredExpiry) {
         const laterSchedule = await trx('estimates').where({ estimate_group_id: groupId, status: 'scheduled' })
           .whereNot({ id: estimate.id }).whereNull('archived_at').whereNull('price_locked_at')
           .where('scheduled_at', '>', authoredExpiry).first('id');
