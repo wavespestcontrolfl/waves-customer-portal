@@ -7,9 +7,12 @@ import { CUSTOMER_SURFACE, WAVES_PHONE_DISPLAY, WAVES_PHONE_TEL } from '../theme
 import { TIMEZONE } from '../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '/api';
+// One label per VALID_VISIT_OUTCOMES entry in complete-scheduled-service.js;
+// an unknown value falls back to the neutral "Service recorded".
 const OUTCOMES = {
   completed: 'Completed', inspection_only: 'Inspected — no treatment',
-  customer_declined: 'Service declined', incomplete: 'Follow-up needed',
+  customer_declined: 'Service declined', follow_up_needed: 'Follow-up needed',
+  customer_concern: 'Concern noted — we will follow up', incomplete: 'Not completed — we will return',
 };
 
 export default function VisitSummaryPage() {
