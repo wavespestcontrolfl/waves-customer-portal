@@ -190,11 +190,14 @@ async function sendCustomerMessage(input) {
   }
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
-  //    form. preDispatchCheck stays local — it is a caller closure, not
-  //    message state, and must not ride into providers/audit.
-  const { preDispatchCheck, ...inputRest } = input;
+  //    form. Caller closures stay outside message state and audit payloads.
+  const { preDispatchCheck, withSmsHandoff, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
+  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || input.channel !== 'sms'
+    || input.audience !== 'lead' || input.purpose !== 'conversational' || input.entryPoint !== 'lead_response_auto_reply')) {
+    return { sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies' };
+  }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
   // Typographic punctuation (curly quotes, em dashes, real ellipses) forces
@@ -357,9 +360,9 @@ async function sendCustomerMessage(input) {
     }
   }
 
-  // 6.5 Caller-supplied final recheck — the last caller-visible abort point
-  //     before dispatch (only the provider-internal send-window boundary
-  //     re-check runs later), so callers with race-sensitive sends (clarify
+  // 6.5 Caller-supplied recheck before provider preparation. Assigned lead
+  //     replies additionally guard the actual SDK request withSmsHandoff.
+  //     Callers with race-sensitive sends (clarify
   //     asks: an answer can arrive while the validators above run) get
   //     their freshest possible abort point inside the canonical path.
   //     Fail closed: a throwing check blocks the send.
@@ -410,6 +413,21 @@ async function sendCustomerMessage(input) {
   // deferral contract as the pipeline block; cheap (pure clock math) and a
   // no-op for exempt inputs.
   const providerOutcome = await dispatchToProvider(sendInput, {
+    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async trx => {
+      // Lock acquisition may wait past an opt-out commit. Reuse the canonical
+      // validators with fresh state on that same connection, before the SDK.
+      const currentState = await loadSuppressionState(sendInput, await loadContactState(sendInput, trx), trx);
+      if (currentState.lookupFailed || currentState.suppressionLoaded !== true) {
+        return { ok: false, code: currentState.lookupFailed ? 'CONSENT_LOOKUP_FAILED' : 'SUPPRESSION_LOOKUP_FAILED',
+          reason: 'SMS consent or suppression could not be rechecked before handoff', retryable: true };
+      }
+      const suppression = await checkSuppression(sendInput, policy, currentState);
+      if (!suppression.ok) return suppression;
+      const consent = await checkConsentForPurpose(sendInput, policy, currentState);
+      if (!consent.ok) return consent;
+      await dispatch();
+      return { ok: true };
+    })),
     preSendCheck: async () => {
       const windowVerdict = checkSendWindow(sendInput, policy, contactState);
       if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;

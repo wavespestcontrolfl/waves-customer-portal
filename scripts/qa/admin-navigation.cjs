@@ -42,6 +42,8 @@ async function main() {
         '/admin/estimates': { estimates: [], total: 0, stats: {} },
         '/admin/estimates/win-loss-slices': { slices: [] },
         '/admin/estimates/source-performance': { sources: [] },
+        '/admin/intelligence-bar/quick-actions': { actions: [] },
+        '/admin/intelligence-bar/threads/latest': { thread: null },
       };
       if (!Object.hasOwn(fixtures, api)) {
         report.unmatched.push(api);
@@ -84,6 +86,60 @@ async function main() {
     await desktop.getByRole('heading', { name: 'Pipeline', exact: true }).first().waitFor();
     check('Estimates link selects the rendered Estimates tab', await desktop.getByRole('link', { name: 'Estimates', exact: true }).getAttribute('aria-current') === 'page');
 
+    await desktop.setViewportSize({ width: 1440, height: 900 });
+    await desktop.getByRole('button', { name: 'Search pages', exact: true }).click();
+    const finder = desktop.getByRole('dialog', { name: 'Go to a page' });
+    const search = finder.getByRole('searchbox', { name: 'Search pages' });
+    check('Page search focuses its input', await search.evaluate((el) => el === document.activeElement));
+    const assistantRequests = () => report.requests.filter(({ path: api }) => api.startsWith('/admin/intelligence-bar/')).length;
+    const requestsBeforeSearch = assistantRequests();
+    await search.fill('Recovery');
+    check('Old page names retain their canonical routes', await finder.getByRole('link', { name: /Needs attention/ }).getAttribute('href') === '/admin/billing-recovery');
+    await search.fill('Accounting');
+    await search.press('ArrowDown');
+    check('Down selects the first result', await finder.getByRole('link', { name: /Banking/ }).evaluate((el) => el === document.activeElement));
+    await desktop.keyboard.press('End');
+    check('End selects the last result', await finder.getByRole('link', { name: /Books & taxes/ }).evaluate((el) => el === document.activeElement));
+    for (const name of ['Invoices', 'Pipeline', 'Books & taxes']) {
+      await search.fill(name);
+      await finder.getByRole('button', { name: `Pin ${name}`, exact: true }).click();
+    }
+    await search.fill('Inventory');
+    check('Three pins fill the available slots', await finder.getByRole('button', { name: 'Pin Inventory', exact: true }).isDisabled());
+    await search.fill('Invoices');
+    await finder.getByRole('button', { name: 'Unpin Invoices', exact: true }).click();
+    await search.fill('Inventory');
+    await finder.getByRole('button', { name: 'Pin Inventory', exact: true }).click();
+    await search.fill('');
+    await shot(desktop, 'desktop-search-pins-1440');
+    const resultLinks = finder.getByRole('link');
+    check('Page search retains readable text and comfortable controls', await search.evaluate((el) => parseFloat(getComputedStyle(el).fontSize)) >= 16 && (await resultLinks.first().boundingBox()).height >= 44);
+    check('Search and pins make no assistant requests', assistantRequests() === requestsBeforeSearch);
+    await desktop.keyboard.press('Escape');
+    check('Search Escape restores its trigger', await desktop.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
+    await desktop.getByRole('button', { name: 'Search pages', exact: true }).click();
+    await finder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    await desktop.getByPlaceholder(/Ask anything/).waitFor();
+    await desktop.keyboard.press('Escape');
+    check('Desktop finder-to-assistant handoff restores the original search trigger', await desktop.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
+    await desktop.reload();
+    await desktop.getByRole('group', { name: 'Pinned pages' }).waitFor();
+    check('Sidebar pins survive a reload', await desktop.getByRole('group', { name: 'Pinned pages' }).getByRole('link').count() === 3);
+    await shot(desktop, 'desktop-pinned-sidebar-1440');
+    await desktop.getByRole('button', { name: 'Search pages', exact: true }).focus();
+    await desktop.keyboard.press('Control+k');
+    await finder.waitFor();
+    await search.fill('no such page');
+    check('No-match search offers a local empty state', await finder.getByText(/No pages match/).isVisible());
+    await finder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    const assistantInput = desktop.getByPlaceholder(/Ask anything/);
+    await assistantInput.fill('Unsent fixture question');
+    await desktop.keyboard.press('Control+k');
+    await finder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    check('Ask Waves keeps its unsent question across page search', await assistantInput.inputValue() === 'Unsent fixture question');
+    await desktop.keyboard.press('Escape');
+    check('Repeated mode switches retain the original keyboard focus target', await desktop.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
+
     for (const width of [700, 820, 1024, 1440]) {
       await desktop.setViewportSize({ width, height: 900 });
       if (width < 768) await desktop.getByRole('button', { name: 'Open menu' }).click();
@@ -114,14 +170,73 @@ async function main() {
     check('Hidden drawer is inert', await mobile.locator('#admin-sidebar').getAttribute('inert') !== null);
     check('No horizontal mobile overflow', await mobile.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
 
+    await mobile.goto(`${server.baseUrl}/admin/customers`);
+    await mobile.getByRole('button', { name: 'Open menu' }).click();
+    await drawer.getByRole('button', { name: 'Search pages', exact: true }).click();
+    const mobileFinder = mobile.getByRole('dialog', { name: 'Go to a page' });
+    const mobileSearch = mobileFinder.getByRole('searchbox');
+    check('New browser starts without saved pins', await mobileFinder.getByRole('button', { name: /^Unpin / }).count() === 0);
+    await mobileSearch.fill('Inventory');
+    await mobileFinder.getByRole('button', { name: 'Pin Inventory', exact: true }).click();
+    await shot(mobile, 'mobile-search-390');
+    await mobileFinder.getByRole('button', { name: 'Ask Waves', exact: true }).focus();
+    await mobile.keyboard.press('Tab');
+    check('Page search owns focus above the mobile drawer', await mobileFinder.getByRole('button', { name: 'Close page search' }).evaluate((el) => el === document.activeElement));
+    await mobile.keyboard.press('Escape');
+    check('Closing page search returns focus to the still-open drawer', await drawer.isVisible() && await drawer.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
+    await drawer.getByRole('button', { name: 'Search pages', exact: true }).click();
+    await mobileSearch.fill('Customers');
+    await mobileSearch.press('Enter');
+    check('Same-page search dismisses both overlays', await mobileFinder.count() === 0 && await drawer.count() === 0);
+    await mobile.getByRole('button', { name: 'Open menu' }).click();
+    await drawer.getByRole('button', { name: 'Search pages', exact: true }).click();
+    await mobileFinder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    await mobile.getByPlaceholder(/Ask anything/).waitFor();
+    check('Ask Waves dismisses the originating mobile drawer', await drawer.count() === 0);
+    await mobile.keyboard.press('Escape');
+    check('Closing Ask Waves from page search returns focus to the menu trigger', await mobile.getByRole('button', { name: 'Open menu' }).evaluate((el) => el === document.activeElement));
+    await mobile.getByRole('button', { name: 'Open menu' }).click();
+    await drawer.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    await mobile.getByPlaceholder(/Ask anything/).waitFor();
+    check('Opening Ask Waves directly dismisses the mobile drawer', await drawer.count() === 0);
+    await mobile.keyboard.press('Escape');
+    check('Closing Ask Waves from the drawer returns focus to the menu trigger', await mobile.getByRole('button', { name: 'Open menu' }).evaluate((el) => el === document.activeElement));
+    await mobile.goto(`${server.baseUrl}/admin/more`);
+    await mobile.getByRole('group', { name: 'Pinned pages' }).waitFor();
+    check('Mobile Settings shares saved pinned pages', await mobile.getByRole('group', { name: 'Pinned pages' }).getByRole('link', { name: 'Inventory', exact: true }).isVisible());
+    const mobileSearchTrigger = mobile.getByRole('button', { name: 'Search pages', exact: true }).first();
+    await mobileSearchTrigger.click();
+    await mobileFinder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    await mobile.getByPlaceholder(/Ask anything/).waitFor();
+    await mobile.keyboard.press('Escape');
+    check('Mobile finder-to-assistant handoff restores the persistent search trigger', await mobileSearchTrigger.evaluate((el) => el === document.activeElement));
+    await mobileSearchTrigger.click();
+    await mobileSearch.fill('Accounting');
+    await mobile.evaluate(() => {
+      Object.defineProperty(window.visualViewport, 'height', { configurable: true, value: 440 });
+      Object.defineProperty(window.visualViewport, 'offsetTop', { configurable: true, value: 60 });
+      window.visualViewport.dispatchEvent(new Event('resize'));
+    });
+    const searchBounds = await mobileFinder.boundingBox();
+    check('Page search follows the visible viewport above the keyboard', searchBounds.y >= 60 && searchBounds.y + searchBounds.height <= 500);
+    await shot(mobile, 'mobile-search-keyboard-390');
+
     const tech = await openPage({ width: 390, role: 'technician', hasTouch: true });
     await tech.goto(`${server.baseUrl}/admin/more`);
     await tech.getByRole('heading', { name: 'Workspaces', exact: true }).waitFor();
     check('Technician directory excludes owner-only destinations', await tech.getByRole('button', { name: 'Sales', exact: true }).count() === 0 && await tech.getByRole('link', { name: 'Early feature access' }).count() === 0);
+    await tech.getByRole('button', { name: 'Search pages', exact: true }).first().click();
+    const techFinder = tech.getByRole('dialog', { name: 'Go to a page' });
+    check('Technician page search excludes restricted destinations', await techFinder.getByRole('link', { name: /Contracts|System health|Estimates|Invoices/ }).count() === 0);
     const legacy = await openPage({ enabled: false });
     await legacy.goto(`${server.baseUrl}/admin/customers`);
     await legacy.getByRole('navigation', { name: 'Admin sections' }).waitFor();
+    // The shell appears before auth; wait for its verified account outlet.
+    await legacy.getByRole('heading', { name: 'Customers', exact: true }).waitFor();
     check('Flag off retains existing navigation', await legacy.getByRole('navigation', { name: 'Admin workspaces' }).count() === 0);
+    await legacy.keyboard.press('Control+k');
+    await legacy.getByPlaceholder(/Ask anything/).waitFor();
+    check('Flag off keeps the assistant shortcut', await legacy.getByRole('dialog', { name: 'Go to a page' }).count() === 0);
     check('No browser render errors', report.pageErrors.length === 0);
   } finally {
     fs.writeFileSync(path.join(output, 'verification.json'), JSON.stringify(report, null, 2));
