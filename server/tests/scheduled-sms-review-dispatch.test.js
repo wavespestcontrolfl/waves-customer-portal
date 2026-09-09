@@ -45,14 +45,15 @@ beforeEach(() => {
         if (patch.metadata.sql.includes("- 'bundled_review_request_id'")) {
           delete meta.bundled_review_request_id;
           delete meta.review_ask_reservation;
-        } else if (patch.metadata.sql.includes("jsonb_build_object('review_ask_reservation', true)")) {
+        } else if (patch.metadata.sql.includes("jsonb_build_object('review_ask_reservation', true")) {
+          meta.queued_at = meta.queued_at || row.created_at;
           meta.review_ask_reservation = true;
         } else if (patch.metadata.sql.includes('review_hold_reason')) {
           meta.review_hold_reason = patch.metadata.bindings[0];
           meta.scheduled_sms_attempts = Math.max(0, meta.scheduled_sms_attempts - 1);
         } else {
           delete meta.review_ask_reservation;
-          meta.queued_at = row.created_at;
+          meta.queued_at = meta.queued_at || row.created_at;
           if (patch.metadata.sql.includes('finalize_pending')) {
             meta.finalize_pending = true;
             meta.provider_message_id = patch.metadata.bindings[0];
@@ -146,12 +147,14 @@ test('a review-policy replay is guarded when its stored body contains only a sho
 
 
 test('repeated settlement failures preserve accepted evidence for the scheduler recovery handler', async () => {
+  row.created_at = new Date(Date.now() - 7 * 86400000);
+  const queuedAt = row.created_at;
   const original = db.getMockImplementation();
   db.mockImplementation((...args) => {
     const query = original(...args);
     const update = query.update;
     query.update = async patch => {
-      if (patch.metadata.sql.includes("jsonb_build_object('review_ask_reservation', true)")) return update(patch);
+      if (patch.metadata.sql.includes("jsonb_build_object('review_ask_reservation', true")) return update(patch);
       expect(mockHeld.has('review-send:customer-1')).toBe(true);
       throw new Error('settlement unavailable');
     };
@@ -161,6 +164,8 @@ test('repeated settlement failures preserve accepted evidence for the scheduler 
     .rejects.toMatchObject({ providerOutcome: { sent: true, providerMessageId: 'SM-durable-proof' }, scheduledReviewAsk: true });
   expect(row.status).toBe('sending');
   expect(row.metadata.review_ask_reservation).toBe(true);
+  expect(row.created_at).toEqual(new Date());
+  expect(row.metadata.queued_at).toEqual(queuedAt);
 });
 
 test.each(['recent', 'history', 'busy'])('completion keeps its transactional links when review is held: %s', async kind => {

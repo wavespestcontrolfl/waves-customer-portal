@@ -17,7 +17,7 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   // Preserve the queue time while ordering the conversation by delivery.
   // Finalization evidence rides the same atomic update so a crash cannot
   // lose the owed replay hooks or the accepted SID they need.
-  let metadataSql = "(COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation') || jsonb_build_object('queued_at', created_at)";
+  let metadataSql = "(COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation') || jsonb_build_object('queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))";
   const bindings = [];
   if (requiresDurableFinalize(meta.entry_point)) {
     metadataSql += " || jsonb_build_object('finalize_pending', true, 'provider_message_id', ?::text)";
@@ -45,7 +45,8 @@ async function dispatchScheduledSms(msg, meta, send, purpose) {
         // provider logging and every settlement write fail, other dispatchers
         // still see this attempt while outer recovery finishes the row.
         const reserved = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('review_ask_reservation', true)"),
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('review_ask_reservation', true, 'queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))"),
+          created_at: new Date(), updated_at: new Date(),
         });
         if (!reserved) throw new Error('Scheduled review claim lost before provider dispatch');
       }
