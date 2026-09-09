@@ -129,7 +129,8 @@ function estimateDatabase(table) {
   builder.whereNotNull = jest.fn((field) => { filters.push((candidate) => candidate[field] != null); return builder; });
   builder.whereIn = jest.fn((field, values) => { filters.push((candidate) => values.includes(candidate[field])); return builder; });
   builder.whereNotIn = jest.fn((field, values) => { filters.push((candidate) => !values.includes(candidate[field])); return builder; });
-  for (const method of ['whereRaw', 'orWhere', 'orWhereRaw', 'forUpdate', 'orderBy', 'limit', 'transacting']) builder[method] = jest.fn(() => builder);
+  for (const method of ['whereRaw', 'orWhereRaw', 'orWhereNotNull', 'forUpdate', 'orderBy', 'limit', 'transacting']) builder[method] = jest.fn(() => builder);
+  builder.orWhere = jest.fn((key) => { if (typeof key === 'function') key(builder); return builder; });
   builder.modify = jest.fn((callback) => { callback(builder); return builder; });
   builder.first = jest.fn(async () => matches() ? structuredClone(row) : null);
   builder.select = jest.fn(async () => matches() ? [structuredClone(row)] : []);
@@ -265,6 +266,20 @@ describe('commercial bid authoring', () => {
       expect(mutations).toHaveLength(0);
       expect(row).toEqual(before);
     }
+  });
+  test('saving a longer fixed hold pushes the group\'s published members forward so the entry link keeps assembling the group (pre-push codex P1 on #4309)', async () => {
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
+    const whereRawSql = [];
+    db.mockImplementation((table) => { const b = estimateDatabase(table); const raw = b.whereRaw; b.whereRaw = jest.fn((sql) => { whereRawSql.push(String(sql)); return raw(sql); }); return b; });
+    const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(whereRawSql.some((sql) => /expired_unsent/.test(sql))).toBe(true);
+    expect(res.statusCode).toBe(200);
+    const siblingExtension = mutations.find(({ patch }) => !patch.estimate_data && patch.expires_at);
+    expect(new Date(siblingExtension.patch.expires_at).toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    // A sweep-expired published anchor is revived by the same write, never an unsent expiry.
+    expect(String(siblingExtension.patch.status?.sql ?? siblingExtension.patch.status)).toMatch(/WHEN status = 'expired' THEN \(CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END\)/);
+    expect(String(siblingExtension.patch.disposition?.sql ?? siblingExtension.patch.disposition)).toMatch(/expired_unviewed/);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
   });
   test('an older editor omitting validity preserves the saved price hold', async () => {
     gateEnvValue.mockReturnValue(false);

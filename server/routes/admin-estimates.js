@@ -398,6 +398,26 @@ function assertAutoSendPricingAuthority(row = {}) {
 // `forUpdate`: lock the sibling rows for the caller's transaction (the
 // schedule route), so a concurrent revision of a sibling serializes against
 // the scheduling write instead of slipping between this read and it.
+// The delivered entry link is the ANCHOR's token, and /data rejects an
+// expired token before it assembles the property group. An ordinary anchor
+// therefore has to stay viewable through the group's longest fixed hold, or
+// a customer who never retained a sibling URL loses the fixed bid before
+// its promised date (GH codex P1 r2 on #4309). Judged over every live
+// sibling; a read failure extends nothing (the standard window stands).
+const GROUP_FIXED_HOLD_STATUSES = ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'];
+async function longestGroupFixedValidity(database, estimate) {
+  if (!estimate?.estimate_group_id) return null;
+  const rows = await database('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .whereIn('status', GROUP_FIXED_HOLD_STATUSES)
+    .whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)
+    .select('estimate_data');
+  return (Array.isArray(rows) ? rows : []).map((row) => proposalExpiry(row)).filter(Boolean)
+    .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
+}
+
 async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false, sendAt = null } = {}) {
   if (!estimate?.estimate_group_id) return null;
   // Two sets are judged (never re-claimed): the PUBLISHABLE siblings this
@@ -416,11 +436,15 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     .where((q) => q
       .where((publishable) => publishable.whereIn('status', ['draft', 'scheduled', 'send_failed']).whereNull('price_locked_at'))
       .orWhere((visible) => applyLinkVisibleSiblingScope(visible))
-      .orWhere((fixed) => fixed.whereIn('status', ['sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
+      // 'sending' too: a fixed sibling whose delivery claim outlived its
+      // deadline (crashed or delayed) leaves the link-visible scope once
+      // expired, yet still decides whether a later group send can deliver
+      // (GH codex P2 r2 on #4309).
+      .orWhere((fixed) => fixed.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
-    if (sendAt && ['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
+    if (sendAt && ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
       assertBidSendDate(sibling, sendAt);
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
@@ -2458,7 +2482,19 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   assertBidSendDate(estimate, now());
-  const nextExpiresAt = estimateExpiresAt(now, estimate);
+  let nextExpiresAt = estimateExpiresAt(now, estimate);
+  // Group ENTRY access is independent of the anchor's own price
+  // eligibility: whether the anchor is ordinary or carries a shorter fixed
+  // hold, its token must outlive the group's longest fixed date so the link
+  // keeps assembling the property group. A longer viewability window cannot
+  // let a fixed property be accepted past its own date: authored proposals
+  // are never self-accepted publicly (PUT /:token/accept refuses them; the
+  // office finalizes), and each property's fixed date still governs sends,
+  // extensions and the bid-form exports (pre-push codex P1).
+  if (estimate.estimate_group_id) {
+    const groupHold = await longestGroupFixedValidity(db, estimate);
+    if (groupHold && groupHold > nextExpiresAt) nextExpiresAt = groupHold;
+  }
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   // One tracked short code PER CHANNEL LEG (same rule as estimate-follow-up
@@ -4203,6 +4239,16 @@ router.put('/:id/proposal', async (req, res, next) => {
     // and this UPDATE must not persist a term no billing path enforces
     // (codex #3297 r4c).
     if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
+    // The published group entry link must keep outliving the group's longest
+    // fixed hold across saves (pre-push codex P1 on #4309): a save that
+    // rewrites this row's expiry takes the longer of its own hold and the
+    // siblings' (read under the group lock held above), and a hold that grew
+    // here is pushed forward onto the group's published members below.
+    let entryExpiry = expiryUpdate;
+    if (groupId && (authoredExpiry || hadFixedValidity)) {
+      const groupHold = await longestGroupFixedValidity(trx, estimate);
+      if (groupHold && (!entryExpiry || groupHold > entryExpiry)) entryExpiry = groupHold;
+    }
     const count = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
@@ -4215,13 +4261,40 @@ router.put('/:id/proposal', async (req, res, next) => {
       monthly_total: totals.monthlyEquivalent,
       annual_total: totals.annualRecurring,
       onetime_total: totals.oneTime,
-      ...(authoredExpiry || hadFixedValidity ? { expires_at: expiryUpdate } : {}),
+      ...(authoredExpiry || hadFixedValidity ? { expires_at: entryExpiry } : {}),
       ...(revivingBid ? { status: estimate.viewed_at ? 'viewed' : estimate.sent_at ? 'sent' : 'draft' } : {}),
       ...(revivingBid && ['expired_unviewed', 'expired_viewed', 'expired_unsent'].includes(estimate.disposition)
         ? { disposition: null, disposition_source: null, disposition_at: null, disposition_note: null } : {}),
       updated_at: db.fn.now(),
     });
     if (!count) return { updatedCount: 0 };
+    if (groupId && authoredExpiry) {
+      // Published members — including an anchor the expiration sweep
+      // already flipped to 'expired' (delivery evidence, never an unsent
+      // expiry) — move forward and revive, so the customer's original
+      // emailed group link assembles the newly valid property again
+      // (pre-push codex P1 on #4309). Unpublished, locked, archived and
+      // terminal rows are untouched.
+      await trx('estimates')
+        .where({ estimate_group_id: groupId })
+        .whereNot({ id: estimate.id })
+        .whereNull('archived_at')
+        .whereNull('price_locked_at')
+        .where((q) => q.whereIn('status', ['sent', 'viewed'])
+          .orWhere((expired) => expired.where({ status: 'expired' })
+            .where((published) => published.whereNotNull('sent_at').orWhereNotNull('viewed_at'))
+            .whereRaw("COALESCE(disposition, '') <> 'expired_unsent'")))
+        .where('expires_at', '<', authoredExpiry)
+        .update({
+          expires_at: authoredExpiry,
+          status: db.raw("CASE WHEN status = 'expired' THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),
+          disposition: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition END"),
+          disposition_source: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_source END"),
+          disposition_at: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_at END"),
+          disposition_note: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_note END"),
+          updated_at: db.fn.now(),
+        });
+    }
     // The version THIS write committed, read under the same lock: the editor
     // keys its next save and its delivery review on it, so a save that lands
     // in the window before the editor's reload cannot be adopted as if it

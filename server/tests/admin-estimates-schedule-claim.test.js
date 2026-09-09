@@ -129,7 +129,7 @@ describe('schedule-send atomic claim', () => {
     // The worker runs on five-minute ticks: 04:55Z (23:55 ET) is the last
     // schedule the fixed 2099-12-21 hold can reach; 04:55:00.001Z is first
     // claimed at 05:00Z, after the day ends (GH codex P2 on #4309).
-    ...['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'expired'].flatMap(status => [
+    ...['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'].flatMap(status => [
       [status, '2099-12-22T05:00:00Z', 409], [status, '2099-12-22T04:59:59.999Z', 409], [status, '2099-12-22T04:55:00.001Z', 409], [status, '2099-12-22T04:55:00Z', 200],
     ]),
     ['accepted', '2099-12-22T05:00:00Z', 200],
