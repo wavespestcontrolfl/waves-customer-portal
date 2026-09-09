@@ -594,6 +594,13 @@ async function dispatchWithFallback(policy, payload = {}, options = {}) {
   return payload.laneId ? agentContext.runInLane(payload.laneId, run) : run();
 }
 
+// One failed leg of a chain. A billed leg (the provider answered, then the
+// answer failed a verdict or the caller's validator) keeps its usage so the
+// caller can account for every leg it paid for.
+function legFailure(route, reason, result, extra = {}) {
+  return { provider: route.provider, model: route.model, reason, ...extra, ...(result?.usage ? { usage: result.usage } : {}) };
+}
+
 async function runFallbackChain(policy, payload, { validate } = {}) {
   const routes = [policy?.primary, policy?.fallback].filter(Boolean);
   if (!routes.length) return { ok: false, reason: 'no_route', failures: [] };
@@ -620,7 +627,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
     const route = routes[index];
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
-      failures.push({ provider: route.provider, model: route.model, reason: 'timeout_budget_exhausted' });
+      failures.push(legFailure(route, 'timeout_budget_exhausted'));
       break;
     }
     const legMs = explicitBudget ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
@@ -634,7 +641,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
     }
 
     if (!result.ok) {
-      failures.push({ provider: route.provider, model: route.model, reason: result.reason || 'error', ...(result.usage ? { usage: result.usage } : {}) });
+      failures.push(legFailure(route, result.reason || 'error', result));
       continue;
     }
 
@@ -655,7 +662,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
       // A max_tokens-truncated Anthropic answer never reaches the validator:
       // callAnthropic fails that leg as anthropic_incomplete first, so a
       // rejection here is a judgement on a complete answer.
-      failures.push({ provider: route.provider, model: route.model, reason: String(rejection), validator: true, ...(result.usage ? { usage: result.usage } : {}) });
+      failures.push(legFailure(route, String(rejection), result, { validator: true }));
       rejectLedgerCall(result, String(rejection), true);
       continue;
     }

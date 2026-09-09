@@ -31,6 +31,7 @@
  */
 
 const crypto = require('crypto');
+const Ajv = require('ajv');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
@@ -46,7 +47,7 @@ const {
 } = require('./lawn-diagnostic-report');
 const { containsReportAccessCode } = require('./service-report/technician-report-copy');
 const { CURATED_REFERENCE, AUTO_RELEASE_RULE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
-const { FUNGUS_DISPLAY, THATCH_DISPLAY } = require('./lawn-assessment');
+const { FUNGUS_DISPLAY, THATCH_DISPLAY, lockCustomerBaseline } = require('./lawn-assessment');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
 const GATE = 'GATE_LAWN_VISIT_ASSESSMENT';
@@ -379,11 +380,28 @@ function zoneFromRefs(photoRefs, photoZones = []) {
   return zones.size === 1 ? [...zones][0] : 'unknown';
 }
 
+// RESPONSE_SCHEMA's containers only — every object and array of the answer,
+// nested as the schema nests them, with the scalar leaves, enums and required
+// keys dropped. Where the normalizers already coerce or drop a bad scalar,
+// they cannot survive a container that is not one: a finding of `null`
+// threw from normalizeFindings AFTER the chain had accepted the leg (Codex
+// #4149 r5), so the answer's shape is checked here, before the leg is
+// accepted, and a malformed one fails over like any other bad answer.
+function containerShape(schema) {
+  if (schema.type === 'object') {
+    return { type: 'object', properties: Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, containerShape(value)])) };
+  }
+  if (schema.type === 'array') return { type: 'array', items: containerShape(schema.items) };
+  return {};
+}
+const hasResponseShape = new Ajv().compile(containerShape(RESPONSE_SCHEMA));
+
 // Schema enforcement should guarantee the shape; the chain's validate hook is
 // the defensive read — a malformed answer fails the leg, so the fallback runs.
 function validateAssessmentJson(result, photoCount) {
   const json = result && result.json;
   if (!json || typeof json !== 'object' || Array.isArray(json)) return 'malformed_assessment';
+  if (!hasResponseShape(json)) return 'malformed_assessment';
   if (!Array.isArray(json.findings)) return 'malformed_assessment';
   if (!json.severities || typeof json.severities !== 'object') return 'malformed_assessment';
   if (!json.scores || typeof json.scores !== 'object') return 'malformed_assessment';
@@ -719,9 +737,15 @@ async function attachRunPhotos(runId, photoIds, knex) {
 // false — /assess never stamps it) and becomes the baseline on the confirm
 // that completes it, when the customer still has none; a property-history
 // confirm installs its baseline itself. Returns the update fields to spread.
-async function legacyBaselineFields({ assessment, run, confirmed, propertyHistoryEnabled }, knex) {
+// `trx` is the transaction the confirm's update runs in: the existence check
+// happens under the customer's baseline lock (pg_advisory_xact_lock, the one
+// installConfirmedBaseline takes), so two first confirms for one customer
+// serialize and the second sees the first's baseline — without it both read
+// "none yet" and both rows came out is_baseline (Codex #4150 r7).
+async function legacyBaselineFields({ assessment, run, confirmed, propertyHistoryEnabled }, trx) {
   if (!run || !confirmed || propertyHistoryEnabled) return {};
-  const existing = await knex('lawn_assessments').where({ customer_id: assessment.customer_id, is_baseline: true }).whereNot({ id: assessment.id }).first('id');
+  await lockCustomerBaseline(assessment.customer_id, trx);
+  const existing = await trx('lawn_assessments').where({ customer_id: assessment.customer_id, is_baseline: true }).whereNot({ id: assessment.id }).first('id');
   return existing ? {} : { is_baseline: true };
 }
 

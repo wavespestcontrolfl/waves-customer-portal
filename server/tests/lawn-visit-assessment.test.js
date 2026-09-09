@@ -216,6 +216,15 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(visit.validateAssessmentJson({ json: { findings: 'x', severities: {}, scores: {} } }, 2)).toBe('malformed_assessment');
     expect(visit.validateAssessmentJson({ json: { findings: [], scores: {} } }, 2)).toBe('malformed_assessment');
     expect(visit.validateAssessmentJson({ json: null }, 2)).toBe('malformed_assessment');
+    // Nested containers are checked before the leg is accepted (Ajv, the
+    // schema's own nesting): a null / scalar finding, photo rating or score
+    // object fails the leg instead of throwing from normalization after the
+    // chain has settled. Scalar leaves stay lenient — the normalizers coerce them.
+    expect(visit.validateAssessmentJson({ json: answer({ findings: [null] }) }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: answer({ findings: ['thinning turf'] }) }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [null, ...answer().photo_quality] }) }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: answer({ scores: { ...answer().scores, turf_density: 72 } }) }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: answer({ findings: [{ ...answer().findings[0], photo_refs: ['1'], severity: 'high' }] }) }, 2)).toBeNull();
     // Every photo needs a valid quality read: none, a missing photo, an out-of-range or invalid entry all fail.
     expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [] }) }, 2)).toBe('incomplete_photo_quality');
     expect(visit.validateAssessmentJson({ json: answer() }, 3)).toBe('incomplete_photo_quality'); // photo 3 unrated (7 is out of range)
@@ -408,14 +417,28 @@ describe('run row', () => {
 });
 
 describe('legacy baseline on confirm', () => {
-  const knexWith = (existing) => () => ({ where() { return this; }, whereNot() { return this; }, first: async () => existing });
+  // A transaction stub: the customer's baseline lock (pg_advisory_xact_lock)
+  // must be taken BEFORE the existence check reads.
+  const trxWith = (existing) => {
+    const calls = [];
+    const trx = () => ({ where() { return this; }, whereNot() { return this; }, first: async () => { calls.push('check'); return existing; } });
+    trx.raw = async (sql, bindings) => { calls.push(`lock:${sql} ${JSON.stringify(bindings)}`); };
+    trx.calls = calls;
+    return trx;
+  };
   const args = { assessment: { id: 'a1', customer_id: 'c1' }, run: { id: 'r1' }, confirmed: true, propertyHistoryEnabled: false };
   test('a run-backed row becomes the customer baseline on the confirm that completes it, when none exists', async () => {
-    expect(await visit.legacyBaselineFields(args, knexWith(null))).toEqual({ is_baseline: true });
-    expect(await visit.legacyBaselineFields(args, knexWith({ id: 'older' }))).toEqual({});
-    expect(await visit.legacyBaselineFields({ ...args, confirmed: false }, knexWith(null))).toEqual({});
-    expect(await visit.legacyBaselineFields({ ...args, run: null }, knexWith(null))).toEqual({});
-    expect(await visit.legacyBaselineFields({ ...args, propertyHistoryEnabled: true }, knexWith(null))).toEqual({});
+    const trx = trxWith(null);
+    expect(await visit.legacyBaselineFields(args, trx)).toEqual({ is_baseline: true });
+    expect(trx.calls).toEqual(['lock:SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text)) ["lawn-baseline","c1"]', 'check']);
+    expect(await visit.legacyBaselineFields(args, trxWith({ id: 'older' }))).toEqual({});
+  });
+  test('a pending, pre-gate or property-history confirm neither stamps nor locks', async () => {
+    for (const variant of [{ confirmed: false }, { run: null }, { propertyHistoryEnabled: true }]) {
+      const trx = trxWith(null);
+      expect(await visit.legacyBaselineFields({ ...args, ...variant }, trx)).toEqual({});
+      expect(trx.calls).toEqual([]);
+    }
   });
 });
 

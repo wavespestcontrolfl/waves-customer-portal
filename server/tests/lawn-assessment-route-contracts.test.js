@@ -148,15 +148,26 @@ describe('lawn assessment route contracts', () => {
       expect(confirm).toMatch(/const calibrationBaseline = runAiScores \|\| assessment\.adjusted_scores \|\| assessment\.composite_scores;/);
       expect(confirm).toMatch(/overall_score: overallScore,/);
       // confirmed_by_tech / confirmed_at are stamped only on a confirmed row; a pending row never becomes the property baseline.
-      expect(confirm).toMatch(/\.\.\.\(confirmed \? \{ confirmed_by_tech: true, confirmed_at: new Date\(\) \} : \{\}\),\s*\.\.\.\(await visitAssessment\.legacyBaselineFields\(\{ assessment, run: visitRun, confirmed, propertyHistoryEnabled \}, db\)\),/);
+      expect(confirm).toMatch(/\.\.\.\(confirmed \? \{ confirmed_by_tech: true, confirmed_at: new Date\(\) \} : \{\}\),\s*updated_at: new Date\(\),/);
       expect(confirm.match(/confirmed_by_tech: true/g)).toHaveLength(1);
-      expect(confirm.match(/installConfirmedBaseline\(/g)).toHaveLength(2);
+      expect(confirm.match(/installConfirmedBaseline\(/g)).toHaveLength(1);
       expect(confirm).toMatch(/const installBaseline = propertyHistoryEnabled && confirmed;/);
-      expect(confirm).toMatch(/installBaseline\s*\? await lawnAssessment\.installConfirmedBaseline\(/);
-      expect(confirm).toMatch(/else if \(installBaseline\) \{/);
-      // Confirm + review commit together when a review was sent; a score-only confirm stamps nothing.
-      expect(confirm).toMatch(/if \(reviewedRun && visitReview\.provided\) \{\s*\(\{ updated, reviewedVisitRun \} = await db\.transaction\(async \(trx\) => \{[\s\S]{0,700}visitAssessment\.reviewRun\(\{ run: visitRun, review: visitReview, technicianId: req\.technicianId \}, trx\)/);
+      // One write path: the legacy baseline check runs in the SAME transaction as the update (under the
+      // customer's baseline lock — legacyBaselineFields takes it), then the review when one was sent, so
+      // a lost review can never ride a successful confirm and two first confirms cannot both become the
+      // baseline. A run-backed row always writes in a transaction; a pre-gate row writes as before.
+      const write = confirm.slice(confirm.indexOf('const writeConfirm = async (trx) => {'), confirm.indexOf('const { updated, reviewedVisitRun } ='));
+      expect(write).toMatch(/^const writeConfirm = async \(trx\) => \{\s*Object\.assign\(updateData, await visitAssessment\.legacyBaselineFields\(\{ assessment, run: visitRun, confirmed, propertyHistoryEnabled \}, trx\)\);/);
+      expect(write).toMatch(/installBaseline\s*\? await lawnAssessment\.installConfirmedBaseline\(\{ assessmentId, updateData \}, \{ knex: trx \}\)\s*: \(await trx\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.update\(updateData\)\.returning\('\*'\)\)\[0\];/);
+      expect(write).toMatch(/const run = reviewedRun && visitReview\.provided\s*\? await visitAssessment\.reviewRun\(\{ run: visitRun, review: visitReview, technicianId: req\.technicianId \}, trx\)\s*: null;/);
+      expect(write.indexOf('legacyBaselineFields(')).toBeLessThan(write.indexOf('installConfirmedBaseline('));
+      expect(confirm).toMatch(/const \{ updated, reviewedVisitRun \} = reviewedRun \? await db\.transaction\(writeConfirm\) : await writeConfirm\(db\);/);
       expect(confirm).not.toMatch(/reviewRun\([\s\S]{0,120}, db\)/);
+      expect(confirm).not.toMatch(/legacyBaselineFields\([\s\S]{0,120}, db\)/);
+      // Calibration compares the run's scores with the RESOLVED confirmation — every score the row confirmed
+      // with, not this request's payload (a follow-up confirm may carry only the last missing field).
+      expect(confirm).toMatch(/LawnIntel\.recordTechCalibration\(assessmentId, aiScores, finalScores\)/);
+      expect(confirm).not.toMatch(/recordTechCalibration\(assessmentId, aiScores, adjustedScores\)/);
       // A pending row returns right after the write with the missing scores — before the wiki link and the intelligence pipeline.
       const pending = confirm.indexOf('if (!confirmed) {');
       expect(pending).toBeGreaterThan(confirm.indexOf('persistProtocolFieldChecks('));
