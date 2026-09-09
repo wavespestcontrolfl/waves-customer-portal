@@ -2678,7 +2678,11 @@ export function calculateEstimate(inputs) {
       const staTre = Math.max(8, Math.ceil(perim / 15));
       const sta = tmSystem === 'advance' ? staAdv : staTre;
       const ai = Math.round((staAdv * (13.16 + 5.25 + 0.75)) * 1.45);
-      const ti = Math.round((staTre * (22.05 + 5.25 + 0.75)) * 1.45);
+      // Trelona station cost mirrors the server fallback constant ($24.00 =
+      // $384 / 16-station box, owner 2026-09-02). The SERVER may price off
+      // the inventory catalog (materialCostSource 'catalog'); this client
+      // preview is the constants-only mirror and is never the price of record.
+      const ti = Math.round((staTre * (24.00 + 5.25 + 0.75)) * 1.45);
       // Bracketed by the selected system's station count; the retired
       // Basic/Premier tier input no longer changes price (bmo/pmo kept for
       // legacy readers, both stamped with the bracket monthly).

@@ -992,15 +992,58 @@ const TERMITE = {
   // Corteva dealer program, we're not enrolled.
   defaultSystem: 'trelona',
   systems: {
-    // Wholesale verified Apr 2026: Advance TBS RFID = $131.60 / 10-cs = $13.16/sta;
-    // Trelona ATBS RFID (pre-baited annual) = $352.80 / 16-cs = $22.05/sta.
+    // Wholesale verified Apr 2026: Advance TBS RFID = $131.60 / 10-cs = $13.16/sta.
+    // Trelona ATBS (pre-baited annual, TWO cartridges per station): the
+    // approved supplier price is $384.00 / 16-station box = $24.00/sta
+    // (owner 2026-09-02; the April $352.80 / $22.05 box is retired). This
+    // constant is the FRESH-ENV FALLBACK: in prod the station cost is read
+    // from the inventory catalog row named catalogProductName (approved
+    // vendor price ÷ units per container) on every pricing sync — see
+    // db-bridge syncTermiteStationCostsFromCatalog and
+    // TERMITE.linkStationCostsToCatalog. stationCostSource is stamped
+    // 'catalog' or 'config' by the bridge and rides the priced line as
+    // materialCostSource so a stale catalog never silently prices a quote.
     // Spacing per LABEL: Advance/Sentricon-class ~10 ft; Trelona ATBS is the
     // wide-spacing annual system (label 10-15 ft, 20 max) — 15 ft is what
-    // keeps a ~224 LF home at 15 stations / ~$610 install instead of
-    // 23 / ~$935 (owner 2026-07-28, competitive review vs $375 Sentricon
+    // keeps a ~224 LF home at 15 stations / ~$653 install instead of
+    // 23 / ~$1,000 (owner 2026-07-28, competitive review vs $375 Sentricon
     // installs).
     advance: { stationCost: 13.16, laborMaterial: 5.25, misc: 0.75, label: 'Advance (Active)', spacingFt: 10 },
-    trelona: { stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, label: 'Trelona (Termite)', spacingFt: 15 },
+    trelona: {
+      stationCost: 24.00,
+      stationCostSource: 'config',
+      catalogProductName: 'Trelona ATBS Bait Station',
+      laborMaterial: 5.25,
+      misc: 0.75,
+      label: 'Trelona (Termite)',
+      spacingFt: 15,
+    },
+  },
+  // Inventory link for the station and cartridge costs (owner 2026-09-03:
+  // "termite bait stations should be linked to inventory for price
+  // changes"). Mirrors SPECIALTY.preSlabTermiticide.linkContainerCostsToCatalog:
+  // the catalog value is trusted only when backed by an ACTIVE, APPROVED
+  // vendor price and inside a [0.5x, 2x] sanity band of the config value;
+  // anything else keeps the config value and stamps the source 'config'.
+  // DB kill switch: pricing_config.termite_install.link_station_costs_to_catalog
+  // = false (no deploy needed).
+  linkStationCostsToCatalog: true,
+  // Cartridge economics — REPORT-ONLY cost inputs for the monitoring cost
+  // model (plan 2026-09-03 §A1; BASF FAQ PSS 26-1201): each Trelona ATBS
+  // station holds two bait cartridges, a cartridge is replaced when more
+  // than 1/3 of its matrix is consumed or missing, and the 33% planning
+  // rate stands until the tech /complete product ledger measures real
+  // swaps. cartridgeCost is the 25-pack rate ($170.75 / 25) and links to
+  // the catalog row named catalogProductName the same way the station does.
+  // followUpVisitReserve = ASSUMED extra activity-directed visits per year
+  // (fraction of one service visit's labor). None of these change a price.
+  cartridges: {
+    cartridgeCost: 6.83,
+    cartridgeCostSource: 'config',
+    catalogProductName: 'Trelona Compressed Termite Bait (25-pack)',
+    cartridgesPerStation: 2,
+    replacementRate: 0.33,
+    followUpVisitReserve: 0.25,
   },
   // 1.45x set Apr 2026 after competitive review (All U Need: 21 Sentricon stations
   // for $375). Prior 1.75x put doorstep ~3x market on Trelona default. Note:

@@ -326,6 +326,32 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!Number.isInteger(win) || win < 1 || win > 168) {
       return fail('estimate_card_hold.cancelWindowHours must be a whole number of hours between 1 and 168');
     }
+  } else if (configKey === 'termite_install') {
+    // Station hardware costs feed installation.price through the 1.45x
+    // multiplier, so a typo here is a doorstep price move; the cartridge
+    // keys are report-only cost inputs (plan 2026-09-03 §A1) but a bad
+    // rate still corrupts every margin report. Optional keys: absent keeps
+    // the constant; present must be sane.
+    const nonNegativeOptional = (key, label) => {
+      if (data?.[key] == null) return null;
+      return isNonNegative(data[key]) ? null : fail(`termite_install.${key} must be a non-negative ${label}`);
+    };
+    for (const [key, label] of [['trelona_bait', '$/station'], ['advance_bait', '$/station'], ['trelona_station_cost', '$/station'], ['advance_station_cost', '$/station'], ['labor_per_station', '$/station'], ['misc_per_station', '$/station'], ['cartridge_cost', '$/cartridge'], ['follow_up_visit_reserve', 'visits per year']]) {
+      const failed = nonNegativeOptional(key, label);
+      if (failed) return failed;
+    }
+    if (data?.multiplier != null && !isPositive(data.multiplier)) return fail('termite_install.multiplier must be positive');
+    if (data?.cartridges_per_station != null) {
+      const n = num(data.cartridges_per_station);
+      if (!Number.isInteger(n) || n < 1 || n > 4) return fail('termite_install.cartridges_per_station must be a whole number between 1 and 4');
+    }
+    if (data?.cartridge_replacement_rate != null) {
+      const rate = num(data.cartridge_replacement_rate);
+      if (!Number.isFinite(rate) || rate < 0 || rate > 1) return fail('termite_install.cartridge_replacement_rate must be a fraction between 0 and 1');
+    }
+    if (data?.link_station_costs_to_catalog != null && typeof data.link_station_costs_to_catalog !== 'boolean') {
+      return fail('termite_install.link_station_costs_to_catalog must be a boolean');
+    }
   } else if (configKey === 'termite_bond') {
     // Warranty-bond quarterly rates by term (owner 2026-07-20). Strictly
     // positive dollars — the db-bridge sync coerces and overwrites runtime
@@ -611,7 +637,7 @@ async function ensureTable() {
       { config_key: 'mosquito_pressure', name: 'Mosquito Pressure Factors', category: 'mosquito', sort_order: 4, data: JSON.stringify({ trees_heavy: 0.15, trees_moderate: 0.05, complexity_complex: 0.10, complexity_moderate: 0.05, pool: 0.05, near_water: 0.10, irrigation: 0.08, lot_acre: 0.15, lot_half: 0.05, cap: 2.0 }) },
 
       // Termite
-      { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 22.05, labor_per_station: 5.25, misc_per_station: 0.75 }) },
+      { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 24.00, labor_per_station: 5.25, misc_per_station: 0.75, link_station_costs_to_catalog: true, cartridge_cost: 6.83, cartridges_per_station: 2, cartridge_replacement_rate: 0.33, follow_up_visit_reserve: 0.25 }) },
       { config_key: 'termite_monitoring', name: 'Termite Station-Check Brackets', category: 'termite', sort_order: 2, data: JSON.stringify({ pricing_model: 'station_brackets', base_monthly: 19, step_monthly: 5, bracket_stations: 5 }) },
 
       // Rodent — bait stations (recurring monthly)

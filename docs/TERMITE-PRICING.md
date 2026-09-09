@@ -19,7 +19,7 @@ Flat monthly rate regardless of footprint, system, or station count.
 
 **WaveGuard qualification:** bait station monitoring is one of five qualifying services for WaveGuard tier discount (`lawn`, `pest`, `treeShrub`, `mosquito`, `termiteBait`). Tier discount applies to the monthly rate for recurring customers.
 
-**v4.4 note:** Basic and Premier currently price flat despite different COGS models. Refactor will tie monitoring price to cartridge consumption + visit frequency.
+**Superseded 2026-07-28:** the flat Basic/Premier tiers above are RETIRED. Station checks price by 5-station bracket — `$19/mo + $5 × max(0, ceil(stations / 5) − 2)` (≤10 → $19 · 11-15 → $24 · 16-20 → $29 …), billed per application (monthly × 12 ÷ 4). Since 2026-09-09 the termite line also carries a report-only `costs` block (service labor, cartridge replacement, follow-up reserve) so the margin on this bracket is computed against real consumables; the annual-plan product that reprices monitoring is PR A2 of `docs/estimator-pricing-plan-2026-09-03.md`.
 
 ---
 
@@ -100,9 +100,9 @@ The following services are quoted in production but NOT documented here. The v4.
 - **`volumeDiscounts` map is dead code:** `SPECIALTY.preSlabTermidor.volumeDiscounts = { '10plus': 0.85, '5plus': 0.90, none: 1.00 }` exists in v1 constants but is unreachable — the only consumer (`service-pricing.js:pricePreSlabTermidor`) is exported but uncalled by v1's estimate-engine, and v2 + client use hardcoded string comparisons (`'10'` / `'5'` / `'NONE'`) rather than the map. Either wire the map into live paths in v4.4 OR delete the map and keep inline string comparisons as canonical. Align key strings (`'10plus'`/`'5plus'`) with UI/live code strings (`'10'`/`'5'`/`'NONE'`) as part of cleanup.
 
 **Vendor cost refreshes:**
-- **Trelona station cost:** $24 in code vs $22.05 real SiteOne price — update or wire from `products_catalog.best_price`.
-- **Advance station cost:** $14 in code, real vendor price unconfirmed — verify from current SiteOne invoice.
-- **Cartridge products:** Trelona cartridge 6-pack ($63.24) and 25-pack ($167.50) not in catalog yet — add in v4.4.
+- **Trelona station cost:** DONE 2026-09-09 (PR A1 of the 2026-09-03 plan). The engine's fallback is $24.00/station ($384.00 / 16-station box, owner-verified 2026-09-02 — the earlier note had the two figures inverted: $22.05 was the stale April code value, $24 the catalog). In prod the station cost is read from the `products_catalog` row **"Trelona ATBS Bait Station"** (approved vendor best price ÷ units in `container_size`, sanity band [0.5×, 2×]) on every pricing sync; kill switch `pricing_config.termite_install.link_station_costs_to_catalog = false`. The priced line reports `materialCostSource.station` = `catalog` | `config`.
+- **Advance station cost:** $13.16 in code (April 2026 wholesale), real vendor price unconfirmed — verify from current SiteOne invoice. Advance is off the menu (replay only).
+- **Cartridge products:** the 25-pack row **"Trelona Compressed Termite Bait (25-pack)"** is seeded by migration `20260909000001` with `needs_pricing = true`; enter the vendor price ($170.75 / 25 = $6.83) in the inventory UI and the cost model links to it the same way as the station. The 6-pack ($64.17) is a manual catalog entry if wanted. Cartridges are still in NO price — they feed the report-only cost model (`costs.cartridgeReplacementAnnual`: 2 per station × 33% × cartridge cost) until PR A2 prices the annual plan.
 
 **Structural/model:**
 - **Bait station monitoring model:** Basic and Premier flat pricing doesn't reflect real COGS difference. Port to cartridge-based consumption model.

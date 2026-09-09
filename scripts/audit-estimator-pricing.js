@@ -58,11 +58,17 @@ const argValue = (flag) => {
 const WANT_DB = args.includes('--db');
 const JSON_OUT = argValue('--json');
 const MD_OUT = argValue('--md');
+// --termite-plan: print the termite station economics (setup × annual ×
+// replacement × minutes → year-one and steady-state margin) for the plan's
+// candidate price shapes instead of the scenario matrix (plan 2026-09-03 §A1).
+// --stations N pins one station count; default walks 8..30.
+const WANT_TERMITE_PLAN = args.includes('--termite-plan');
+const STATIONS_ARG = argValue('--stations');
 // Reject unknown flags: a not-yet-built mode (the plan names --termite-plan
 // for PR A1) must never silently run the default matrix (codex P1 on PR #3792).
 // Only when run as the CLI: the golden test requires this file as a library
 // under jest's own argv.
-const KNOWN_FLAGS = new Map([['--db', 0], ['--json', 1], ['--md', 1]]);
+const KNOWN_FLAGS = new Map([['--db', 0], ['--json', 1], ['--md', 1], ['--termite-plan', 0], ['--stations', 1]]);
 if (require.main === module) {
   for (let i = 0; i < args.length; i += 1) {
     if (!KNOWN_FLAGS.has(args[i])) {
@@ -85,10 +91,20 @@ const { visitsPerYearForCadence, prepayCoverageCadenceForPattern } = require(pat
 // Termite station economics are the owner-reviewed cartridge model in
 // docs/estimator-pricing-plan-2026-09-03.md §A1 (BASF Trelona ATBS: two
 // cartridges per station, label-driven replacement, 25-pack cartridge rate,
-// an ASSUMED activity follow-up reserve). The termite pricer defines no
-// per-station monitoring cost of its own; the rodent bait / amortization
-// rates are rodent inputs and must never stand in for it (codex r6 P1).
-const TERMITE_CARTRIDGE_MODEL = Object.freeze({ cartridgesPerStation: 2, replacementRate: 0.33, cartridgeCost: 6.83, followUpVisitsPerYear: 0.25, followUpVisitCost: 55 });
+// an ASSUMED activity follow-up reserve). Since PR A1 the inputs live on
+// constants.TERMITE.cartridges (DB-tunable via pricing_config.termite_install
+// and catalog-linkable), so this audit reads the same numbers the engine's
+// costs block reports; the literals are the fresh-env fallback only. The
+// termite pricer defines no other per-station monitoring cost; the rodent
+// bait / amortization rates are rodent inputs and must never stand in for it
+// (codex r6 P1).
+const TERMITE_CARTRIDGE_MODEL = Object.freeze({
+  cartridgesPerStation: Number(constants.TERMITE.cartridges?.cartridgesPerStation ?? 2),
+  replacementRate: Number(constants.TERMITE.cartridges?.replacementRate ?? 0.33),
+  cartridgeCost: Number(constants.TERMITE.cartridges?.cartridgeCost ?? 6.83),
+  followUpVisitsPerYear: Number(constants.TERMITE.cartridges?.followUpVisitReserve ?? 0.25),
+  followUpVisitCost: 55,
+});
 const termiteAnnualCost = (stations) => round2(stations * TERMITE_CARTRIDGE_MODEL.cartridgesPerStation * TERMITE_CARTRIDGE_MODEL.replacementRate * TERMITE_CARTRIDGE_MODEL.cartridgeCost + TERMITE_CARTRIDGE_MODEL.followUpVisitsPerYear * TERMITE_CARTRIDGE_MODEL.followUpVisitCost);
 
 // ── Money helpers (kept local on purpose — this file must not import engine helpers) ──
@@ -1793,7 +1809,99 @@ function markupVsMarginAudit() {
   ];
 }
 
+// ── --termite-plan: station economics for the annual-plan price shapes ──
+// Cost side comes from the engine's own termite line (installation.* and the
+// costs block priceTermiteBait emits — station and cartridge cost, service
+// minutes at GLOBAL rates, label-driven replacement, follow-up reserve), so
+// this table moves with pricing_config / the catalog link, never a private
+// copy. Price side = the plan's candidate shapes (§A1): P1 setup stations ×
+// $30 + annual $249 base / +$50 per 5-station bracket above 10; P2 today's
+// install formula + $249. Today's quarterly program is printed beside them.
+// Report only — nothing here is a price the engine charges.
+const TERMITE_PLAN_SHAPES = Object.freeze({
+  P1: { setupPerStation: 30, annualBase: 249, annualStep: 50, bracketStations: 5, bracketFloor: 10 },
+  P2: { setupPerStation: null, annualBase: 249, annualStep: 0, bracketStations: 5, bracketFloor: 10 },
+});
+function termitePlanRow(stations) {
+  const T = constants.TERMITE;
+  const sys = T.systems[T.defaultSystem];
+  // Reverse the station count into a perimeter the pricer resolves to exactly
+  // `stations` (ceil(perimeter / spacing) with the min-station floor).
+  const perimeter = Math.max(1, (stations - 1) * sys.spacingFt + 1);
+  const { priceTermiteBait } = require(path.join(ENGINE_DIR, 'service-pricing'));
+  const li = priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' }, measurements: { perimeterLF: perimeter } }, { system: T.defaultSystem, perimeterLF: perimeter });
+  if (!li || li.stations !== stations || !li.costs) {
+    return { stations, error: `engine priced ${li ? li.stations : 'nothing'} stations for perimeter ${perimeter}` };
+  }
+  const c = li.costs;
+  const setupCost = c.installTotal;
+  const annualCostSteady = c.annualTotal;
+  const annualCostAnnualPlan = round2(c.serviceLaborPerVisit + c.cartridgeReplacementAnnual + c.followUpReserveAnnual);
+  const bracketsAbove = (shape) => Math.max(0, Math.ceil((stations - shape.bracketFloor) / shape.bracketStations));
+  const shapes = {};
+  for (const [name, shape] of Object.entries(TERMITE_PLAN_SHAPES)) {
+    const setup = shape.setupPerStation != null ? stations * shape.setupPerStation : li.installation.retailValue;
+    const annual = shape.annualBase + shape.annualStep * bracketsAbove(shape);
+    shapes[name] = {
+      setup,
+      annual,
+      yearOne: setup + annual,
+      setupMargin: setup > 0 ? round2((setup - setupCost) / setup) : null,
+      annualMargin: annual > 0 ? round2((annual - annualCostAnnualPlan) / annual) : null,
+      threeYearRevenue: setup + annual * 3,
+      threeYearMargin: round2(setup + annual * 3 - setupCost - annualCostAnnualPlan * 3),
+    };
+  }
+  return {
+    stations,
+    perimeter,
+    stationCost: c.stationCost,
+    cartridgeCost: c.cartridgeCost,
+    materialCostSource: li.materialCostSource,
+    minutes: { install: Math.round(stations * 0.083 * 60), service: c.serviceMinutesPerVisit },
+    costs: { setup: setupCost, serviceLaborPerVisit: c.serviceLaborPerVisit, cartridgeReplacementAnnual: c.cartridgeReplacementAnnual, followUpReserveAnnual: c.followUpReserveAnnual, annualPlanSteadyState: annualCostAnnualPlan, quarterlyProgramSteadyState: annualCostSteady },
+    today: { install: li.installation.price, monitoringAnnual: li.monitoring.annual, yearOne: li.installation.price + li.monitoring.annual, monitoringMargin: li.monitoring.annual > 0 ? round2((li.monitoring.annual - annualCostSteady) / li.monitoring.annual) : null },
+    shapes,
+  };
+}
+function runTermitePlan() {
+  const counts = STATIONS_ARG ? [Number(STATIONS_ARG)] : Array.from({ length: 23 }, (_, i) => i + 8);
+  if (counts.some((n) => !Number.isInteger(n) || n < 1 || n > 200)) {
+    console.error(`--stations must be a whole number between 1 and 200 (got ${JSON.stringify(STATIONS_ARG)})`);
+    process.exit(2);
+  }
+  const rows = counts.map(termitePlanRow);
+  const out = { generatedAt: new Date().toISOString(), engineConstantsSource: 'constants.js (in-code defaults)', cartridgeModel: TERMITE_CARTRIDGE_MODEL, shapes: TERMITE_PLAN_SHAPES, rows };
+  if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify(out, null, 2));
+  const md = [];
+  md.push('# Termite station economics (plan 2026-09-03 §A1)');
+  md.push('');
+  md.push(`Station cost ${money(rows[0]?.stationCost)} (${rows[0]?.materialCostSource?.station ?? 'n/a'}), cartridge ${money(rows[0]?.cartridgeCost)} (${rows[0]?.materialCostSource?.cartridge ?? 'n/a'}), ${TERMITE_CARTRIDGE_MODEL.cartridgesPerStation}/station × ${pct(TERMITE_CARTRIDGE_MODEL.replacementRate)} replacement, follow-up reserve ${TERMITE_CARTRIDGE_MODEL.followUpVisitsPerYear} visit/yr. Report only.`);
+  md.push('');
+  md.push('| Stations | Setup cost | Annual cost (1 visit) | Today install + qtrly | Today mon. margin | P1 setup + annual | P1 setup / annual margin | P2 setup + annual | P2 setup / annual margin |');
+  md.push('|---|---|---|---|---|---|---|---|---|');
+  for (const r of rows) {
+    if (r.error) { md.push(`| ${r.stations} | ${r.error} | | | | | | | |`); continue; }
+    md.push(`| ${r.stations} | ${money(r.costs.setup)} | ${money(r.costs.annualPlanSteadyState)} | ${money(r.today.install)} + ${money(r.today.monitoringAnnual)} | ${pct(r.today.monitoringMargin)} | ${money(r.shapes.P1.setup)} + ${money(r.shapes.P1.annual)} | ${pct(r.shapes.P1.setupMargin)} / ${pct(r.shapes.P1.annualMargin)} | ${money(r.shapes.P2.setup)} + ${money(r.shapes.P2.annual)} | ${pct(r.shapes.P2.setupMargin)} / ${pct(r.shapes.P2.annualMargin)} |`);
+  }
+  const text = md.join('\n');
+  if (MD_OUT) fs.writeFileSync(MD_OUT, text + '\n');
+  console.log(text);
+  if (rows.some((r) => r.error)) process.exitCode = 4;
+}
+
 async function main() {
+  if (WANT_TERMITE_PLAN) {
+    if (WANT_DB) {
+      const dbInfo = await maybeSyncFromDb();
+      if (!dbInfo.synced) {
+        console.error(`--db requested but the pricing_config overlay did not run: ${dbInfo.reason || 'sync returned false'}`);
+        process.exit(3);
+      }
+    }
+    runTermitePlan();
+    return;
+  }
   const dbInfo = await maybeSyncFromDb();
   if (WANT_DB && !dbInfo.synced) {
     // An explicitly requested overlay that did not happen must never look like

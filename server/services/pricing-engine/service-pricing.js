@@ -4690,6 +4690,52 @@ function priceTermiteStationRental(installPrice) {
   };
 }
 
+// Termite program cost model (plan 2026-09-03 §A1, LAB-006 — REPORT ONLY).
+// Install = hardware + laborMaterial + misc per station plus the computed
+// (never billed) install labor. Steady-state annual = service labor
+// (5 min/station + the shared drive time, per visit × visits) + cartridge
+// replacement (installed cartridges × label-driven replacement rate × the
+// cartridge cost) + an ASSUMED activity follow-up reserve (fraction of one
+// service visit's labor). Cartridge inputs live on TERMITE.cartridges and
+// are DB-tunable via pricing_config.termite_install; the station and
+// cartridge costs may come from the inventory catalog (db-bridge link),
+// which is what materialCostSource reports.
+function termiteProgramCostModel({ stations, installMaterialCost, installLabor, visitsPerYear, system }) {
+  const c = TERMITE.cartridges || {};
+  const cartridgesPerStation = Number.isFinite(Number(c.cartridgesPerStation)) ? Number(c.cartridgesPerStation) : 0;
+  const replacementRate = Number.isFinite(Number(c.replacementRate)) ? Number(c.replacementRate) : 0;
+  const cartridgeCost = Number.isFinite(Number(c.cartridgeCost)) ? Number(c.cartridgeCost) : 0;
+  const followUpVisitReserve = Number.isFinite(Number(c.followUpVisitReserve)) ? Number(c.followUpVisitReserve) : 0;
+  const visits = Number(visitsPerYear) > 0 ? Number(visitsPerYear) : 0;
+  const serviceLaborPerVisit = laborCost(stations * 5);
+  const serviceLaborAnnual = serviceLaborPerVisit * visits;
+  const cartridgeReplacementAnnual = stations * cartridgesPerStation * replacementRate * cartridgeCost;
+  const followUpReserveAnnual = followUpVisitReserve * serviceLaborPerVisit;
+  const annualTotal = serviceLaborAnnual + cartridgeReplacementAnnual + followUpReserveAnnual;
+  const r2 = (n) => Math.round(n * 100) / 100;
+  return {
+    installMaterial: r2(installMaterialCost),
+    installLabor: r2(installLabor),
+    installTotal: r2(installMaterialCost + installLabor),
+    stationCost: r2(Number(system?.stationCost) || 0),
+    cartridgeCost: r2(cartridgeCost),
+    cartridgesPerStation,
+    cartridgeReplacementRate: replacementRate,
+    followUpVisitReserve,
+    serviceMinutesPerVisit: stations * 5 + GLOBAL.DRIVE_TIME,
+    serviceLaborPerVisit: r2(serviceLaborPerVisit),
+    serviceVisitsPerYear: visits,
+    serviceLaborAnnual: r2(serviceLaborAnnual),
+    cartridgeReplacementAnnual: r2(cartridgeReplacementAnnual),
+    followUpReserveAnnual: r2(followUpReserveAnnual),
+    annualTotal: r2(annualTotal),
+    materialCostSource: {
+      station: system?.stationCostSource === 'catalog' ? 'catalog' : 'config',
+      cartridge: c.cartridgeCostSource === 'catalog' ? 'catalog' : 'config',
+    },
+  };
+}
+
 function priceTermiteBait(property, options = {}) {
   const {
     // No destructure default (codex P2): an absent system must reach
@@ -4842,6 +4888,13 @@ function priceTermiteBait(property, options = {}) {
   // 2026-07-28) — the flat Basic/Premier tiers are retired.
   const monitoringMonthly = termiteMonitoringMonthlyForStations(stations);
   const monitoringAnnual = monitoringMonthly * 12;
+  const costs = termiteProgramCostModel({
+    stations,
+    installMaterialCost,
+    installLabor,
+    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    system: sys,
+  });
 
   return {
     service: 'termite_bait',
@@ -4895,6 +4948,16 @@ function priceTermiteBait(property, options = {}) {
       monthly: monitoringMonthly,
       annual: monitoringAnnual,
     },
+    // Where the hardware cost behind installation.price came from (plan
+    // 2026-09-03 §A1): 'catalog' = the inventory catalog's approved vendor
+    // price on the last pricing sync, 'config' = pricing_config /
+    // constants fallback. Never silent — a stale catalog prices as 'config'.
+    materialCostSource: costs.materialCostSource,
+    // Report-only program cost model (LAB-006): install cost plus the
+    // steady-state annual cost of servicing the stations — service labor per
+    // visit, label-driven cartridge replacement, and the activity follow-up
+    // reserve. Feeds margin reporting; nothing here changes a price.
+    costs,
     annual: monitoringAnnual,
     monthly: monitoringMonthly,
     // Quarterly station checks, billed per application (owner 2026-07-20).

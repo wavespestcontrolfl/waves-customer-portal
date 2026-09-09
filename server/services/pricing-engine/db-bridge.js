@@ -810,6 +810,73 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   }
 }
 
+// Termite station + cartridge cost from the inventory catalog (owner
+// 2026-09-03: "termite bait stations should be linked to inventory for
+// price changes"). Same trust rules as the pre-slab link above: the catalog
+// row named TERMITE.systems.trelona.catalogProductName (station) and
+// TERMITE.cartridges.catalogProductName (cartridge) is used ONLY when its
+// best_price is backed by an ACTIVE, APPROVED/auto-approved vendor price and
+// the per-unit figure sits inside [0.5x, 2x] of the config value. The
+// per-unit cost is best_price ÷ the leading count in container_size
+// ("1 station" → 1, "16 stations" → 16, "25 cartridges" → 25; missing → 1),
+// because bait hardware is counted, not measured in ounces. Fail-open: any
+// miss keeps the config value. The winning source is stamped on the
+// constants (stationCostSource / cartridgeCostSource) so the priced line can
+// carry materialCostSource — a stale or missing catalog price is never
+// silent. Runs every sync AFTER config re-applies the base costs.
+function unitsPerContainer(containerSize) {
+  const m = String(containerSize || '').trim().match(/^(\d+(?:\.\d+)?)\s*(?:x\s*)?/i);
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+async function syncTermiteStationCostsFromCatalog(db) {
+  const termite = constants.TERMITE;
+  if (termite?.linkStationCostsToCatalog !== true) return;
+  const targets = [
+    { key: 'station', target: termite.systems?.trelona, costKey: 'stationCost', sourceKey: 'stationCostSource' },
+    { key: 'cartridge', target: termite.cartridges, costKey: 'cartridgeCost', sourceKey: 'cartridgeCostSource' },
+  ].filter(({ target }) => typeof target?.catalogProductName === 'string' && target.catalogProductName.trim());
+  if (!targets.length) return;
+  try {
+    if (!(await db.schema.hasTable('products_catalog'))) return;
+    const rows = await db('products_catalog')
+      .whereIn('name', targets.map(({ target }) => target.catalogProductName.trim()))
+      .where({ active: true, needs_pricing: false })
+      .select('name', 'best_price', 'container_size', 'best_vendor_pricing_id');
+    const backingIds = rows.map((row) => row.best_vendor_pricing_id).filter(Boolean);
+    const approvedBackingIds = new Set();
+    if (backingIds.length) {
+      const backing = await db('vendor_pricing')
+        .whereIn('id', backingIds)
+        .where({ is_active: true })
+        .whereIn('approval_status', ['approved', 'auto_approved'])
+        .select('id');
+      for (const row of backing) approvedBackingIds.add(row.id);
+    }
+    const byName = new Map(rows.map((row) => [row.name, row]));
+    for (const { key, target, costKey, sourceKey } of targets) {
+      const row = byName.get(target.catalogProductName.trim());
+      if (!row?.best_vendor_pricing_id || !approvedBackingIds.has(row.best_vendor_pricing_id)) continue;
+      const price = Number(row.best_price);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      const perUnit = Math.round((price / unitsPerContainer(row.container_size)) * 100) / 100;
+      const configPerUnit = Number(target[costKey]);
+      if (!Number.isFinite(configPerUnit) || configPerUnit <= 0) continue;
+      if (perUnit > configPerUnit * 2 || perUnit < configPerUnit * 0.5) {
+        console.warn(
+          `[pricing-engine] termite ${key}: catalog $${perUnit.toFixed(2)}/unit outside sanity band of config $${configPerUnit.toFixed(2)}/unit — keeping config value`
+        );
+        continue;
+      }
+      target[costKey] = perUnit;
+      target[sourceKey] = 'catalog';
+    }
+  } catch (err) {
+    console.warn('[pricing-engine] termite inventory-price link skipped:', err.message);
+  }
+}
+
 // Counter, not a boolean: overlapping direct callers (route + admin config
 // + proposal approval) must all be tracked — the first to finish must not
 // clear the flag while another sync is still mutating constants.
@@ -1185,6 +1252,21 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       if (t.misc_per_station != null) {
         constants.TERMITE.systems.advance.misc = Number(t.misc_per_station);
         constants.TERMITE.systems.trelona.misc = Number(t.misc_per_station);
+      }
+      // Config re-applies the base station/cartridge costs every sync, so
+      // the catalog link below (or its kill switch) self-heals within one
+      // sync — the source stamps must reset with the values they describe.
+      constants.TERMITE.systems.trelona.stationCostSource = 'config';
+      setBoolean(constants.TERMITE, 'linkStationCostsToCatalog', t.link_station_costs_to_catalog ?? t.linkStationCostsToCatalog);
+      const cartridges = constants.TERMITE.cartridges;
+      if (cartridges) {
+        // Report-only cost inputs (plan 2026-09-03 §A1) — none of these
+        // change a price; they feed the termite line's costs block.
+        setNumber(cartridges, 'cartridgeCost', t.cartridge_cost ?? t.cartridgeCost, Number);
+        setNumber(cartridges, 'cartridgesPerStation', t.cartridges_per_station ?? t.cartridgesPerStation, Number);
+        setNumber(cartridges, 'replacementRate', t.cartridge_replacement_rate ?? t.cartridgeReplacementRate, Number);
+        setNumber(cartridges, 'followUpVisitReserve', t.follow_up_visit_reserve ?? t.followUpVisitReserve, Number);
+        cartridges.cartridgeCostSource = 'config';
       }
     }
     if (config.termite_monitoring) {
@@ -1980,6 +2062,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     await syncPreSlabContainerCostsFromCatalog(db);
+    await syncTermiteStationCostsFromCatalog(db);
 
     assertValidPestPricingConfig(constants);
 

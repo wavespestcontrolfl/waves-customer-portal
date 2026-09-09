@@ -108,14 +108,14 @@ describe("termite station rental — client fallback engine", () => {
     expect(rentalRow(rent).perTreatment).toBe(Math.round(own.results.tmBait.ti / 20));
     // Per-system spacing (owner 2026-07-28): Trelona installs FEWER stations
     // (label 15-ft vs Advance 10-ft), so despite the pricier per-station
-    // hardware ($22.05 vs $13.16) its install can undercut Advance. Pin the
+    // hardware ($24.00 vs $13.16) its install can undercut Advance. Pin the
     // structure — each system priced off its OWN station count — instead of
     // the retired "Trelona always costs more" ordering.
     const perim = own.results.tmBait.perim;
     const staTre = Math.max(8, Math.ceil(perim / 15));
     const staAdv = Math.max(8, Math.ceil(perim / 10));
     expect(own.results.tmBait.sta).toBe(staTre);
-    expect(own.results.tmBait.ti).toBe(Math.round(staTre * (22.05 + 5.25 + 0.75) * 1.45));
+    expect(own.results.tmBait.ti).toBe(Math.round(staTre * (24.00 + 5.25 + 0.75) * 1.45));
     expect(own.results.tmBait.ai).toBe(Math.round(staAdv * (13.16 + 5.25 + 0.75) * 1.45));
   });
 
