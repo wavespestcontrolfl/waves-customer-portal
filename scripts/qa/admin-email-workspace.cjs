@@ -110,6 +110,12 @@ async function main() {
         const { page } = await openPage(width);
         await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
         await page.getByText(a.subject, { exact: false }).first().waitFor();
+        if (!baseline) {
+          const activity = page.locator('details').filter({ hasText: 'Email activity' });
+          assert.equal(await activity.getAttribute('open'), '');
+          assert.equal(await activity.getByText('Unread', { exact: true }).isVisible(), true);
+          assert.equal(await activity.evaluate((node) => Boolean(node.compareDocumentPosition(document.querySelector('[aria-label="Email inbox"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), true);
+        }
         await shot(page, `inbox-${width}`);
         await page.getByText(a.subject, { exact: false }).first().click();
         await page.getByRole('textbox', { name: 'Reply', exact: true }).waitFor();
@@ -124,7 +130,7 @@ async function main() {
     if (!baseline) await scenario('Keyboard inbox selection, mobile return and authenticated attachment download', async () => {
       const { page } = await openPage(390);
       await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
-      const row = page.getByRole('button', { name: `Open email: ${a.subject}`, exact: true });
+      const row = page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: a.subject });
       await row.focus(); await page.keyboard.press('Enter');
       const heading = page.getByRole('heading', { name: a.subject, exact: true });
       await heading.waitFor();
@@ -135,7 +141,7 @@ async function main() {
       assert.equal(download.suggestedFilename(), 'Patio notes.pdf');
       assert.equal(await download.failure(), null);
       await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
-      await page.waitForFunction((label) => document.activeElement?.getAttribute('aria-label') === label, `Open email: ${a.subject}`);
+      await page.waitForFunction((subject) => document.activeElement?.textContent?.includes(subject), a.subject);
       assert.equal(new URL(page.url()).searchParams.has('id'), false);
       await page.close();
     });

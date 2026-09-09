@@ -59,11 +59,21 @@ async function compose() {
   return dialog;
 }
 async function open(message) {
-  fireEvent.click(await screen.findByRole("button", { name: `Open email: ${message.subject}` }));
+  fireEvent.click(await screen.findByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes(message.subject) }));
   return screen.findByRole("textbox", { name: "Reply" });
 }
 
 describe("Email draft and navigation preservation", () => {
+  it("distinguishes same-subject inbox rows by sender and unread state", async () => {
+    inbox = [{ ...a, is_read: false }, { ...b, subject: a.subject }];
+    mount();
+    const rows = await screen.findAllByRole("button", { name: /^Open email:/ });
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveAccessibleName(/a@example.invalid/);
+    expect(rows[0]).toHaveAccessibleName(/Unread/);
+    expect(rows[1]).toHaveAccessibleName(/b@example.invalid/);
+  });
+
   it("inserts public Quick Links once and keeps the email draft after closing the picker", async () => {
     loadResponses["link-library"] = () => response({ links: [
       { key: "quote", name: "Request a quote", category: "booking", url: "https://www.wavespestcontrol.com/quote/" },
@@ -259,7 +269,7 @@ describe("Email draft and navigation preservation", () => {
     await waitFor(() => expect(screen.queryByRole("textbox", { name: "Reply", exact: true })).not.toBeInTheDocument());
     await waitFor(() => expect(document.activeElement).toBe(mode === "remount"
       ? screen.getByPlaceholderText("Search emails...")
-      : screen.getByRole("button", { name: `Open email: ${(mode === "single" ? a : b).subject}` })));
+      : screen.getByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes((mode === "single" ? a : b).subject) })));
     view.unmount();
     window.history.back();
     await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/admin?fixture=previous"));

@@ -102,8 +102,9 @@ function EmailMessageRow({ email, mailbox, editor, onOpen }) {
       <Button variant="ghost" onClick={(event) => handleStar(event, email)} aria-label={`${email.is_starred ? "Unstar" : "Star"} ${email.subject || "email"}`} aria-pressed={Boolean(email.is_starred)} className="my-2 ml-1 shrink-0 self-start px-2">
         <Star size={18} fill={email.is_starred ? "currentColor" : "none"} aria-hidden />
       </Button>
-      <button type="button" onClick={(event) => onOpen(event, email)} aria-label={`Open email: ${email.subject || "(no subject)"}`} aria-pressed={isSelected}
+      <button type="button" onClick={(event) => onOpen(event, email)} aria-pressed={isSelected}
         className="u-focus-ring min-w-0 flex-1 appearance-none border-0 bg-transparent px-3 py-4 text-left text-ui-body">
+        <span className="sr-only">Open email:</span>
         <span className="flex flex-col items-start gap-1">
           <span className={cn("min-w-0 truncate", !email.is_read && "font-medium")}>
             {!email.is_read && <span className="mr-2 inline-block h-2 w-2 rounded-full bg-zinc-900" aria-label="Unread" />}{sender}
