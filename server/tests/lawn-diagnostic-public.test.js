@@ -277,7 +277,7 @@ describe('buildPublicLawnReport whitelisting', () => {
   // customer copy for a low/unknown finding (the v0.4 naming gate). Deliberately omits
   // "disease" (the generic "no specific pest or disease" fallback uses it) and "weed"
   // (specific weeds are genericized to "weed pressure" at any confidence, by design).
-  const GOVERNED_CAUSE = /\b(chinch|caterpillars?|armyworms?|sod\s?webworms?|grubs?|large patch(?:es)?|brown patch(?:es)?|gr[ae]y leaf|dollar spots?|fungus|fungal|leaf spots?|mold|mildew|insects?|drought|water stress|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?)\b/i;
+  const GOVERNED_CAUSE = /\b(chinch(?:\s?bugs?)?|caterpillars?|army\s?worms?|sod\s?webworms?|grubs?|large patch(?:es)?|brown patch(?:es)?|gr[ae]y leaf|dollar spots?|fungus|fungal|leaf spots?|mold|mildew|insects?|drought|water stress|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?)\b/i;
 
   // The diagnosis-driven, customer-facing fields — everything a cause name could leak
   // into. Excludes seasonal_context (server-generated SWFL education that legitimately
@@ -309,6 +309,8 @@ describe('buildPublicLawnReport whitelisting', () => {
       'Grubs in the soil',    // plural cause name — singular-only gates missed these
       'Dollar spots forming', // plural multi-word spot disease
       'Possible insect activity', // generic cause word, no named species
+      'Chinchbugs along the driveway',
+      'Army worms in the turf',
       'Nutsedges along the walk',
       'Sedges along the curb',
       'Clovers spreading',

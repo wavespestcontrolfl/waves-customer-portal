@@ -3,71 +3,19 @@ const { scrubCustomerText, SUMMARY_CAUSE_RE } = require('./lawn-diagnostic-repor
 const { containsReportAccessCode } = require('./service-report/technician-report-copy');
 const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
 const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
-const { GRASS_TYPE_LABELS } = require('./lawn-grass-context');
 const { NO_STRESS_LABEL } = require('./lawn-visit-result');
 
 const NO_OBSERVATIONS = 'No additional observations from the photo review.';
 
-const ECHO_ALLOWLIST = new Set([
-  ...Object.values(GRASS_TYPE_LABELS).flatMap((label) => label.toLowerCase().split(/[^\p{L}]+/u)),
-  'florida', 'southwest', 'lawn', 'turf', 'grass', 'front', 'back', 'side', 'yard', 'photo', 'photos',
-].filter(Boolean));
-const ECHO_RUN_WORDS = 5;
-// Words a sentence may open with in ordinary lawn notes ("Checked the back
-// yard", "Chinch damage by the drive"): a sentence-initial capital on one of
-// these is capitalisation, not a name; any OTHER sentence-initial capital
-// the answer reproduces is treated as a name ("Kowalski reports thinning by
-// the gate" — Codex #4149 r11: the first token was exempted outright).
-const ECHO_COMMON_WORDS = new Set(('the a an and or but so if then this that these those there here it its is are was were be been has have had do does did '
-  + 'not no yes we our i my you your they their he she his her him them who what when where which how also still just very some any all most more less much many '
-  + 'new old big small good bad fine ok okay please note notes noted check checked checking saw seen see found find looks looked looking appears appeared seems seemed '
-  + 'customer client owner homeowner tech technician crew visit visited service treated treatment applied application spray sprayed '
-  + 'lawn turf grass yard front back side left right north south east west corner edge edges strip bed beds driveway walk walkway sidewalk street curb fence gate pool patio house home garage mailbox '
-  + 'area areas spot spots patch patches zone zones section sections whole entire mostly some heavy light moderate mild severe minor major '
-  + 'thin thinning bare sparse brown browning yellow yellowing green dry wet soggy dead dying damage damaged stress stressed weak healthy dense '
-  + 'water watering irrigation sprinkler sprinklers rain mow mowed mowing cut scalped shade shaded sun sunny dog dogs pet pets kids traffic '
-  + 'chinch bugs bug insect insects pest pests fungus fungal disease weeds weed sedge nutsedge crabgrass clover spurge dollarweed drought thatch grubs grub worms worm armyworms caterpillars '
-  + 'photo photos photos taken took recheck follow up next last today yesterday week month').split(/\s+/));
-// A word that follows a name when the name is the subject of the note
-// ("Brown reports damage", "Green's dog"): an ordinary lawn word in that
-// position is a surname, however common the word (Codex #4149 r12).
-const NAME_SYNTAX_RE = /^(?:reports?|reported|says?|said|mentions?|mentioned|asks?|asked|calls?|called|wants?|wanted|notes?|noted|tells?|told|confirms?|confirmed|thinks?|thought|requests?|requested|complains?|complained|prefers?|preferred|texted|emailed|phoned|met|showed|pointed|agreed|declined|approved)$/i;
-const echoWords = (text) => String(text || '').replace(/[‘’]/g, "'").toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean);
-function echoesTechnicianNotes(text, notes) {
-  if (!text || !notes) return false;
-  const words = echoWords(text);
-  const wordBases = new Set(words.map((word) => word.replace(/'s$/, '')));
-  const joined = ` ${words.join(' ')} `;
-  const noteWords = echoWords(notes);
-  for (let i = 0; i + ECHO_RUN_WORDS <= noteWords.length; i += 1) {
-    if (joined.includes(` ${noteWords.slice(i, i + ECHO_RUN_WORDS).join(' ')} `)) return true;
-  }
-  const raw = String(notes).replace(/[‘’]/g, "'").split(/\s+/);
-  for (let i = 0; i < raw.length; i += 1) {
-    const token = raw[i].replace(/^[^\p{L}]+|[^\p{L}']+$/gu, '');
-    if (token.length < 3) continue;
-    const base = token.toLowerCase().replace(/'s$/, '');
-    if (ECHO_ALLOWLIST.has(base) || !wordBases.has(base)) continue;
-    const next = (raw[i + 1] || '').replace(/[^\p{L}']+$/gu, '');
-    const nameSyntax = /'s$/i.test(token) || NAME_SYNTAX_RE.test(next);
-    const ordinary = ECHO_COMMON_WORDS.has(base) || SUMMARY_CAUSE_RE.test(token);
-    const sentenceInitial = i === 0 || (/[.!?:;]$/.test(raw[i - 1]) && !/^(?:mr|mrs|ms|miss|mx|dr)\.?$/i.test(raw[i - 1]));
-    // Capitals alone identify an unusual word, or a mid-sentence name.
-    // Subject/possessive syntax also catches lowercase names and surnames
-    // that double as lawn words ("Brown reports", "Green's dog").
-    const name = /^\p{Lu}/u.test(token)
-      ? nameSyntax || !sentenceInitial || !ordinary
-      : nameSyntax && !ordinary;
-    if (name) return true;
-  }
-  return false;
-}
-function withoutTechnicianEchoes(analysis, notes) {
+// Free-form notes can contain private phrases and names that no name heuristic
+// can enumerate. When notes informed the model, keep all generated prose in
+// raw_response for staff and publish only the reviewed labels/fallback copy.
+function withoutNoteInfluencedProse(analysis, notes) {
   if (!notes) return analysis;
   return {
     ...analysis,
-    observations: echoesTechnicianNotes(analysis.observations, notes) ? '' : analysis.observations,
-    findings: (analysis.findings || []).map((finding) => (echoesTechnicianNotes(finding.confirmation_step, notes) ? { ...finding, confirmation_step: '' } : finding)),
+    observations: '',
+    findings: (analysis.findings || []).map((finding) => ({ ...finding, confirmation_step: '' })),
   };
 }
 
@@ -98,7 +46,7 @@ function customerObservations(text, findings = []) {
 const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
-  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s-]+/g, ' ');
+  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s-]+/g, ' ').replace(/\bpatches\b/g, 'patch').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
   if (CAUSE_TERM_SYNONYMS[base]) return CAUSE_TERM_SYNONYMS[base];
   return /(?:ss|us|is)$/.test(base) ? base : base.replace(/(?<=[a-z])s$/, '');
 };
@@ -115,6 +63,9 @@ function namesUnpublishedCause(text, findings) {
     if (!finding || !finding.label || (CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0) < CONFIDENCE_RANK.moderate) continue;
     // A negated technician detail names the cause it ruled OUT — it publishes nothing.
     if (finding.negated || finding.label === NO_STRESS_LABEL) continue;
+    // A mixed/negated name cannot establish positive evidence for prose.
+    // Keep it internal until review supplies an unambiguous finding.
+    if (/\b(?:no|not|none|without|ruled out|negative|absent|unlikely|excluded|free)\b/i.test(finding.name || '')) continue;
     for (const term of governedTerms(`${finding.name || ''} ${finding.label}`)) published.add(term);
   }
   for (const term of governedTerms(text)) if (!published.has(term)) return true;
@@ -151,8 +102,7 @@ function reviewedObservations({ current, lastPublished, observations, findings =
 
 module.exports = {
   NO_OBSERVATIONS,
-  echoesTechnicianNotes,
-  withoutTechnicianEchoes,
+  withoutNoteInfluencedProse,
   customerObservations,
   namesUnpublishedCause,
   governedTerms,

@@ -2,41 +2,25 @@ const copy = require('../services/lawn-visit-customer-copy');
 const { normalizeAssessment } = require('../services/lawn-visit-result');
 const { answer, finding } = require('./helpers/lawn-visit-fixtures');
 
-describe('technician note echoes', () => {
+describe('technician note boundary', () => {
   test.each([
-    ["Mrs. Kowalski's dog has worn a path by the gate.", 'Mrs. Kowalski says the dog digs by the side gate.', true],
-    ['Worn strip where the dog digs by the side gate.', 'Mrs. Kowalski says the dog digs by the side gate.', true],
-    ['Thin St. Augustine turf at the side gate looks dry.', 'Mrs. Kowalski says the dog digs by the side gate. St. Augustine, mowed Tuesday.', false],
-    ['Kowalski reports thinning by the gate.', 'Kowalski reports thinning by the gate', true],
-    ["Thinning near the gate, as Kowalski's note says.", 'Kowalski says the dog digs there', true],
-    ['Chinch damage along the drive; the back yard was checked.', 'Chinch damage by the drive. Checked the back yard. Dog digs.', false],
-    ['Thin turf near the mailbox.', 'Mailbox side is thin. Nothing else.', false],
-    ['Brown reports damage near the gate.', 'Brown reports damage near the gate', true],
-    ["The dog is Green's; brown patch by the drive.", "Green's dog digs. Brown patch by the drive.", true],
-    ['Brown patches near the drive.', 'Brown patches by the drive. Green strip is fine.', false],
-    ['Kowalski reports damage near the gate.', 'kowalski reports damage', true],
-    ["Turf worn where kowalski's dog runs.", "kowalski's dog runs the fence", true],
-    ['Turf worn where Kowalski’s dog runs.', "kowalski's dog runs the fence", true],
-    ["Turf worn where kowalski's dog runs.", 'Kowalski’s dog runs the fence', true],
-    ['The customer reported damage by the gate.', 'customer reports damage near the gate', false],
-    ['Dog digs by the gate.', 'dog digs at the gate', false],
-    ['Turf is thin near the side gate.', '', false],
-    ['', 'Mrs. Kowalski says the dog digs by the gate.', false],
-  ])('screens %s against the private note', (text, notes, expected) => {
-    expect(copy.echoesTechnicianNotes(text, notes)).toBe(expected);
-  });
-
-  test('withholds repeated notes before observations or confirmation steps can be published', () => {
+    'Li reports damage',
+    'Smith-Jones says the dog digs',
+    "brown's dog digs",
+    'customer is verbally abusive',
+    'Ordinary lawn notes with no private detail',
+  ])('keeps model prose internal whenever notes informed the answer: %s', (notes) => {
     const analysis = normalizeAssessment(answer({
-      observations: "Mrs. Kowalski's dog has worn a path by the gate.",
-      findings: [finding({ confirmation_step: 'Ask Mrs. Kowalski when the dog is out' }), finding({ name: 'Dollar spot', confirmation_step: 'Check the shaded strip at dawn' })],
+      observations: notes,
+      findings: [finding({ confirmation_step: notes }), finding({ name: 'Dollar spot', confirmation_step: 'Check the shaded strip at dawn' })],
     }), 2);
-    const bounded = copy.withoutTechnicianEchoes(analysis, 'Mrs. Kowalski says the dog digs by the side gate.');
+    const bounded = copy.withoutNoteInfluencedProse(analysis, notes);
     expect(bounded.observations).toBe('');
-    expect(bounded.findings.map((f) => f.confirmation_step)).toEqual(['', 'Check the shaded strip at dawn']);
+    expect(bounded.findings.map((f) => f.confirmation_step)).toEqual(['', '']);
     expect(copy.customerObservations(bounded.observations, bounded.findings)).toBe(copy.NO_OBSERVATIONS);
-    expect(analysis.observations).toMatch(/Kowalski/);
-    expect(copy.withoutTechnicianEchoes(analysis, null)).toBe(analysis);
+    expect(analysis.observations).toBe(notes);
+    expect(analysis.findings[0].confirmation_step).toBe(notes);
+    expect(copy.withoutNoteInfluencedProse(analysis, null)).toBe(analysis);
   });
 });
 
@@ -69,6 +53,8 @@ describe('customer publication', () => {
       expect(copy.customerObservations(text, findings)).toBe(copy.NO_OBSERVATIONS);
     }
     expect(copy.customerObservations('Some insect pressure is likely.', [chinch])).toBe(copy.NO_OBSERVATIONS);
+    expect(copy.customerObservations('Chinchbugs are damaging the turf.', [])).toBe(copy.NO_OBSERVATIONS);
+    expect(copy.customerObservations('Chinchbugs are damaging the turf.', [chinch])).toBe('Chinchbugs are damaging the turf.');
     expect(copy.customerObservations('Thin turf along the driveway edge.', [])).toBe('Thin turf along the driveway edge.');
     expect(copy.customerObservations('Fungal activity in the shaded strip.', [{ label: 'fungal activity', confidence: 'moderate' }])).toMatch(/^Fungal activity/);
   });
@@ -87,6 +73,13 @@ describe('customer publication', () => {
     expect(copy.customerObservations('Iron deficiency in shade.', [{ name: 'Iron deficiency', label: 'color and nutrient stress', confidence: 'high' }])).toBe('Iron deficiency in shade.');
     expect(copy.customerObservations('Weed pressure along the walk.', [{ label: 'weed pressure', confidence: 'low' }])).toMatch(/^Weed pressure/);
     expect([...copy.governedTerms('Nutsedges, grey leaf spot and Gray leaf spots; iron deficiency')]).toEqual(['nutsedge', 'gray leaf', 'iron deficiency']);
+  });
+
+  test('plural aliases match their evidence and negated names do not establish positive causes', () => {
+    expect(copy.customerObservations('Large patches are spreading in the shade.', [{ name: 'Large patch', label: 'large patch (fungal) activity', confidence: 'moderate' }])).toBe('Large patches are spreading in the shade.');
+    expect(copy.customerObservations('Sodwebworms are damaging the turf.', [{ name: 'Sod webworm activity', label: 'caterpillar activity', confidence: 'moderate' }])).toBe('Sodwebworms are damaging the turf.');
+    expect(copy.customerObservations('Nutsedge is spreading along the walk.', [{ name: 'Clover; no nutsedge observed', label: 'weed pressure', confidence: 'moderate' }])).toBe(copy.NO_OBSERVATIONS);
+    expect(copy.customerObservations('Chinch bug activity along the driveway.', [{ name: 'Fungal activity; no chinch bugs observed', label: 'chinch bug activity', confidence: 'moderate' }])).toBe(copy.NO_OBSERVATIONS);
   });
 
   test('confirmation steps obey the same privacy and cause rules', () => {
