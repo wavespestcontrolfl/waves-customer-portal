@@ -102,7 +102,7 @@ function EmailMessageRow({ email, mailbox, editor, onOpen }) {
       <Button variant="ghost" onClick={(event) => handleStar(event, email)} aria-label={`${email.is_starred ? "Unstar" : "Star"} ${email.subject || "email"}`} aria-pressed={Boolean(email.is_starred)} className="my-2 ml-1 shrink-0 self-start px-2">
         <Star size={18} fill={email.is_starred ? "currentColor" : "none"} aria-hidden />
       </Button>
-      <button type="button" onClick={(event) => onOpen(event, email)} aria-pressed={isSelected}
+      <button type="button" onClick={(event) => onOpen(event, email)} aria-expanded={isSelected} aria-controls={isSelected ? `email-conversation-${email.id}` : undefined}
         className="u-focus-ring min-w-0 flex-1 appearance-none border-0 bg-transparent px-3 py-4 text-left text-ui-body">
         <span className="sr-only">Open email:</span>
         <span className="flex flex-col items-start gap-1">
@@ -142,7 +142,7 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
   }, [email.gmail_thread_id, thread]);
   const extractedData = emailDetails(email), category = email.classification, categoryLabel = CATEGORY_LABELS[category];
   const sender = email.from_name || email.from_address;
-  return <section aria-label="Selected email" className="min-w-0 overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+  return <section id={`email-conversation-${email.id}`} aria-label="Selected email" className="min-w-0 overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
     <div className="space-y-3 border-b-hairline border-zinc-200 p-4">
       <Button variant="ghost" onClick={onBack} className="gap-2 xl:hidden"><ArrowLeft size={16} aria-hidden />Back to inbox</Button>
       <h2 ref={headingRef} tabIndex={-1} className="m-0 u-focus-ring break-words text-18 font-medium leading-[1.35]">{email.subject || "(no subject)"}</h2>
