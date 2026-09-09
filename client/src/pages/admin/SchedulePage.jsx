@@ -360,7 +360,7 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awai
       ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
       : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
   }
-  if (awaitsPayment && reviewTiming === "customer_requested") return `Review text waits for the invoice to be paid, then goes out at the next ${tickNoun(preview)}${preview?.smsSendWindowEnabled ? " the send window allows" : ""}. The request is recorded.`;
+  if (awaitsPayment && reviewTiming === "customer_requested") return "The request is recorded on this visit. New review enrollment waits for invoice payment and visit eligibility. An existing cadence keeps its schedule.";
   const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
   return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
 }
@@ -391,7 +391,7 @@ function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     // 8 AM–8 PM send window (codex #4140 r2).
     return bundled
       ? "Review link is included in the completion text."
-      : "Review text goes out separately as soon as the send window allows. The request is recorded on this visit.";
+      : "The request is recorded on this visit. An existing cadence keeps its schedule; otherwise an eligible visit queues a separate review text, subject to the send window.";
   }
   if (reviewTiming === "tomorrow_8") {
     // In cadence mode 8:00 is the eligibility time; the worker's first tick
@@ -12102,9 +12102,9 @@ export function CompletionPanel({
     if (!willReview || oneTimeRecapOnly) return undefined;
     let cancelled = false;
     const load = () => fetchReviewSendPreview().then((data) => {
-      if (cancelled || !data) return;
+      if (cancelled) return;
       setReviewSendPreview(data);
-      previewFailureNoticedRef.current = false;
+      if (data) previewFailureNoticedRef.current = false;
     });
     load();
     // The smart window is bucketed by time of day, so a panel left open

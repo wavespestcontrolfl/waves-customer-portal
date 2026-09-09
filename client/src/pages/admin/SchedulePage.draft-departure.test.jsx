@@ -128,3 +128,41 @@ describe('completion review timing across midnight', () => {
     expect(screen.queryByText(/about Wed,? 8:/)).toBeNull();
   });
 });
+
+
+describe('completion review preview availability', () => {
+  it('clears a previously available scheduler when the polling refresh fails', async () => {
+    let previewAvailable = true;
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/send-time-preview')) {
+        if (!previewAvailable) throw new Error('preview unavailable');
+        return { ok: true, json: async () => ({ schedulerEnabled: true, reviewSequencesEnabled: true, smsSendWindowEnabled: true, cadenceTickMinutesOfHour: [14, 44] }) };
+      }
+      return { ok: true, json: async () => ({ customer: {}, actions: [], available: false }) };
+    }));
+    await mount();
+    fireEvent.change(document.querySelector('option[value="customer_requested"]').parentElement, { target: { value: 'customer_requested' } });
+    expect(screen.getByText(/An existing cadence keeps its schedule/)).toBeTruthy();
+    previewAvailable = false;
+    await act(async () => vi.advanceTimersByTimeAsync(60000));
+    expect(screen.getByText(/Whether automated review texts can send is not known yet/)).toBeTruthy();
+    expect(screen.queryByText(/An existing cadence keeps its schedule/)).toBeNull();
+    previewAvailable = true;
+    await act(async () => vi.advanceTimersByTimeAsync(60000));
+    expect(screen.getByText(/An existing cadence keeps its schedule/)).toBeTruthy();
+  });
+
+  it.each([false, true])('records requested links without promising to move an existing cadence (unpaid invoice: %s)', async (unpaid) => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/send-time-preview')
+        ? { schedulerEnabled: true, reviewSequencesEnabled: true, smsSendWindowEnabled: true }
+        : { customer: {}, actions: [], available: false },
+    })));
+    await mount({ service: { ...service, completionInvoiceAlreadySent: unpaid, invoiceStatus: unpaid ? 'sent' : 'paid' } });
+    fireEvent.change(document.querySelector('option[value="customer_requested"]').parentElement, { target: { value: 'customer_requested' } });
+    expect(screen.getByText(/An existing cadence keeps its schedule/)).toBeTruthy();
+    expect(screen.queryByText(/as soon as the send window allows|then goes out at the next/)).toBeNull();
+    if (unpaid) expect(screen.getByText(/New review enrollment waits for invoice payment and visit eligibility/)).toBeTruthy();
+  });
+});
