@@ -2640,6 +2640,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // office retired the shown house, or the gate flipped): re-read the
   // property list and withhold the card's actions until the label follows.
   const dashboardSelectionNamed = !!(selectedProperty && selectedProperty.propertyId);
+  // Read by the satisfaction load below (a one-shot effect): the scope Home
+  // showed when the response arrives, not when the effect was declared.
+  const pendingScopeRef = useRef({ entry: null, saved: false, named: false, refresh: null });
+  pendingScopeRef.current = { entry: dashboardEntry, saved: dashboardSavedScope, named: dashboardSelectionNamed, refresh: onSavedScopeUnavailable };
   const nextScopeStale = scopeEchoMismatch(nextRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (nextScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [nextScopeStale, onSavedScopeUnavailable]);
   const nextService = nextScopeStale ? null : (nextRead.data?.next || null);
@@ -2756,7 +2760,13 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
         setBalanceStatus('error');
       });
     api.getPendingSatisfaction().then(d => {
-      if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
+      // A prompt served under another house than Home shows (the echo
+      // disagrees with the entry) is not asked — the selection is re-read
+      // instead (GitHub codex r11 P2). Same rule as the next/last reads.
+      const { entry, saved, named, refresh } = pendingScopeRef.current;
+      if (scopeEchoMismatch(d.propertyScope, entry, saved, named)) {
+        if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
+      } else if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
       setPendingSatisfactionStatus('ready');
     }).catch(err => {
       // No error UI: the feedback card only exists when a pending item is

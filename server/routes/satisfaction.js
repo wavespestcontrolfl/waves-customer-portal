@@ -5,7 +5,7 @@ const { authenticate } = require('../middleware/auth');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
 const ReviewService = require('../services/review-request');
-const { applyPropertyPredicate, resolveSessionScope } = require('../services/account-properties');
+const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 
 router.use(authenticate);
 
@@ -39,7 +39,13 @@ router.get('/pending', async (req, res, next) => {
     // property's visit must not be asked (or submitted) from this house's
     // dashboard (GitHub codex r5 P1). Every property retired: nothing to ask.
     const scope = await resolveSessionScope(req);
-    if (scope.enabled && scope.scoped && (scope.closed || !scope.property)) return res.json({ pending: [] });
+    // The RESOLVED scope is echoed like the schedule and last-visit reads so
+    // Home can drop a prompt served under another house than it shows (the
+    // selected house retired, or the gate flipped, after the list loaded)
+    // instead of asking the customer to rate the wrong visit (GitHub codex
+    // r11 P2).
+    const propertyScope = resolvedScopePayload(scope);
+    if (scope.enabled && scope.scoped && (scope.closed || !scope.property)) return res.json({ pending: [], propertyScope });
 
     let pendingQuery = db('service_records')
       .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' })
@@ -62,7 +68,7 @@ router.get('/pending', async (req, res, next) => {
     pendingQuery = applyPropertyPredicate(pendingQuery, scope, 'scheduled_services');
     const pending = await pendingQuery;
 
-    res.json({ pending });
+    res.json({ pending, propertyScope });
   } catch (err) {
     next(err);
   }

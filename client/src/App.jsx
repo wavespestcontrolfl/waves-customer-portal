@@ -436,7 +436,7 @@ function RoutesErrorBoundary({ children }) {
 }
 
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty, selectedProperty = null } = useAuth();
+  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty, refreshProperties, selectedProperty = null } = useAuth();
   const location = useLocation();
   const targetProperty = new URLSearchParams(location.search).get('notificationProperty');
   // Saved-property destination (GATE_APP_PROPERTY_SCOPE): a push that knows
@@ -488,10 +488,27 @@ function ProtectedRoute({ children }) {
   const targetPending = isAuthenticated && (profileDiffers || savedDiffers || primaryUnknown);
   const switchingTarget = useRef(null);
   const [targetError, setTargetError] = useState(null);
+  // A target the in-memory list does not carry is re-read ONCE before it is
+  // refused: a house added after this tab last loaded `properties` (a warm
+  // app session, an in-app bell tap) is valid on the server but absent here
+  // (GitHub codex r10 P2). `refreshedFor` records the destination whose
+  // re-read finished, so the second pass decides on the fresh list; a
+  // failed re-read sets propertiesError and fails closed above.
+  const refreshingFor = useRef(null);
+  const [refreshedFor, setRefreshedFor] = useState(null);
   useEffect(() => {
     const destination = `${targetProperty}:${resolvedTargetPropertyId || ''}`;
     if (!targetPending || loading || switchingTarget.current === destination) return;
     if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
+    const refreshUnseen = () => {
+      if (refreshedFor === destination) return false;
+      if (refreshingFor.current === destination) return true;
+      refreshingFor.current = destination;
+      Promise.resolve(typeof refreshProperties === 'function' ? refreshProperties() : false)
+        .catch(() => false)
+        .finally(() => { refreshingFor.current = null; setRefreshedFor(destination); });
+      return true;
+    };
     if (primaryUnknown) {
       // Entries for this profile are listed but none is its primary (the
       // office retired it): nothing safe to open — fail closed.
@@ -507,6 +524,7 @@ function ProtectedRoute({ children }) {
     // destinations require the profile to list a house (uncapped codex r1x
     // P1); a customer-wide one proceeds to the ownership-checked switch.
     if (propertyScopedDestination && !properties.some((property) => String(property.customerId || property.id) === targetProperty)) {
+      if (refreshUnseen()) return;
       setTargetError('This notification belongs to a property that is no longer available on your account.');
       return;
     }
@@ -515,6 +533,7 @@ function ProtectedRoute({ children }) {
       ? properties.find((property) => String(property.customerId || property.id) === targetProperty && String(property.propertyId) === resolvedTargetPropertyId)
       : null;
     if (resolvedTargetPropertyId && !savedEntry) {
+      if (refreshUnseen()) return;
       setTargetError('This notification belongs to a property that is no longer available on your account.');
       return;
     }
@@ -524,7 +543,7 @@ function ProtectedRoute({ children }) {
     void switchProperty(savedEntry ? { customerId: savedEntry.customerId, propertyId: savedEntry.propertyId } : targetProperty).then((switched) => {
       if (!switched) setTargetError('This property could not be opened. Try again.');
     }).catch(() => setTargetError('This property could not be opened. Try again.'));
-  }, [targetPending, targetProperty, resolvedTargetPropertyId, primaryUnknown, propertyScopedDestination, currentProfileEntries.length, loading, properties, propertiesError, switchProperty]);
+  }, [targetPending, targetProperty, resolvedTargetPropertyId, primaryUnknown, propertyScopedDestination, currentProfileEntries.length, loading, properties, propertiesError, switchProperty, refreshProperties, refreshedFor]);
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
   useGlassSurface(loading || targetPending);

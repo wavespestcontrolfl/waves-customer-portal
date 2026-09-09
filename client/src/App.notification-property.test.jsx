@@ -92,15 +92,51 @@ test('a profile-only push for the current profile while its PRIMARY is selected:
   expect(state.auth.switchProperty).not.toHaveBeenCalled();
 });
 
-test('a push naming a saved property that is no longer listed shows the unavailable notice, no switch', async () => {
+test('a push naming a saved property that is no longer listed re-reads the list ONCE, then shows the unavailable notice, no switch', async () => {
   window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1&notificationPropertyId=prop-gone');
   state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
     selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
     properties: [{ id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' }],
-    propertiesError: null, switchProperty: vi.fn(async () => true) };
+    propertiesError: null, switchProperty: vi.fn(async () => true), refreshProperties: vi.fn(async () => true) };
   render(<App />);
   await waitFor(() => expect(document.body.textContent).toMatch(/no longer available/));
+  expect(state.auth.refreshProperties).toHaveBeenCalledTimes(1);
   expect(state.auth.switchProperty).not.toHaveBeenCalled();
+});
+
+// A house added after this tab last loaded its list (warm app session, an
+// in-app bell tap): valid on the server, absent in memory — the list is
+// re-read before the target is judged (GitHub codex r10 P2).
+test('a push naming a saved property the STALE list lacks switches once the re-read lists it', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1&notificationPropertyId=prop-new');
+  const fresh = [
+    { id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true },
+    { id: 'property-1:prop-new', customerId: 'property-1', propertyId: 'prop-new', isPrimaryProperty: false },
+  ];
+  let view;
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+    properties: [{ id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true }],
+    propertiesError: null, switchProperty: vi.fn(async () => true),
+    refreshProperties: vi.fn(async () => { state.auth = { ...state.auth, properties: fresh }; view.rerender(<App />); return true; }) };
+  view = render(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith({ customerId: 'property-1', propertyId: 'prop-new' }));
+  expect(state.auth.refreshProperties).toHaveBeenCalledTimes(1);
+  expect(document.body.textContent).not.toMatch(/no longer available/);
+});
+
+test('a push naming a listed saved property never re-reads the list', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1&notificationPropertyId=prop-b');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+    properties: [
+      { id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true },
+      { id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false },
+    ],
+    propertiesError: null, switchProperty: vi.fn(async () => true), refreshProperties: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith({ customerId: 'property-1', propertyId: 'prop-b' }));
+  expect(state.auth.refreshProperties).not.toHaveBeenCalled();
 });
 
 test('a profile-only push for the current profile while a NON-primary house is selected falls back to that profile\'s primary', async () => {

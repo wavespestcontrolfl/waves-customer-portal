@@ -110,13 +110,16 @@ describe('GET /satisfaction/pending — the prompt follows the selected house', 
     global.__SCOPE__ = SECONDARY;
     let res = await fetch(`${base}/satisfaction/pending`);
     expect(res.status).toBe(200);
+    // The resolved scope is echoed (GitHub codex r11 P2) so Home drops a
+    // prompt served under another house than it shows.
+    expect((await res.json()).propertyScope).toEqual({ enabled: true, propertyId: 'prop-b', closed: false });
     const [pending] = recordChains();
     expect(pending.some((c) => c[0] === 'leftJoin' && c[1] === 'scheduled_services')).toBe(true);
     expect(propertyPredicates(pending)).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
 
     jest.clearAllMocks(); global.__SCOPE__ = CLOSED;
     res = await fetch(`${base}/satisfaction/pending`);
-    expect(await res.json()).toEqual({ pending: [] });
+    expect(await res.json()).toEqual({ pending: [], propertyScope: expect.objectContaining({ closed: true }) });
     expect(db).not.toHaveBeenCalled();
   });
   test('gate off / single home: today\'s query, no predicate', async () => {

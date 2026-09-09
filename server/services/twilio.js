@@ -1057,7 +1057,7 @@ const TwilioService = {
    * Phase 1 callers always pass a token (minted by migration backfill);
    * legacy callers that pass nothing still get a sensible bodyless message.
    */
-  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null } = {}) {
+  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null, scheduledServiceId = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -1172,6 +1172,12 @@ const TwilioService = {
             audience: "customer",
             purpose: "tech_en_route",
             customerId,
+            // The visit this notice is about: rides provider → push routing →
+            // push sink, where the deep link is qualified with the visit's
+            // saved property (GitHub codex #4207 r11 P1) — without it an
+            // App-delivered en-route push for a secondary house opened the
+            // profile's primary and hid the active tracker.
+            ...(scheduledServiceId ? { appointmentId: scheduledServiceId } : {}),
             identityTrustLevel:
               isServiceContactRole(contact.role)
                 ? "service_contact_authorized"
@@ -1327,6 +1333,7 @@ const TwilioService = {
             audience: "customer",
             purpose: "tech_arrived",
             customerId,
+            ...(scheduledServiceId ? { appointmentId: scheduledServiceId } : {}),
             identityTrustLevel:
               isServiceContactRole(contact.role)
                 ? "service_contact_authorized"

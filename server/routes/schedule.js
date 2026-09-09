@@ -161,6 +161,54 @@ router.get('/', async (req, res, next) => {
     // says nothing about billing.
     const cancellable = await hasCancellableWork(req.customerId);
 
+    if (allProperties) {
+      // Coverage projection only (see listQuerySchema): nothing actionable —
+      // returned BEFORE the re-service tie-in and the per-row grouped-visit /
+      // calendar verdicts below, which cost one or two queries per visit and
+      // feed only the actionable payload (GitHub codex r10 P2).
+      return res.json({
+        coverageOnly: true,
+        hasCancellableWork: cancellable,
+        reservice: null,
+        overlayHandoff: false,
+        upcoming: upcoming.map((s) => ({
+          id: s.id,
+          date: s.scheduled_date,
+          // Arrival windows stay: the Year-at-a-glance calendar prints them
+          // (a time of day is not a cross-house action).
+          windowStart: s.window_start,
+          windowEnd: s.window_end,
+          serviceType: normalizeServiceType(s.service_type),
+          status: s.status,
+          isRecurring: s.is_recurring === true,
+          isCallback: s.is_callback === true,
+          waveguardQualifying: portalRowQualifiesForWaveGuard({
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          }),
+          serviceFamily: portalRowWaveGuardFamily({
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          }),
+          serviceDisplayName: (() => {
+            if (!s.catalog_service_name) return null;
+            const withCatalog = portalRowWaveGuardFamily({
+              service_type: s.service_type,
+              service_key: s.catalog_service_key,
+              service_name: s.catalog_service_name,
+              catalog_billing_type: s.catalog_billing_type,
+            });
+            const labelOnly = portalRowWaveGuardFamily({ service_type: s.service_type });
+            return withCatalog && withCatalog !== labelOnly ? normalizeServiceType(s.catalog_service_name) : null;
+          })(),
+        })),
+      });
+    }
+
     // Self-serve re-service tie-in (GATE_RESERVICE_SELF_SERVE): when the
     // customer's LIVE plan state grants a lane, the portal offers the same
     // standing /reservice/:token page the office texts (services/
@@ -214,50 +262,6 @@ router.get('/', async (req, res, next) => {
         : g === true ? await groupedCalendarVerdict(s.visit_id) : null);
     }
 
-    if (allProperties) {
-      // Coverage projection only (see listQuerySchema): nothing actionable.
-      return res.json({
-        coverageOnly: true,
-        hasCancellableWork: cancellable,
-        reservice: null,
-        overlayHandoff: false,
-        upcoming: upcoming.map((s) => ({
-          id: s.id,
-          date: s.scheduled_date,
-          // Arrival windows stay: the Year-at-a-glance calendar prints them
-          // (a time of day is not a cross-house action).
-          windowStart: s.window_start,
-          windowEnd: s.window_end,
-          serviceType: normalizeServiceType(s.service_type),
-          status: s.status,
-          isRecurring: s.is_recurring === true,
-          isCallback: s.is_callback === true,
-          waveguardQualifying: portalRowQualifiesForWaveGuard({
-            service_type: s.service_type,
-            service_key: s.catalog_service_key,
-            service_name: s.catalog_service_name,
-            catalog_billing_type: s.catalog_billing_type,
-          }),
-          serviceFamily: portalRowWaveGuardFamily({
-            service_type: s.service_type,
-            service_key: s.catalog_service_key,
-            service_name: s.catalog_service_name,
-            catalog_billing_type: s.catalog_billing_type,
-          }),
-          serviceDisplayName: (() => {
-            if (!s.catalog_service_name) return null;
-            const withCatalog = portalRowWaveGuardFamily({
-              service_type: s.service_type,
-              service_key: s.catalog_service_key,
-              service_name: s.catalog_service_name,
-              catalog_billing_type: s.catalog_billing_type,
-            });
-            const labelOnly = portalRowWaveGuardFamily({ service_type: s.service_type });
-            return withCatalog && withCatalog !== labelOnly ? normalizeServiceType(s.catalog_service_name) : null;
-          })(),
-        })),
-      });
-    }
 
     res.json({
       // The selection this read was actually scoped to (GATE_APP_PROPERTY_SCOPE):

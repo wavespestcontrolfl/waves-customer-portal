@@ -175,11 +175,17 @@ describe('saved-property scope on the customer schedule routes', () => {
     tables.scheduled_services = [{ id: 'svc-x', customer_id: 'cust-1', property_id: 'prop-a', scheduled_date: '2099-01-05', window_start: '09:00:00', window_end: '11:00:00', service_type: 'Quarterly Pest Control', status: 'confirmed', customer_confirmed: true, is_recurring: true, is_callback: false, reschedule_token: 'resched-tok', technician_name: 'T' }];
     tables.customers = [{ id: 'cust-1', active: true, waveguard_tier: 'Silver', monthly_rate: 89, reservice_token: 'tok-reservice' }];
     await withServer(async (base) => {
+      const groupedSpy = jest.spyOn(require('../routes/reschedule-public'), 'groupedVisit');
       const res = await fetch(`${base}/schedule?days=365&allProperties=1`);
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(propertyPredicates(visitsChainCalls())).toEqual([]);
       expect(body.coverageOnly).toBe(true);
+      // Coverage-only returns before the per-row grouped-visit verdicts and
+      // the re-service tie-in — neither feeds the projection (GitHub codex r10 P2).
+      expect(groupedSpy).not.toHaveBeenCalled();
+      expect(require('../services/reservice-scheduler').reserviceLanesForCustomer).not.toHaveBeenCalled();
+      groupedSpy.mockRestore();
       expect(body.reservice).toBeNull();
       expect(body.overlayHandoff).toBe(false);
       expect(Object.keys(body.upcoming[0]).sort()).toEqual(['date', 'id', 'isCallback', 'isRecurring', 'serviceDisplayName', 'serviceFamily', 'serviceType', 'status', 'waveguardQualifying', 'windowEnd', 'windowStart']);
