@@ -4328,7 +4328,7 @@
         "fixture_facts": [
           "Before the drop: Dana asked to schedule her quarterly visit, {{dow+7}} or {{dow+8}} preferred",
           "find_slots: S2-1 {{dow+7}} 9 AM, S2-2 {{dow+8}} 1 PM, S2-3 {{dow+9}} 10 AM",
-          "request_booking placed a PENDING request for Wednesday 1 PM"
+          "request_booking placed a PENDING request for {{dow+8}} 1 PM"
         ],
         "required_facts": [
           "{{day+8}} at 1 PM was requested; the office confirms"
