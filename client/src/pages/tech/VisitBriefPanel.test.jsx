@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import VisitBriefPanel from './VisitBriefPanel';
+import TechFieldVisit from './TechFieldVisit';
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 const BASE_SERVICE = {
@@ -30,6 +32,15 @@ const stopOf = (...services) => ({
 
 const detailFor = (byService, status = 'ready') => ({ status, byService });
 
+function SelectedVisit({ error = '', request }) {
+  const [busy, setBusy] = React.useState(false);
+  const stop = stopOf(BASE_SERVICE);
+  return <TechFieldVisit stop={stop} error={error} busy={busy} enRouteState={{}} onSiteState={{}}>
+    <VisitBriefPanel stop={stop} detail={detailFor({})} request={request} onBusyChange={setBusy}
+      techLine={{ line: { formatted: '(941) 555-0100' }, canCall: true }} />
+  </TechFieldVisit>;
+}
+
 const LINKED_ESTIMATE = {
   linked: true,
   estimateId: 'est-1',
@@ -44,6 +55,49 @@ const LINKED_ESTIMATE = {
 };
 
 describe('VisitBriefPanel', () => {
+  it.each(['sms', 'call'])('keeps pending %s state through route failure and retry', async (action) => {
+    vi.useFakeTimers();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    let finish;
+    const request = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    const { rerender } = render(<SelectedVisit request={request} />);
+    const panel = screen.getByTestId('visit-brief-panel');
+    if (action === 'sms') {
+      fireEvent.click(screen.getByRole('button', { name: /Text/ }));
+      fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Pending fixture message' } });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })); });
+    } else {
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Call/ })); });
+    }
+
+    rerender(<SelectedVisit request={request} error="Route connection unavailable" />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Route connection unavailable');
+    expect(panel).toBeInTheDocument();
+    expect(panel).not.toBeVisible();
+    expect(screen.getByRole('button', { name: 'Today' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'En route' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Photos/ })).not.toBeInTheDocument();
+
+    rerender(<SelectedVisit request={request} />);
+    expect(screen.getByTestId('visit-brief-panel')).toBe(panel);
+    if (action === 'sms') expect(screen.getByLabelText('Message')).toHaveValue('Pending fixture message');
+    const pendingButton = screen.getByRole('button', { name: action === 'sms' ? 'Sending…' : /Calling…/ });
+    expect(pendingButton).toBeDisabled();
+    fireEvent.click(pendingButton);
+    expect(request).toHaveBeenCalledTimes(1);
+
+    rerender(<SelectedVisit request={request} error="Route connection unavailable" />);
+    await act(async () => { finish({ success: true }); });
+    if (action === 'call') {
+      expect(panel).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Today' })).toBeDisabled();
+      await act(async () => { vi.advanceTimersByTime(45000); });
+    }
+    expect(panel).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Today' })).toBeEnabled();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('renders the three distinct money labels from the linked estimate + prediction', () => {
     render(
       <VisitBriefPanel
