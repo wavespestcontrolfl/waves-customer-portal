@@ -8,6 +8,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 const { randomUUID } = require('node:crypto');
+const { runRouteReorder } = require('../services/route-reorder');
 const { HQ } = require('../services/route-optimizer');
 const { getScheduleQualityMeasurements } = require('../services/scheduling/day-quality');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -20,6 +21,7 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
   let customerId;
   let ids;
   const gates = ['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_SCHEDULE_QUALITY_MEASUREMENTS'];
+  const now = new Date('2040-09-09T08:00:00Z');
   const date = '2040-09-10';
   beforeAll(() => {
     const url = new URL(process.env.DATABASE_URL);
@@ -52,6 +54,22 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     delete process.env.GATE_ROUTE_REORDER;
     delete process.env.GATE_SCHEDULE_QUALITY_ALERTS;
     await mockConnection.rollback();
+  });
+
+  test('the fenced repair changes only route_order and records before-route measurements', async () => {
+    const before = await mockConnection('scheduled_services').whereIn('id', ids).select('*').orderBy('id');
+    const result = await runRouteReorder({ now });
+    expect(result).toMatchObject({ applied: 1, failed: 0 });
+    const after = await mockConnection('scheduled_services').whereIn('id', ids).select('*').orderBy('id');
+    const withoutOrder = rows => rows.map(({ route_order: _order, ...row }) => row);
+    expect(withoutOrder(after)).toEqual(withoutOrder(before));
+    expect([...after].sort((a, b) => a.route_order - b.route_order).map(row => row.id)).toEqual([ids[0], ids[2], ids[1]]);
+    const ledger = await mockConnection('route_optimization_planner_runs').where('id', result.ledgerId).first('result');
+    const details = typeof ledger.result === 'string' ? JSON.parse(ledger.result) : ledger.result;
+    expect(details.reorders[0].source).toBe('chronological_repair');
+    expect(details.route_quality[0]).toMatchObject({ serviceMinutes: 240, modeledLateVisits: [expect.objectContaining({ id: ids[2], lateMinutes: 60 })] });
+    expect(details.route_quality[1]).toMatchObject({ snapshot_phase: 'applied_reorder', modeledLateVisits: [] });
+    expect(details.route_quality[1].plannedStops.map(stop => stop.id)).toEqual([ids[0], ids[2], ids[1]]);
   });
 
   test('measurements use live hold occupancy, unassigned work and configured closures', async () => {
