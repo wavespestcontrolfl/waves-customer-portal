@@ -140,7 +140,7 @@ export function useIntelligenceBar({
   const onActionResolved = useCallback((action, decision, body) => {
     if (actionEpoch !== epochRef.current) return;
     setPendingActions(previous => previous.map(item => item.id === action.id ? { ...item, receipt: body,
-      resolvedStatus: decision === 'cancel' && body.cancelled ? 'cancelled' : undefined } : item));
+      resolvedStatus: decision === 'cancel' && (body.cancelled || body.outcome === 'canceled') ? 'cancelled' : undefined } : item));
     setActiveTask(task => retainTaskReceipt(task, action, decision, body));
     if (decision === 'confirm' && body?.success) onAfterSubmitRef.current?.({
       toolCalls: [{ name: action.tool }], confirmedAction: true, result: body.result,

@@ -392,7 +392,7 @@ test('"this stop" and "this visit" on a schedule panel resolve the appointment a
 
 test('check and summarize are direct-read verbs that select an exact full name', async () => {
   lookupRows = [rows.customers[0]];
-  for (const prompt of ['Check Synthetic Person details', 'Summarize Synthetic Person']) {
+  for (const prompt of ['Check Synthetic Person details', 'Summarize Synthetic Person', 'Read Synthetic Person details']) {
     const task = await Context.resolve({ prompt, pageData: {} });
     expect(task.target?.customer_id).toBe(A);
   }
