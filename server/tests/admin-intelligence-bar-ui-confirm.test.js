@@ -194,8 +194,8 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
       expect(mockExecuteTool).toHaveBeenCalledTimes(1);
       const [toolName, params] = mockExecuteTool.mock.calls[0];
       expect(toolName).toBe('create_customer');
-      expect(params).toEqual({ first_name: 'Jeff', phone: '9415550100' });
-      expect(params.confirmed).toBeUndefined();
+      expect(params).toEqual({ first_name: 'Jeff', phone: '9415550100', confirmed: false });
+      expect(params.confirmed).toBe(false);
 
       // …the stored proposal also carries no confirmation flag…
       const stored = mockCreatePendingAction.mock.calls[0][0];
@@ -218,6 +218,20 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
       expect(toolResult.pending_confirmation).toBe(true);
       expect(toolResult.success).toBeUndefined();
+    });
+  });
+
+  test('a blocked route optimizer preview creates no confirmation card', async () => {
+    mockExecuteTool.mockResolvedValue({ blocked: true, message: 'No services found for this date.' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'blocked-route', name: 'optimize_all_routes', input: { date: '2099-01-01' } }],
+      [{ type: 'text', text: 'No route was changed.' }],
+    ]);
+    await withServer(async baseUrl => {
+      const response = await postQuery(baseUrl, { prompt: 'Optimize the route', context: 'schedule' });
+      expect(response.status).toBe(200);
+      expect(response.body.pendingActions || []).toHaveLength(0);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
     });
   });
 
@@ -440,7 +454,7 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
           source: { type: 'base64', media_type: 'image/png', data: validImageData },
         },
         // Last block of the last message carries the per-round cache breakpoint.
-        { type: 'text', text: prompt, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: expect.stringContaining(`\n\n${prompt}`), cache_control: { type: 'ephemeral' } },
       ]);
 
       expect(body.conversationHistory[0].content).toBe(
@@ -500,6 +514,29 @@ describe('/confirm-action commit path', () => {
     delete process.env.GATE_IB_UI_CONFIRM;
   });
 
+  test.each([
+    { success: false, blocked: true, reason: 'duplicate_estimate', message: 'A draft already exists' },
+    { failed: true, reason: 'validation_failed' },
+    { blocked: true, reason: 'approval_required' },
+  ])('does not report a refused domain outcome as completed: %j', async (outcome) => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'create_customer', params: { first_name: 'Synthetic', last_name: 'Fixture' } },
+    });
+    mockExecuteTool.mockResolvedValue(outcome);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      const body = await res.json();
+      expect(body.success).toBe(false);
+      expect(body.result).toEqual(outcome);
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, outcome);
+    });
+  });
+
   test('claims, attaches server-derived confirmed for two-step tools, executes stored params', async () => {
     mockClaimForConfirm.mockResolvedValue({
       action: { id: PENDING_ID, tool_name: 'create_customer', params: { first_name: 'Jeff', phone: '9415550100' } },
@@ -544,6 +581,39 @@ describe('/confirm-action commit path', () => {
     });
   });
 
+  test('a blocked committed action returns unsuccessful while preserving its actual result', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'update_customer', params: { customer_id: 'synthetic-customer', updates: { city: 'Test City' } } },
+    });
+    const result = { blocked: true, message: 'The requested update is unavailable.' };
+    mockExecuteTool.mockResolvedValue(result);
+    await withServer(async baseUrl => {
+      const response = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(await response.json()).toMatchObject({ success: false, result });
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, result);
+    });
+  });
+
+  test('an accepted-but-unconfirmed send returns unsuccessful with an explicit unknown outcome', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'send_email_reply', params: { email_id: 'synthetic-email', body: 'Synthetic reply' } },
+    });
+    const result = { outcome_unknown: true, warning: 'Gmail did not confirm the send outcome. Check the sent thread before creating another send.' };
+    mockExecuteTool.mockResolvedValue(result);
+    await withServer(async baseUrl => {
+      const response = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ success: false, outcome: 'outcome_unknown', result });
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, result);
+    });
+  });
+
   test.each([
     ['not_found', 404],
     ['actor_mismatch', 403],
@@ -578,6 +648,7 @@ describe('/confirm-action commit path', () => {
       });
       expect(res.status).toBe(403);
       expect(mockExecuteTool).not.toHaveBeenCalled();
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ blocked: true, code: 'permission_denied' }));
     });
   });
 
@@ -982,7 +1053,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const [toolName, params] = mockExecuteTool.mock.calls[0];
       expect(toolName).toBe('bulk_update_leads');
       expect(params.dry_run).toBe(false);
-      expect(params.lead_ids).toEqual(['l1', 'l2']);
+      expect(params._approved_lead_ids).toEqual(['l1', 'l2']);
     });
   });
 });
