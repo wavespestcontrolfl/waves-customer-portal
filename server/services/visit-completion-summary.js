@@ -345,8 +345,23 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
   }
 }
 
+async function summaryEmailOutcomes(message, database) {
+  const messages = await database('email_messages').where({ trigger_event_id: message.trigger_event_id,
+    template_key: 'service.visit_summary', recipient_id: message.recipient_id })
+    .select('id', 'status', 'sent_at', 'provider_message_id', 'error_message');
+  const states = new Map(messages.map((row) => [row.id, summaryEmailState(row)]));
+  // A corrected-address resend has a new ledger row. Only its successful
+  // outcome can supersede the original; another recipient's delivery cannot.
+  const recoveries = await database('email_bounce_recoveries').whereIn('original_message_id', messages.map((row) => row.id))
+    .select('original_message_id', 'recovery_message_id');
+  for (const recovery of recoveries) {
+    if (states.get(recovery.recovery_message_id) === 'sent') states.delete(recovery.original_message_id);
+  }
+  return [...states.values()];
+}
+
 // A provider bounce arrives after the aggregate closed as sent. When the
-// recipient ledger no longer proves any accepted send, the effect returns to
+// recipient ledger contains any unresolved send, the effect returns to
 // the uncertain bucket the office already reviews, once per closed packet.
 async function reconcileSummaryEmailBounce(message, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
@@ -358,10 +373,8 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'sent' })
     .forUpdate().first('id');
   if (!effect) return { reconciled: false };
-  const messages = await database('email_messages').where({ trigger_event_id: message.trigger_event_id,
-    template_key: 'service.visit_summary', recipient_id: message.recipient_id })
-    .select('status', 'sent_at', 'provider_message_id', 'error_message');
-  if (messages.map(summaryEmailState).includes('sent')) return { reconciled: false };
+  const outcomes = await summaryEmailOutcomes(message, database);
+  if (!outcomes.includes('unknown_delivery')) return { reconciled: false };
   const flipped = await database('visit_effects').where({ id: effect.id, status: 'sent' })
     .update({ status: 'unknown_delivery', last_error: 'provider_bounce', updated_at: database.fn.now() }).returning('id');
   if (!flipped.length) return { reconciled: false };
@@ -414,10 +427,10 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
       .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
     if (!effect) return { reconciled: false };
-    const messages = await trx('email_messages').where({ trigger_event_id: message.trigger_event_id,
-      template_key: 'service.visit_summary', recipient_id: message.recipient_id })
-      .select('status', 'sent_at', 'provider_message_id', 'error_message');
-    if (!messages.map(summaryEmailState).includes('sent')) return { reconciled: false };
+    const outcomes = await summaryEmailOutcomes(message, trx);
+    if (!outcomes.includes('sent') || outcomes.some((state) => !['sent', 'suppressed'].includes(state))) {
+      return { reconciled: false };
+    }
     await trx('visit_effects').where({ id: effect.id })
       .update({ status: 'sent', sent_at: trx.fn.now(), last_error: null, updated_at: trx.fn.now() });
     // The bounce alert, or the coordinator's delivery-review alert when the
