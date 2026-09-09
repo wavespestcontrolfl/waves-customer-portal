@@ -42,6 +42,22 @@ describe('review request send-time calculator', () => {
   });
 
 
+  test.each([
+    ['2026-05-26T11:44:30Z', '2026-05-26T13:00:30.000Z', '2026-05-26T13:29:30.000Z'],
+    ['2026-05-26T19:20:30Z', '2026-05-26T20:35:30.000Z', '2026-05-26T20:59:30.000Z'],
+  ])('relative preview retains valid interior jitter samples at the fence (%s)', (completed, earliest, latest) => {
+    const plan = calculateReviewSendPlan(new Date(completed), 'wdo inspection', { jitter: false });
+    expect(plan.earliestAt.toISOString()).toBe(earliest);
+    expect(plan.latestAt.toISOString()).toBe(latest);
+    const samples = Array.from({ length: 31 }, (_,i) => {
+      const random = jest.spyOn(Math, 'random').mockReturnValue((i + 0.5) / 31);
+      try { return calculateReviewSendTime(new Date(completed), 'wdo inspection').getTime(); }
+      finally { random.mockRestore(); }
+    });
+    expect(plan.earliestAt.getTime()).toBe(Math.min(...samples));
+    expect(plan.latestAt.getTime()).toBe(Math.max(...samples));
+  });
+
   test('keeps lawn and mosquito review requests before 5 PM ET', () => {
     const lawn = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care');
     const mosquito = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'mosquito');
