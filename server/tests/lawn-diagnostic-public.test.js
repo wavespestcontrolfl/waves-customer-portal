@@ -277,7 +277,7 @@ describe('buildPublicLawnReport whitelisting', () => {
   // customer copy for a low/unknown finding (the v0.4 naming gate). Deliberately omits
   // "disease" (the generic "no specific pest or disease" fallback uses it) and "weed"
   // (specific weeds are genericized to "weed pressure" at any confidence, by design).
-  const GOVERNED_CAUSE = /\b(chinch(?:\s?bugs?)?|caterpillars?|army\s?worms?|sod\s?webworms?|grubs?|large patch(?:es)?|brown patch(?:es)?|gr[ae]y leaf|dollar spots?|fungus|fungal|leaf spots?|mold|mildew|insects?|drought|water stress|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?)\b/i;
+  const GOVERNED_CAUSE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|caterpillars?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|grubs?|large[\s‐‑‒–—-]+patch(?:es)?|brown[\s‐‑‒–—-]+patch(?:es)?|gr[ae]y[\s‐‑‒–—-]+leaf|dollar[\s‐‑‒–—-]+spots?|fungus|fungal|leaf[\s‐‑‒–—-]+spots?|mold|mildew|insects?|drought|water[\s‐‑‒–—-]+stress|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?)\b/i;
 
   // The diagnosis-driven, customer-facing fields — everything a cause name could leak
   // into. Excludes seasonal_context (server-generated SWFL education that legitimately
@@ -317,6 +317,11 @@ describe('buildPublicLawnReport whitelisting', () => {
       'Spurges near the drive',
       'Crabgrass along the walk',
       'Dollarweeds in the shade',
+      'Sod-webworm damage',
+      'Sod‑webworm damage',
+      'Large-patch activity',
+      'Leaf-spot activity',
+      'Gray-leaf-spot activity',
     ])('low-confidence "%s" degrades to symptom-only copy', (name) => {
       const diag = sentDiagnostic({
         report_contract: JSON.stringify({
@@ -338,6 +343,18 @@ describe('buildPublicLawnReport whitelisting', () => {
       });
       expect(causeCopy(buildPublicLawnReport(diag))).not.toMatch(GOVERNED_CAUSE);
     });
+
+    test.each(['Sod-webworm', 'Large-patch', 'Leaf-spot', 'Gray-leaf-spot'])(
+      'moderate %s copy still strips confirmed-language claims', (name) => {
+        const diag = sentDiagnostic({
+          report_contract: JSON.stringify({
+            diagnosis: { primary_finding: name, confidence: 'moderate', findings: [{ name, confidence: 'moderate' }] },
+            customer_summary: `${name} is confirmed along the edge.`, watering: {},
+          }),
+        });
+        expect(buildPublicLawnReport(diag).summary).not.toMatch(/confirmed/i);
+      },
+    );
 
     test('positive control: a MODERATE finding still names its cause (invariant is not vacuous)', () => {
       const diag = sentDiagnostic({

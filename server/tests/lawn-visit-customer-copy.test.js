@@ -82,6 +82,26 @@ describe('customer publication', () => {
     expect(copy.customerObservations('Chinch bug activity along the driveway.', [{ name: 'Fungal activity; no chinch bugs observed', label: 'chinch bug activity', confidence: 'moderate' }])).toBe(copy.NO_OBSERVATIONS);
   });
 
+  test.each(['Sod-webworm', 'Sod‑webworm', 'Large-patch', 'Leaf-spot', 'Gray-leaf-spot', 'Iron-deficiency'])(
+    'hyphenated %s prose requires matching evidence', (cause) => {
+      const text = `${cause} activity along the edge.`;
+      const evidence = { name: cause.replace(/[-‑]/g, ' '), label: 'general lawn stress', confidence: 'moderate' };
+      expect(copy.customerObservations(text, [])).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.customerObservations(text, [{ ...evidence, confidence: 'low' }])).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.customerObservations(text, [evidence])).toBe(text);
+      expect(copy.safeConfirmationStep(text)).toBe('');
+    },
+  );
+
+  test.each(["weren't observed", "aren't present", 'wasn’t observed', "can't be found", 'cannot be confirmed'])(
+    'a normalized finding that says chinch bugs %s cannot authorize cause prose', (polarity) => {
+      const analysis = normalizeAssessment(answer({ findings: [finding({ name: `Chinch bugs ${polarity}`, confidence: 'high' })] }), 2);
+      expect(analysis.findings).toHaveLength(1);
+      expect(copy.customerObservations('Chinchbugs are damaging the turf.', analysis.findings)).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.safeConfirmationStep('Check the chinch bug activity', analysis.findings[0])).toBe('');
+    },
+  );
+
   test('confirmation steps obey the same privacy and cause rules', () => {
     const chinch = { label: 'chinch bug activity', confidence: 'high' };
     expect(copy.safeConfirmationStep('Float test near the driveway; call 941-555-0100 if it fails', chinch)).not.toMatch(/941/);

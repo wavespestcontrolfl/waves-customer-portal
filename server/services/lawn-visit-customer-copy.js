@@ -46,7 +46,7 @@ function customerObservations(text, findings = []) {
 const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
-  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s-]+/g, ' ').replace(/\bpatches\b/g, 'patch').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
+  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\bpatches\b/g, 'patch').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
   if (CAUSE_TERM_SYNONYMS[base]) return CAUSE_TERM_SYNONYMS[base];
   return /(?:ss|us|is)$/.test(base) ? base : base.replace(/(?<=[a-z])s$/, '');
 };
@@ -65,7 +65,7 @@ function namesUnpublishedCause(text, findings) {
     if (finding.negated || finding.label === NO_STRESS_LABEL) continue;
     // A mixed/negated name cannot establish positive evidence for prose.
     // Keep it internal until review supplies an unambiguous finding.
-    if (/\b(?:no|not|none|without|ruled out|negative|absent|unlikely|excluded|free)\b/i.test(finding.name || '')) continue;
+    if (/\b(?:no|not|none|cannot|\w+n['’]t|without|ruled out|negative|absent|unlikely|excluded|free)\b/i.test(finding.name || '')) continue;
     for (const term of governedTerms(`${finding.name || ''} ${finding.label}`)) published.add(term);
   }
   for (const term of governedTerms(text)) if (!published.has(term)) return true;
