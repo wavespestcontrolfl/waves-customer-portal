@@ -445,9 +445,10 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // ── Card read-back and payment outcomes ─────────────────────────────────────
 
 const CARD_PAYMENT_RES = Object.freeze([
-  // Directing the caller through the portal is navigation, not a charge.
-  /\b(?:went|gone) through\b|\bgo through\b(?!\s+(?:(?:the|our|your|a)\s+)?(?:portal|website|app|payment (?:page|steps)|steps)\b)/gi,
-  /\b(?:payment|card|that|it)(?:[\x27\u2019]ll| will| should| would) go through\b/gi,
+  /\b(?:went|gone) through\b/gi,
+  // "Go through" needs a payment-outcome subject and tense. A direction
+  // such as "you can go through it in the portal" makes no payment claim.
+  /\b(?:payment|card|charge|transaction|that|it|everything)(?:[\x27\u2019]ll| will| should| would| has| had| did| does| is going to)?(?: (?:already|now|just))? (?:go(?:es)?|gone|going) through\b/gi,
   /\b(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed)\b/gi,
 ]);
 const CARD_NUMBER_WORDS_RE = new RegExp(`\\b(?:${NUMBER_WORD_EN_STRICT})(?:[\\s,-]+(?:and[\\s,-]+)?(?:${NUMBER_WORD_EN_STRICT}))*\\b`, 'gi');

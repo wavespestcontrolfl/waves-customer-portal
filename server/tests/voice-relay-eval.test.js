@@ -2963,8 +2963,12 @@ describe('voice relay eval — named spoken checks', () => {
     ["I can't take cards, but it went through.", 'fail'],
     ['Your payment went through the portal.', 'fail'],
     ['Your payment will go through the portal.', 'fail'],
+    ['Your payment did go through.', 'fail'],
     ['Please go through the portal to pay.', 'pass'],
     ['You can go through your app to make the payment.', 'pass'],
+    ['You can go through the payment process in the portal.', 'pass'],
+    ['You can go through it securely in your portal.', 'pass'],
+    ['Please go through Waves customer portal to pay.', 'pass'],
     ["I cannot confirm that it went through; please use the portal.", 'pass'],
     ["I can't take payments here; please use the portal.", 'pass'],
   ])('card read-back uses supplied synthetic facts: %s', (text, status) => {
