@@ -35,6 +35,15 @@ test.each(['STOP', 'stop.', 'STOPP', 'REMOVE', 'OPT OUT', 'DO NOT TEXT', 'START'
 });
 
 test.each([
+  "Please stop texting me. I don't have any leads for you.",
+  'Please remove me from your list.',
+  'This is the wrong number.',
+])('natural-language consent does not wait on the model: %s', async (body) => {
+  expect(await screenInboundSms({ body })).toBeNull();
+  expect(mockDispatch).not.toHaveBeenCalled();
+});
+
+test.each([
   PITCH, 'We can send you more pest-control leads.', 'We can provide you with more lawn leads.',
   'We provide you with unlimited estimates for local contractors.',
   'I can offer you qualified pest-control customers.',

@@ -12,9 +12,11 @@ const { detectSmsOptCommand, detectHelp } = require('./messaging/opt-out-detecto
 const CLASSIFIER_VERSION = 'sms-solicitation-v1';
 const TIMEOUT_MS = 3500;
 
-function isCarrierCommand(text) {
+function bypassesClassification(text) {
   const cmd = detectSmsOptCommand(text);
-  if (cmd.action && /keyword$/.test(String(cmd.detectionMethod || ''))) return true;
+  // Never add a model wait before consent handling. Deterministic pitch
+  // evidence can still be recorded for vendor footers without a model call.
+  if (cmd.action && (/keyword$/.test(String(cmd.detectionMethod || '')) || !isSolicitationPitch(text))) return true;
   return Boolean(detectHelp(text).help);
 }
 
@@ -82,7 +84,7 @@ async function screenInboundSms({ body, hasCustomer, isReaction, isAiLine = fals
   const mode = classifierMode();
   if (mode === 'off') return null;
   const text = String(body || '').trim();
-  if (hasCustomer || isReaction || isAiLine || !text || isCarrierCommand(text)) return null;
+  if (hasCustomer || isReaction || isAiLine || !text || bypassesClassification(text)) return null;
   const verdict = await classifySolicitation({ body });
   logger.info(`[sms-solicitation] ${verdict.method} solicitation=${verdict.solicitation} confidence=${verdict.confidence.toFixed(2)} mode=${mode}`);
   return { ...verdict, mode };

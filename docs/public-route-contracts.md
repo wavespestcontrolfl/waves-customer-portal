@@ -144,6 +144,8 @@ same noindex/no-referrer/no-store headers as `/report/:token`),
 unknown-sender SMS. Other values, including `true`, leave this stage off.
 Known primary/secondary/service-contact numbers, reactions, empty bodies,
 standalone carrier commands, and the AI assistant line bypass the classifier.
+Natural-language consent requests never wait on the model; only deterministic
+pitch evidence, such as a vendor footer, may be recorded for those messages.
 The unified inbox message is durably saved before screening. A failed unified
 save or relationship lookup bypasses screening and preserves ordinary handling;
 model failures record a failed non-solicitation verdict. The 3.5-second model
