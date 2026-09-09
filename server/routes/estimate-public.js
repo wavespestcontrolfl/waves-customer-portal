@@ -10554,6 +10554,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         err.code = 'RECURRING_CARD_REQUIRED';
         throw err;
       }
+      // The verified intent re-read UNDER THIS ROW LOCK (#4144): a
+      // "use a different payment method" from another tab retires it in
+      // Stripe under the same lock, so a retirement that committed since
+      // the pre-transaction verify is seen here and aborts the accept
+      // (402 → the client re-mints, which follows the replacement chain).
+      if (recurringCardVerification?.ok
+        && !(await RecurringCards.verifyRecurringCardIntentUnderLock({ setupIntentId: recurringCardVerification.setupIntentId }))) {
+        const err = new Error('Save a card for Auto Pay to confirm your recurring plan');
+        err.status = 402;
+        err.code = 'RECURRING_CARD_REQUIRED';
+        throw err;
+      }
 
       // Commercial identity for a ONE-TIME accept (codex #3594 r2 P1): the
       // one-time path below skips EstimateConverter entirely (`treatAsOneTime`),

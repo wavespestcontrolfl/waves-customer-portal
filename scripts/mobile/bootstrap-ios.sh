@@ -138,7 +138,7 @@ fi
 # (b) the server serving /.well-known/apple-app-site-association
 # (GATE_UNIVERSAL_LINKS — see docs/mobile/universal-links.md). Idempotent:
 # creates the entitlements file if missing, appends the applinks entry if the
-# file exists without it. Xcode must reference the file (manual step below).
+# file exists without it. The APNs setup below connects the signing file.
 ENTITLEMENTS="ios/App/App/App.entitlements"
 APPLINK_DOMAIN="applinks:portal.wavespestcontrol.com"
 if [ ! -f "$ENTITLEMENTS" ]; then
@@ -163,6 +163,11 @@ else
   echo "==> ${APPLINK_DOMAIN} appended to App.entitlements ✓"
 fi
 
+# Notification permission can be granted even when the signed app is missing
+# aps-environment. Configure every App target build configuration so a fresh
+# native project cannot silently depend on a manual Push Notifications step.
+python3 "$ROOT/scripts/mobile/ios_push.py" configure "$ROOT/client/ios/App" --badge
+
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"
 cat <<'NOTES'
@@ -170,18 +175,21 @@ cat <<'NOTES'
      → select App/PrivacyInfo.xcprivacy → check "App" target membership
      (required for the Filesystem plugin's file-timestamp declaration).
    • Signing & Capabilities → select your Team (bundle id: com.wavespestcontrol.portal)
-   • + Capability → Push Notifications
+   • Push Notifications is configured by this script. Automatic signing must
+     use a profile with Push Notifications enabled for this App ID.
    • + Capability → Background Modes → check "Remote notifications"
    • + Capability → Associated Domains → confirm applinks:portal.wavespestcontrol.com
-     is listed (this script pre-writes App/App.entitlements; if Xcode shows the
-     capability empty, Build Settings → Code Signing Entitlements must point at
-     App/App.entitlements). Automatic signing then enables Associated Domains
-     on the App ID for you. Server side, links only start opening in-app once
+     is listed. Automatic signing then enables Associated Domains on the
+     App ID for you. Server side, links only start opening in-app once
      GATE_UNIVERSAL_LINKS=true is set on Railway — see docs/mobile/universal-links.md.
    • App Store Connect → Users and Access → Integrations → APNs Auth Key:
        create a .p8 key, note the Key ID + Team ID → these feed the backend
        APNs env vars (see docs/mobile/apns-backend-pr-plan.md).
    • Run on a real device (push does not work in the simulator).
+   • Before uploading the exported App Store / TestFlight IPA, run from the repo root:
+       python3 scripts/mobile/ios_push.py verify /path/to/Waves.ipa
+     The exported app must have aps-environment=production. A web deployment
+     cannot add this entitlement to an already-installed iOS build.
 NOTES
 if [ "${CI:-}" = "true" ]; then
   echo "==> CI mode: native project synced; skipping Xcode launch."

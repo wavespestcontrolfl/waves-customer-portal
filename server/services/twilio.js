@@ -151,7 +151,7 @@ async function notifySmsGuardBlocked({ to, body, reason, messageType }) {
         `Recipient: ${maskPhone(to)}`,
         `Body length: ${body?.length || 0}`,
       ].join("\n"),
-      link: "/admin/sms-templates",
+      link: "/admin/communications#tab=templates",
       originalMessageType: "sms_guard_blocked",
       originalToMasked: maskPhone(to),
     });
@@ -171,6 +171,10 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
       ...payload,
       originalToMasked: maskPhone(to),
     });
+    if (stats?.suppressed || stats?.policySilenced) {
+      // An intentional preference/policy stop is not a delivery outage.
+      return { success: true, sid: 'internal-admin-notification-suppressed', suppressed: true };
+    }
     if (!internalAlertNotificationDelivered(stats)) {
       logger.warn(
         `[twilio] internal alert notification redirect did not deliver; suppressed owner/admin SMS fallback (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
@@ -792,18 +796,26 @@ const TwilioService = {
         // operatorInitiated flag — admin attribution is operator provenance.
         adminAttributed: Boolean(options.adminUserId),
       });
+      if (typeof options.withSmsHandoff === 'function' && pushRoute !== 'sms_only') {
+        return { success: false, preSendBlocked: true, code: 'UNSUPPORTED_SMS_HANDOFF',
+          error: 'Locked lead handoff requires SMS routing', validator: 'check_sms_handoff_authority' };
+      }
       if (pushRoute === "push_first") {
         const pushed = await PushRouting.attemptPushFirst({
           customerId: options.customerId,
           to,
           body,
           messageType: options.messageType,
+          // The visit this message is about — the push link opens its house.
+          appointmentId: options.appointmentId || null,
           fromNumber,
           // Proof-of-send linkage for the scheduled-SMS recovery sweep —
           // without it a crash window makes the sweep resend the message.
           scheduledSmsLogId: options.scheduledSmsLogId,
           explicitPushOnly: options.explicitPushOnly,
           notificationEventKey: options.notificationEventKey,
+          invoiceId: options.invoiceId,
+          requestNotification: options.requestNotification,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
           preSendCheck: options.preSendCheck,
         });
@@ -814,6 +826,8 @@ const TwilioService = {
           return { success: true, sid: pushed.sid, fromNumber, pushRouted: true };
         }
         if (options.explicitPushOnly) {
+          if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason };
+          if (pushed.retryable) return { success: false, appRetryable: true, error: pushed.reason };
           if (pushed.pending) return { success: false, appPending: true, error: pushed.reason };
           return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable' };
         }
@@ -830,13 +844,44 @@ const TwilioService = {
       // clearance outranks the bounced send — an insert-time default is
       // post-handoff and can postdate a START that raced the log write,
       // wrongly re-suppressing an opted-in recipient (hook P1 ×2).
-      const handoffAt = new Date();
+      let handoffAt;
       // Re-anchor the 21610 ordering timestamp at the ACTUAL provider
       // handoff (codex #3495): entry-time capture predates template/
       // customer lookups and the push-first attempt, so a START received
       // during that preparation wrongly outranked the rejection.
-      smsAttemptAt = new Date();
-      const message = await c.messages.create(msgPayload);
+      let message;
+      let dispatchStarted = false;
+      const dispatch = async () => {
+        handoffAt = new Date();
+        smsAttemptAt = handoffAt;
+        dispatchStarted = true;
+        message = await c.messages.create(msgPayload);
+      };
+      if (typeof options.withSmsHandoff === 'function') {
+        let verdict;
+        try {
+          verdict = await options.withSmsHandoff(dispatch);
+        } catch (err) {
+          if (!message && dispatchStarted) throw err;
+          if (!dispatchStarted) {
+            verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED',
+              reason: 'SMS handoff authority check failed', retryable: true };
+          } else {
+            // The read-only guard may fail to commit after Twilio accepts.
+            // Preserve that known acceptance so callers cannot retry the SMS.
+            logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
+          }
+        }
+        if (!message) {
+          return { success: false, preSendBlocked: true,
+            code: verdict?.code || 'SMS_HANDOFF_CHECK_FAILED',
+            error: verdict?.reason || 'SMS handoff authority was not established',
+            ...(verdict?.retryable ? { retryable: true } : {}),
+            validator: 'check_sms_handoff_authority' };
+        }
+      } else {
+        await dispatch();
+      }
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
       );
@@ -848,6 +893,7 @@ const TwilioService = {
           to,
           body,
           messageType: options.messageType,
+          appointmentId: options.appointmentId || null,
           preSendCheck: options.preSendCheck,
         }).catch(() => {});
       }
@@ -1047,7 +1093,7 @@ const TwilioService = {
    * Phase 1 callers always pass a token (minted by migration backfill);
    * legacy callers that pass nothing still get a sensible bodyless message.
    */
-  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null } = {}) {
+  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null, scheduledServiceId = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -1162,6 +1208,12 @@ const TwilioService = {
             audience: "customer",
             purpose: "tech_en_route",
             customerId,
+            // The visit this notice is about: rides provider → push routing →
+            // push sink, where the deep link is qualified with the visit's
+            // saved property (GitHub codex #4207 r11 P1) — without it an
+            // App-delivered en-route push for a secondary house opened the
+            // profile's primary and hid the active tracker.
+            ...(scheduledServiceId ? { appointmentId: scheduledServiceId } : {}),
             identityTrustLevel:
               isServiceContactRole(contact.role)
                 ? "service_contact_authorized"
@@ -1317,6 +1369,7 @@ const TwilioService = {
             audience: "customer",
             purpose: "tech_arrived",
             customerId,
+            ...(scheduledServiceId ? { appointmentId: scheduledServiceId } : {}),
             identityTrustLevel:
               isServiceContactRole(contact.role)
                 ? "service_contact_authorized"
