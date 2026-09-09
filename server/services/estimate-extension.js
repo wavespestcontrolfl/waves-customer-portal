@@ -260,34 +260,53 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // terminal (status + archived_at guards), or (c) reporting success over a
   // concurrent sweep flip (status guard). Zero rows → 409, callers surface
   // retry/failure.
-  const updated = await db('estimates')
-    .where({ id: estimate.id, status: estimate.status })
-    .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
-    .whereNull('archived_at')
-    .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
-    // Never revive a row under a clarify re-price hold (codex r7 P0 on
-    // #3804): the renderer refuses it, so the extension's SMS would carry
-    // a dead link — and the public auto-grant's eligibility read could
-    // have preceded the hold. Zero rows → the same 409 as any other
-    // concurrent change; the public route releases its burn on it.
-    .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-    .update(updates);
-  if (!updated) {
-    const err = new Error('Estimate changed while extending — retry.');
-    err.statusCode = 409;
-    throw err;
-  }
+  await db.transaction(async (trx) => {
+    if (estimate.estimate_group_id) {
+      // Proposal saves and grouped sends take this lock before row locks.
+      // Hold it through both writes so a new fixed hold cannot split the offer.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-send', String(estimate.estimate_group_id)]);
+      const locked = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id })
+        .orderBy('id').forUpdate().select('id', 'estimate_data');
+      const anchor = locked.find((row) => row.id === estimate.id);
+      if (!anchor) {
+        const err = new Error('Estimate changed groups while extending — retry.');
+        err.statusCode = 409;
+        throw err;
+      }
+      if (await fixedBidBlocksExtension(trx, { ...estimate, estimate_data: anchor.estimate_data })) {
+        const err = validationError('This bid or a grouped property has a fixed validity date. Contact the office to revise the proposal.');
+        err.code = 'FIXED_BID_VALIDITY';
+        throw err;
+      }
+    }
+    const updated = await trx('estimates')
+      .where({ id: estimate.id, status: estimate.status, estimate_group_id: estimate.estimate_group_id || null })
+      .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
+      .whereNull('archived_at')
+      .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
+      // Never revive a row under a clarify re-price hold (codex r7 P0 on
+      // #3804): the renderer refuses it, so the extension's SMS would carry
+      // a dead link — and the public auto-grant's eligibility read could
+      // have preceded the hold. Zero rows → the same 409 as any other
+      // concurrent change; the public route releases its burn on it.
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      .update(updates);
+    if (!updated) {
+      const err = new Error('Estimate changed while extending — retry.');
+      err.statusCode = 409;
+      throw err;
+    }
 
-  // Multi-property group: the ONE link renders every sibling, and the public
-  // viewability filter drops expired rows per-estimate — extending only this
-  // row would revive one property and hide the rest (codex #3244 r3). Extend
-  // every live sibling to the same deadline, reviving expired/send_failed
-  // ones with the viewed-aware status; accepted/declined/archived siblings
-  // keep their terminal state. Best-effort and SILENT — only the extended
-  // estimate drives customer comms (one thread per group).
-  if (estimate.estimate_group_id) {
-    try {
-      await db('estimates')
+    // Multi-property group: the ONE link renders every sibling, and the public
+    // viewability filter drops expired rows per-estimate — extending only this
+    // row would revive one property and hide the rest (codex #3244 r3). Extend
+    // every live sibling to the same deadline, reviving expired/send_failed
+    // ones with the viewed-aware status; accepted/declined/archived siblings
+    // keep their terminal state. Atomic and SILENT — only the extended
+    // estimate drives customer comms (one thread per group).
+    if (estimate.estimate_group_id) {
+      await trx('estimates')
         .where({ estimate_group_id: estimate.estimate_group_id })
         .whereNot({ id: estimate.id })
         .whereNull('archived_at')
@@ -340,10 +359,8 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           disposition_note: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_note END"),
           updated_at: db.fn.now(),
         });
-    } catch (siblingErr) {
-      logger.warn(`[estimate-extension] group sibling extension failed for estimate ${estimate.id}: ${siblingErr.message}`);
     }
-  }
+  });
 
   // Re-arm the ENGAGEMENT ENGINE's expiring lifecycle for the new deadline
   // too (codex 2736 r9): the engine's one-lifecycle enqueue guard and the
