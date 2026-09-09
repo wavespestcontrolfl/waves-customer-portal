@@ -4039,7 +4039,9 @@ router.put('/:id/proposal', async (req, res, next) => {
     const existingData = parseEstimateData(estimate.estimate_data) || {};
     const authoredExpiry = proposalExpiry({ estimate_data: { proposal: normalized } });
     const hadFixedValidity = hasFixedBidValidity(estimate);
-    const standardStart = estimate.sent_at || estimate.scheduled_at;
+    const standardStart = estimate.status === 'scheduled'
+      ? estimate.scheduled_at || estimate.sent_at
+      : estimate.sent_at || estimate.scheduled_at;
     const expiryUpdate = authoredExpiry || (hadFixedValidity && standardStart
       ? estimateExpiresAt(() => new Date(standardStart)) : null);
     const revivingBid = expiredRecovery && (expiryUpdate > new Date() || (hadFixedValidity && !expiryUpdate));

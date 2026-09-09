@@ -241,6 +241,7 @@ describe('commercial bid authoring', () => {
     ['draft', null, null, null], ['expired', null, null, null],
     ['sent', '2099-01-01T12:00:00Z', null, '2099-01-08T12:00:00.000Z'],
     ['scheduled', null, '2099-01-10T12:00:00Z', '2099-01-17T12:00:00.000Z'],
+    ['scheduled', '2020-01-01T12:00:00Z', '2099-01-10T12:00:00Z', '2099-01-17T12:00:00.000Z'],
   ])('clearing fixed validity restores the ordinary %s expiry from delivery, never the save time', async (status, sentAt, scheduledAt, expected) => {
     Object.assign(row, { status, sent_at: sentAt, scheduled_at: scheduledAt, expires_at: new Date('2026-01-09T04:59:59.999Z'),
       estimate_data: { proposal: { ...proposal(), validThrough: '2026-01-08' } } });
