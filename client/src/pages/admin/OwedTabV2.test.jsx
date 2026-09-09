@@ -4,6 +4,11 @@ import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OwedTabV2, { dueLabel, whoLabel } from "./OwedTabV2";
 
+// A stated deadline that has passed reads as overdue at render time
+// (dueLabel/isOverdueNow), so c2's due_at must stay in the FUTURE relative
+// to the real clock — a fixed date turned this file into a time bomb the day
+// it passed (2026-09-09 13:00Z).
+const dueTomorrow = () => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 const rows = () => [
   {
     id: "c1", call_log_id: "11111111-2222-4333-8444-555555555555", party: "waves", kind: "send_estimate", description: "Send the caller an estimate",
@@ -13,7 +18,7 @@ const rows = () => [
   },
   {
     id: "c2", call_log_id: "22222222-2222-4333-8444-555555555555", party: "waves", kind: "callback", description: "Call the caller back (promised by the AI phone assistant)",
-    status: "open", source: "ai", human_state: null, due_at: "2026-09-09T13:00:00Z", overdue: false, call_started_at: "2026-09-02T14:00:00Z",
+    status: "open", source: "ai", human_state: null, due_at: dueTomorrow(), overdue: false, call_started_at: "2026-09-02T14:00:00Z",
     customer_id: null, from_phone: "+15555550177", direction: "inbound",
     fulfillment: { kind: "outbound_call", strength: "association", basis: "completed_outbound_call_to_caller_within_14_days", matched_at: "2026-09-03T14:00:00Z" },
     extractor_version: "relay-v1",
