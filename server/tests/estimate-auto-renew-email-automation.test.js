@@ -15,6 +15,7 @@ const mockGetTemplate = jest.fn();
 function query(result) {
   const chain = {
     where: jest.fn(() => chain),
+    whereRaw: jest.fn(() => chain),
     whereIn: jest.fn(() => chain),
     whereNull: jest.fn(() => chain),
     whereNotNull: jest.fn(() => chain),
@@ -79,6 +80,13 @@ function staleEstimate(overrides = {}) {
 }
 
 describe('estimate auto-renew email automation cutover', () => {
+  test('a fixed bid deadline is never renewed or emailed automatically', async () => {
+    mockDb.__estimateQueries = [query([staleEstimate({ estimate_data: { proposal: { enabled: true, validThrough: '2026-09-22' } } })])];
+    await EstimateAutoRenew.checkAll();
+    expect(mockDb.__estimateQueries).toHaveLength(0);
+    expect(mockProcessTrigger).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     jest.clearAllMocks();
     mockDb.__estimateQueries = [];

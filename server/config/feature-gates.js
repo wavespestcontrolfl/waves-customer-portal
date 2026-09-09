@@ -1867,6 +1867,10 @@ const gates = {
   // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
   commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
 
+  // Bid unit and validity controls; default off everywhere.
+  // Readers always honor saved quantities and dates after the controls are off.
+  commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
+
   // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
   // proposal.pdf download, and the proposal email attachment render the React
   // EstimateProposalDocument (service-report-style document) through the

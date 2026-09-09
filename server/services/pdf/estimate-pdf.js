@@ -22,6 +22,7 @@ const {
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
 const { normalizeProposal, computeProposalTotals, annualizedAmount } = require('../estimate-proposal');
+const { formatUnitPrice, formatQuantity } = require('../../../shared/proposal-bid.cjs');
 const { resolveProposalBillingContext } = require('../estimate-proposal-billing');
 
 // Brand palette — identical to invoice-pdf.js.
@@ -145,7 +146,7 @@ function detailsBlock(doc, estimate, x, y) {
   const rows = [
     ['Proposal #', String(estimate.id || '').split('-')[0].toUpperCase() || '—'],
     ['Date', formatDisplayDate(estimate.created_at || new Date(), { fallback: '—' })],
-    ['Valid through', formatDisplayDate(estimate.expires_at, { fallback: '30 days from issue' })],
+    ['Valid through', formatDisplayDate(require('../proposal-bid').proposalExpiry(estimate) || estimate.expires_at, { fallback: '7 days after sending' })],
     ['Prepared by', 'Waves Pest Control, LLC'],
   ];
   doc.fontSize(10).font('Helvetica');
@@ -160,12 +161,12 @@ function detailsBlock(doc, estimate, x, y) {
 // Column geometry for the line-item table.
 const COL = {
   desc: L,
-  freq: L + W - 250,
-  qty: L + W - 165,
-  rate: L + W - 130,
-  amount: L + W - 70,
+  freq: L + W - 300,
+  qty: L + W - 225,
+  rate: L + W - 140,
+  amount: L + W - 75,
 };
-const COL_W = { desc: W - 260, freq: 80, qty: 30, rate: 60, amount: 70 };
+const COL_W = { desc: W - 310, freq: 70, qty: 80, rate: 60, amount: 75 };
 
 function tableHeader(doc, y) {
   doc.fontSize(8).font('Helvetica-Bold').fillColor(MUTED);
@@ -203,16 +204,19 @@ function buildingBlock(ctx, building, y, taxRate) {
 
   doc.fontSize(10);
   for (const item of building.lineItems) {
+    doc.font('Helvetica').fontSize(10);
     const descH = doc.heightOfString(item.description || '—', { width: COL_W.desc });
-    const rowH = Math.max(descH + 6, 18);
+    const qtyH = doc.heightOfString(formatQuantity(item), { width: COL_W.qty });
+    const rateH = doc.heightOfString(formatUnitPrice(item.unitPrice), { width: COL_W.rate });
+    const rowH = Math.max(descH + 6, qtyH + 6, rateH + 6, 18);
     y = ensureSpace(ctx, y, rowH + 4);
     if (y === 56) y = tableHeader(doc, y);  // re-print header after a page break
 
     doc.font('Helvetica').fillColor(INK).text(item.description || '—', COL.desc, y, { width: COL_W.desc });
     doc.fillColor(BODY).fontSize(9).text(item.frequencyLabel, COL.freq, y + 1, { width: COL_W.freq });
     doc.fontSize(10).fillColor(INK);
-    doc.text(String(item.quantity), COL.qty, y, { width: COL_W.qty, align: 'right' });
-    doc.text(currency(item.unitPrice), COL.rate, y, { width: COL_W.rate, align: 'right' });
+    doc.text(formatQuantity(item), COL.qty, y, { width: COL_W.qty, align: 'right' });
+    doc.text(formatUnitPrice(item.unitPrice), COL.rate, y, { width: COL_W.rate, align: 'right' });
     const amountLabel = currency(item.amount) + (item.taxable ? ' *' : '');
     doc.text(amountLabel, COL.amount, y, { width: COL_W.amount, align: 'right' });
     y += rowH;

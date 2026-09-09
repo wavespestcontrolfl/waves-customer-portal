@@ -5809,7 +5809,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ${building.note ? `<div class="proposal-building-note">${escapeHtml(building.note)}</div>` : ''}
         ${(building.lineItems || []).map((item) => `
         <div class="proposal-line">
-          <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${item.quantity > 1 ? ` &times; ${item.quantity}` : ''}</span>
+          <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${item.unit || item.quantity !== 1 ? `<br>${escapeHtml(require('../../shared/proposal-bid.cjs').formatLineBasis(item))}` : ''}</span>
           <span class="proposal-line-amt">${fmtMoney(item.amount)}${item.taxable === true ? ' *' : ''}${item.frequencyLabel ? ` <span class="proposal-line-freq">${escapeHtml(String(item.frequencyLabel).toLowerCase())}</span>` : ''}</span>
         </div>`).join('')}
       </div>`).join('');
@@ -25343,12 +25343,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           taxRate: proposalForView.taxRate,
           taxLabel: proposalForView.taxLabel,
           terms: proposalForView.terms,
+          ...(proposalForView.validThrough ? { validThrough: proposalForView.validThrough } : {}),
           buildings: (proposalForView.buildings || []).map((building) => ({
             name: building.name,
             note: building.note,
             lineItems: (building.lineItems || []).map((item) => ({
               description: item.description,
               quantity: item.quantity,
+              ...(item.unit ? { unit: item.unit } : {}),
               unitPrice: item.unitPrice,
               amount: item.amount,
               frequency: item.frequency,

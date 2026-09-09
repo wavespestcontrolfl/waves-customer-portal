@@ -23,7 +23,7 @@ function makeQuery(updateResult) {
   const q = {};
   const updates = [];
   const chain = () => q;
-  ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify']
+  ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify']
     .forEach((m) => { q[m] = jest.fn(chain); });
   q.update = jest.fn((payload, returning) => { updates.push({ payload, returning }); return Promise.resolve(updateResult); });
   return { q, updates };

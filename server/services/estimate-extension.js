@@ -135,6 +135,9 @@ async function extensionDeliverableUnderGate(database, estimate) {
 
 async function extendEstimate({ estimate, days, silent = false, entryPoint, workflow, smsMetadata = {} }) {
   if (!estimate || !estimate.id) throw validationError('Estimate not found');
+  if (require('./proposal-bid').hasFixedBidValidity(estimate)) {
+    throw validationError('This bid has a fixed validity date. Contact the office to revise the proposal.');
+  }
   // Engine-authoritative pricing gate (#3750, GH codex P1 r14 / uncapped
   // P0 r17 + r20): an extension revives the token — the price becomes
   // viewable and acceptable again and its refreshed link is redelivered —
@@ -244,6 +247,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // retry/failure.
   const updated = await db('estimates')
     .where({ id: estimate.id, status: estimate.status })
+    .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
     .whereNull('archived_at')
     .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
     // Never revive a row under a clarify re-price hold (codex r7 P0 on
@@ -289,6 +293,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         // …nor a HELD sibling (clarify re-price): it cannot render either.
         .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+        .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
         // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
         // while the gate is on a sibling that fails the authority predicate
         // is never revived, whatever raced between the verdict and here.

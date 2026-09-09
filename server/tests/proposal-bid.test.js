@@ -1,0 +1,59 @@
+jest.mock('../models/db', () => {
+  const db = jest.fn(() => { throw new Error('This unit test must not access a database'); });
+  db.raw = jest.fn(); db.fn = { now: jest.fn() };
+  return db;
+});
+const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+const { buildProposalFirstInvoice } = require('../services/proposal-win');
+const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
+const { proposalExpiry, assertBidSendDate, validateBidFields } = require('../services/proposal-bid');
+
+const line = (id, quantity, unitPrice, unit = 'acre') => ({ id, description: `Synthetic ${id}`, quantity, unitPrice, unit, frequency: 'one_time' });
+const estimate = (lines, extra = {}) => ({ estimate_data: { proposal: { enabled: true, validThrough: '2026-12-21', buildings: [{ name: 'Synthetic property', lineItems: lines }], ...extra } } });
+const normalized = (lines, extra) => normalizeProposal(estimate(lines, extra));
+
+describe('bid quantity authority', () => {
+  test('keeps fractional acres, sub-cent square-foot rates, and per-line cent rounding through reload and invoice billing', () => {
+    const proposal = normalized([line('acre', 25.8, 100), line('slab', 14768, 0.0755, 'sqft'), line('fraction', 0.125, 1.08, 'gal')]);
+    expect(proposal.buildings[0].lineItems.map((row) => row.amount)).toEqual([2580, 1114.98, 0.14]);
+    expect(proposal.buildings[0].lineItems[0].quantity).toBe(25.8);
+    expect(proposal.buildings[0].lineItems[1].unitPrice).toBe(0.0755);
+    const reloaded = normalizeProposal({ estimate_data: JSON.stringify({ proposal }) });
+    expect(reloaded).toEqual(proposal);
+    expect(computeProposalTotals(reloaded).oneTime).toBe(3695.12);
+    const invoice = buildProposalFirstInvoice(reloaded);
+    expect(invoice.subtotal).toBe(3695.12);
+    expect(invoice.lineItems.reduce((sum, item) => sum + item.quantity * item.unit_price, 0)).toBeCloseTo(invoice.subtotal, 2);
+    expect(invoice.lineItems[0].description).toContain('25.8 acres × $100.00');
+    expect(invoice.lineItems[1].description).toContain('14,768 sq ft × $0.0755');
+  });
+  test.each([0, -1, Infinity, NaN, null, true, '', 0.00001, 25.12345])('rejects invalid quantity %s before normalization', (quantity) => {
+    expect(validateBidFields({ buildings: [{ lineItems: [line('a', quantity, 10)] }] })).toMatch(/quantit/i);
+  });
+  test.each([null, true, Infinity, '', 1.23456])('rejects invalid unit price %s before normalization', (unitPrice) => {
+    expect(validateBidFields({ buildings: [{ lineItems: [line('a', 1, unitPrice)] }] })).toMatch(/Unit prices/);
+  });
+});
+
+describe('fixed bid validity', () => {
+  test.each([
+    ['2026-09-22', '2026-09-23T03:59:59.999Z'],
+    ['2026-12-21', '2026-12-22T04:59:59.999Z'],
+    ['2026-03-07', '2026-03-08T04:59:59.999Z'],
+    ['2026-03-08', '2026-03-09T03:59:59.999Z'],
+    ['2026-11-01', '2026-11-02T04:59:59.999Z'],
+  ])('honors the full Eastern calendar day %s, including DST', (validThrough, expected) => {
+    const row = estimate([line('a', 25.8, 100)], { validThrough });
+    expect(proposalExpiry(row).toISOString()).toBe(expected);
+    expect(estimateExpiresAt(() => new Date('2026-09-01T12:00:00Z'), row).toISOString()).toBe(expected);
+    expect(estimateExpiresAt(() => new Date('2026-09-20T12:00:00Z'), row).toISOString()).toBe(expected);
+  });
+  test('retains the seven-day legacy send window and rejects expired or impossible bid dates', () => {
+    expect(estimateExpiresAt(() => new Date('2026-09-01T12:00:00Z')).toISOString()).toBe('2026-09-08T12:00:00.000Z');
+    const row = estimate([line('a', 1, 10)], { validThrough: '2026-09-22' });
+    expect(() => assertBidSendDate(row, new Date('2026-09-23T04:00:00Z'))).toThrow(/validity date has passed/);
+    expect(() => assertBidSendDate(row, new Date('2026-09-23T03:59:59Z'))).not.toThrow();
+    expect(validateBidFields({ validThrough: '2026-02-30' })).toMatch(/calendar date/);
+  });
+});
+
