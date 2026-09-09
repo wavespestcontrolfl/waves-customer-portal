@@ -103,6 +103,58 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(await db('product_restock_requests').where({ product_id: row.id })).toHaveLength(1);
   }, 30000);
 
+  test.each(['before Tuesday', 'by 2026-09-15', 'by tomorrow'])('a restock deadline %s preserves the exact formulation and saved date', async suffix => {
+    const prefix = `DeadlineQA${crypto.randomUUID().slice(0, 8)}`;
+    const base = await product({ name: `${prefix} 10% SC` });
+    const intended = await product({ name: `${prefix} 20% SC` });
+    const { etDateString, addETDays } = require('../utils/datetime-et');
+    const fields = { quantity: 2, unit: 'lb', needed_by: suffix === 'by tomorrow' ? etDateString(addETDays(new Date(), 1)) : '2026-09-15' };
+    const prompt = `Request 2 lb of ${intended.name} ${suffix}`;
+    const wrong = await propose('create_restock_request', { ...fields, product_id: base.id }, prompt);
+    expect(wrong.body.pendingActions || []).toHaveLength(0);
+    const proposed = await propose('create_restock_request', { ...fields, product_id: intended.id }, prompt);
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    expect(JSON.stringify(proposed.body.pendingActions[0].contract)).toContain(fields.needed_by);
+    const saved = await confirm(proposed);
+    expect(saved.body).toMatchObject({ success: true, result: { request: { product_id: intended.id } } });
+    expect(etDateString(new Date(saved.body.result.request.needed_by))).toBe(fields.needed_by);
+    const persisted = await db('product_restock_requests').where({ id: saved.body.result.request.id })
+      .select('id', db.raw('needed_by::text as needed_by')).first();
+    expect(persisted.needed_by).toBe(fields.needed_by);
+    expect(await db('product_restock_requests').where({ product_id: base.id })).toHaveLength(0);
+    expect(await onHand(intended.id)).toBe(10);
+    expect(await db('vendor_orders').where({ restock_request_id: persisted.id })).toHaveLength(0);
+  }, 40000);
+
+  test('a restock deadline cannot disappear from the model preview', async () => {
+    const row = await product();
+    const proposed = await propose('create_restock_request', { product_id: row.id, quantity: 2 },
+      `Request 2 lb of ${row.name} before Tuesday`);
+    expect(proposed.body.pendingActions || []).toHaveLength(0);
+    expect(await db('product_restock_requests').where({ product_id: row.id })).toHaveLength(0);
+  });
+
+  test('a literal catalog name ending in a deadline phrase never collapses to its shorter product', async () => {
+    const base = await product();
+    const intended = await product({ name: `${base.name} before Tuesday` });
+    const prompt = `Request 2 lb of ${intended.name}`;
+    const wrong = await propose('create_restock_request', { product_id: base.id, quantity: 2, needed_by: '2026-09-15' }, prompt);
+    expect(wrong.body.pendingActions || []).toHaveLength(0);
+    const saved = await confirm(await propose('create_restock_request', { product_id: intended.id, quantity: 2 }, prompt));
+    expect(saved.body).toMatchObject({ success: true, result: { request: { product_id: intended.id, needed_by: null } } });
+    expect(await db('product_restock_requests').where({ product_id: base.id })).toHaveLength(0);
+  }, 30000);
+
+  test('ambiguous catalog names ending in a deadline phrase do not fall back to a shorter match', async () => {
+    const base = await product();
+    await product({ name: `${base.name} before Tuesday` });
+    await product({ name: `${base.name} before Tuesday` });
+    const proposed = await propose('create_restock_request', { product_id: base.id, quantity: 2, needed_by: '2026-09-15' },
+      `Request 2 lb of ${base.name} before Tuesday`);
+    expect(proposed.body.pendingActions || []).toHaveLength(0);
+    expect(await db('product_restock_requests').where({ product_id: base.id })).toHaveLength(0);
+  });
+
   test('portal and bar adjustments/requests/receipts agree on saved quantities, units, status and actor', async () => {
     const ui = await product(), bar = await product();
     const uiAdjust = await api(`/api/admin/inventory/${ui.id}/adjust`, { movementType: 'restock', quantity: 2, unit: 'lb', reason: 'Physical receipt' });

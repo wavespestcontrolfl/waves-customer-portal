@@ -43,6 +43,10 @@ already verified result, not an additional domain capability.
   against the preview. Named restock requests resolve through the current queue,
   filtered by product before a two-row ambiguity limit; explicit request IDs and
   viewed requests cannot be substituted, even for the same product.
+- Restock requests recognize `before`/`by` deadlines using weekdays,
+  today/tomorrow or ISO dates only after the full catalog-name lookup misses.
+  Literal names and ambiguous matches are preserved; a deadline clause without
+  the preview's `needed_by` date refuses before confirmation.
 - Exact product ID and full-precision product/request versions bind approval.
   The domain rechecks under locks; a stock or identity change requires a fresh
   preview. Ambiguous names return candidates with formulation/package/SKU data.
@@ -68,6 +72,11 @@ already verified result, not an additional domain capability.
 
 ## Verification
 
+- The deadline follow-up passes all **28 PostgreSQL scenarios**, including six
+  new cases for visible/persisted dates, exact formulations, a missing preview
+  date, literal catalog suffixes and ambiguity. All three positive deadline
+  examples failed before the resolver correction. The six inventory server
+  suites pass **175 tests**; domain and portal-brand checks pass.
 - `node .local/run-ib-test.cjs tests/intelligence-bar-inventory-db.test.js`:
   **21 real PostgreSQL cases pass** (91.09 seconds), using actual Express/auth,
   registry, shared domain operations and an isolated dev database with a scripted
@@ -109,7 +118,7 @@ already verified result, not an additional domain capability.
   queue scope, and separately verified relocation provenance/denominator retention.
 
 Structural follow-up: `resolveInventoryWriteTarget` and `verifiedBaselineProof`
-retain complexity warnings (37 and 27), as do the changed legacy proposal,
+retain complexity warnings (43 and 27), as do the changed legacy proposal,
 confirmation and inventory UI functions and the partial-coverage validator.
 They remain explicit P2 work; these warnings are not reported as passing review
 or silently excluded from the final reconciliation.

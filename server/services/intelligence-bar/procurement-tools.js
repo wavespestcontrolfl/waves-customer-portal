@@ -208,8 +208,8 @@ Use for: "we have 64 oz of Bifen on the shelf", "add the 2 gallons I bought toda
   },
   {
     name: 'create_restock_request',
-    description: `Save an open restock request. This does not place a vendor order or increase stock. Resolve the exact product/formulation and inventory unit first; use saved catalog fields and the stock/forecast readers. Your call returns a preview; the operator confirms in the UI.
-Use for: "put Bifen on the shopping list", "order 2 bags of Prodiamine before Tuesday"`,
+    description: `Save an open restock request. This does not place a vendor order or increase stock. Resolve the exact product/formulation and inventory unit first; use saved catalog fields and the stock/forecast readers. Include a requested deadline as needed_by in YYYY-MM-DD form. Your call returns a preview; the operator confirms in the UI.
+Use for: "put Bifen on the restock list", "request 2 lb of Prodiamine before Tuesday"`,
     input_schema: {
       type: 'object',
       properties: {
@@ -949,13 +949,25 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   ];
   const selected = patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
   if (!selected) return unavailable;
-  const name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
+  let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
+  let literal = null;
+  const deadline = toolName === 'create_restock_request' && name.match(/^(.+?)\s+(?:before|by)\s+(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{4}-\d{2}-\d{2})[.!]?$/i);
+  if (deadline) {
+    // A deadline-looking suffix can still belong to a complete catalog name.
+    // Only split it after that lookup misses, and never drop the preview date.
+    literal = await resolveProduct({ product_name: name });
+    if (!literal.product && !literal.candidates) {
+      if (!preview.needed_by) return unavailable;
+      name = deadline[1].trim();
+      literal = null;
+    }
+  }
   const deictic = /^(?:this|that|current|selected|viewed|open)\s+product$/i.test(name);
   const productId = deictic && inventoryPage ? pageData.productId || pageData.product_id || query.get('productId')
     : name.replace(/^product\s+/i, '');
   const selector = UUID_RE.test(String(productId || '')) ? { product_id: productId } : { product_name: name };
   if (deictic && !selector.product_id) return unavailable;
-  const resolved = await resolveProduct(selector);
+  const resolved = literal || await resolveProduct(selector);
   if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
   if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
   return { productId: resolved.product.id };
