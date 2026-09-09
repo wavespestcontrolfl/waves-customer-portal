@@ -73,7 +73,7 @@ function invoiceBillsVisitApplication(invoice, svc, catalogNames) {
     // Inspect ALL containing catalog names: unordered catalog rows must never
     // let the first matching family hide a conflicting service identity.
     const matches = [...catalogNames].filter((name) => norm(name) === label || (label.length >= 8 && norm(name).includes(label)));
-    if (matches.some((name) => isCompositeService(name) || otherFamily(name))) return false;
+    if (matches.some((name) => isCompositeService(name) || serviceKeyFor({ service_type: name }) !== visitFamily)) return false;
     if (label === visitLabel || matches.length > 0) evidence = true;
   }
   return evidence;

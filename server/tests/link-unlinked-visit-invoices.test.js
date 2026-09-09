@@ -142,6 +142,10 @@ describe('conservative historical repair evidence', () => {
     expect(invoiceBillsVisitApplication({ line_items: [{ description: 'Pest Control', amount: 100 }] },
       { service_type: 'Pest Control' }, new Set(names))).toBe(false);
   });
+  test('unknown catalog services cannot stand in for the visit application', () => {
+    expect(invoiceBillsVisitApplication({ line_items: [{ description: 'WDO Inspection Service', amount: 100 }] },
+      { service_type: 'Pest Control' }, new Set(['WDO Inspection Service']))).toBe(false);
+  });
   test('propagates closeout lookup failures rather than reporting a packet exclusion', async () => {
     assertScheduledInvoiceNotPacketOwned.mockRejectedValueOnce(new Error('lookup failed'));
     await expect(run(fixture())).rejects.toThrow('lookup failed');
