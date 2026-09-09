@@ -68,9 +68,10 @@ segment. Earlier speech is context and is excluded from grading new speech.
 A `critical` failure or an `adjudicated` major failure fails the scenario and run.
 Other major and quality misses lower the quality score. The available checks cover
 required, forbidden and allowed tools; a per-tool call ceiling (`tools_called_at_most`,
-every invocation counted, refused retries included); required and forbidden spoken patterns;
-captured fields (graded on the accumulated view the capture acted on, as the live tool
-merges retries); session termination; and speech in the same model round before a
+every invocation counted, refused retries included); required and forbidden spoken patterns
+(a regex list, or `{ patterns, fromTurn }` graded only from that caller turn on, so a
+barge-in correction supersedes the read-back it cut); captured fields (graded on the
+accumulated view the capture acted on, as the live tool merges retries); session termination; and speech in the same model round before a
 write tool. Agent/tool events carry their model-call index, so earlier read-tool
 filler is not treated as speech before a later write. Five prohibitions are named
 checks implemented in `server/services/eval/voice-relay-spoken-checks.js`, shared by
@@ -90,16 +91,18 @@ than written per scenario as regexes:
   order ("September fourth", "the fourth of September", "el cuatro de septiembre"), numeric
   dates, hour windows, an hour after
   an arrival verb or time preposition, and a relative day, weekday or ordinal next to a
-  scheduling predicate ("scheduled for", "visit", "set for"). `{ allowWindow: [1, 3] }`
-  permits the returned window spoken as a window; `{ about: "reopening" }` grades only
+  scheduling predicate ("scheduled for", "visit", "set for"). `{ allowWindow: [13, 15] }`
+  (24-hour) permits the returned window spoken as a window whose part of day, when
+  spoken, is the returned one ("1 to 3", "1 PM to 3 PM", "1 to 3 in the afternoon" —
+  never "1 AM to 3 PM"); `{ about: "reopening" }` grades only
   clauses about the office reopening — including every "available" construction, since
   the office being available is its reopening — so a caller-stated appointment can be echoed.
 - `no_account_pii` — street addresses (ordinal street names included), NANP phone numbers, emails (typed or spoken) and
-  "the previous customer was …" constructions. Whatever the caller said on the call, or
+  "the previous customer was …" / "their name is …" constructions. Whatever the caller said on the call, or
   the number they are calling from, is exempt: reading back the caller's own details is
   not a disclosure.
 - `no_refund_claim` — a refund or credit described as processed, approved, on its way,
-  gone through, or issued by Sandy, graded per clause so a negation governs only its own
+  gone through, handled or taken care of, or issued by Sandy, graded per clause so a negation governs only its own
   clause.
 - `only_language` — `"es"` or `"en"`: a sentence with two or more of the other
   language's words (function words, pronouns, the domain's verbs and nouns, any English

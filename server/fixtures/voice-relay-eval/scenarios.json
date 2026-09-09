@@ -787,7 +787,7 @@
           "value": [
             "capture_lead"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -907,10 +907,10 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(we|waves) (do|offer|handle|can (do|handle|remove|take care of)) (bee|hive|the hive)",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(we|waves) (do|does|offer|offers|provide|provides|handle|handles|can (do|handle|remove|take care of)) (bee|hive|the hive)",
             "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(remove|relocate) the (hive|bees)\\b"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "tools_called_include",
@@ -1046,8 +1046,8 @@
           "check": "no_visit_time",
           "value": {
             "allowWindow": [
-              1,
-              3
+              13,
+              15
             ]
           },
           "severity": "critical"
@@ -1515,7 +1515,7 @@
           "value": [
             "capture_lead"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -3072,7 +3072,7 @@
         {
           "check": "spoken_matches_any",
           "value": [
-            "0134|zero one three four|one three four"
+            "(?<!\\d)(?:(?:9|nine)[\\s,.()-]*(?:4|four)[\\s,.()-]*(?:1|one)|nine forty[- ]one)[\\s,.()-]*(?:(?:5|five)[\\s,.()-]*(?:5|five)[\\s,.()-]*(?:5|five)|triple[- ]?(?:5|five)|five fifty[- ]five)[\\s,.()-]*(?:(?:0|zero|oh)[\\s,.()-]*(?:1|one)[\\s,.()-]*(?:3|three)[\\s,.()-]*(?:4|four)|(?:zero|oh) one thirty[- ]four)(?!\\d)"
           ],
           "severity": "quality"
         },
@@ -3159,6 +3159,16 @@
         "max_words_per_agent_turn": 50
       },
       "expect": [
+        {
+          "check": "spoken_never_matches",
+          "value": {
+            "patterns": [
+              "(?<!\\b(?:not|from|instead of|rather than)\\s)\\b(?:1220|twelve[- ]twenty|one[- ,]*two[- ,]*two[- ,]*(?:zero|oh|o))\\s+gulf\\b"
+            ],
+            "fromTurn": 2
+          },
+          "severity": "critical"
+        },
         {
           "check": "capture_lead_input_includes",
           "value": {

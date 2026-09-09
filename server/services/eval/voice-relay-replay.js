@@ -263,11 +263,22 @@ function compileRegex(source) {
 // check means adding a runner in CHECK_RUNNERS and a rule here.
 const toolList = (knownTools) => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty tool list'
   : (v.find((n) => !knownTools.has(n)) ? `unknown tool "${v.find((n) => !knownTools.has(n))}"` : null));
-const regexList = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
-  : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
 const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty write-tool list'
   : (v.find((n) => !WRITE_TOOLS.includes(n)) ? `"${v.find((n) => !WRITE_TOOLS.includes(n))}" is not a write tool (${WRITE_TOOLS.join(', ')})` : null));
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
+  : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
+// A regex list, or the same list graded from a caller turn onward —
+// { patterns: [...], fromTurn: 2 } skips what Sandy said before the caller's
+// second turn: a barge-in correction supersedes the read-back it cut.
+const regexList = (v) => {
+  if (Array.isArray(v)) return regexPatterns(v);
+  if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn: <caller turn> }';
+  const unknown = Object.keys(v).find((k) => k !== 'patterns' && k !== 'fromTurn');
+  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn)`;
+  if (!Number.isInteger(v.fromTurn) || v.fromTurn < 1) return 'fromTurn must be a caller turn number (1 is the first)';
+  return regexPatterns(v.patterns);
+};
 const CHECK_VALUE_RULES = Object.freeze({
   tools_called_include: toolList,
   tools_performed_include: writeToolList,
@@ -1154,13 +1165,15 @@ const CHECK_RUNNERS = Object.freeze({
     const hit = value.filter((n) => performedNames.includes(n));
     return hit.length ? ['pass', `performed: ${hit.join(', ')}`] : ['fail', `none of ${value.join(', ')} was performed`];
   },
-  spoken_never_matches(value, record, { spoken }) {
-    const hit = firstRegexHit(value, spoken);
-    return hit ? ['fail', `/${hit.source}/i matched: "${clip(hit.text, 160)}"`] : ['pass', 'no forbidden phrase spoken'];
+  spoken_never_matches(value, record, view) {
+    const { sources, spoken, scope } = spokenScope(value, view);
+    const hit = firstRegexHit(sources, spoken);
+    return hit ? ['fail', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['pass', `no forbidden phrase spoken${scope}`];
   },
-  spoken_matches_any(value, record, { spoken }) {
-    const hit = firstRegexHit(value, spoken);
-    return hit ? ['pass', `/${hit.source}/i matched: "${clip(hit.text, 160)}"`] : ['fail', `none of ${value.map((v) => `/${v}/i`).join(', ')} was spoken`];
+  spoken_matches_any(value, record, view) {
+    const { sources, spoken, scope } = spokenScope(value, view);
+    const hit = firstRegexHit(sources, spoken);
+    return hit ? ['pass', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['fail', `none of ${sources.map((v) => `/${v}/i`).join(', ')} was spoken${scope}`];
   },
   capture_lead_input_includes(value, record) {
     // Only a capture the fixture ACCEPTED and answered ok counts — a rejected
@@ -1207,6 +1220,13 @@ const CHECK_RUNNERS = Object.freeze({
   },
   ...SPOKEN_CHECK_RUNNERS,
 });
+
+// The patterns and the speech they grade: every utterance, or — for
+// { patterns, fromTurn } — only what Sandy said from that caller turn on.
+function spokenScope(value, { spoken, utterances }) {
+  if (Array.isArray(value)) return { sources: value, spoken, scope: '' };
+  return { sources: value.patterns, spoken: utterances.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}` };
+}
 
 function firstRegexHit(sources, spoken) {
   for (const source of sources) {
