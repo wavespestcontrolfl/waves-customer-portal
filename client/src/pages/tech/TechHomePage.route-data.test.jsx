@@ -31,7 +31,7 @@ let scheduleFails;
 let briefStatus;
 let fetchMock;
 
-function mount(path = '/tech', { enabled = true, role = 'technician', id = 'tech-fixture' } = {}) {
+function mount(path = '/tech', { enabled = false, role = 'technician', id = 'tech-fixture' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id, name: 'Fixture Technician', role }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
