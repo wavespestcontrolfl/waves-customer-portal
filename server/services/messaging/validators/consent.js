@@ -263,6 +263,24 @@ async function checkConsentForPurpose(input, policy, contactState) {
  * Load the recipient's notification_prefs + minimal customer record into
  * contactState. Pure read, no writes.
  */
+// App property scope (PR 3): an appointment send names its visit
+// (input.appointmentId); a NON-primary saved property owns the five
+// appointment toggles the per-purpose gate reads (enforced under
+// GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unreadable under
+// enforcement = lookupFailed → CONSENT_LOOKUP_FAILED (retry), never the
+// customer row's answer. No-op without a visit, a row, or a customer.
+async function applyVisitPropertyToggles(state, input, dbh) {
+  if (!state.prefs || !state.customer || !input.appointmentId || state.lookupFailed) return;
+  try {
+    state.prefs = await require('../../property-notification-prefs')
+      .prefsForVisit(state.prefs, state.customer.id, input.appointmentId, 'consent', dbh);
+  } catch (err) {
+    if (dbh.isTransaction) throw err;
+    logger.warn(`[messaging:consent] property toggle lookup failed: ${err.message}`);
+    state.lookupFailed = true;
+  }
+}
+
 async function loadContactState(input, dbh = db) {
   // lookupFailed signals a transient DB error during the consent
   // lookup. The validator distinguishes this from a clean "no record
@@ -306,6 +324,8 @@ async function loadContactState(input, dbh = db) {
       state.lookupFailed = true;
     }
   }
+
+  await applyVisitPropertyToggles(state, input, dbh);
 
   // Reply evidence for the no-prefs-row conversational exception: has this
   // phone ever texted US? Only queried when the consent decision actually

@@ -1030,10 +1030,13 @@ const TwilioService = {
 
     if (!customer || !service) return;
 
-    // Check if customer has this notification enabled
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // Check if customer has this notification enabled — for a NON-primary
+    // saved property, that property's own toggle (app property scope, PR 3;
+    // enforced under GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise).
+    const prefs = await require('./property-notification-prefs').prefsForVisit(
+      await db("notification_prefs").where({ customer_id: customerId }).first(),
+      customerId, scheduledServiceId, 'reminder_24h_legacy',
+    );
     if (!prefs?.service_reminder_24h || !prefs?.sms_enabled) return;
 
     const time = service.window_start
@@ -1095,9 +1098,14 @@ const TwilioService = {
    */
   async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null, scheduledServiceId = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // The visit's NON-primary saved property owns the en-route toggle (app
+    // property scope, PR 3; enforced under GATE_APP_PROPERTY_TEXTS, shadow-
+    // logged otherwise). A failed property read under enforcement throws —
+    // the caller retries rather than texting on the customer row's answer.
+    const prefs = await require('./property-notification-prefs').prefsForVisit(
+      await db("notification_prefs").where({ customer_id: customerId }).first(),
+      customerId, scheduledServiceId, 'en_route',
+    );
     if (!customer || !prefs?.tech_en_route) return;
 
     // Honor the customer's delivery-channel choice (portal Settings dropdown,
@@ -1305,9 +1313,11 @@ const TwilioService = {
    */
   async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // Same per-property toggle as en-route (app property scope, PR 3).
+    const prefs = await require('./property-notification-prefs').prefsForVisit(
+      await db("notification_prefs").where({ customer_id: customerId }).first(),
+      customerId, scheduledServiceId, 'arrived',
+    );
     // Deterministic local suppression (opt-out / SMS disabled / missing customer):
     // the arrival is "handled", not a retryable failure. The caller (markOnProperty)
     // keeps its idempotency guard stamped on this signal so no later same-job

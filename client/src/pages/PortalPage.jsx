@@ -9,6 +9,7 @@ import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
+import { propertyRelationshipChip } from '../lib/contact-roles';
 import { fmtMoney } from '../lib/money';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
@@ -4409,6 +4410,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const [prefs, setPrefs] = useState(null);
   const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
+  // The Appointment-texts card lists one entry per SAVED property once the
+  // server answers that shape (app property scope, PR 3); a profile-shaped
+  // list keeps the per-profile card.
+  const perPropertyTexts = savedScope && propertyPrefs.some((p) => p.propertyId);
+  const shownTextsEntry = perPropertyTexts ? propertyPrefs.find((p) => p.id === activePropertyId) || null : null;
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
@@ -4562,13 +4568,20 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         : p
     )));
     try {
-      const result = await api.updatePropertyNotificationPrefs(propertyId, { [key]: newVal });
+      // Saved-property entries (app property scope, PR 3) address the PROFILE
+      // and name the saved property; a profile entry is addressed by its id.
+      const result = await api.updatePropertyNotificationPrefs(property.customerId || propertyId, {
+        [key]: newVal,
+        ...(property.propertyId ? { propertyId: property.propertyId } : {}),
+      });
       setPropertyPrefs(prev => prev.map(p => (
         p.id === propertyId
           ? { ...p, preferences: { ...(p.preferences || {}), ...(result.preferences || {}) } }
           : p
       )));
-      if (propertyId === customer.id) {
+      // The signed-in profile's own row changed (its primary property, or the
+      // profile entry): the account-level card mirrors it.
+      if ((property.customerId || propertyId) === customer.id && property.isPrimaryProperty !== false) {
         setPrefs(prev => ({ ...(prev || {}), ...(result.preferences || {}) }));
       }
     } catch (err) {
@@ -4639,15 +4652,20 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     const lockKey = `${propertyId}:contact`;
     setPrefsLocked(prev => ({ ...prev, [lockKey]: true }));
     try {
-      const result = await api.updatePropertyNotificationPrefs(propertyId, {
+      // Contacts are stored per PROFILE (ruling R2 pending): a saved-property
+      // entry saves to its profile, and every entry of that profile shows the
+      // same list afterwards.
+      const targetProfileId = property.customerId || propertyId;
+      const result = await api.updatePropertyNotificationPrefs(targetProfileId, {
         serviceContacts: savedContacts,
         serviceContactsConsent: !!contactConsent[propertyId],
       });
+      const sameProfile = (p) => (p.customerId ? String(p.customerId) === String(targetProfileId) : p.id === propertyId);
       setPropertyPrefs(prev => prev.map(p => (
-        p.id === propertyId
+        sameProfile(p)
           ? {
             ...p,
-            preferences: { ...(p.preferences || {}), ...(result.preferences || {}) },
+            ...(p.id === propertyId ? { preferences: { ...(p.preferences || {}), ...(result.preferences || {}) } } : {}),
             serviceContacts: result.serviceContacts || savedContacts,
           }
           : p
@@ -5374,16 +5392,16 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
                 <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment texts</div>
                 <div style={{ marginTop: 12 }}>
-                  {/* Appointment texts and on-location contacts are stored per
-                      PROFILE (notification_prefs / customers.service_contact*),
-                      so this picker lists profiles even under the saved-property
-                      scope — a saved-house picker here would show house B while
-                      an edit applied to every house on the profile. Per-property
-                      texts arrive with the notifications PR of the lane. */}
+                  {/* Under the saved-property scope the server lists one entry
+                      per SAVED property (id = the entry key, so this picker
+                      and the page selection agree): a primary property reads
+                      its profile's notification_prefs row, a non-primary one
+                      its own toggles (app property scope, PR 3). A profile-
+                      shaped list (gate off) still lists profiles. */}
                   <PropertyScopeSelect
                     id="notifications-property-scope"
                     properties={savedScope ? propertyPrefs : properties}
-                    currentId={savedScope ? customer.id : activePropertyId}
+                    currentId={savedScope && !perPropertyTexts ? customer.id : activePropertyId}
                     onSelect={onSelectProperty}
                     switchingId={switchingPropertyId}
                     nextById={savedScope ? null : nextById}
@@ -5392,13 +5410,21 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 </div>
                 {savedScope && (
                   <div style={{ fontSize: 14, color: muted, marginTop: 8 }}>
-                    These settings apply to every property on this profile.
+                    {perPropertyTexts
+                      ? 'Each property keeps its own appointment texts. On-location contacts are shared across this profile.'
+                      : 'These settings apply to every property on this profile.'}
                   </div>
                 )}
                 <div style={{ fontSize: 15, color: muted, marginTop: 10 }}>
-                  {customer.isPrimaryProfile
-                    ? 'Your primary residence gets every alert unless you turn one off.'
-                    : 'Other properties start quiet. Turn on what you want to hear about here.'}
+                  {perPropertyTexts
+                    ? (shownTextsEntry?.isPrimaryProperty
+                      ? 'Your primary residence gets every alert unless you turn one off.'
+                      : shownTextsEntry?.quietByDefault
+                        ? 'Rentals and managed properties start quiet. Turn on what you want to hear about here.'
+                        : 'This property follows your primary residence until you change a setting here.')
+                    : (customer.isPrimaryProfile
+                      ? 'Your primary residence gets every alert unless you turn one off.'
+                      : 'Other properties start quiet. Turn on what you want to hear about here.')}
                 </div>
               </>
             ) : (
@@ -5417,8 +5443,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             )}
           </div>
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {(propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer.id) : propertyPrefs).map((property) => {
-              const label = property.profileLabel || 'Service property';
+            {(propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === (perPropertyTexts ? activePropertyId : customer.id)) : propertyPrefs).map((property) => {
+              const label = property.propertyId
+                ? (property.label || propertyRelationshipChip(property) || property.profileLabel || 'Service property')
+                : (property.profileLabel || 'Service property');
               const address = formatPropertyAddress(property);
               // One distinct icon per alert (2026-09-06: no repeats, one tile style).
               const options = [
@@ -5439,7 +5467,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                   border: '1px solid #E7E2D7',
                   borderRadius: 8,
                   padding: 14,
-                  background: property.id === customer.id ? '#F8FCFE' : subtle,
+                  background: (property.propertyId ? property.isPrimaryProperty : property.id === customer.id) ? '#F8FCFE' : subtle,
                 }}>
                   {!multiProperty && (
                     <div style={{ marginBottom: 10 }}>

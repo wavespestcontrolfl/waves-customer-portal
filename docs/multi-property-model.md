@@ -157,3 +157,60 @@ Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
   under the saved scope. Preview harness: `?properties=saved[&selected=<key>]`.
 - Gate off: the server answers the profile list, the client stays in profile
   mode, every query is byte-identical to today's.
+
+### PR 3 of 4 — appointment texts by saved property (migration + card + sender seams + shadow log)
+
+- **Schema** (`20260909000030_property_notification_prefs`): `property_notification_prefs`
+  — one row per `customer_properties` row, the five appointment toggles
+  (`appointment_confirmation`, `service_reminder_72h`, `service_reminder_24h`,
+  `tech_en_route`, `tech_arrived`) plus `appointment_notify_primary`, every
+  column NULLABLE (NULL = not chosen). No backfill: an absent row IS the
+  default, and the PRIMARY property never gets a row — it keeps reading the
+  customer's `notification_prefs` row byte-for-byte. `property_text_decisions`
+  is the ruling-R5 shadow log (below).
+- **Ruling R1 default** (`services/property-notification-prefs.js`
+  `defaultPropertyToggles`): `own_home`, `family_home` and unrecorded
+  relationships inherit the customer row; `rental_owned` and
+  `managed_for_client` start OFF for the five toggles (the 2026-09-06
+  "rentals default off" ruling); "send these to me too" always inherits.
+- **Two gates, read at call time.** `GATE_APP_PROPERTY_SCOPE` off: the new
+  table is never read and every resolver answers the customer row.
+  `GATE_APP_PROPERTY_TEXTS` off (ruling R5, shadow mode): each sender seam
+  resolves the visit's NON-primary saved property, records what the property
+  rule WOULD decide next to what the customer row DID decide, and sends on
+  the customer row. On: the property decision is enforced. A property lookup
+  that FAILS answers the customer row in shadow mode (logged) and THROWS under
+  enforcement — the seams read that as prefs-unavailable / held / retry,
+  never as the customer row's answer.
+- **Sender seams** (`resolveAppointmentPrefs` / `prefsForVisit`): reminders
+  `getReminderPrefs(customerId, { scheduledServiceId })` (every call site
+  passes its visit; the channel re-check does not need it); twilio
+  `sendServiceReminder`, `sendTechEnRoute` (new `scheduledServiceId` option,
+  threaded from track-transitions), `sendTechArrived`; appointment-email
+  `resolveRecipients(customer, { scheduledServiceId })` via `sendTemplate`
+  (notify-primary → "send these to me too"); notification-service
+  `customerPreferenceEnabled(customerId, key, { scheduledServiceId })` from
+  the bell's `appointmentId`; the consent validator's per-purpose toggle via
+  `input.appointmentId`. Delivery channels, App-first choices and quiet hours
+  stay on the customer row (#4057).
+- **Card + route.** `GET /notifications/property-preferences` under the scope
+  answers one entry per SAVED property (`id` = the `/auth/properties` entry
+  key; `chosen` marks toggles the property picked vs inherited;
+  `quietByDefault`; `contactsShared: true`). `PUT
+  /notifications/property-preferences/:customerId` takes `propertyId`: a
+  non-primary property upserts its own row (contacts in the same body are
+  refused — ruling R2 pending, contacts stay per profile); the primary
+  property or no `propertyId` = today's profile write. The Visits tab's
+  Appointment-texts card follows the page's selected house.
+- **Shadow-log review (read-only, prod)** before flipping
+  `GATE_APP_PROPERTY_TEXTS` — one week, expect `agreed = true` for every
+  inheriting house and `false` only where a rental/managed house would go
+  quiet:
+  `SELECT source, relationship, agreed, count(*) FROM property_text_decisions
+  WHERE created_at > now() - interval '7 days' GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;`
+  Disagreements to eyeball:
+  `SELECT created_at, source, relationship, customer_decisions, property_decisions
+  FROM property_text_decisions WHERE NOT agreed ORDER BY created_at DESC LIMIT 50;`
+- **Deferred** — ruling R2 (on-location contacts per property) is its own
+  PR; per-house Property-tab details remain Phase C.
+

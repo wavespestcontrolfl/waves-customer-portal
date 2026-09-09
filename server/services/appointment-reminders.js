@@ -363,7 +363,7 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
     // App backups, including the terminal quiet-hour email, share one
     // current-consent check before the transactional email provider.
     if (requestedChannel === 'push') {
-      const prefs = await getReminderPrefs(customerId).catch(() => ({ unavailable: true }));
+      const prefs = await getReminderPrefs(customerId, { scheduledServiceId }).catch(() => ({ unavailable: true }));
       if (prefs.unavailable) return { ok: false, held: true, reason: 'preferences_unavailable' };
       const categoryEnabled = kind === '72h' ? prefs.serviceReminder72h
         : kind === '24h' ? prefs.serviceReminder24h : prefs.appointmentConfirmation;
@@ -732,7 +732,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   // before: their sends re-check the opt-out at the validator.
   let prefsKnown = false;
   try {
-    const prefs = await getReminderPrefs(customerId);
+    const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     channel = prefs.confirmationChannel;
     confirmationOn = prefs.appointmentConfirmation;
     prefsKnown = !prefs.unavailable;
@@ -1895,8 +1895,23 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
   return channelPrefs;
 }
 
-async function getReminderPrefs(customerId) {
-  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
+// `scheduledServiceId` (app property scope, PR 3): the visit the toggles are
+// for. A visit stamped with a NON-primary saved property resolves its five
+// appointment toggles + notify-primary from that property (ruling R1
+// defaults) — enforced under GATE_APP_PROPERTY_TEXTS, shadow-logged
+// otherwise; the channels below stay the customer's. Omitted = customer row.
+// A property lookup that FAILS under enforcement reads as `unavailable`
+// (held), never as the customer row's answer.
+async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
+  let prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
+  if (prefs?.__prefsUnavailable !== true && scheduledServiceId) {
+    try {
+      prefs = await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders');
+    } catch (err) {
+      logger.warn(`[appt-remind] property toggles unreadable for visit ${scheduledServiceId}: ${err.message}`);
+      prefs = PREFS_UNAVAILABLE;
+    }
+  }
   const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
 
   return {
@@ -2006,7 +2021,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
   }
 
   try {
-    const prefs = await getReminderPrefs(customerId);
+    const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     if (!prefs.appointmentConfirmation) {
       await db('appointment_reminders')
         .where({ id: record.id })
@@ -3029,7 +3044,7 @@ const AppointmentReminders = {
         // inside the upper bound as due, while leaving the 24h reminder to own
         // the final day.
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
-          const prefs = await getReminderPrefs(r.customer_id);
+          const prefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
           // Email-first promotion under GATE_REMINDER_72H_EMAIL_FIRST
           // (one-time visits only; never past an unreadable prefs row or an
           // explicit Text choice) — see resolve72hChannel for the contract.
@@ -3255,7 +3270,7 @@ const AppointmentReminders = {
 
         // ── 24-hour reminder ──
         if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25) {
-          const prefs = await getReminderPrefs(r.customer_id);
+          const prefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
           const channel24 = prefs.reminder24hChannel;
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still
@@ -3346,7 +3361,7 @@ const AppointmentReminders = {
                 }
                 const emailRes = await withReminderSendFence(r, '24h', async () => {
                   if (channel24 === 'push') {
-                    const currentPrefs = await getReminderPrefs(r.customer_id);
+                    const currentPrefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
                     if (currentPrefs.unavailable || currentPrefs.reminder24hChannel !== 'push') {
                       return { held: true, reason: 'preferences_changed' };
                     }
