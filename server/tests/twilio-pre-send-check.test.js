@@ -34,6 +34,7 @@ jest.mock('../services/sms-guard', () => ({
 jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(() => Promise.resolve()),
 }));
+jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => {}) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -175,6 +176,24 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     });
     expect(result).toMatchObject({ success: true, sid: 'SM_ok' });
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test('an authority lookup error blocks retryably without a provider failure alert', async () => {
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async () => { throw Object.assign(new Error('connection unavailable'), { code: '08006' }); },
+    });
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'SMS_HANDOFF_CHECK_FAILED', retryable: true });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
+  });
+
+  test('an actual SDK failure still follows provider failure handling', async () => {
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('provider unavailable'), { status: 503 }));
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async dispatch => { await dispatch(); return { ok: true }; },
+    })).rejects.toMatchObject({ status: 503 });
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+    expect(require('../services/twilio-failure-alerts').alertTwilioFailure).toHaveBeenCalledTimes(1);
   });
 
   test('a guarded send cannot escape through explicit push routing', async () => {

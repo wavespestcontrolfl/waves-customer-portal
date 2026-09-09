@@ -127,9 +127,52 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await executeLeadTool('send_lead_response', input, contexts[0])).toMatchObject({ sent: false, blocked: true, code: 'LEAD_SUBJECT_CHANGED' });
     expect(mockLookup).toHaveBeenCalledTimes(1);
     expect(mockCreate).not.toHaveBeenCalled();
-    expect(await db('lead_activities').where({ lead_id: leads[0], activity_type: 'auto_response_sent' })).toHaveLength(0);
+    const activities = await db('lead_activities').where({ lead_id: leads[0] });
+    // A changed phone still belongs to the assigned lead: record the blocked
+    // attempt for triage. Reassigned/archived subjects receive no bookkeeping.
+    expect(activities.map(row => row.activity_type)).toEqual(change === 'change_phone' ? ['sms_blocked'] : []);
+    expect((await db('customers').where({ id: customers[0] }).first()).pipeline_stage).toBe('new_lead');
+    expect((await db('leads').where({ id: leads[0] }).first()).status).toBe('new');
     expect(await db('messaging_audit_log').where({ lead_id: leads[0], blocked_code: 'LEAD_SUBJECT_CHANGED' })).toHaveLength(1);
   });
+
+  test.each(['comms', 'customer', 'lead'].flatMap(lock => ['consent', 'suppression'].map(change => [lock, change])))(
+    '%s lock wait observes a committed %s opt-out before the SDK', async (lock, change) => {
+      const holder = await db.transaction();
+      let attempt;
+      try {
+        const { rows: [{ pid }] } = await holder.raw('SELECT pg_backend_pid() AS pid');
+        if (lock === 'comms') await require('../utils/customer-comms-lock').lockCustomerComms(holder, customers[0]);
+        else await holder(lock === 'customer' ? 'customers' : 'leads')
+          .where({ id: lock === 'customer' ? customers[0] : leads[0] }).forUpdate().first();
+        let sendError;
+        attempt = executeLeadTool('send_lead_response', input, contexts[0]).catch(error => { sendError = error; });
+        const deadline = Date.now() + 5000;
+        while (true) {
+          if (sendError) throw sendError;
+          const { rows } = await holder.raw('SELECT pid FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))', [pid]);
+          if (rows.length) break;
+          if (Date.now() >= deadline) throw new Error('Send did not wait on the held authority lock');
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        expect(mockLookup).toHaveBeenCalledTimes(1);
+        if (change === 'consent') await holder('notification_prefs').where({ customer_id: customers[0] }).update({ sms_enabled: false });
+        else await holder('messaging_suppression').insert({ phone: phones[0], reason: 'opt_out_keyword', source: 'qa_handoff', active: true });
+        await holder.commit();
+        const code = change === 'consent' ? 'SMS_OPTED_OUT' : 'SUPPRESSED_OPT_OUT';
+        expect(await attempt).toMatchObject({ sent: false, blocked: true, code });
+        expect(mockCreate).not.toHaveBeenCalled();
+        expect(await db('sms_log').where({ customer_id: customers[0], direction: 'outbound' })).toHaveLength(0);
+        expect((await db('lead_activities').where({ lead_id: leads[0] })).map(row => row.activity_type)).toEqual(['sms_blocked']);
+        expect((await db('customers').where({ id: customers[0] }).first()).pipeline_stage).toBe('new_lead');
+        expect((await db('leads').where({ id: leads[0] }).first()).status).toBe('new');
+        expect(await db('messaging_audit_log').where({ lead_id: leads[0], blocked_code: code })).toHaveLength(1);
+      } finally {
+        if (!holder.isCompleted()) await holder.rollback();
+        if (attempt) await attempt;
+      }
+    }, 15000,
+  );
 
   test('SDK-time locks allow foreign-key audit inserts and prevent authority edits', async () => {
     mockCreate.mockImplementationOnce(async () => {

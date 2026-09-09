@@ -218,3 +218,10 @@ test.each(['bookkeeping', 'audit'])('a known provider acceptance survives %s fai
   expect(mockPipeline).not.toHaveBeenCalled();
   expect(mockState.inserts).toBe(0);
 });
+
+test('a retryable handoff block remains retryable in the tool result', async () => {
+  mockMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SMS_HANDOFF_CHECK_FAILED', retryable: true });
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context))
+    .toMatchObject({ sent: false, blocked: true, code: 'SMS_HANDOFF_CHECK_FAILED', retryable: true });
+  expect(mockPipeline).not.toHaveBeenCalled();
+});

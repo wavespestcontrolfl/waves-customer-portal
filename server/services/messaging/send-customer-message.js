@@ -411,7 +411,21 @@ async function sendCustomerMessage(input) {
   // deferral contract as the pipeline block; cheap (pure clock math) and a
   // no-op for exempt inputs.
   const providerOutcome = await dispatchToProvider(sendInput, {
-    withSmsHandoff,
+    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async trx => {
+      // Lock acquisition may wait past an opt-out commit. Reuse the canonical
+      // validators with fresh state on that same connection, before the SDK.
+      const currentState = await loadSuppressionState(sendInput, await loadContactState(sendInput, trx), trx);
+      if (currentState.lookupFailed || currentState.suppressionLoaded !== true) {
+        return { ok: false, code: currentState.lookupFailed ? 'CONSENT_LOOKUP_FAILED' : 'SUPPRESSION_LOOKUP_FAILED',
+          reason: 'SMS consent or suppression could not be rechecked before handoff', retryable: true };
+      }
+      const suppression = await checkSuppression(sendInput, policy, currentState);
+      if (!suppression.ok) return suppression;
+      const consent = await checkConsentForPurpose(sendInput, policy, currentState);
+      if (!consent.ok) return consent;
+      await dispatch();
+      return { ok: true };
+    })),
     preSendCheck: async () => {
       const windowVerdict = checkSendWindow(sendInput, policy, contactState);
       if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;

@@ -298,8 +298,7 @@ async function executeLeadTool(toolName, input, context) {
           if (current.error || current.customer.phone !== customer.phone) {
             return { ok: false, code: 'LEAD_SUBJECT_CHANGED', reason: 'Assigned lead or contact changed before dispatch' };
           }
-          await dispatch();
-          return { ok: true };
+          return dispatch(trx);
         }),
       }).catch(err => {
         if (!err.providerOutcome?.sent) throw err;
@@ -409,6 +408,7 @@ async function executeLeadTool(toolName, input, context) {
           blocked: true,
           code: result.code,
           reason: result.reason,
+          ...(result.retryable ? { retryable: true } : {}),
           name: customer.first_name,
         };
       }

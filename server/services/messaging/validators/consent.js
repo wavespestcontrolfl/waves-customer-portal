@@ -263,7 +263,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
  * Load the recipient's notification_prefs + minimal customer record into
  * contactState. Pure read, no writes.
  */
-async function loadContactState(input) {
+async function loadContactState(input, dbh = db) {
   // lookupFailed signals a transient DB error during the consent
   // lookup. The validator distinguishes this from a clean "no record
   // found" outcome so callers can retry instead of suppressing on a
@@ -273,9 +273,10 @@ async function loadContactState(input) {
   // Try by customerId first (cheapest, indexed lookup).
   if (input.customerId) {
     try {
-      state.prefs = await db('notification_prefs').where({ customer_id: input.customerId }).first();
-      state.customer = await db('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
+      state.prefs = await dbh('notification_prefs').where({ customer_id: input.customerId }).first();
+      state.customer = await dbh('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
     } catch (err) {
+      if (dbh.isTransaction) throw err; // Required handoff read: an aborted transaction cannot authorize a send.
       logger.warn(`[messaging:consent] customer lookup failed: ${err.message}`);
       state.lookupFailed = true;
     }
@@ -285,10 +286,10 @@ async function loadContactState(input) {
   // flows where the wrapper is invoked with only `to` set.
   if (!state.customer && input.to) {
     try {
-      const cust = await db('customers').where({ phone: input.to }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
+      const cust = await dbh('customers').where({ phone: input.to }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city');
       if (cust) {
         state.customer = cust;
-        state.prefs = await db('notification_prefs').where({ customer_id: cust.id }).first();
+        state.prefs = await dbh('notification_prefs').where({ customer_id: cust.id }).first();
         // Phone-match recovery: if the customerId path threw above
         // (setting lookupFailed=true) but we successfully loaded the
         // customer here via phone, contact state IS now valid — clear
@@ -300,6 +301,7 @@ async function loadContactState(input) {
         state.lookupFailed = false;
       }
     } catch (err) {
+      if (dbh.isTransaction) throw err;
       logger.warn(`[messaging:consent] phone-match lookup failed: ${err.message}`);
       state.lookupFailed = true;
     }
@@ -342,12 +344,13 @@ async function loadContactState(input) {
     )];
     if (phones.length) {
       try {
-        const inbound = await db('sms_log')
+        const inbound = await dbh('sms_log')
           .where({ direction: 'inbound' })
           .whereIn('from_phone', phones)
           .first('id');
         state.hasInboundHistory = Boolean(inbound);
       } catch (err) {
+        if (dbh.isTransaction) throw err;
         logger.warn(`[messaging:consent] inbound-history lookup failed: ${err.message}`);
         state.lookupFailed = true;
       }

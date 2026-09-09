@@ -844,9 +844,11 @@ const TwilioService = {
       // customer lookups and the push-first attempt, so a START received
       // during that preparation wrongly outranked the rejection.
       let message;
+      let dispatchStarted = false;
       const dispatch = async () => {
         handoffAt = new Date();
         smsAttemptAt = handoffAt;
+        dispatchStarted = true;
         message = await c.messages.create(msgPayload);
       };
       if (typeof options.withSmsHandoff === 'function') {
@@ -854,15 +856,21 @@ const TwilioService = {
         try {
           verdict = await options.withSmsHandoff(dispatch);
         } catch (err) {
-          if (!message) throw err;
-          // The read-only guard may fail to commit after Twilio accepts.
-          // Preserve that known acceptance so callers cannot retry the SMS.
-          logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
+          if (!message && dispatchStarted) throw err;
+          if (!dispatchStarted) {
+            verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED',
+              reason: 'SMS handoff authority check failed', retryable: true };
+          } else {
+            // The read-only guard may fail to commit after Twilio accepts.
+            // Preserve that known acceptance so callers cannot retry the SMS.
+            logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
+          }
         }
         if (!message) {
           return { success: false, preSendBlocked: true,
             code: verdict?.code || 'SMS_HANDOFF_CHECK_FAILED',
             error: verdict?.reason || 'SMS handoff authority was not established',
+            ...(verdict?.retryable ? { retryable: true } : {}),
             validator: 'check_sms_handoff_authority' };
         }
       } else {

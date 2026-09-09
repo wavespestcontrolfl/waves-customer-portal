@@ -83,7 +83,7 @@ async function checkSuppression(input, _policy, contactState) {
  *     created_at      timestamptz
  *     cleared_at      timestamptz nullable — when START or admin clears it
  */
-async function loadSuppressionState(input, contactState) {
+async function loadSuppressionState(input, contactState, dbh = db) {
   if (!input || !input.to) return contactState;
   try {
     // Suppression rows written by the Twilio webhook carry the canonical
@@ -94,7 +94,7 @@ async function loadSuppressionState(input, contactState) {
     // validator's no-prefs exception would send to an opted-out number
     // (Codex P1 on PR #3057, 2396f5557).
     const candidates = [...new Set([input.to, toE164(input.to)].filter(Boolean))];
-    const row = await db('messaging_suppression')
+    const row = await dbh('messaging_suppression')
       .whereIn('phone', candidates)
       .where({ active: true })
       .first();
@@ -108,6 +108,7 @@ async function loadSuppressionState(input, contactState) {
     // exception even though legacy paths below stay fail-open.
     contactState.suppressionLoaded = true;
   } catch (err) {
+    if (dbh.isTransaction) throw err; // Required handoff read; never continue an aborted transaction toward the SDK.
     // ONLY the undefined-relation error (Postgres 42P01) means "migration
     // not yet applied" and may fail open. Matching any error that merely
     // mentions the table name (e.g. "permission denied for table
