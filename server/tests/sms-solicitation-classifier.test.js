@@ -34,7 +34,11 @@ test.each(['STOP', 'stop.', 'STOPP', 'REMOVE', 'OPT OUT', 'DO NOT TEXT', 'START'
   expect(mockDispatch).not.toHaveBeenCalled();
 });
 
-test.each([PITCH, 'We can send you more pest-control leads.', 'We can provide you with more lawn leads.'])('a deterministic pitch records a shadow verdict without a model call: %s', async (body) => {
+test.each([
+  PITCH, 'We can send you more pest-control leads.', 'We can provide you with more lawn leads.',
+  'We provide you with unlimited estimates for local contractors.',
+  'I can offer you qualified pest-control customers.',
+])('a deterministic pitch records a shadow verdict without a model call: %s', async (body) => {
   expect(await screenInboundSms({ body })).toMatchObject({ solicitation: true, confidence: 1, method: 'regex', mode: 'shadow' });
   expect(mockDispatch).not.toHaveBeenCalled();
 });
@@ -49,6 +53,8 @@ test.each([
   'I have more lawn leads for you from my neighbors. Can you quote them?',
   'I can send you more pest-control leads from my neighbors. Can you quote them?',
   'We can provide you with more lawn leads from our neighbors who need service.',
+  'My neighbors need service. I can send you more pest-control leads; can you quote them?',
+  'I can provide you with more lawn leads. They are my neighbors and need quotes.',
 ])('ambiguous service requests reach the bounded model: %s', async (body) => {
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
   expect(await screenInboundSms({ body })).toMatchObject({ solicitation: false, method: 'model', mode: 'shadow' });
