@@ -163,7 +163,16 @@ async function accountSavedProperties(req, knex = db) {
     }
     for (const row of rows) entries.push(savedPropertyEntry(profile, row));
   }
-  return { properties: entries, selected: selectedEntryFor(req, entries) };
+  const selected = selectedEntryFor(req, entries);
+  // C4 cancelled read-only session: exactly ONE entry — the current selection
+  // (or the primary). /auth/select-property is not a cancelled read, so a
+  // picker would only offer switches that 401; and resolveSessionScope leaves
+  // a cancelled session unscoped, so its reads stay customer-wide as today.
+  if (req.customer && req.customer.active !== true && selected.key) {
+    const only = entries.filter((e) => e.key === selected.key);
+    return { properties: only, selected };
+  }
+  return { properties: entries, selected };
 }
 
 // The signed-in profile's property scope for one request:
@@ -174,7 +183,11 @@ async function accountSavedProperties(req, knex = db) {
 // property = the validated claim's row, else the primary, else the first.
 async function resolveSessionScope(req, knex = db) {
   const customerId = req.customerId;
-  if (!appPropertyScopeEnabled()) return { customerId, enabled: false, multi: false, property: null };
+  // Gate off — or a C4 cancelled read-only session (req.customerInactive):
+  // no property scoping at all, today's customer-wide reads.
+  if (!appPropertyScopeEnabled() || req.customerInactive === true) {
+    return { customerId, enabled: false, multi: false, property: null };
+  }
   const customerProperties = require('./customer-properties');
   await customerProperties.ensurePrimaryProperty(customerId).catch(() => {});
   const rows = await knex('customer_properties')

@@ -17,6 +17,11 @@ export function tokenSessionIdentity(token) {
     return {
       customerId: String(payload.customerId),
       sessionId: payload.sessionId == null ? null : String(payload.sessionId),
+      // Selected saved property (GATE_APP_PROPERTY_SCOPE). A same-profile
+      // property switch keeps customerId AND sessionId, so the retry guard
+      // must compare this too or a stale select-property could retry under
+      // the new selection's credential.
+      propertyId: payload.propertyId == null ? null : String(payload.propertyId),
     };
   } catch {
     return null;
@@ -31,7 +36,9 @@ export function sameRequestSession(left, right) {
     // family, so null -> family is safe when the customer is unchanged. Once
     // an access token has a family, keep matching it strictly so a concurrent
     // logout/login or property-session replacement can never inherit a retry.
-    && (left.sessionId === null || left.sessionId === right.sessionId));
+    && (left.sessionId === null || left.sessionId === right.sessionId)
+    // Strict on the property claim: none → some IS a scope change.
+    && (left.propertyId ?? null) === (right.propertyId ?? null));
 }
 
 function isTrustedCustomerRequestUrl(url) {

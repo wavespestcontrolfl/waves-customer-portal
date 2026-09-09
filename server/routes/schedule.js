@@ -338,6 +338,11 @@ router.post('/:id/confirm', async (req, res, next) => {
         // since the read misses (knex renders null as IS NULL) and the
         // customer refreshes, instead of a stale confirm landing.
         visit_id: service.visit_id || null,
+        // The observed PROPERTY too (codex #4207 r1): staff can move the
+        // visit to another of the customer's houses between the scoped read
+        // and this write; a confirm scoped to the old house must then miss,
+        // not land on the newly assigned property.
+        property_id: service.property_id || null,
       })
       .update({
         status: 'confirmed',

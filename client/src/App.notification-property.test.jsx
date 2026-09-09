@@ -56,3 +56,15 @@ test('signed-out taps retain the complete authenticated destination through logi
   expect(new URLSearchParams(window.location.search).get('next')).toBe('/?tab=visits&notificationProperty=property-2');
   expect(state.auth.switchProperty).not.toHaveBeenCalled();
 });
+
+test('saved-property entries (composite ids) still resolve a notification by its profile id', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-2');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    properties: [
+      { id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+      { id: 'property-2:prop-z', customerId: 'property-2', propertyId: 'prop-z' },
+    ], propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith('property-2'));
+  expect(document.body.textContent).not.toMatch(/no longer available/);
+});

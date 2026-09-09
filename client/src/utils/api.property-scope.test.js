@@ -37,3 +37,21 @@ describe('api saved-property calls', () => {
     expect(calls[0].url).toMatch(/\/schedule\/properties-next$/);
   });
 });
+
+describe('request identity carries the saved-property claim', () => {
+  const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const tok = (p) => `${b64u({ alg: 'none' })}.${b64u(p)}.x`;
+  it('a same-profile, same-family token with a different property is NOT the same request session', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+    const { sameRequestSession, tokenSessionIdentity } = await import('./api.js');
+    const a = tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f', propertyId: 'pa' }));
+    const b = tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f', propertyId: 'pb' }));
+    const none = tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f' }));
+    expect(a.propertyId).toBe('pa');
+    expect(none.propertyId).toBeNull();
+    expect(sameRequestSession(a, b)).toBe(false);
+    expect(sameRequestSession(none, a)).toBe(false); // none → some is a scope change
+    expect(sameRequestSession(a, tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f', propertyId: 'pa', nonce: 2 })))).toBe(true);
+    expect(sameRequestSession(none, tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f', nonce: 2 })))).toBe(true);
+  });
+});

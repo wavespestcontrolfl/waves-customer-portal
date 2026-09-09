@@ -444,7 +444,9 @@ function ProtectedRoute({ children }) {
   useEffect(() => {
     if (!targetPending || loading || switchingTarget.current === targetProperty) return;
     if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
-    if (!properties.some((property) => String(property.id) === targetProperty)) {
+    // Saved-property entries carry composite ids (GATE_APP_PROPERTY_SCOPE);
+    // a notification names the PROFILE, so match on the entry's customer.
+    if (!properties.some((property) => String(property.customerId || property.id) === targetProperty)) {
       setTargetError('This notification belongs to a property that is no longer available on your account.');
       return;
     }

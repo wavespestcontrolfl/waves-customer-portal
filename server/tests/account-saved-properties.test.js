@@ -91,9 +91,17 @@ describe('accountSavedProperties — the unified list', () => {
     expect(db).not.toHaveBeenCalledWith('customers');
     // Read-only session: the lazy primary writer is never invoked (codex #4199 r1 P2).
     expect(customerProperties.ensurePrimaryProperty).not.toHaveBeenCalled();
-    expect(properties.map((e) => e.key)).toEqual(['cust-1:prop-a', 'cust-1:prop-b', 'cust-1:prop-c']);
+    // ONE entry — the current selection — so no picker offers a switch the cancelled route set refuses (uncapped audit P1).
+    expect(properties.map((e) => e.key)).toEqual(['cust-1:prop-b']);
     expect(properties.every((e) => e.customerId === 'cust-1')).toBe(true);
     expect(selected).toEqual({ key: 'cust-1:prop-b', customerId: 'cust-1', propertyId: 'prop-b' });
+  });
+
+  test('a cancelled session with no valid claim keeps exactly its primary entry', async () => {
+    const cancelled = { ...PROFILES[0], active: false };
+    const { properties, selected } = await accountSavedProperties({ customerId: 'cust-1', accountId: 'acct-1', propertyId: null, customer: cancelled });
+    expect(properties.map((e) => e.key)).toEqual(['cust-1:prop-a']);
+    expect(selected.key).toBe('cust-1:prop-a');
   });
 
   test('a cancelled profile with NO property row still falls back to its own profile entry, without writing one', async () => {
@@ -156,6 +164,14 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
     const { qb, calls } = recordingQb();
     scopeVisitsToProperty(qb, scope);
     expect(calls).toEqual([['where', 'scheduled_services.customer_id', 'cust-1']]);
+  });
+
+  test('a cancelled read-only session (req.customerInactive) is never property-scoped, even with a claim', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    db.mockClear();
+    const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: 'prop-b', customerInactive: true });
+    expect(scope).toEqual({ customerId: 'cust-1', enabled: false, multi: false, property: null });
+    expect(db).not.toHaveBeenCalled();
   });
 
   test('gate on, single property → multi=false → no property predicate (single-home customers untouched)', async () => {

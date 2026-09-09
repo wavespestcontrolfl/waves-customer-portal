@@ -123,6 +123,9 @@ export function AuthProvider({ children }) {
   const [propertyScope, setPropertyScope] = useState('profile');
   const propertyScopeRef = useRef('profile');
   const [selectedProperty, setSelectedProperty] = useState(null);
+  // Mirror of `properties` for the storage handler (stable callback, stale closure).
+  const propertiesRef = useRef([]);
+  useEffect(() => { propertiesRef.current = properties; }, [properties]);
   const adoptPropertyPayload = (data) => {
     const payload = applyPropertyPayload(data);
     propertyScopeRef.current = payload.scope;
@@ -291,6 +294,19 @@ export function AuthProvider({ children }) {
       const propertyChanged = tokenPropertyId(api.token) !== tokenPropertyId(token);
       if (familyChanged || propertyChanged) setSessionEpoch(++sessionEpochRef.current);
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
+      if (propertyChanged && !identityChanged) {
+        // Resolve the new selection NOW from the token and the list we hold,
+        // so the label never lags the scope: if the follow-up list read
+        // fails, requests already run under property B and the page must not
+        // keep A's label over B's visits. loadCustomer below re-reads the
+        // authoritative selection.
+        const pid = tokenPropertyId(token);
+        const mine = (propertiesRef.current || []).filter((p) => String(p.customerId || p.id) === String(nextId));
+        const entry = pid ? mine.find((p) => String(p.propertyId) === pid) : mine.find((p) => p.isPrimaryProperty);
+        setSelectedProperty(entry
+          ? { key: entry.id, customerId: entry.customerId, propertyId: entry.propertyId }
+          : (pid ? { key: `${nextId}:${pid}`, customerId: nextId, propertyId: pid } : null));
+      }
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not
         // keep rendering (and firing actions) against it while loadCustomer

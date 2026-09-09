@@ -36,6 +36,7 @@ function chain(rows) {
     });
   }
   c.first = jest.fn(async () => rows[0]);
+  c.update = jest.fn(async (patch) => { c.calls.push(['update', patch]); return rows.length ? 1 : 0; });
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;
 }
@@ -129,6 +130,25 @@ describe('saved-property scope on the customer schedule routes', () => {
       const calls = visitsChainCalls();
       expect(calls[0]).toEqual(['where', { id: 'svc-at-primary', customer_id: 'cust-1' }]);
       expect(propertyPredicates(calls)).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
+    });
+  });
+
+  test('POST /:id/confirm: the write pins the PROPERTY the scoped lookup observed, so a staff move between read and write misses (409) instead of confirming the other house', async () => {
+    global.__SCOPE__ = MULTI_SECONDARY;
+    // Lookup finds the visit at prop-b; the CAS update then finds no row (staff moved it) → 409.
+    const lookupRows = [{ id: 'svc-b', customer_id: 'cust-1', property_id: 'prop-b', status: 'pending', visit_id: null, source_action: null, customer_confirmed: false }];
+    let call = 0;
+    db.mockImplementation((table) => {
+      if (table !== 'scheduled_services') throw new Error(`unexpected table ${table}`);
+      call += 1;
+      return chain(call === 1 ? lookupRows : []);
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/schedule/svc-b/confirm`, { method: 'POST' });
+      expect(res.status).toBe(409);
+      const updateChain = db.mock.results[1].value;
+      expect(updateChain.calls[0]).toEqual(['where', { id: 'svc-b', customer_id: 'cust-1', status: 'pending', visit_id: null, property_id: 'prop-b' }]);
+      expect(updateChain.calls[1][0]).toBe('update');
     });
   });
 });

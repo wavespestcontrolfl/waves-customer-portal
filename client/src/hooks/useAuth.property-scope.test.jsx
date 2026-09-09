@@ -182,6 +182,26 @@ describe('cross-tab saved-property switch', () => {
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
   });
 
+  it('a cross-tab property change resolves the selection from the token immediately, even when the follow-up list read fails', async () => {
+    const tokA = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-a' });
+    const tokB = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' });
+    const store = { waves_token: tokA, waves_refresh_token: 'ref-a' };
+    stubLocalStorage(store);
+    api.getMe.mockResolvedValue({ id: 'cust-1' });
+    api.getAuthProperties.mockResolvedValue(SAVED);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-a');
+    // The re-read after the cross-tab switch fails (offline) — the selection must already say prop-b.
+    api.getAuthProperties.mockRejectedValue(new Error('offline'));
+    await act(async () => {
+      store.waves_token = tokB;
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token', newValue: tokB }));
+    });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-1');
+    api.getAuthProperties.mockResolvedValue(SAVED);
+  });
+
   it('a routine same-family rotation without a property change keeps the epoch', async () => {
     const tokA1 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 1 });
     const tokA2 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 2 });

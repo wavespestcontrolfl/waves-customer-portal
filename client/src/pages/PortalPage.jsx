@@ -15639,7 +15639,9 @@ export default function PortalPage() {
   const activePropertyId = selectedProperty?.key || customer.id;
   const activeProperty = portalProperties.find((property) => property.id === activePropertyId) || null;
   const wateringPlanCustomerId = new URLSearchParams(location.search).get('wateringPlanCustomer');
-  const wateringPlanProperty = portalProperties.find((property) => String(property.id) === wateringPlanCustomerId);
+  // The watering-plan deep link names a PROFILE; saved-property entries carry
+  // composite ids, so match on the entry's customer (its first entry wins).
+  const wateringPlanProperty = portalProperties.find((property) => String(property.customerId || property.id) === wateringPlanCustomerId);
   const canSwitchProperties = portalProperties.length > 1;
   const propertyRenderKey = `${activePropertyId}:${requestRefreshKey}`;
   // Keep the destination explicit for Visits and watering-plan deep links.
