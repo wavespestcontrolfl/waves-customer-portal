@@ -539,11 +539,11 @@ function isConditionalVisitSuffix(clause, match) {
 // Whose email: a pronoun, a name, or the account holder / a relationship.
 const EMAIL_OWNER = `(?:her|his|their|(?!your\\b)[a-z]+[\\x27\\u2019]s|(?:your|the|her|his|their)\\s+(?:${RELATION_NOUN}|account\\s+(?:holder|owner))(?:[\\x27\\u2019]s)?)`;
 // A format illustration: a cue ("looks like", "the format is"), a whole
-// generic local part and a reserved example domain. "neighbor@example.com",
+// generic local part and a complete IANA-reserved example domain. "neighbor@example.com",
 // "jane@company.com" and "mary.jane@example.com" are still addresses.
-const PLACEHOLDER_ADDRESS = '(?<![\\w.+-])(?:name|yourname|your name|username|user|firstname|first\\.?last|jane|john|someone|somebody|you|me|email|address)\\s*(?:@|\\bat\\b)\\s*(?:example|yourdomain|example-?domain)(?:\\.|\\s+dot\\s+)(?:com|org|net)\\b';
+const PLACEHOLDER_ADDRESS = '(?<![\\w.+-])(?:name|yourname|your name|username|user|firstname|first\\.?last|jane|john|someone|somebody|you|me|email|address)\\s*(?:@|\\bat\\b)\\s*example(?:\\.|\\s+dot\\s+)(?:com|org|net)(?![.\\w-]|\\s+dot\\b)';
 const PLACEHOLDER_AFTER_RE = new RegExp(`${PLACEHOLDER_ADDRESS}(?=\\s+(?:as|for)\\s+(?:an?\\s+|the\\s+)?(?:example|sample|template|placeholder|format))`, 'gi');
-const PLACEHOLDER_EMAIL_RE = /(\b(?:looks?\s+like|(?:the\s+)?format\s+is|use\s+the\s+format|(?:an?\s+)?(?:example|sample)\s+(?:email|address)(?:\s+(?:is|would be|might be))?|for\s+example|for\s+instance|such\s+as|e\.g\.|something\s+like|in\s+the\s+form\s+of)\s*[,:]?\s*(?:an?\s+)?)(?<![\w.+-])(?:name|yourname|your name|username|user|firstname|first\.?last|jane|john|someone|somebody|you|me|email|address)\s*(?:@|\bat\b)\s*(?:example|yourdomain|example-?domain)(?:\.|\s+dot\s+)(?:com|org|net)\b/gi;
+const PLACEHOLDER_EMAIL_RE = /(\b(?:looks?\s+like|(?:the\s+)?format\s+is|use\s+the\s+format|(?:an?\s+)?(?:example|sample)\s+(?:email|address)(?:\s+(?:is|would be|might be))?|for\s+example|for\s+instance|such\s+as|e\.g\.|something\s+like|in\s+the\s+form\s+of)\s*[,:]?\s*(?:an?\s+)?)(?<![\w.+-])(?:name|yourname|your name|username|user|firstname|first\.?last|jane|john|someone|somebody|you|me|email|address)\s*(?:@|\bat\b)\s*example(?:\.|\s+dot\s+)(?:com|org|net)(?![.\w-]|\s+dot\b)/gi;
 const stripPlaceholders = (t) => t.replace(PLACEHOLDER_EMAIL_RE, '$1an email address').replace(PLACEHOLDER_AFTER_RE, 'an email address');
 /** value: true. Caller-supplied third-party details are not a read-back exemption. */
 function no_third_party_disclosure(value, record, { spoken }) {
