@@ -316,7 +316,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const extract = jest.fn(async (matched) => {
       expect(matched.message).toMatchObject({ id: queue.id, created_at: sentAt, message_body: provider.message_body,
         from_phone: provider.from_phone, to_phone: provider.to_phone });
-      return require('../services/sms-operational-extractor').groundExtraction({ facts: [], obligations: [{
+      return require('../services/sms-operational-extractor').groundExtraction({ facts: [], additional_properties: [], obligations: [{
         party: 'waves', kind: 'callback', description: 'call', quote: provider.message_body, basis: 'promise',
         property_id: context.properties[0].id, due_text: 'tomorrow at 10 AM', due_at: null,
       }] }, matched);
