@@ -6,6 +6,7 @@ import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import api from '../utils/api';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
+import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
 import { fmtMoney } from '../lib/money';
@@ -2616,10 +2617,36 @@ function SavedVisitDetails({ visits }) {
   </ul>;
 }
 
-function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
+function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
+  // Saved-property scope: the entry this tab shows, for the scope-echo check.
+  const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
+  const dashboardSavedScope = properties.some((p) => p.key);
+  // A NON-primary saved property is selected: the protection score and the
+  // local alerts describe the PRIMARY address (customer-keyed reads, the
+  // primary's ZIP) — withheld here rather than shown as house B's
+  // (uncapped codex r1t P1). Next visit, tracker and last visit follow the
+  // selection; the plan recommendations are plan-wide.
+  // Shown only once the selected entry is CONFIRMED the profile's primary (or
+  // a row-less profile, its own primary). A selection with no listed entry
+  // (the list read failed while /auth/me resolved a house; a house retired
+  // mid-session before the re-read; a closed profile) is withheld too
+  // (uncapped codex r1x P1) — never the primary's facts under an unconfirmed
+  // house. Profile mode (no selection, no saved entries) shows them as today.
+  const entryConfirmedPrimary = !!dashboardEntry && (dashboardEntry.isPrimaryProperty === true || !dashboardEntry.propertyId);
+  const dashboardSecondarySelection = !!(selectedProperty || dashboardSavedScope) && !entryConfirmedPrimary;
   const compact = useIsMobile(720);
   const nextRead = usePortalRead('next-visit', () => api.getNextService());
-  const nextService = nextRead.data?.next || null;
+  // A next visit scoped to a different house than Home shows is stale (the
+  // office retired the shown house, or the gate flipped): re-read the
+  // property list and withhold the card's actions until the label follows.
+  const dashboardSelectionNamed = (selectedProperty && selectedProperty.propertyId) || null;
+  // Read by the satisfaction load below (a one-shot effect): the scope Home
+  // showed when the response arrives, not when the effect was declared.
+  const pendingScopeRef = useRef({ entry: null, saved: false, named: false, refresh: null });
+  pendingScopeRef.current = { entry: dashboardEntry, saved: dashboardSavedScope, named: dashboardSelectionNamed, refresh: onSavedScopeUnavailable };
+  const nextScopeStale = scopeEchoMismatch(nextRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
+  useEffect(() => { if (nextScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [nextScopeStale, onSavedScopeUnavailable]);
+  const nextService = nextScopeStale ? null : (nextRead.data?.next || null);
   // The Add-to-Calendar button hides itself once the arrival window closes,
   // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
   // the deadline so the button disappears on its own (codex #3249 r4 P2).
@@ -2643,8 +2670,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
-  const lastRead = usePortalRead('latest-service', () => api.getServices({ limit: 1 }));
-  const lastService = lastRead.data?.services?.[0] || null;
+  // The selected house's last visit (server-scoped; a no-op off the gate).
+  const lastRead = usePortalRead('latest-service', () => api.getServices({ limit: 1, propertyScoped: 1 }));
+  // The read echoes the selection it was scoped to; a mismatch (the selected
+  // house retired while Home was open — the server fell back to the primary)
+  // withholds the card and its report link, exactly like the next visit
+  // (uncapped codex r1v P1).
+  const lastScopeStale = scopeEchoMismatch(lastRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
+  useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
+  const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
   const [pendingSatisfactionStatus, setPendingSatisfactionStatus] = useState('loading');
@@ -2726,7 +2760,13 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         setBalanceStatus('error');
       });
     api.getPendingSatisfaction().then(d => {
-      if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
+      // A prompt served under another house than Home shows (the echo
+      // disagrees with the entry) is not asked — the selection is re-read
+      // instead (GitHub codex r11 P2). Same rule as the next/last reads.
+      const { entry, saved, named, refresh } = pendingScopeRef.current;
+      if (scopeEchoMismatch(d.propertyScope, entry, saved, named)) {
+        if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
+      } else if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
       setPendingSatisfactionStatus('ready');
     }).catch(err => {
       // No error UI: the feedback card only exists when a pending item is
@@ -2927,7 +2967,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           on the day of service, where the tech is matters more than the
           greeting. ServiceTracker renders null on every other day, so
           non-service-day layout is unchanged. */}
-      <ServiceTracker />
+      <ServiceTracker currentEntry={dashboardEntry} savedScope={dashboardSavedScope} selectedProperty={selectedProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} />
 
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
@@ -3005,11 +3045,19 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         </div>
       </section>
 
-      <PropertyScoreCard data={propertyScore} compact={compact} />
+      {dashboardSecondarySelection ? (
+        <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
+          <div style={{ fontSize: 14, color: muted, lineHeight: 1.5 }}>
+            Your protection score, lawn health and local alerts are shown for your primary address. Switch to that property to see them.
+          </div>
+        </section>
+      ) : (
+        <PropertyScoreCard data={propertyScore} compact={compact} />
+      )}
 
       <RecommendationsCard data={propertyRecommendations} customer={customer} />
 
-      <PropertyAlertsCard data={propertyAlerts} />
+      {!dashboardSecondarySelection && <PropertyAlertsCard data={propertyAlerts} />}
 
       {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
         <section data-glass="card" style={{ ...card, padding: 20, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
@@ -3316,7 +3364,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           2026-07-15) — home keeps a one-glance teaser so score movement
           stays visible without the full card. The pre-assessment state
           (mowing height + "tracking will start soon") moved with it. */}
-      {!lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
+      {/* Lawn health is read by CUSTOMER (useLawnHealth(customer.id)) — the primary's turf; withheld under a secondary with the score and alerts (uncapped codex r1u P1). */}
+      {!dashboardSecondarySelection && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
         const lawnScore = Math.round(lawnHealth.scores.overallScore);
         const lawnInitial = Math.round(lawnHealth.initialScores.overallScore);
         return (
@@ -3434,7 +3483,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         </section>
       )}
 
-      <MyRequestsCard />
+      <MyRequestsCard focusRequestId={focusRequestId} />
     </div>
   );
 }
@@ -4019,7 +4068,7 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
-const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel'];
+const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel', 'requestChannel'];
 const APP_OPTION = { value: 'push', label: 'App' };
 const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
 const APPOINTMENT_CHANNEL_KEYS = [
@@ -4112,11 +4161,11 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         </button>
       </div>
       <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
+        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices, payment problems, receipts and request updates. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
       </p>
       <details style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Email copies and other messages</summary>
-        Emailed receipt copies and important billing notices keep their current delivery methods. So do messages with attachments, review requests, conversations, security codes and marketing.
+        Existing emailed receipt copies continue. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
       </details>
       <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         {prefs.smsEnabled === false ? 'Text backup is currently off. ' : 'Text backup remains subject to your text preferences. '}
@@ -4148,6 +4197,47 @@ function formatTime(t) {
 }
 
 // "Thu, Sep 10 · 9:00 AM – 11:00 AM" for an account-next row, or the empty copy.
+// Saved-property scope: does a scoped read's echoed selection (`propertyScope`
+// from /schedule and /schedule/next — what the SERVER honored) differ from the
+// entry this tab shows? Null from the server means the primary. A mismatch
+// means the office retired the shown house, or the gate flipped, while the
+// tab was open: the tab re-reads the property list and withholds actions on
+// these visits until the label follows (codex #4207 r1j).
+export function scopeEchoMismatch(propertyScope, currentEntry, savedScope, selectedPropertyId = null) {
+  if (!propertyScope) return false;
+  const named = selectedPropertyId ? String(selectedPropertyId) : null;
+  // The server is NOT scoping any more (gate off, cancelled) while this tab
+  // still dresses reads as one house — a saved list, or a selection naming
+  // a house even when the list read failed: those reads are customer-wide,
+  // so they are withheld until the client adopts profile mode (uncapped
+  // codex r1m; the selection case uncapped codex r2c P1).
+  if (!propertyScope.enabled) return !!savedScope || !!named;
+  // Every property retired (closed): no house to show anything under — stale
+  // in EVERY client state, entry or not (GitHub codex r5 P1): the list is
+  // re-read (it lists no entry for this profile) and property-facing
+  // actions are withheld.
+  if (propertyScope.closed) return true;
+  // The RESOLVED selection (what the read was scoped to, fallbacks included):
+  // null = no property predicate (single home / profile-keyed entry).
+  const honored = propertyScope.propertyId ? String(propertyScope.propertyId) : null;
+  // No saved list (profile mode, or the list read failed on a fresh session
+  // while /auth/me resolved a house): a selection naming a house is the only
+  // binding there is — the echo must name that house (uncapped codex r2c
+  // P1). No selection: a server scoped to a house while this client is in
+  // profile mode (the gate came back after a rollback) is stale until the
+  // list is re-read.
+  if (!savedScope) return named ? honored !== named : !!honored;
+  // A house is SELECTED but the retained list has no entry for it (another
+  // tab switched to a newly added house and the list reload failed): the
+  // server may have fallen back to a different house, and there is no entry
+  // to compare the echo against — stale until the entry resolves, so no
+  // fallback house's visits, tracker or ticket is accepted under the named
+  // selection (uncapped codex r2a P1). No selection named = profile/primary.
+  if (!currentEntry) return !!named;
+  if (honored) return honored !== String(currentEntry.propertyId || '');
+  return currentEntry.isPrimaryProperty !== true;
+}
+
 function nextVisitLabel(next) {
   if (!next) return 'No visit scheduled';
   const day = parseDate(next.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -4166,7 +4256,11 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
   const [rect, setRect] = useState(null);
   const ref = useRef(null);
   const popRef = useRef(null);
-  const current = properties.find((p) => p.id === currentId) || properties[0];
+  // Profile entries fall back to the first profile (today's rule). Saved-
+  // property entries never do: an unknown selection (list reloading after a
+  // switch) reads as "Select a property" rather than the wrong house.
+  const savedEntries = properties.some((p) => p.key);
+  const current = properties.find((p) => p.id === currentId) || (savedEntries ? null : properties[0]);
   const place = useCallback(() => { if (ref.current) setRect(ref.current.getBoundingClientRect()); }, []);
   useEffect(() => {
     if (!open) return undefined;
@@ -4186,7 +4280,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
       window.removeEventListener('resize', place);
     };
   }, [open, place]);
-  if (!current) return null;
+  if (!current && !savedEntries) return null;
   const label = (p) => p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property');
   const busy = !!switchingId;
   return (
@@ -4209,16 +4303,16 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
           fontFamily: FONTS.body, color: B.glassNavy, opacity: busy ? 0.7 : 1,
         }}
       >
-        <GlassTile name={current.isPrimaryProfile ? 'home' : 'building'} />
+        <GlassTile name={current?.isPrimaryProfile ? 'home' : 'building'} />
         {/* The glass theme flattens every weight inside a button to 600, so the
             hierarchy here is size + colour only — same scale as the visit
             cards (16 navy name, 14 muted detail). */}
         <span style={{ minWidth: 0, flex: 1 }}>
           <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>
-            {busy ? 'Switching…' : label(current)}
+            {busy ? 'Switching…' : (current ? label(current) : 'Select a property')}
           </span>
           <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {current.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(current) || 'No address on file'}
+            {current ? `${current.isPrimaryProfile ? 'Primary residence · ' : ''}${formatPropertyAddress(current) || 'No address on file'}` : 'Your properties are still loading'}
           </span>
         </span>
         <span style={{ display: 'inline-flex', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}>
@@ -4276,7 +4370,17 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
   );
 }
 
-function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProperty, switchingPropertyId }) {
+function ScheduleTab({ customer, properties = [], activePropertyId: activePropertyIdProp, selectedProperty = null, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
+  // The entry this session is scoped to (saved-property key, else the profile
+  // id). Falls back to the profile for callers that do not pass one.
+  const activePropertyId = activePropertyIdProp || customer?.id;
+  const currentEntry = properties.find((p) => p.id === activePropertyId) || null;
+  // A selection whose entry is not (yet) loaded is named neutrally — never
+  // the primary's label over another house's visits.
+  const scopedWithoutEntry = !currentEntry && !!activePropertyIdProp && activePropertyIdProp !== customer?.id;
+  const currentLabel = currentEntry?.profileLabel || (scopedWithoutEntry ? 'the selected property' : customer?.profileLabel) || 'this property';
+  // Saved-property entries carry `key` (GET /auth/properties?scope=saved).
+  const savedScope = properties.some((p) => p.key);
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   // C4: a cancelled account keeps the schedule READS; every notification /
@@ -4285,11 +4389,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
   const cancelledAccount = customer?.cancelled === true;
   const scheduleRead = usePortalRead('schedule', () => api.getSchedule(90));
   const { loading, error: loadError } = scheduleRead;
-  const upcoming = scheduleRead.data?.upcoming || [];
+  // A read scoped to a different house than this tab shows is stale: re-read
+  // the property list and show nothing actionable until the label follows.
+  const scopeStale = scopeEchoMismatch(scheduleRead.data?.propertyScope, currentEntry, savedScope, selectedProperty?.propertyId || null);
+  useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
+  const upcoming = scopeStale ? [] : (scheduleRead.data?.upcoming || []);
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
   // a lane — absent, the CTA card below simply doesn't render.
-  const reservice = scheduleRead.data?.reservice || null;
+  // Withheld with the visits while stale (uncapped codex r1m P1): a retired
+  // secondary makes the server fall back to the primary, and its re-service
+  // link books the PRIMARY address from the secondary's screen.
+  const reservice = scopeStale ? null : (scheduleRead.data?.reservice || null);
   // Does this property have a plan at all (recurring series, upcoming rows,
   // monthly billing or a live prepay term — the schedule payload's
   // hasCancellableWork)? A property with none gets no "request a visit"
@@ -4311,14 +4422,36 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
   // the "next visit at each property" chips. Independent of the schedule
   // load so a failure here never blanks the tab; null = still loading.
   const multiProperty = properties.length > 1;
-  const accountNextRead = usePortalRead(`account-next:${customer?.id}:${multiProperty}`, () => multiProperty
-    ? api.getAccountUpcoming().then(res => Array.isArray(res?.properties) ? res.properties : [])
+  // Saved-property scope reads the per-entry twin (/schedule/properties-next,
+  // rows keyed like the entries); the profile scope keeps /account-next.
+  const accountNextRead = usePortalRead(`account-next:${customer?.id}:${activePropertyId}:${multiProperty}:${savedScope}`, () => multiProperty
+    ? (savedScope
+      // A 404 here means GATE_APP_PROPERTY_SCOPE went dark while this tab was
+      // open (codex #4207 r1 P1): the server has already dropped its property
+      // predicate, so this tab must fall back to the profile model too —
+      // re-read the property list (which now answers the profile shape) and
+      // serve the profile summary meanwhile.
+      ? api.getSavedPropertiesNext().then((res) => {
+        // Every unified entry gets a row; a selection missing from them means
+        // the office retired that house while this tab was open — the server
+        // has already fallen back to the primary, so the label must follow
+        // (codex #4207 r1g P1): re-read the list, which carries the honored
+        // selection. The rows still render meanwhile.
+        const rows = Array.isArray(res?.properties) ? res.properties : [];
+        if (rows.length && !rows.some((row) => row.key === activePropertyId) && onSavedScopeUnavailable) onSavedScopeUnavailable();
+        return res;
+      }).catch((err) => {
+        if (err?.status !== 404) throw err;
+        if (onSavedScopeUnavailable) onSavedScopeUnavailable();
+        return api.getAccountUpcoming();
+      })
+      : api.getAccountUpcoming()).then(res => Array.isArray(res?.properties) ? res.properties : [])
     : Promise.resolve(null));
   // A summary awaiting revalidation must not look like a current appointment.
   const accountNextFailed = Boolean(accountNextRead.error);
   const accountNext = accountNextRead.pending || accountNextFailed ? null : accountNextRead.data;
   const nextById = multiProperty && accountNext
-    ? Object.fromEntries(properties.map((p) => [p.id, accountNext.find((row) => row.id === p.id)?.next || null]))
+    ? Object.fromEntries(properties.map((p) => [p.id, accountNext.find((row) => (savedScope ? row.key : row.id) === p.id)?.next || null]))
     : null;
 
   // Refresh visit data independently: a return to the app must never replace
@@ -4362,7 +4495,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
     setPrefsLocked(prev => ({ ...prev, [channelKey]: true }));
     setPrefs(prev => ({ ...prev, [channelKey]: value }));
     try {
-      await api.updateNotificationPrefs({ [channelKey]: value });
+      const result = await api.updateNotificationPrefs({ [channelKey]: value });
+      if (channelKey === 'requestChannel' && result.preferences?.requestChannel !== value) {
+        throw new Error('Refresh the app to manage request notifications.');
+      }
     } catch (err) {
       setPrefs(prev => ({ ...prev, [channelKey]: prevVal }));
       showCustomerAlert('Could not update delivery preference. Please try again.');
@@ -4864,13 +5000,15 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
             <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Upcoming Visits</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {upcomingOnly.length
-                ? `${upcomingOnly.length} ${upcomingOnly.length === 1 ? 'visit' : 'visits'} scheduled${multiProperty ? ` at ${customer.profileLabel || 'this property'}` : ''}`
-                : multiProperty ? `Nothing scheduled at ${customer.profileLabel || 'this property'}` : 'Schedule status'}
+                ? `${upcomingOnly.length} ${upcomingOnly.length === 1 ? 'visit' : 'visits'} scheduled${multiProperty ? ` at ${currentLabel}` : ''}`
+                : multiProperty ? `Nothing scheduled at ${currentLabel}` : 'Schedule status'}
             </div>
             <div style={{ marginTop: 5, fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {multiProperty
-                ? 'Pick a property below to see its visits, reminders and text settings.'
-                : 'Appointment timing, confirmation status, reminders, and reschedule options.'}
+              {scopeStale
+                ? 'Your property selection changed. Refreshing…'
+                : multiProperty
+                  ? 'Pick a property below to see its visits, reminders and text settings.'
+                  : 'Appointment timing, confirmation status, reminders, and reschedule options.'}
             </div>
           </div>
           {/* Requests create work — a cancelled account (C4) passes no
@@ -4891,7 +5029,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               <PropertyScopeSelect
                 id="visits-property-scope"
                 properties={properties}
-                currentId={customer.id}
+                currentId={activePropertyId}
                 onSelect={onSelectProperty}
                 switchingId={switchingPropertyId}
                 nextById={nextById}
@@ -4910,7 +5048,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
                 {properties.map((p) => {
-                  const active = p.id === customer.id;
+                  const active = p.id === activePropertyId;
                   const n = nextById ? nextById[p.id] : undefined;
                   return (
                     <button
@@ -5057,6 +5195,20 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
             </div>
             <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
+            {prefs.appPreferencesAvailable && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, paddingTop: 16 }}>
+                <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Request updates</div>
+                  <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Get request status updates in the app. Existing email confirmations continue.</div>
+                </div>
+                <select aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
+                  disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}
+                  style={{ fontSize: 16, padding: '7px 10px', minHeight: 44, borderRadius: 8, border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy }}>
+                  <option value="email">Email</option>
+                  <option value="push" disabled={!app.ready && prefs.requestChannel !== 'push'}>App</option>
+                </select>
+              </div>
+            )}
             {customer.email ? (() => {
               const allEmail = APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === 'email');
               const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
@@ -5222,16 +5374,27 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
                 <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment texts</div>
                 <div style={{ marginTop: 12 }}>
+                  {/* Appointment texts and on-location contacts are stored per
+                      PROFILE (notification_prefs / customers.service_contact*),
+                      so this picker lists profiles even under the saved-property
+                      scope — a saved-house picker here would show house B while
+                      an edit applied to every house on the profile. Per-property
+                      texts arrive with the notifications PR of the lane. */}
                   <PropertyScopeSelect
                     id="notifications-property-scope"
-                    properties={properties}
-                    currentId={customer.id}
+                    properties={savedScope ? propertyPrefs : properties}
+                    currentId={savedScope ? customer.id : activePropertyId}
                     onSelect={onSelectProperty}
                     switchingId={switchingPropertyId}
-                    nextById={nextById}
+                    nextById={savedScope ? null : nextById}
                     compact
                   />
                 </div>
+                {savedScope && (
+                  <div style={{ fontSize: 14, color: muted, marginTop: 8 }}>
+                    These settings apply to every property on this profile.
+                  </div>
+                )}
                 <div style={{ fontSize: 15, color: muted, marginTop: 10 }}>
                   {customer.isPrimaryProfile
                     ? 'Your primary residence gets every alert unless you turn one off.'
@@ -5243,7 +5406,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 <div style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Contacts</div>
                 <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>On-location contacts</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
-                  Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.
+                  {savedScope && properties.length > 1
+                    // One profile, several saved houses: contacts and texts are
+                    // stored per PROFILE, so a tenant added here hears about
+                    // every house — say so (codex #4207 r1c).
+                    ? 'Add anyone who should get appointment texts — a spouse, partner, tenant, or property manager. These contacts and settings apply to every property on this profile.'
+                    : 'Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.'}
                 </div>
               </>
             )}
@@ -5464,7 +5632,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
 // =========================================================================
 const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.';
 
-function BillingTab({ customer, refreshCustomer }) {
+function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
   // credits) and the tokenized Pay now hand-off; every management surface
@@ -5508,6 +5676,8 @@ function BillingTab({ customer, refreshCustomer }) {
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
   const [invoiceChannel, setInvoiceChannel] = useState('sms');
   const [savedInvoiceChannel, setSavedInvoiceChannel] = useState('sms');
+  const [paymentIssueChannel, setPaymentIssueChannel] = useState('sms');
+  const [savedPaymentIssueChannel, setSavedPaymentIssueChannel] = useState('sms');
   const [appPreferencesAvailable, setAppPreferencesAvailable] = useState(false);
   const billingApp = useAppNotifications(appPreferencesAvailable, customer?.id);
   // Receipt texts have no on/off switch (owner 08-28), but a customer who
@@ -5521,6 +5691,11 @@ function BillingTab({ customer, refreshCustomer }) {
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const [billingPrefsLoadError, setBillingPrefsLoadError] = useState(false);
   const compact = useIsMobile(760);
+  useEffect(() => {
+    if (!loading && focusPaymentMethods) {
+      document.getElementById('billing-payment-methods')?.scrollIntoView?.({ block: 'start' });
+    }
+  }, [loading, focusPaymentMethods]);
 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
@@ -5637,6 +5812,8 @@ function BillingTab({ customer, refreshCustomer }) {
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
           setInvoiceChannel(prefsData.invoiceChannel || 'sms');
           setSavedInvoiceChannel(prefsData.invoiceChannel || 'sms');
+          setPaymentIssueChannel(prefsData.paymentIssueChannel || 'sms');
+          setSavedPaymentIssueChannel(prefsData.paymentIssueChannel || 'sms');
           setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
           setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
@@ -6296,10 +6473,20 @@ function BillingTab({ customer, refreshCustomer }) {
       // email leg.
       billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
       ...(appPreferencesAvailable && invoiceChannel !== savedInvoiceChannel ? { invoiceChannel } : {}),
+      ...(appPreferencesAvailable && paymentIssueChannel !== savedPaymentIssueChannel ? { paymentIssueChannel } : {}),
       paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
-      .then(() => {
+      .then((result) => {
+        if (appPreferencesAvailable && (
+          (invoiceChannel !== savedInvoiceChannel && result?.preferences?.invoiceChannel !== invoiceChannel)
+          || (paymentIssueChannel !== savedPaymentIssueChannel && result?.preferences?.paymentIssueChannel !== paymentIssueChannel)
+        )) {
+          setInvoiceChannel(result?.preferences?.invoiceChannel || savedInvoiceChannel);
+          setPaymentIssueChannel(result?.preferences?.paymentIssueChannel || savedPaymentIssueChannel);
+          throw new Error('Billing delivery preference was not saved');
+        }
         setSavedInvoiceChannel(invoiceChannel);
+        setSavedPaymentIssueChannel(paymentIssueChannel);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was
@@ -7070,6 +7257,25 @@ function BillingTab({ customer, refreshCustomer }) {
             <option value="sms">Text</option>
             <option value="push" disabled={!billingApp.ready}>App</option>
           </select>
+          </div>
+        </div>}
+
+        {appPreferencesAvailable && <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap',
+          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
+        }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Payment problems</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Auto Pay failures, payment retries and bank verification. App opens your payment methods, with an allowed text backup. Email copies continue.</div>
+          </div>
+          <div style={{ display: 'flex', flex: compact ? '1 0 100%' : '0 0 auto', justifyContent: 'flex-end' }}>
+            <select aria-label="Delivery method for payment problems" value={paymentIssueChannel}
+              onChange={(e) => setPaymentIssueChannel(e.target.value)}
+              style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, border: '1px solid #D8D0C0',
+                borderRadius: 8, padding: '7px 10px', minHeight: 44, background: '#fff', fontFamily: 'inherit' }}>
+              <option value="sms">Text</option>
+              <option value="push" disabled={!billingApp.ready}>App</option>
+            </select>
           </div>
         </div>}
 
@@ -10363,8 +10569,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   const loadPlan = useCallback(() => {
     setPlanStatus('loading');
     Promise.all([
-      api.getNextService(),
-      api.getSchedule(365),
+      // Coverage evidence is per CUSTOMER (WaveGuard covers every house):
+      // never narrowed to the selected saved property.
+      api.getNextService({ allProperties: true }),
+      api.getSchedule(365, { allProperties: true }),
       // Completed-service history is optional context. Keep the current plan
       // usable when that focused endpoint is temporarily unavailable.
       api.getServices({ limit: 50 }).catch((err) => {
@@ -11557,7 +11765,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
   );
 }
 
-function ServiceTracker() {
+function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
   const [propertyPrefs, setPropertyPrefs] = useState(null);
@@ -11566,22 +11774,65 @@ function ServiceTracker() {
   // load (and itself on a slow network), and an out-of-order response would
   // overwrite fresher tracker state. Only the latest-issued request may write.
   const trackerSeqRef = useRef(0);
+  // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the tracker reads echo the
+  // selection they were scoped to. A poll that comes back scoped to another
+  // house than this tab shows (the selected house was retired mid-session;
+  // the server fell back to the primary) must not adopt that house's tracker
+  // (uncapped codex r1m P1) — drop it and re-read the property list, exactly
+  // like the schedule reads. Refs: the poll callback is stable.
+  const scopeRef = useRef({ entry: null, saved: false, named: false, refresh: null });
+  scopeRef.current = { entry: currentEntry, saved: savedScope, named: (selectedProperty && selectedProperty.propertyId) || null, refresh: onSavedScopeUnavailable };
+  // The arrival checklist's gate-code and pet-plan rows come from
+  // /property/preferences, which is keyed by the CUSTOMER — they describe the
+  // profile's PRIMARY address. Under a NON-primary saved selection they are
+  // neither fetched nor shown (uncapped codex r1s P1): "Gate code on file"
+  // for house A must not render on house B's tracker. The generic prep
+  // reminders stay. Shown only once the selected entry is CONFIRMED the
+  // profile's primary (or a row-less profile entry): a selection with NO
+  // listed entry (another tab switched to a newly added house and the list
+  // reload failed, so the old list was retained; a house retired mid-session)
+  // is withheld too (uncapped codex r1z P1) — same rule as DashboardTab's
+  // entryConfirmedPrimary. Profile mode (no selection, no saved entries)
+  // shows them as today.
+  const entryConfirmedPrimary = !!currentEntry && (currentEntry.isPrimaryProperty === true || !currentEntry.propertyId);
+  const profileFactsApply = !(selectedProperty || savedScope) || entryConfirmedPrimary;
+  const profileFactsRef = useRef(profileFactsApply);
+  profileFactsRef.current = profileFactsApply;
+  const adoptTracker = useCallback((d) => {
+    const { entry, saved, named, refresh } = scopeRef.current;
+    if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
+      setTracker(null);
+      if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
+      return;
+    }
+    setTracker(d.tracker);
+  }, []);
 
   const fetchTracker = useCallback(() => {
     const seq = ++trackerSeqRef.current;
     api.getActiveTracker()
-      .then(d => { if (seq !== trackerSeqRef.current) return; setTracker(d.tracker); setLoading(false); })
+      .then(d => { if (seq !== trackerSeqRef.current) return; adoptTracker(d); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) setLoading(false); });
-  }, []);
+  }, [adoptTracker]);
 
   useEffect(() => {
     const seq = ++trackerSeqRef.current;
     api.getTodayTracker()
-      .then(d => { if (seq !== trackerSeqRef.current) return; setTracker(d.tracker); setLoading(false); })
+      .then(d => { if (seq !== trackerSeqRef.current) return; adoptTracker(d); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) fetchTracker(); });
-    api.getPropertyPreferences().then(d => setPropertyPrefs(d.preferences)).catch(() => {});
     api.getWeather().then(setWeather).catch(() => {});
-  }, [fetchTracker]);
+  }, [fetchTracker, adoptTracker]);
+  // The profile facts are read whenever they START applying — not only on
+  // mount: /auth/me resolved the primary while /auth/properties failed, then
+  // the list recovered under the same selected key with this tracker still
+  // mounted (uncapped codex r2d P1). When they stop applying (a secondary
+  // house selected) the primary's rows are dropped, never shown stale.
+  useEffect(() => {
+    if (!profileFactsApply) { setPropertyPrefs(null); return undefined; }
+    let stale = false;
+    api.getPropertyPreferences().then(d => { if (!stale) setPropertyPrefs(d.preferences); }).catch(() => {});
+    return () => { stale = true; };
+  }, [profileFactsApply]);
 
   // 'none' | step number — derived so the interval effect keys on the PHASE,
   // not the tracker object identity (which changes on every poll).
@@ -11962,10 +12213,12 @@ function ServiceTracker() {
         <div data-glass="soft" style={subCardBase}>
           <div style={{ fontSize: 16, fontWeight: 600, color: B.glassNavy, marginBottom: 8 }}>Before your tech arrives</div>
           {[
-            propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
-              ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
-              : { icon: 'warning', text: 'No gate code on file', ok: false },
-            propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
+            ...(profileFactsApply ? [
+              propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
+                ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
+                : { icon: 'warning', text: 'No gate code on file', ok: false },
+            ] : []),
+            profileFactsApply && propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
               ? { icon: 'checkCircle', text: `Pet plan: ${petPlanShort}`, ok: true }
               : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
             { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
@@ -13826,7 +14079,47 @@ function useSheetViewport(open, dialogRef) {
   return viewport;
 }
 
-function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
+// My Property under a SECONDARY saved-property selection (GitHub codex r4
+// P1): the tab's facts, gate codes, pet plan, irrigation settings and access
+// notes are stored per PROFILE (GET/PUT /property/preferences key on the
+// customer, not the saved property) — rendering it under house B would show
+// and overwrite house A's. Until those reads and writes are saved-property
+// aware, the tab is explicitly profile-scoped: it names the address the
+// details belong to and offers the switch, and nothing is read or written.
+function PropertyProfileScopedNotice({ primaryEntry, onSwitch }) {
+  const address = primaryEntry ? formatPropertyAddress(primaryEntry) : '';
+  // Same tokens the tabs build locally (PORTAL_CARD_STYLE / PORTAL_SHELL /
+  // PORTAL_BUTTON_BASE) — this component sits outside any tab.
+  const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
+  const muted = PORTAL_SHELL.muted;
+  const iconTile = { width: 38, height: 38, borderRadius: 8, background: '#F8FCFE', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
+  const secondaryButton = { ...PORTAL_BUTTON_BASE, background: '#fff', color: B.glassNavy, border: '1px solid #D8D0C0', borderRadius: 10, boxShadow: 'none', padding: '10px 14px', fontSize: 14, minHeight: 44 };
+  return (
+    <section data-glass="card" style={{ ...card, padding: 24 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+        <span style={iconTile}><Icon name="house" size={16} strokeWidth={2} /></span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Property details are kept for your primary address</div>
+          <div style={{ fontSize: 14, color: muted, marginTop: 6, lineHeight: 1.5 }}>
+            {address
+              ? <>Gate codes, pet and access notes, and watering settings on file belong to <strong>{address}</strong>. Switch to that property to view or edit them.</>
+              : 'Gate codes, pet and access notes, and watering settings are kept with your primary address, which is not available to switch to right now. Call or text Waves to update them.'}
+          </div>
+          {primaryEntry && typeof onSwitch === 'function' && (
+            <button type="button" onClick={onSwitch} data-glass-accent="" style={{ ...secondaryButton, marginTop: 14, padding: '10px 14px', fontSize: 14 }}>
+              View {primaryEntry.label || 'primary'} property details
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, selectedProperty = null, scopeUnavailable = false, onSavedScopeUnavailable = null }) {
+  // A house is selected (a saved-property id on the selection) whether or
+  // not the retained list has an entry for it — see scopeEchoMismatch.
+  const selectionNamed = (selectedProperty && selectedProperty.propertyId) || null;
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
   const viewport = useSheetViewport(open, dialogRef);
@@ -13862,10 +14155,17 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     if (!open) return undefined;
     let stale = false;
     setSubmitError('');
-    api.getServices({ limit: 1 }).then(d => {
-      if (!stale && d.services?.length) setLastService(d.services[0]);
+    api.getServices({ limit: 1, propertyScoped: 1 }).then(d => {
+      // A last visit scoped to another house than this overlay names is not
+      // this house's (the callback-eligibility copy would be wrong).
+      if (!stale && d.services?.length && !scopeEchoMismatch(d.propertyScope, currentEntry, savedScope, selectionNamed)) setLastService(d.services[0]);
     }).catch(() => {});
-    api.getNextService().then(d => { if (!stale) setNextService(d.next || null); }).catch(() => {});
+    // The "defer until your visit on …" advisory follows the house too: a
+    // next visit echoed under another house than this overlay names is not
+    // this house's (GitHub codex r13 P2).
+    api.getNextService().then(d => {
+      if (!stale && !scopeEchoMismatch(d.propertyScope, currentEntry, savedScope, selectionNamed)) setNextService(d.next || null);
+    }).catch(() => {});
     // Fail-closed on every path: reset BEFORE the fetch and null on failure,
     // so a reopen after the streamline kill switch (or an eligibility change)
     // can never keep serving a stale handoff off the previous payload — a
@@ -13898,7 +14198,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const problemCategoryValues = ['pest_issue', 'lawn_concern', 'schedule_change'];
   const isProblemCategory = problemCategoryValues.includes(category);
   const selectedCategory = requestCategories.find(c => c.value === category);
-  const propertyAddress = formatPropertyAddress(customer);
+  // The house this ticket is about: the SELECTED saved property's address
+  // (the server files the ticket under the same selection — codex #4207
+  // GitHub r3 P1), not the profile mirror, which is always the primary.
+  const propertyAddress = propertyAddressProp !== undefined ? propertyAddressProp : formatPropertyAddress(customer);
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(' ');
 
   // Callback recognition: pest/lawn issue within 30 days of last service
@@ -13918,7 +14221,19 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   // the eligible pest/lawn ticket form is REPLACED by the picker CTA (the
   // picker's own details box reaches dispatch notes; photos are accepted as
   // lost on this lane — the ticket form survives only for ineligible plans).
-  const overlayHandoff = !!scheduleData?.overlayHandoff;
+  // The schedule read echoes the selection it was scoped to; a mismatch with
+  // the house this overlay names (the selected secondary was retired while
+  // the page stayed open — the server fell back to the primary) withholds
+  // every action here — the picker handoff, the per-visit reschedule links
+  // AND the ticket itself, which the server would file under the fallback
+  // house — until the selection is refreshed (uncapped codex r1n P1).
+  // scopeUnavailable: the page already knows there is no house (every saved
+  // property retired) — withheld before any read lands, no re-read to ask for.
+  const scopeStale = scopeUnavailable || scopeEchoMismatch(scheduleData?.propertyScope, currentEntry, savedScope, selectionNamed);
+  useEffect(() => { if (scopeStale && !scopeUnavailable && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, scopeUnavailable, onSavedScopeUnavailable]);
+  // Shown in the address slot while the selection is being refreshed.
+  const propertyAddressShown = scopeStale ? 'Refreshing your property selection…' : propertyAddress;
+  const overlayHandoff = !scopeStale && !!scheduleData?.overlayHandoff;
   const handoffLane = category === 'pest_issue' ? 'pest' : category === 'lawn_concern' ? 'lawn' : null;
   const pickerHandoffUrl = overlayHandoff && handoffLane && scheduleData?.reservice?.url
     && (scheduleData.reservice.lanes || []).includes(handoffLane)
@@ -13941,7 +14256,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const lastServiceDateStr = lastService ? fmtDate(lastService.date, { month: 'short', day: 'numeric' }) : '';
   const descriptionLimit = 500;
   const photoLimit = 3;
-  const canSubmit = !!category && !!description.trim() && !submitting;
+  const canSubmit = !!category && !!description.trim() && !submitting && !scopeStale;
   const photosRemaining = Math.max(0, photoLimit - photos.length);
 
   const muted = PORTAL_SHELL.muted;
@@ -14102,6 +14417,16 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         urgency: isProblemCategory ? urgency : 'routine',
         locationOnProperty: location || null,
         photos: photos.map(p => p.data),
+        // The house shown in this overlay — the server refuses the ticket
+        // when its resolved scope names another (uncapped codex r1o P1).
+        // Pinned to the SELECTION when the list has no entry for it yet — the
+        // entry's id and the selection's id are the same house whenever both
+        // exist (uncapped codex r2a P1) — and independently of the list: a
+        // fresh session whose /auth/properties read failed while /auth/me
+        // resolved a house still binds its ticket to that house (uncapped
+        // codex r2c P1); the server answers 409 on a mismatch.
+        ...(currentEntry?.propertyId || selectedProperty?.propertyId
+          ? { expectedPropertyId: String(currentEntry?.propertyId || selectedProperty.propertyId) } : {}),
       });
       // The server's 60s dedupe path returns success against the EARLIER
       // request with photoCount: 0 — if the customer attached photos this
@@ -14124,6 +14449,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
       }, hadNote ? 7000 : 2500);
     } catch (err) {
       console.error(err);
+      // The selection went stale between open and submit: re-read the list so
+      // the overlay names the house the server will actually bind to.
+      if (err?.code === 'property_selection_stale' && onSavedScopeUnavailable) onSavedScopeUnavailable();
       setSubmitError(err?.message || 'Could not submit the request. Please try again or call Waves at (941) 297-5749.');
     } finally {
       setSubmitting(false);
@@ -14259,9 +14587,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                         <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>
                           {customerName || 'Waves customer'}
                         </div>
-                        {propertyAddress && (
+                        {propertyAddressShown && (
                           <div style={{ fontSize: 14, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {propertyAddress}
+                            {propertyAddressShown}
                           </div>
                         )}
                       </div>
@@ -14761,13 +15089,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 }
 
 // =========================================================================
-// MY REQUESTS CARD — a short-lived receipt for recently submitted requests
+// MY REQUESTS CARD — recent receipts and the exact request opened from App
 // =========================================================================
-// Requests are no longer tracked through an admin status pipeline; each one
-// fires an admin notification and the office follows up directly (call/text).
-// So this card is just an acknowledgment of recent submissions (last 14 days)
-// rather than a New→Reviewed→Scheduled→Resolved tracker.
-function MyRequestsCard() {
+function MyRequestsCard({ focusRequestId } = {}) {
+  const cardRef = useRef(null);
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -14775,12 +15100,19 @@ function MyRequestsCard() {
   const loadRequests = useCallback(() => {
     setLoading(true);
     setLoadError(false);
-    api.getRequests()
+    api.getRequests(focusRequestId)
       .then(d => { setRequests(d.requests || []); setLoading(false); })
       .catch(() => { setLoadError(true); setLoading(false); });
-  }, []);
+  }, [focusRequestId]);
 
   useEffect(() => { loadRequests(); }, [loadRequests]);
+
+  useEffect(() => {
+    if (!loading && focusRequestId) {
+      cardRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      cardRef.current?.focus({ preventScroll: true });
+    }
+  }, [loading, focusRequestId]);
 
   if (loading) return null;
 
@@ -14800,17 +15132,19 @@ function MyRequestsCard() {
   const RECENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
   const recent = requests
     .filter(r => {
+      if (focusRequestId) return r.id === focusRequestId;
       if (r.status === 'resolved') return false; // dropped once the office marks it handled
       const created = new Date(r.createdAt).getTime();
       return Number.isFinite(created) && Date.now() - created < RECENT_WINDOW_MS;
     })
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  if (!recent.length) return null;
+  if (!recent.length) return focusRequestId
+    ? <section ref={cardRef} tabIndex={-1} role="status" data-glass="card" style={{ padding: 16 }}>This request isn’t available for the selected property.</section> : null;
 
   const muted = '#475569';
 
   return (
-    <section data-glass="card" style={{
+    <section ref={cardRef} tabIndex={-1} aria-label="My Requests" data-glass="card" style={{
       background: B.white,
       borderRadius: 8,
       padding: 16,
@@ -14834,7 +15168,7 @@ function MyRequestsCard() {
         </span>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy }}>My Requests</div>
-          <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>We've got your recent requests — our team will follow up directly.</div>
+          <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>{focusRequestId ? 'View the latest status of this request.' : "We've got your recent requests — our team will follow up directly."}</div>
         </div>
       </div>
 
@@ -14852,7 +15186,7 @@ function MyRequestsCard() {
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.35 }}>{r.subject}</div>
                   <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
-                    {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    {r.category?.replace(/_/g, ' ')} · {formatETDateTime(created, { month: 'short', day: 'numeric', ...(focusRequestId ? { year: 'numeric' } : {}) })}
                   </div>
                 </div>
                 <span style={{
@@ -14864,7 +15198,7 @@ function MyRequestsCard() {
                   color: B.glassNavy,
                   border: '1px solid #E7E2D7',
                   whiteSpace: 'nowrap',
-                }}>Received</span>
+                }}>{focusRequestId ? ({ new: 'Received', acknowledged: 'Acknowledged', scheduled: 'Scheduled', resolved: 'Resolved' }[r.status] || 'Received') : 'Received'}</span>
               </div>
               {r.urgency === 'urgent' && (
                 <div style={{ marginTop: 8, fontSize: 14, color: B.red, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -15107,7 +15441,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
-function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onRequestVisit, onSelectProperty, switchingPropertyId }) {
+function VisitsTab({ customer, properties = [], activePropertyId, selectedProperty = null, subTab, onSubTabChange, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   const compact = useIsMobile(760);
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
   const card = {
@@ -15174,7 +15508,22 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
           </div>
         </div>
       </section>
-      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} switchingPropertyId={switchingPropertyId} /> : <ServicesTab />}
+      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : (
+        <>
+          {/* Completed visits and reports read /services, which is
+              customer-wide (per-property history is PR 4 of the lane): under
+              the saved-property MODEL say so — whenever the list is
+              saved-shaped, not only with 2+ active entries (GitHub codex r8
+              P2): a profile whose other houses were retired still lists their
+              visits and reports here, under the remaining house's address. */}
+          {properties.some((p) => p.key) && (
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }} data-testid="completed-profile-wide-notice">
+              Completed visits and reports are listed for this whole profile, including any property that is no longer active.
+            </div>
+          )}
+          <ServicesTab />
+        </>
+      )}
     </div>
   );
 }
@@ -15436,7 +15785,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 }
 
 export default function PortalPage() {
-  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
+  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
   // C4: /auth/me reports `cancelled` for a churned account admitted under
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
@@ -15653,13 +16002,41 @@ export default function PortalPage() {
 
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}` || 'W';
   const portalProperties = Array.isArray(properties) ? properties : [];
+  // The entry the session is scoped to: the saved-property selection's key
+  // (GATE_APP_PROPERTY_SCOPE), else the profile — every switcher compares
+  // entry ids against this, never against customer.id directly.
+  const activePropertyId = selectedProperty?.key || customer.id;
+  const activeProperty = portalProperties.find((property) => property.id === activePropertyId) || null;
+  // Every saved property of this profile retired (closed): the list names no
+  // selectable entry (`selected.key` null). No house to show, edit or file
+  // under (GitHub codex r5 P1) — the header shows no address, My Property
+  // renders the profile-scoped notice, the request overlay withholds submit.
+  const propertyUnavailable = propertyScope === 'saved' && !!selectedProperty && !selectedProperty.key;
   const wateringPlanCustomerId = new URLSearchParams(location.search).get('wateringPlanCustomer');
-  const wateringPlanProperty = portalProperties.find((property) => String(property.id) === wateringPlanCustomerId);
-  const canSwitchProperties = portalProperties.length > 1;
-  const propertyRenderKey = `${customer.id}:${requestRefreshKey}`;
+  // The watering-plan deep link names a PROFILE; saved-property entries carry
+  // composite ids, so match on the entry's customer (its first entry wins).
+  const wateringPlanProperty = portalProperties.find((property) => String(property.customerId || property.id) === wateringPlanCustomerId);
+  // Switchable with 2+ entries — or with ONE entry that is not the current
+  // selection (this profile closed, every saved property retired, while a
+  // sibling profile still lists a house): the sole entry is the way out, not
+  // a no-op (GitHub codex r8 P2).
+  const canSwitchProperties = portalProperties.length > 1 || (propertyScope === 'saved' && !activeProperty && portalProperties.length > 0);
+  const propertyRenderKey = `${activePropertyId}:${requestRefreshKey}`;
+  // A NON-primary saved property of a profile is selected: My Property is
+  // profile-scoped (see PropertyProfileScopedNotice) — the primary entry of
+  // the same profile is the switch target (absent when the office retired it).
+  // Also PENDING while a saved-property selection has no resolved entry yet
+  // (the list read failed; /auth/me still names the claim — uncapped codex
+  // r1r P1): a missing entry is NOT a primary selection, and the tab would
+  // read and write the primary's preferences under an unknown house.
+  const savedSecondarySelection = propertyUnavailable || !!(selectedProperty && selectedProperty.propertyId
+    && (!activeProperty || (activeProperty.key && activeProperty.propertyId && activeProperty.isPrimaryProperty !== true)));
+  const profilePrimaryEntry = savedSecondarySelection && !propertyUnavailable
+    ? (portalProperties.find((p) => String(p.customerId) === String(selectedProperty.customerId) && p.isPrimaryProperty === true) || null)
+    : null;
   // Keep the destination explicit for Visits and watering-plan deep links.
   const selectProperty = async (propertyId, { tab = 'dashboard' } = {}) => {
-    if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
+    if (!propertyId || propertyId === activePropertyId || switchingPropertyId) return;
     setSwitchingPropertyId(propertyId);
     // Flush PropertyTab's debounced edits BEFORE switchProperty replaces the
     // access token — a delayed save after the swap would write the previous
@@ -15674,22 +16051,37 @@ export default function PortalPage() {
       showCustomerAlert('Your latest property edits could not be saved, so we kept this property open. Try saving again before switching.');
       return;
     }
-    const switched = await switchProperty(propertyId);
+    // A saved-property entry switches by its (profile, property) pair; a
+    // profile entry (or a legacy caller) still passes the profile id.
+    const targetEntry = portalProperties.find((property) => property.id === propertyId);
+    const switched = await switchProperty(targetEntry && targetEntry.propertyId !== undefined
+      ? { customerId: targetEntry.customerId, propertyId: targetEntry.propertyId }
+      : propertyId);
     setSwitchingPropertyId(null);
     if (switched) {
       setActiveTab(tab);
       // Replace, not push: the prior tab history belongs to the PREVIOUS
       // property's session — Back must not restore a stale tab context
       // against the newly selected property.
-      const target = tab === 'visits' ? '/?tab=schedule' : (tab === 'property' ? `/?tab=property&wateringPlanCustomer=${encodeURIComponent(propertyId)}` : '/');
+      const wateringCustomerId = (targetEntry && targetEntry.customerId) || propertyId;
+      const target = tab === 'visits' ? '/?tab=schedule' : (tab === 'property' ? `/?tab=property&wateringPlanCustomer=${encodeURIComponent(wateringCustomerId)}` : '/');
       if (window.location.pathname + window.location.search !== target) navigate(target, { replace: true });
       setVisitsSubTab('upcoming');
       setShowMenu(false);
       setShowMoreSheet(false);
       setRequestRefreshKey(key => key + 1);
+    } else {
+      // UI audit F0314: switchProperty stores the failure on AuthContext.error,
+      // which nothing on this page renders — the "Switching" label just
+      // vanished and the menu stayed on the old property.
+      showCustomerAlert('We could not switch to that property just now. Please try again.');
     }
   };
-  const activePropertyAddress = formatPropertyAddress(customer);
+  // The header address is the selected entry's. A selection whose entry is
+  // not loaded shows no address rather than the primary's (codex #4207 r1).
+  const activePropertyAddress = activeProperty
+    ? formatPropertyAddress(activeProperty)
+    : (propertyUnavailable || (selectedProperty && activePropertyId !== customer.id) ? '' : formatPropertyAddress(customer));
   const accountMenuItems = (cancelledAccount ? (items) => items.filter(i => CANCELLED_TABS.includes(i.tab)) : (items) => items)([
     { icon: 'home', label: 'Home', sub: 'Portal overview', tab: 'dashboard', action: () => switchTab('dashboard') },
     { icon: 'plan', label: 'My Plan', sub: 'Services and bundle savings', tab: 'plan', action: () => switchTab('plan') },
@@ -15736,6 +16128,11 @@ export default function PortalPage() {
   return (
     <PortalGlassContext.Provider value={true}>
     <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}>
+      {/* Always registered (codex #4207 r2): a gate rollback drops the client
+          to profile mode, but the refresh token still forwards its property
+          claim — when the gate returns, the next refresh must re-read the
+          list or reads would honor a house the UI no longer names. */}
+      <PropertySelectionRevalidator active refresh={refreshProperties} />
     <div className="portal-root" style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an
@@ -15922,7 +16319,7 @@ export default function PortalPage() {
                     </div>
                     <div style={{ display: 'grid', gap: 6 }}>
                       {portalProperties.map(property => {
-                        const active = property.id === customer.id;
+                        const active = property.id === activePropertyId;
                         const address = formatPropertyAddress(property);
                         return (
                           <button
@@ -16230,22 +16627,24 @@ export default function PortalPage() {
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
-        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
-        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
+        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the
           // same sub-tab; replace (not push) so pill toggles don't stack
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
-          wateringPlanCustomerId={wateringPlanCustomerId}
-          onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
-        />}
+        {activeTab === 'property' && (savedSecondarySelection
+          ? <PropertyProfileScopedNotice key={`property-notice-${propertyRenderKey}`} primaryEntry={profilePrimaryEntry} onSwitch={profilePrimaryEntry ? () => selectProperty(profilePrimaryEntry.id, { tab: 'property' }) : undefined} />
+          : <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
+            wateringPlanCustomerId={wateringPlanCustomerId}
+            onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
+          />)}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
         </PortalRefreshArea>
       </main>
@@ -16281,6 +16680,12 @@ export default function PortalPage() {
         onClose={() => setShowReportIssue(false)}
         onSubmitted={() => setRequestRefreshKey(k => k + 1)}
         customer={customer}
+        propertyAddress={activePropertyAddress}
+        currentEntry={activeProperty}
+        savedScope={portalProperties.some((p) => p.key)}
+        selectedProperty={selectedProperty}
+        scopeUnavailable={propertyUnavailable}
+        onSavedScopeUnavailable={refreshProperties}
       />
     </div>
     </PortalReadProvider>
@@ -16290,4 +16695,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, PortalGlassContext };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

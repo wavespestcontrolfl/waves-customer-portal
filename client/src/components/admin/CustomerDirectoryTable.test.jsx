@@ -36,6 +36,40 @@ it("keeps a WebKit pointer action available when its containing main receives fo
   expect(trigger).toHaveFocus();
 });
 
+it("keeps an iOS Safari tap available when main receives focus after the pointer is released", () => {
+  // iOS order: pointerdown → pointerup → compat mousedown focuses <main>
+  // (focusin) → click. The menu must survive that focusin or the click
+  // lands on nothing.
+  const { customer, onEdit, trigger, menu } = directory();
+  const action = screen.getByRole("button", { name: "Edit customer" });
+  fireEvent.pointerDown(action);
+  fireEvent.pointerUp(action);
+  screen.getByRole("main").focus();
+  expect(menu.open).toBe(true);
+  fireEvent.click(action);
+  expect(onEdit).toHaveBeenCalledTimes(1);
+  expect(onEdit).toHaveBeenCalledWith(customer);
+  expect(menu.open).toBe(false);
+  expect(trigger).toHaveFocus();
+});
+
+it("opens the profile from a phone tap on Open profile", () => {
+  const onOpen = vi.fn();
+  render(
+    <main tabIndex={-1}>
+      <CustomerDirectoryTable customers={[{ id: "fixture-b", firstName: "Blake", lastName: "Sample" }]} onOpen={onOpen} />
+    </main>,
+  );
+  const menu = screen.getByLabelText("Actions for Blake Sample").closest("details");
+  menu.open = true;
+  const action = screen.getByRole("button", { name: "Open profile" });
+  fireEvent.pointerDown(action);
+  fireEvent.pointerUp(action);
+  screen.getByRole("main").focus();
+  fireEvent.click(action);
+  expect(onOpen).toHaveBeenCalledWith("fixture-b");
+});
+
 it("still dismisses on an outside pointer or keyboard focus change after a pointer action", () => {
   const { menu } = directory();
   const action = screen.getByRole("button", { name: "Edit customer" });
