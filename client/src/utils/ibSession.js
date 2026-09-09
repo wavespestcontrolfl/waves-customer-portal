@@ -38,6 +38,15 @@ export function ibSessionId() {
 // request answered after a newer one began (navigation or Clear released the
 // submit guard mid-flight) leaves the newer key in place, so a dropped
 // response to the newer request still replays its saved task on retry.
+// A definitive answer (any 4xx: validation, authorization, a refused or
+// changed request) settles the identity. A server failure keeps the key like
+// a dropped response does: the server may hold the task with an unknown
+// outcome, and the same key replays it instead of starting a second task with
+// a second confirmation card.
+export function definitiveFailure(error) {
+  return Boolean(error?.status) && error.status < 500;
+}
+
 export function createRequestIdentity(sessionId = ibSessionId()) {
   let pending = null;
   return {

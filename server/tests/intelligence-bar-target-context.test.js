@@ -501,3 +501,34 @@ test('an earlier explicit target survives a later communication clause referenci
   expect(task.target.customer_id).toBe(A);
   expect((await Context.validateRecordTarget({ customer_id: B }, task)).code).toBe('target_clarification_required');
 });
+
+test('verified city and technician words after "for" are filters, not customer names', async () => {
+  rows.customers = [{ id: A, first_name: 'Synthetic', last_name: 'Person', city: 'Sarasota' }];
+  rows.technicians = [{ name: 'Synthetic Tech' }];
+  for (const prompt of ['Show the schedule for Sarasota', 'Show the route for Tech', 'Show the day summary for sarasota tomorrow']) {
+    const task = await Context.resolve({ prompt, pageData: {} });
+    expect(task.namesRequested).toBe(false);
+    expect(task.target).toBeNull();
+    expect(await Context.prepareReadInput({ date: '2026-09-09' }, task, { toolName: 'get_schedule_view', schema: { properties: {} } })).toEqual({ input: { date: '2026-09-09' } });
+  }
+  // An unverified word after "for" stays a person: a misspelled name never becomes a broad read.
+  expect((await Context.resolve({ prompt: 'Show the schedule for Jhon', pageData: {} })).namesRequested).toBe(true);
+  // A verified word that is also a customer's name stays a person.
+  rows.customers.push({ id: B, first_name: 'Sarasota', last_name: 'Family', city: 'Venice' });
+  expect((await Context.resolve({ prompt: 'Show the schedule for Sarasota', pageData: {} })).namesRequested).toBe(true);
+  rows.customers.pop();
+  // Any selector other than "for" keeps the word a person.
+  for (const prompt of ['Text Sarasota the invoice', "Show Sarasota's schedule", 'Update customer Tech', 'Tech needs a reminder']) {
+    expect((await Context.resolve({ prompt, pageData: {} })).namesRequested).toBe(true);
+  }
+  // The synchronous hint never verifies filters on its own.
+  expect(Context.namesRequested('Show the schedule for Sarasota')).toBe(true);
+});
+
+test('the operator-wide conversation search is refused inside a customer-scoped task', async () => {
+  const schema = { properties: { query: { type: 'string' } } };
+  const params = { query: 'refund' };
+  expect(await Context.prepareReadInput(params, context(), { toolName: 'search_ib_history', schema })).toMatchObject({ code: 'customer_scope_required' });
+  expect(await Context.prepareReadInput(params, { targets: [], namesRequested: true, page: { ids: {} } }, { toolName: 'search_ib_history', schema })).toMatchObject({ code: 'customer_scope_required' });
+  expect(await Context.prepareReadInput(params, { targets: [], page: { ids: {} } }, { toolName: 'search_ib_history', schema })).toEqual({ input: params });
+});

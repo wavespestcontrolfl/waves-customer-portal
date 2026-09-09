@@ -2,7 +2,9 @@ import PendingActionsCard from './PendingActionsCard';
 
 export default function IntelligenceTaskCard({ task, onSelectTarget, onRefresh, onContinue, onResolved, variant = 'light' }) {
   if (!task) return null;
-  // "dark" is the Tier-2 D palette of the desktop modal; "light" the zinc shell.
+  // "dark" is the Tier-2 D palette of the desktop modal (legacy inline styles);
+  // "light" the zinc shell. Both are light surfaces: the modal renders on
+  // D.card #FFFFFF, so the D palette's own text color (#334155) applies.
   const dark = variant === 'dark';
   const text = dark ? '#334155' : '#27272A', border = dark ? '#E2E8F0' : '#E4E4E7';
   const target = task.taskTarget;

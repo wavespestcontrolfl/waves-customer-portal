@@ -70,24 +70,56 @@ function targetClause(prompt, retainRecordConstraints = false) {
   return clause.replace(opener, '$1this').split(/\bthat\b/i)[0];
 }
 
-function explicitSingleNames(prompt) {
+const FOR_SELECTOR_RE = /(?:^|\s)for$/;
+function explicitSingleNames(prompt, filterWords = null) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(clause);
   const dated = new Set([...normalized.matchAll(DATED_MONTH_RE)].map(m => m[1]));
-  return [...new Set([
-    ...[...normalized.matchAll(PERSON_REFERENCE)]
-      .filter(m => m[1] !== 'customer' || !/\b(?:this|that|current|selected|viewed|open)\s+$/.test(normalized.slice(0, m.index)))
-      .map(m => m[2]),
+  const references = [...normalized.matchAll(PERSON_REFERENCE)]
+    .filter(m => m[1] !== 'customer' || !/\b(?:this|that|current|selected|viewed|open)\s+$/.test(normalized.slice(0, m.index)));
+  // A verified filter word (see verifiedFilterWords) is a person only when a
+  // selector other than "for" names it: a verb, "customer", a possessive or
+  // the leading subject.
+  const otherEvidence = new Set([
+    ...references.filter(m => !FOR_SELECTOR_RE.test(m[1])).map(m => m[2]),
     ...[...clause.matchAll(/\b([\p{L}-]+)[’']s\b/giu)].map(m => normalizeName(m[1])),
     ...(normalized.match(/^([\p{L}'-]+)\s+(?:needs|wants|has|is|should|would|asked)\b/u)?.slice(1, 2) || []),
-  ])].filter(word => !NON_PERSON_NAMES.has(word) && !dated.has(word));
+  ]);
+  return [...new Set([...references.map(m => m[2]), ...otherEvidence])]
+    .filter(word => !NON_PERSON_NAMES.has(word) && !dated.has(word) && !(filterWords?.has(word) && !otherEvidence.has(word)));
 }
 
-function namesRequested(prompt) {
+function namesRequested(prompt, filterWords = null) {
   // This is a refusal hint, never a fuzzy identity match. A misspelling after
   // an explicit person reference must not fall back to the open customer.
-  const references = explicitSingleNames(prompt);
+  const references = explicitSingleNames(prompt, filterWords);
   return references.length > 0;
+}
+
+// Bare "for <word>" is also how schedule and route reads take a place or a
+// technician ("the schedule for Sarasota", "the route for Adam"). A word is a
+// filter only when the database verifies it as a customer city or an active
+// technician's name AND no customer carries it as a first or last name; an
+// unverified or shared word stays a person reference, so a misspelled name
+// still fails closed. The row check repeats the predicate so the verdict comes
+// from the returned rows themselves.
+async function verifiedFilterWords(prompt) {
+  const normalized = normalizeName(targetClause(prompt));
+  const words = [...new Set([...normalized.matchAll(/\bfor\s+([\p{L}'-]+)\b/gu)].map(m => m[1]))]
+    .filter(word => !NON_PERSON_NAMES.has(word));
+  if (!words.length) return new Set();
+  const technicians = await db('technicians').whereRaw('coalesce(active, true)').select('name');
+  const technicianWords = new Set(technicians.flatMap(technician => normalizeName(technician.name).split(' ')));
+  const filters = new Set();
+  for (const word of words) {
+    const rows = await db('customers').whereNull('deleted_at')
+      .whereRaw('? = ? OR ? = ? OR ? = ?', [normalizedStoredName('city'), word, normalizedStoredName('first_name'), word, normalizedStoredName('last_name'), word])
+      .select('first_name', 'last_name', 'city');
+    const person = rows.some(row => normalizeName(row.first_name) === word || normalizeName(row.last_name) === word);
+    const city = rows.some(row => normalizeName(row.city) === word);
+    if (!person && (city || technicianWords.has(word))) filters.add(word);
+  }
+  return filters;
 }
 
 function pageIds(pageData = {}) {
@@ -235,7 +267,7 @@ async function loadPage(pageData, prompt) {
   return page;
 }
 
-function candidateSelection(candidates, prompt, viewedCustomer, complete) {
+function candidateSelection(candidates, prompt, viewedCustomer, complete, nameHint) {
   if (!complete) return { target: null, targets: [], ambiguous: true };
   const labels = candidates.map(c => normalizeName(c.label));
   const requestedSet = targetClause(prompt).split(/\b(?:both|these customers|all of these)\s+/i)[1];
@@ -258,22 +290,23 @@ function candidateSelection(candidates, prompt, viewedCustomer, complete) {
   if (candidates.length === 1) return { target: candidates[0], targets: candidates, ambiguous: false };
   if (candidates.length > 1) return { target: null, targets: [], ambiguous: true };
   const pageReference = PAGE_REFERENCE_RE.test(targetClause(prompt));
-  const target = !namesRequested(prompt) && pageReference ? viewedCustomer : null;
+  const target = !nameHint && pageReference ? viewedCustomer : null;
   return { target: target || null, targets: target ? [target] : [], ambiguous: false };
 }
 
 async function resolve({ prompt, pageData, selectedTarget }) {
-  const [viewed, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
+  const [viewed, namedResult, filterWords] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt), verifiedFilterWords(prompt)]);
   const named = namedResult.matches;
+  const nameHint = namesRequested(prompt, filterWords);
   // A stale page hint cannot block an unrelated task or an explicitly named
   // customer. A request relying on the unavailable viewed record still stops.
   if (viewed.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length && !selectedTarget?.customer_id) return viewed;
   const page = viewed.error ? { ids: {}, records: {} } : viewed;
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete);
+  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, nameHint);
   if (selectedTarget?.customer_id) {
     const selected = await customerById(selectedTarget.customer_id);
-    if (!selected || ((namesRequested(prompt) || named.length || !namedResult.complete) && !named.some(c => c.id === selected.id))
+    if (!selected || ((nameHint || named.length || !namedResult.complete) && !named.some(c => c.id === selected.id))
       || (selection.ambiguous && /\b(?:both|these customers|all of these)\b/i.test(targetClause(prompt)))) {
       // selectable: a fresh customer choice re-resolves this request.
       return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch', selectable: true };
@@ -287,7 +320,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   const readRecipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you)\s+)*(?:(?:show|read|get|find|look up|check|summarize)\s+(?:(?:the|our)\s+)?(?:customer\s+)?(?:conversation|thread|messages|texts|sms|calls|call history|details|history)\s+(?:with|for|from|to|on)|what\s+(?:did|have)\s+we\s+(?:say|send|said|sent)\s+to(?:\s+(?:the\s+)?customer\s+on)?)\s+(.+)/i)?.[1] || '';
   const reviewClause = targetClause(prompt);
   const explicitReview = reviewClause.match(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i)?.[1];
-  const reviewReference = explicitReview || (!namesRequested(prompt)
+  const reviewReference = explicitReview || (!nameHint
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
   const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|stop|visit|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => { const kind = `${recordKind(match[1])}_id`; return [kind, page.ids[kind] || null]; }));
@@ -309,9 +342,9 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
     // An explicitly named customer that did not resolve keeps the request
     // target-specific: broad customer-row readers stay refused until it does.
-    namesRequested: namesRequested(prompt),
+    namesRequested: nameHint,
     reviewReference: reviewReference?.toLowerCase() || null,
-    bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
+    bulkLeadRequest: !nameHint && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
       .map(match => normalizeEmail(match[1])),
     explicitPhones: [...recipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
@@ -463,6 +496,11 @@ const SCOPED_CUSTOMER_ROW_READERS = new Set(['query_customers', 'query_leads', '
 const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone)
   || Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
 
+// The operator's own past conversations quote every customer verbatim, and a
+// stored thread carries no customer association to filter on, so the search
+// is refused inside a customer-scoped task rather than narrowed.
+const ACTOR_WIDE_READERS = new Set(['search_ib_history']);
+
 const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
 const EMAIL_KEYED_READERS = new Set(['check_email_suppression']);
 
@@ -470,6 +508,9 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   const input = { ...params };
   if ((context.targets?.length || context.namesRequested) && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
     return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
+  }
+  if ((context.targets?.length || context.namesRequested) && ACTOR_WIDE_READERS.has(toolName)) {
+    return { error: 'Past-conversation search returns verbatim exchanges about any customer and cannot be limited to the task customer, so it is unavailable inside a task for a specific customer.', code: 'customer_scope_required' };
   }
   if (context.namesRequested && !context.targets?.length
     && (SCOPED_CUSTOMER_ROW_READERS.has(toolName) || (schema.properties?.customer_id && !hasOwnSelector(params)))) {

@@ -73,3 +73,21 @@ it('a delayed history probe survives a concurrent failed query', async () => {
   expect(result.current.savedTasks).toEqual([{ id: 'saved-task' }]);
   expect(result.current.response).toBe('Error: Model unavailable');
 });
+
+it('a server failure keeps the request key so the retry replays the saved task; a 4xx answer releases it', async () => {
+  const bodies = [];
+  let status = 503;
+  vi.stubGlobal('fetch', vi.fn((url, options) => {
+    if (url.endsWith('/query')) { bodies.push(JSON.parse(options.body)); return Promise.resolve({ ok: false, status, json: async () => ({ error: 'Request failed' }) }); }
+    return Promise.resolve({ ok: true, json: async () => ({ actions: [] }) });
+  }));
+  const { result } = renderHook(() => useIntelligenceBar({ context: 'dispatch' }));
+  await act(async () => result.current.submit('Same request'));
+  await act(async () => result.current.submit('Same request'));
+  expect(bodies[1].request_key).toBe(bodies[0].request_key);
+  status = 409;
+  await act(async () => result.current.submit('Same request'));
+  expect(bodies[2].request_key).toBe(bodies[0].request_key);
+  await act(async () => result.current.submit('Same request'));
+  expect(bodies[3].request_key).not.toBe(bodies[0].request_key);
+});

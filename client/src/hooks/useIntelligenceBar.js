@@ -16,7 +16,7 @@ import {
   toggleFavorite as toggleFavoriteStorage,
 } from '../utils/ibStorage';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../utils/ibImages';
-import { createRequestIdentity, ibSessionId } from '../utils/ibSession';
+import { createRequestIdentity, definitiveFailure, ibSessionId } from '../utils/ibSession';
 import { retainTaskReceipt } from '../utils/ibTaskReceipts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -252,8 +252,9 @@ export function useIntelligenceBar({
 
       if (onAfterSubmitRef.current) onAfterSubmitRef.current(data);
     } catch (err) {
-      // A definitive HTTP failure was answered; only a dropped response keeps the key.
-      if (err?.status) {
+      // Only a definitive 4xx answer settles the identity; a server failure
+      // keeps the key so the retry replays the saved task (see ibSession).
+      if (definitiveFailure(err)) {
         identityRef.current.settle(identity);
         answered = true;
       }

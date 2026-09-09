@@ -26,7 +26,7 @@ import useModalFocus from "../../hooks/useModalFocus";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
-import { createRequestIdentity, ibSessionId } from "../../utils/ibSession";
+import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
 import { retainTaskReceipt } from "../../utils/ibTaskReceipts";
 import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
@@ -617,8 +617,9 @@ function GlobalCommandPalette({ user }, ref) {
           }
         }
       } catch (err) {
-        // A definitive HTTP failure was answered; only a dropped response keeps the key.
-        if (err?.status) {
+        // Only a definitive 4xx answer settles the identity; a server failure
+        // keeps the key so the retry replays the saved task (see ibSession).
+        if (definitiveFailure(err)) {
           identityRef.current.settle(identity);
           answered = true;
         }
