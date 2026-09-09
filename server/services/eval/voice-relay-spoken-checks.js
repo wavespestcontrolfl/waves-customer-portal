@@ -427,7 +427,7 @@ const VISIT_QUESTION_RE = /(?:^|[—–:])\s*(?:so[,\s]+)?(?:(?:is|are|was|were|
 const DISCLOSURE_VERB = '(?:confirm|verify|deny|say|tell|share|disclose|provide|give)';
 // An explicit refusal or offer to explain answers what Sandy can do; an
 // otherwise affirmative prefix answers the caller even before a redirect.
-const VISIT_NONANSWER = `(?:i|we)\\s+(?:(?:cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|(?:will|do) not)\\s+${DISCLOSURE_VERB}|(?:can|could|will|would)\\s+(?:explain|help|assist|show))\\b`;
+const VISIT_NONANSWER = `(?:i|we)(?:[\\x27\\u2019](?:m|re)| (?:am|are))?\\s+(?:(?:cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|(?:will|do) not|unable|not able)\\s+(?:to\\s+)?${DISCLOSURE_VERB}|(?:can|could|will|would)\\s+(?:explain|help|assist|show))\\b`;
 const VISIT_ANSWER_RE = new RegExp(`^\\s*(?:no|nope|not (?:today|tomorrow)|i[\\x27\\u2019]m afraid not|that(?:[\\x27\\u2019]s| is) (?:wrong|incorrect|not right)|(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:(?:is|are|was|were|does|do|did|has|have)(?:n[\\x27\\u2019]t| not)?|will(?: not)?|won[\\x27\\u2019]t)|(?:${AFFIRMATION}|no|nope)[,\\s]+(?!\\s*${VISIT_NONANSWER})[^.!?]*)[.!\\s]*$`, 'i');
 
 // A negative appointment fact is still private. Only a refusal to disclose
@@ -438,7 +438,7 @@ function isDisclosureRefusal(prefix) {
   const conditional = [...prefix.matchAll(/\b(?:whether|if)\b/gi)].pop();
   // The conditional must introduce this visit predicate, not another
   // action such as "if she opens the portal her visit is scheduled".
-  return (conditional && /^(?:\s+(?:or|when|the|her|his|their|your|that|this|an?))*\s*$/i.test(prefix.slice(conditional.index + conditional[0].length))) || DISCLOSURE_REFUSAL_RE.test(prefix);
+  return (conditional && /^(?:\s+(?:or|not|when|the|her|his|their|your|that|this|an?|[a-z]+[\x27\u2019]s|[a-z]+\s+(?:has|have)))*\s*$/i.test(prefix.slice(conditional.index + conditional[0].length))) || DISCLOSURE_REFUSAL_RE.test(prefix);
 }
 const VISIT_INQUIRY_RE = /\b(?:check|see|view|find(?: out)?|learn|confirm|tell(?:\s+(?:you|her|him|them))?|(?:ask|contact)\b[^.!?;:]*?)\s+(?:about\s+)?when\b/i;
 const isVisitInquiry = (prefix) => VISIT_INQUIRY_RE.test(prefix) && !/\b(?:i|we)\s+(?:can|could|will|would)\s+(?:tell|confirm)\b/i.test(prefix);
@@ -455,7 +455,7 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   new RegExp(`\\b(?:i|we)(?:[\\x27\\u2019]ve| (?:have|had|can|could|do|did|don[\\x27\\u2019]t|didn[\\x27\\u2019]t))?(?: not)? (?:see|saw|seen|find|found|locate|located)\\s+(?:(?:no|an?|any|the|that|scheduled|upcoming|her|his|their)\\s+)*${VISIT_NOUN}`, 'gi'),
 ]);
 const VISIT_SUBJECT_RE = new RegExp(`\\b(?:${VISIT_NOUN}|technician|tech|she|he|they|someone|somebody|arrival|window|slot|eta)\\b`, 'i');
-const CONTACT_SUBJECT_RE = /\b(?:call|calls|calling|speak|speaks|speaking|talk|talks|talking|reach|contact|open|opens|opened|closes?|closed|hours|line|number)\b/i;
+const CONTACT_SUBJECT_RE = /\b(?:call|calls|calling|follow[ -]up|speak|speaks|speaking|talk|talks|talking|reach|contact|open|opens|opened|closes?|closed|hours|line|number)\b/i;
 const DISCLOSURE_SUBJECT_RE = new RegExp(`${VISIT_SUBJECT_RE.source}|${CONTACT_SUBJECT_RE.source}`, 'gi');
 // Number labels distinguish a disclosed fragment from a count or menu option.
 const PHONE_FRAGMENT_RE = /\b(?:phone(?: number)?|number|area code|(?:first|last)(?:\s+(?:\d+|one|two|three|four|five|six|seven))?\s+digits?)\s*(?:(?:is|are|was|were|ends? (?:in|with)|starts? with|begins? with)\s+|:\s*)\d(?:[\s,.-]*\d)*\b/i;
