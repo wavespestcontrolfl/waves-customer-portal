@@ -128,12 +128,26 @@ it('an "Additional work" option keeps the protocol row\'s application mode on it
 });
 
 it('a plan outage withdraws every still-derived suggestion and keeps entered values with their units', () => {
-  const governed = { productId: 'k', lawnPlanDefaults: { rate: 3 }, rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft', lawnPlanManualFields: [] };
-  const entered = { ...governed, productId: 'micro', totalAmount: '9', amountUnit: 'gal', totalAmountManual: true, rate: '2', areaValue: '1000', lawnPlanManualFields: ['rate', 'areaValue', 'amountUnit'] };
-  const manual = { productId: 'legacy', totalAmount: 4, amountUnit: 'oz' };
-  expect(withdrawLawnPlanSuggestions([governed, entered, manual])).toEqual([
-    { ...governed, totalAmount: '', rate: '', areaValue: '', lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON },
+  const governed = { productId: 'k', lawnPlanDefaults: { rate: 3 }, rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft', applicationMethod: 'broadcast_spray', lawnPlanManualFields: [] };
+  const entered = { ...governed, productId: 'micro', totalAmount: '9', amountUnit: 'gal', totalAmountManual: true, rate: '2', areaValue: '1000', applicationMethod: 'spot_treatment', lawnPlanManualFields: ['rate', 'areaValue', 'amountUnit', 'applicationMethod'] };
+  const manual = { productId: 'legacy', totalAmount: 4, amountUnit: 'oz', applicationMethod: 'broadcast_spray' };
+  // The plan's application mode is withdrawn with its quantities: a recipe
+  // the failed request cannot verify does not carry a prior broadcast/spot
+  // classification into the completion; a chosen method stays (Codex r12 P1).
+  expect(withdrawLawnPlanSuggestions([governed, entered, manual], { planUnverified: true })).toEqual([
+    { ...governed, totalAmount: '', rate: '', areaValue: '', applicationMethod: '', lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON },
     { ...entered, lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON },
     manual,
   ]);
+  // A refresh that fails after a successful load keeps the mode that load verified.
+  expect(withdrawLawnPlanSuggestions([governed])[0]).toMatchObject({ totalAmount: '', rate: '', areaValue: '', applicationMethod: 'broadcast_spray' });
+});
+
+it('a chosen rate unit never relabels the plan rate: the still-derived rate and total stay withdrawn while the units differ, return when they agree, and the area still follows the visit', () => {
+  const row = { productId: 'product', rate: '', rateUnit: 'lb', totalAmount: '', amountUnit: 'lb', areaValue: 5000, areaUnit: 'sqft', lawnPlanDefaults: {}, lawnPlanManualFields: ['rateUnit', 'amountUnit'] };
+  const fresh = { ...row, rate: 3, rateUnit: 'fl_oz', totalAmount: 12, amountUnit: 'fl_oz', areaValue: 4000, lawnPlanManualFields: [] };
+  expect(reconcileLawnPlanSelections([row], [fresh])[0]).toMatchObject({ rate: '', rateUnit: 'lb', totalAmount: '', amountUnit: 'lb', areaValue: 4000 });
+  expect(reconcileLawnPlanSelections([{ ...row, rateUnit: 'fl_oz', amountUnit: 'fl_oz' }], [fresh])[0]).toMatchObject({ rate: 3, rateUnit: 'fl_oz', totalAmount: 12, areaValue: 4000 });
+  // An entered rate under the chosen unit is the tech's actual and refreshes nothing but the area.
+  expect(reconcileLawnPlanSelections([{ ...row, rate: 2, lawnPlanManualFields: ['rate', 'rateUnit'] }], [fresh])[0]).toMatchObject({ rate: 2, rateUnit: 'lb', areaValue: 5000 });
 });

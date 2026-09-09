@@ -491,9 +491,56 @@ it('a draft restored during a plan outage withdraws the suggestions saved under 
   // no longer stand behind (Codex r8 P1).
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
   expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  // The saved application mode was that plan's suggestion too: the tech must
+  // confirm it even after entering the amount and area (Codex r12 P1).
+  const methodOf = (index) => within(totals()[index].parentElement).getAllByRole('combobox')[2];
+  expect(totals().map((_, index) => methodOf(index).value)).toEqual(['', '']);
+  expect(screen.queryAllByPlaceholderText('Sq ft')).toHaveLength(0);
   failPlan = false;
   fireEvent.click(screen.getByRole('button', { name: 'Retry plan' }));
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '10']));
+  expect(totals().map((_, index) => methodOf(index).value)).toEqual(['broadcast_spray', 'broadcast_spray']);
+});
+
+it('changing only the rate unit withdraws a plan-suggested rate and total instead of relabeling them, and returning to the plan unit restores them', async () => {
+  enableDefaults();
+  mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  const rate = () => screen.getAllByPlaceholderText('Rate')[0];
+  const rateUnit = () => within(totals()[0].parentElement).getAllByRole('combobox')[0];
+  expect(rate().value).toBe('3');
+  fireEvent.change(rateUnit(), { target: { value: 'lb' } });
+  // 3 fl oz per 1,000 sq ft and 15 fl oz must never stand as 3 lb and 15 lb (Codex r12 P1).
+  expect(rate().value).toBe('');
+  expect(totals()[0].value).toBe('');
+  expect(rateUnit().value).toBe('lb');
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  // A visit-area refresh cannot restore the withdrawn rate under the foreign unit; the area still follows.
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[1].value).toBe('8'));
+  expect(rate().value).toBe('');
+  expect(totals()[0].value).toBe('');
+  expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('4000');
+  fireEvent.change(rateUnit(), { target: { value: 'fl_oz' } });
+  await waitFor(() => expect(rate().value).toBe('3'));
+  expect(totals()[0].value).toBe('12');
+});
+
+it('a failed refresh that withdraws plan suggestions drops an untouched generated report', async () => {
+  enableDefaults();
+  mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  fireEvent.change(notes, { target: { value: 'Hand notes before generating.' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(notes.value).toContain('Applied the old products.'));
+  failPlan = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
+  await screen.findByText('Plan could not be refreshed. Enter actual amounts or retry.');
+  // The withdrawn rows are a changed product payload: prose grounded in the old rate cannot ride along (Codex r12 P1).
+  expect(totals().map(input => input.value)).toEqual(['', '']);
+  expect(notes.value).not.toContain('Applied the old products.');
+  expect(notes.value).toContain('Hand notes before generating.');
 });
 
 it('a tierless visit with governed defaults still requires every product\'s actual amount', async () => {
@@ -543,9 +590,11 @@ it('edits and removals on a governed draft restored under an initial plan outage
   await screen.findByText('Lawn plan unavailable.');
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
-  // Defaults never loaded, but the rows are governed: a measured area and a
-  // removal recorded now must not be undone by the retry (pre-push audit P1).
-  fireEvent.change(screen.getAllByPlaceholderText('Sq ft')[1], { target: { value: '1000' } });
+  // Defaults never loaded, but the rows are governed: a confirmed method, a
+  // measured area and a removal recorded now must not be undone by the retry
+  // (pre-push audit P1; the method is confirmed first — Codex r12 P1).
+  fireEvent.change(within(totals()[1].parentElement).getAllByRole('combobox')[2], { target: { value: 'broadcast_spray' } });
+  fireEvent.change(screen.getAllByPlaceholderText('Sq ft')[0], { target: { value: '1000' } });
   fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
   await waitFor(() => expect(totals()).toHaveLength(1));
   failPlan = false;
@@ -569,8 +618,9 @@ it('a governed draft restored under an initial plan outage still submits its sav
   await screen.findByText('Lawn plan unavailable.');
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
-  // The withdrawn rows ask for the actual area and amount; the visit area
-  // itself was restored from the draft.
+  // The withdrawn rows ask for the method, the actual area and amount; the
+  // visit area itself was restored from the draft.
+  totals().forEach((input) => fireEvent.change(within(input.parentElement).getAllByRole('combobox')[2], { target: { value: 'broadcast_spray' } }));
   screen.getAllByPlaceholderText('Sq ft').forEach((input) => fireEvent.change(input, { target: { value: '1000' } }));
   fireEvent.change(totals()[0], { target: { value: '3' } });
   fireEvent.change(totals()[1], { target: { value: '2' } });

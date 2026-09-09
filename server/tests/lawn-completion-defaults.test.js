@@ -111,6 +111,20 @@ test('every option carries the protocol row\'s application mode, so an added her
   ]);
 });
 
+test('a deactivated catalog product is offered neither as a default nor under "Additional work"', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push({ productId: 'retired', defaultInPlan: false, gates: {}, applicationMode: 'broadcast' });
+  plan.mixCalculator.items[0].product.active = false;
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, product: { id: 'retired', name: 'Retired herbicide', active: false } },
+  ];
+  const result = buildLawnCompletionDefaults(plan, context);
+  // The completion writer rejects an inactive product row, so the option would
+  // be an action that cannot be completed (Codex r12 P2).
+  expect(result.items).toEqual([]);
+  expect(result.options).toEqual([]);
+});
+
 test('a nonmember can use an explicitly assigned window; a spot default stays spot work', () => {
   const { plan, context } = fixture();
   plan.propertyGate.serviceTier = null;

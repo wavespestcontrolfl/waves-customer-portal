@@ -21,7 +21,11 @@ const PLAN_FIELDS = ['rate', 'rateUnit', 'amountUnit', 'areaValue', 'areaUnit', 
 // withdrawn while that unit differs from the plan's (below), but an untouched
 // rate or treated area must still follow a visit-area refresh — a stale
 // product area would be the nutrient ledger's denominator (Codex r9 P1).
-const CALCULATION_INPUTS = ['rate', 'rateUnit', 'areaValue', 'areaUnit', 'applicationMethod'];
+// Neither is a chosen rate unit: the plan's rate is a quantity in the plan's
+// unit, so while the units differ the still-derived rate and total stay
+// withdrawn rather than relabeled, and they return when the units agree
+// again or the tech enters the actual (Codex r12 P1).
+const CALCULATION_INPUTS = ['rate', 'areaValue', 'areaUnit', 'applicationMethod'];
 
 export function lawnPlanSelections(items, buildProduct, catalog, { areas = LAWN_DEFAULT_AREAS, governed = false } = {}) {
   const seen = new Set();
@@ -67,12 +71,20 @@ export function lawnPlanSelections(items, buildProduct, catalog, { areas = LAWN_
 // restored row would otherwise keep the suggestions saved under an earlier
 // plan and pass the actuals gate with them.
 export const LAWN_PLAN_UNAVAILABLE_REASON = 'Plan unavailable. Confirm the treated area and actual amount or retry.';
-export function withdrawLawnPlanSuggestions(rows) {
+// `planUnverified`: the rows were saved under a plan this session never
+// resolved (a draft restored while the initial request failed), so the
+// plan's application mode is withdrawn with its quantities — a recipe the
+// failed request cannot verify must not carry a prior broadcast/spot
+// classification into the completion; the tech confirms the method, as
+// reconciliation requires when a default disappears (Codex r12 P1). A refresh
+// that fails after a successful load keeps the mode that load verified.
+export function withdrawLawnPlanSuggestions(rows, { planUnverified = false } = {}) {
   return rows.map((row) => row.lawnPlanDefaults ? {
     ...row,
     totalAmount: row.totalAmountManual ? row.totalAmount : '',
     rate: row.lawnPlanManualFields?.includes('rate') ? row.rate : '',
     areaValue: row.lawnPlanManualFields?.includes('areaValue') ? row.areaValue : '',
+    ...(planUnverified && !row.lawnPlanManualFields?.includes('applicationMethod') ? { applicationMethod: '' } : {}),
     lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON,
   } : row);
 }
@@ -113,6 +125,13 @@ export function reconcileLawnPlanSelections(current, defaults, removedIds = []) 
     // unit the tech chose: a still-derived total stays withdrawn until the
     // units agree again or the tech enters the actual.
     if (manual.has('amountUnit') && !manual.has('totalAmount') && next.amountUnit !== fresh.amountUnit) next.totalAmount = '';
+    // Likewise a chosen rate unit: the plan's 3 fl oz per 1,000 sq ft is
+    // never restated as 3 lb. The untouched rate and its derived total stay
+    // withdrawn until the tech enters the actual or the unit matches again.
+    if (manual.has('rateUnit') && !manual.has('rate') && next.rateUnit !== fresh.rateUnit) {
+      next.rate = '';
+      if (!row.totalAmountManual) next.totalAmount = '';
+    }
     if (fresh.totalAmount === '' && !row.totalAmountManual) next.totalAmount = '';
     if (fresh.rate === '' && !manual.has('rate')) next.rate = '';
     if (row.applicationAreaDefault !== false) next.applicationArea = fresh.applicationArea;
