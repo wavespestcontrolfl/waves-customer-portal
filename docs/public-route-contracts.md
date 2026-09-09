@@ -87,7 +87,9 @@ unassigned work remains a fixed blocker. Public responses expose no full route,
 provider legs or exact route coordinates. Scheduling traffic lookups share a
 40-request/800-element allowance per application process per 15 minutes across
 HTTP requests and fall back to the conservative model when exhausted; response
-data remains request-local. Gate-off availability is unchanged.
+data remains request-local. The south-zone day funnel still restricts capacity
+offers to clustered days or one seed day when its gate is enabled.
+Gate-off availability is unchanged.
 Estimate reservation and acceptance certify and persist route order as described
 below; the gate remains off until the other booking writers are integrated.
 Existing request fields, token/signature guards, rate limits and privacy headers
@@ -97,8 +99,13 @@ Routine durations resolve through the catalog's additive scheduling policy;
 new arrival labels start on the hour within 08:00–18:00 ET, last start 16:00.
 Reserve and accept recheck the full live route and eligibility under the shared
 date lock and, for capacity route-order writes, the technician-day fence
-acquired before row locks. Completed stops retain their route prefix. A stale
-route or changed service allowance returns the existing 409 `SLOT_UNAVAILABLE`.
+acquired before row locks. Relevant route rows remain locked through persistence;
+a busy completion returns a recoverable conflict rather than waiting in reverse
+lock order. Unrelated assigned technicians do not invalidate the route fingerprint.
+Completed stops retain their route prefix. A stale route or changed service
+allowance returns the existing 409 `SLOT_UNAVAILABLE`, including for version-2
+holds accepted after gate shutdown. Signed offers are verified against the resolved
+allowance before route traffic preparation and again under the transaction lock.
 Without a combined recurring allocation, catalog sizing and capability checks use only
 the primary appointment (pest when selected, otherwise the first program);
 independently scheduled companion programs do not enlarge its allowance.

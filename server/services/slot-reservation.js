@@ -339,9 +339,9 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
   return null;
 }
 
-async function catalogLinkForProfile(conn, serviceProfile = {}) {
+async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false } = {}) {
   const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
-    ...(require('./scheduling/policy').capacityEnabled() ? ['scheduling_duration_policy'] : [])];
+    ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
   // `service` is the DISPLAY CATEGORY — pest specialties (german_roach,
@@ -492,6 +492,7 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
     serviceCadences: opts.serviceCadences,
     durationMinutes: opts.durationMinutes,
     preserveCombinedCapacity: opts.preserveCombinedCapacity,
+    preserveCapacity: row?.reservation_policy_version === 2,
   };
   const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimate, profileOptions, client);
   const held = require('./combined-visit-capacity').capacityFromReservation(row);
@@ -500,7 +501,7 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
     if (selected.length !== held.services.length || held.services.some(key => !selected.includes(key))) {
       throw capacityError('service_selection_changed');
     }
-    if (held.version === 2 && capacityEnabled() && held.services.some((key, index) =>
+    if (held.version === 2 && held.services.some((key, index) =>
       profile.services.find(service => service.service === key).durationMinutes !== held.durations[index])) {
       throw capacityError('service_duration_changed');
     }
@@ -512,7 +513,7 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
   }
   if (row?.reservation_policy_version === 2) {
     const heldDuration = Number(row.estimated_duration_minutes);
-    if (capacityEnabled() && profile.durationMinutes !== heldDuration) {
+    if (profile.durationMinutes !== heldDuration) {
       throw capacityError('service_duration_changed');
     }
     profile.durationMinutes = heldDuration;
@@ -565,8 +566,8 @@ async function reserveSlot({
   // Signed-offer gate (booking-audit round 2): every slot the generator
   // returns carries `.exp.sig` inside its slotId — a bare/hand-crafted id
   // (including a crafted `_unassigned` one) was never offered. Presence and
-  // expiry are checked here before any DB work; the HMAC itself is verified
-  // in-txn once the effective duration is known. Rejected with the same
+  // expiry are checked here before any DB work; capacity mode verifies the
+  // HMAC before route traffic, then both modes verify the locked profile. Rejected with the same
   // SLOT_UNAVAILABLE the client already recovers from by refreshing slots —
   // which is also exactly what a customer holding a pre-deploy (unsigned)
   // slot list needs: one 409, then the refreshed list is signed.
@@ -697,6 +698,11 @@ async function reserveSlot({
     const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimateForCapacity, {
       serviceMode, selectedFrequency, serviceCadences, durationMinutes,
     });
+    // Authenticate the offered tuple before spending the shared traffic budget.
+    // The transaction repeats this check against the locked estimate profile.
+    if (!verifySlotOffer({ surface: 'estimate', scopeId: String(estimateId), date,
+      startMinutes: slotStartMinutes, technicianId: techId, durationMinutes: profile.durationMinutes,
+      exp: offerExp }, offerSig)) throw capacityError('invalid_offer');
     preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
       prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
         service_type: profile.services.map(service => service.service).join(' ') },
@@ -869,9 +875,9 @@ async function reserveSlot({
       // very slots getAvailableSlots returned. A token holder can no longer
       // reserve any tuple the generator never offered; a legitimately offered
       // `_unassigned` slot verifies like any other, while an UNSIGNED
-      // unassigned id died at the presence gate above. Verified here (not
-      // pre-txn) because the duration needs the estimate's profile — the
-      // coarse policy checks below stay as defense-in-depth.
+      // unassigned id died at the presence gate above. Recheck the locked
+      // profile here even after capacity mode authenticated before traffic;
+      // the coarse policy checks below stay as defense-in-depth.
       if (!verifySlotOffer({
         surface: 'estimate',
         scopeId: String(estimateId),

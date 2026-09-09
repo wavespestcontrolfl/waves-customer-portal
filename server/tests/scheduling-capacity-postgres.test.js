@@ -305,4 +305,78 @@ describeDb('scheduling capacity on PostgreSQL', () => {
     expect((await mockPg('scheduled_services').where({ id: held.scheduledServiceId }).first()).customer_id).toBeNull();
   });
 
+  test.each([false, true])('gate-off changed selection rejects a v2 hold (combined=%s)', async combined => {
+    if (combined) await mockPg('estimates').where({ id: estimateIds[0] })
+      .update({ estimate_data: estimateData(['pest_control', 'lawn_care']) });
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0], combined ? 70 : 30) });
+    const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const changed = estimateData(combined ? ['pest_control', 'lawn_care'] : ['lawn_care']);
+    if (combined) changed.result.recurring.services[0].estimatedDurationMinutes = 90;
+    await mockPg('estimates').where({ id: estimateIds[0] }).update({ estimate_data: changed });
+    await expect(prepareReservationCommit(held.scheduledServiceId))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed' });
+    await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId, preparedCapacity }))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed' });
+  });
+
+  test('invalid signed offers never prepare route traffic', async () => {
+    const optimizer = require('../services/route-optimizer');
+    const travel = jest.spyOn(optimizer, 'createSchedulingTravel');
+    try {
+      const good = signedSlot(estimateIds[0]);
+      const bad = good.slice(0, -1) + (good.endsWith('a') ? 'b' : 'a');
+      await expect(reserveSlot({ estimateId: estimateIds[0], slotId: bad }))
+        .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'invalid_offer' });
+      expect(travel).not.toHaveBeenCalled();
+    } finally { travel.mockRestore(); }
+  });
+
+  test('another technician changing their route does not invalidate acceptance', async () => {
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
+    const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
+    await mockPg('scheduled_services').insert(baseStop({ technician_id: otherTechId }));
+    const booked = await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId, preparedCapacity });
+    expect(booked.customer_id).toBe(customerId);
+  });
+
+  test('a completion holding a route row makes acceptance retry without waiting', async () => {
+    const stop = baseStop({ route_order: 1 });
+    await mockPg('scheduled_services').insert(stop);
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
+    const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
+    const completion = await mockPg.transaction();
+    try {
+      await completion('scheduled_services').where({ id: stop.id }).forUpdate().first();
+      await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId, preparedCapacity }))
+        .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_busy' });
+      await completion('scheduled_services').where({ id: stop.id }).update({ status: 'completed' });
+      await completion.commit();
+      await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId, preparedCapacity }))
+        .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_changed' });
+    } finally { if (!completion.isCompleted()) await completion.rollback(); }
+  });
+
+  test('verified route rows remain locked through order persistence', async () => {
+    const { verifyArrivalCapacity, persistArrivalOrder } = require('../services/scheduling/arrival-route');
+    const stop = baseStop({ route_order: 1 });
+    await mockPg('scheduled_services').insert(stop);
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
+    const prepared = await prepareReservationCommit(held.scheduledServiceId);
+    await mockPg.transaction(async trx => {
+      const fit = await verifyArrivalCapacity(prepared, { conn: trx });
+      await expect(mockPg.transaction(other => other('scheduled_services').where({ id: stop.id }).forUpdate().noWait().first()))
+        .rejects.toMatchObject({ code: '55P03' });
+      await persistArrivalOrder(trx, fit, held.scheduledServiceId);
+    });
+  });
+
+  test('an unchanged single-service hold keeps its catalog allowance after gate shutdown', async () => {
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const booked = await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId });
+    expect(booked).toMatchObject({ estimated_duration_minutes: 30, customer_id: customerId,
+      reservation_expires_at: null });
+  });
+
 });

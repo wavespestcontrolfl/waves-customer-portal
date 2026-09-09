@@ -803,7 +803,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
           label,
           visitsPerYear: visitsForService(row),
           commercial: /commercial/i.test(rawIdentity) || undefined,
-          ...(capacityEnabled() && Number.isFinite(explicitDuration) && explicitDuration > 0
+          ...((capacityEnabled() || userOpts.preserveCapacity) && Number.isFinite(explicitDuration) && explicitDuration > 0
             ? { durationMinutes: explicitDuration } : {}),
         };
       })
@@ -856,7 +856,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
  * booking boundary. This is also used inside reserve/commit transactions. */
 async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
   const profile = resolveEstimateSlotProfile(estimate, userOpts);
-  if (!capacityEnabled()) return profile;
+  if (!capacityEnabled() && !userOpts.preserveCapacity) return profile;
   const { catalogLinkForProfile } = require('./slot-reservation');
   const { serviceDurationMinutes } = require('./service-library');
   // Without a combined recurring allocation, the held appointment belongs
@@ -866,8 +866,8 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
     : [profile.services.find(service => service.service === 'pest_control') || profile.services[0]].filter(Boolean);
   const services = [];
   for (const service of appointmentServices) {
-    const catalog = await catalogLinkForProfile(conn, { ...profile, services: [service] });
-    const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes);
+    const catalog = await catalogLinkForProfile(conn, { ...profile, services: [service] }, { preserveCapacity: userOpts.preserveCapacity });
+    const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes, { preserveCapacity: userOpts.preserveCapacity });
     services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0) });
   }
   const capacity = profile.reservationServiceMix
@@ -1873,9 +1873,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     if (s?.date && !preferredSeedDates.includes(s.date)) preferredSeedDates.push(s.date);
   }
   const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
-  const { slots: funneledBookable, funnel } = capacityEnabled()
-    ? { slots: allBookable, funnel: null }
-    : applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
+  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {

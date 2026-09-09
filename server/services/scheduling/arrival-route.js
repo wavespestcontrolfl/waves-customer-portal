@@ -315,7 +315,9 @@ function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin
 
 function routeFingerprint(context) {
   const { createHash } = require('crypto');
-  const rows = [...context.rows, context.target].map(row => Object.fromEntries(
+  const relevant = context.rows.filter(row => row.technician_id == null
+    || row.technician_id === context.target.technician_id);
+  const rows = [...relevant, context.target].map(row => Object.fromEntries(
     [...COLUMNS, 'lat', 'lng'].map(key => [key, row[key] ?? null]),
   )).sort((a, b) => String(a.id).localeCompare(String(b.id)));
   // Prospective creation time is bookkeeping, not a changed route input.
@@ -356,6 +358,18 @@ async function prepareArrivalCapacity(options) {
 
 async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, durationMinutes, serviceTypes } = {}) {
   if (!prepared || (!capacityEnabled() && !prepared.options.preserveCapacity)) throw capacityError();
+  // Completion writers lock stops without the tech-day fence. Hold relevant
+  // rows through persistence; NOWAIT avoids reversing their lock order.
+  if (!conn?.isTransaction) throw capacityError('transaction_required');
+  try {
+    await conn('scheduled_services').where({ scheduled_date: prepared.options.date })
+      .where(query => query.where('technician_id', prepared.options.technicianId).orWhereNull('technician_id'))
+      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+      .orderBy('id').select('id').forUpdate().noWait();
+  } catch (error) {
+    if (error.code === '55P03') throw capacityError('route_busy');
+    throw error;
+  }
   const context = await loadArrivalRouteContext({ ...prepared.options, conn, travel: prepared.travel });
   if (!context || routeFingerprint(context) !== prepared.fingerprint) throw capacityError();
   const fit = evaluateArrivalPlacement(context, { ...prepared.options,
