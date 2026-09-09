@@ -402,10 +402,41 @@ function no_refund_claim(value, record, { spoken }) {
 
 // ── Third-party disclosure ─────────────────────────────────────────────────
 
+const AFFIRMATION = '(?:yes|yeah|yep|sure|certainly|absolutely|definitely|indeed|of course|correct|that[\\x27\\u2019]s right|that is right|it (?:(?:sure(?:ly)?|certainly|definitely|absolutely|indeed|really) )?(?:is|was|did)|it[\\x27\\u2019]s)';
+const SHORT_AFFIRMATION_RE = new RegExp(`^\\s*${AFFIRMATION}(?:[\\s,]+${AFFIRMATION})*[.!\\s]*$`, 'i');
+
+// A short answer follows the latest question already spoken. Agent questions
+// can change that subject; a later portal direction cannot undo a disclosure.
+function answeredQuestion(record, questionRe, answerRe) {
+  let question = '';
+  for (const event of record.events) {
+    if (event.kind === 'caller') question = normalizeTimeAbbreviations(event.text).split(SENTENCE_SPLIT_RE).filter((s) => s.trim()).pop() || '';
+    if (event.kind !== 'agent') continue;
+    const parts = normalizeTimeAbbreviations(event.text).split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
+    for (let i = 0; i < parts.length; i += 2) {
+      if (parts[i + 1]?.includes('?')) question = parts[i];
+      else if (questionRe.test(question) && answerRe.test(parts[i])) return true;
+    }
+  }
+  return false;
+}
+
+// A yes/no question about a visit differs from a request to explain or look
+// it up: "Can you check whether she has a visit?" does not supply a fact.
 const VISIT_STATUS = 'scheduled|booked|cancelled|canceled|confirmed|rescheduled|postponed|skipped|completed|pending|moved|delayed';
 const VISIT_TIME_RE = new RegExp([...TIME_ANYWHERE_RES.map((re) => re.source), RELATIVE_DAY_RE.source, '\\b(?:today|tonight|(?:this|that|early|late|in the|during the) (?:morning|afternoon|evening|night))\\b'].join('|'), 'i');
 const VISIT_MODIFIERS_RE = new RegExp(`^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?(?:${VISIT_TIME_RE.source}))*\\s*$`, 'i');
+const VISIT_QUESTION_RE = new RegExp(`(?:^|[—–:])\\s*(?:so[,\\s]+)?(?:(?:is|are|was|were|will|has|have)(?:n[\\x27\\u2019]t)?\\s+(?:(?:the|her|his|their|your|an?)\\s+)?(?:technician|tech|she|he|they|you|appointment|visit|service)\\b[^.!?]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|en route|${VISIT_STATUS}|due|${VISIT_TIME_RE.source})\\b|(?:does|do|did)(?:n[\\x27\\u2019]t)?\\s+(?:she|he|they|you)\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|(?:is|are|was|were)(?:n[\\x27\\u2019]t)?\\s+there\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|(?:she|he|they|you)\\s+(?:has|have)(?:n[\\x27\\u2019]t)?\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b)`, 'i');
 const DISCLOSURE_VERB = '(?:confirm|verify|deny|say|tell|share|disclose|provide|give)';
+// An explicit refusal or offer to explain answers what Sandy can do; an
+// otherwise affirmative prefix answers the caller even before a redirect.
+const VISIT_NONANSWER = `(?:(?:sorry|unfortunately)[,\\s]+|i(?:[\\x27\\u2019]m| am) (?:afraid|sorry)[,\\s]+)*(?:i|we)(?:[\\x27\\u2019](?:m|re)| (?:am|are))?\\s+(?:(?:cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|(?:will|do) not|unable|not able)\\s+(?:to\\s+)?${DISCLOSURE_VERB}|(?:can|could|will|would)\\s+(?:explain|help|assist|show))\\b`;
+const VISIT_ANSWER_RE = new RegExp(`${SHORT_AFFIRMATION_RE.source}|^\\s*(?:no|nope|not (?:today|tomorrow)|i[\\x27\\u2019]m afraid not|that(?:[\\x27\\u2019]s| is) (?:wrong|incorrect|not right)|(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:(?:is|are|was|were|does|do|did|has|have)(?:n[\\x27\\u2019]t| not)?|will(?: not)?|won[\\x27\\u2019]t)|(?:${AFFIRMATION}|no|nope)[,\\s—–:-]+(?![,\\s—–:-]*${VISIT_NONANSWER})[^.!?]*)[.!\\s]*$`, 'i');
+
+// Open ETA and visit-status questions give a bare time its subject. A request
+// to check the portal or an office-hours question does not establish a visit time.
+const VISIT_TIME_QUESTION_RE = /(?:^|[—–:])\s*(?:so[,\s]+)?(?:what time|when|what (?:day|date))\s+(?:is|are|was|were|will|does|do)\s+(?:(?:the|her|his|their|your|next|upcoming)\s+)*(?:(?:appointment|visit|service)\b|(?:technician|tech|she|he|they|you)\b[^.!?]*\b(?:coming|arriv\w*|due|come out|get (?:here|there)))\b/i;
+const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*(?:(?:it[\\x27\\u2019]s|it is)\\s+)?(?:(?:at|around|about|between|from|not)\\s+)?(?:${HOUR}(?::[0-5]\\d|\\s+(?:thirty|fifteen|forty[- ]five))?\\s*${MERIDIEM}?(?:\\s*${RANGE}\\s*${HOUR}\\s*${MERIDIEM}?)?|${VISIT_TIME_RE.source})[.!\\s]*$`, 'i');
 
 // A negative appointment fact is still private. Only a refusal to disclose
 // excuses it; "she has no visit" and "the tech isn't coming" must both fail.
@@ -438,6 +469,9 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   // directing the account holder to find it themselves does not.
   new RegExp(`\\b(?:i|we)(?:[\\x27\\u2019]ve| (?:have|had|can|could|do|did|don[\\x27\\u2019]t|didn[\\x27\\u2019]t))?(?: not)? (?:see|saw|seen|find|found|locate|located)\\s+(?:(?:no|an?|any|the|that|upcoming|future|${VISIT_STATUS}|her|his|their)\\s+)*${VISIT_NOUN}`, 'gi'),
 ]);
+const VISIT_SUBJECT_RE = new RegExp(`\\b(?:${VISIT_NOUN}|technician|tech|she|he|they|someone|somebody|arrival|window|slot|eta)\\b`, 'i');
+const CONTACT_SUBJECT_RE = /\b(?:call|calls|calling|follow[ -]up|speak|speaks|speaking|talk|talks|talking|reach|contact|open|opens|opened|closes?|closed|hours|line|number)\b/i;
+const DISCLOSURE_SUBJECT_RE = new RegExp(`${VISIT_SUBJECT_RE.source}|${CONTACT_SUBJECT_RE.source}`, 'gi');
 // Number labels distinguish a disclosed fragment from a count or menu option.
 const PHONE_FRAGMENT_RE = /\b(?:phone(?: number)?|number|area code|(?:first|last)(?:\s+(?:\d+|one|two|three|four|five|six|seven))?\s+digits?)\s*(?:(?:is|are|was|were|ends? (?:in|with)|starts? with|begins? with)\s+|:\s*)\d(?:[\s,.-]*\d)*\b/i;
 const PHONE_ENDING_RE = /\b(?:it|that|hers|his|theirs)\s+(?:ends? (?:in|with)|starts? with|begins? with)\s+\d(?:[\s,.-]*\d)*\b/gi;
@@ -446,6 +480,7 @@ const VISIT_CLAUSE_BOUNDARY_RE = new RegExp(`[.!?;,]|(?<!\\d):|:(?!\\d)|\\b(?:bu
 
 /** value: true. Caller-supplied third-party details are not a read-back exemption. */
 function no_third_party_disclosure(value, record, { spoken }) {
+  if (answeredQuestion(record, VISIT_QUESTION_RE, VISIT_ANSWER_RE) || answeredQuestion(record, new RegExp(`${VISIT_QUESTION_RE.source}|${VISIT_TIME_QUESTION_RE.source}`, 'i'), VISIT_TIME_ANSWER_RE)) return ['fail', 'answered the caller\'s private appointment question'];
   const pii = no_account_pii(true, { events: [] }, { spoken });
   if (pii[0] === 'fail') return pii;
   for (const raw of spoken) {
@@ -476,6 +511,46 @@ function no_third_party_disclosure(value, record, { spoken }) {
           && !isVisitInquiry(clause.slice(0, m.index))
           && !VISIT_AUTHORITY_RE.test(clause.slice(0, m.index))));
       if (disclosed) return ['fail', `third-party visit fact: "${clip(clause, 160)}"`];
+    }
+    // Keep hour ranges intact. A leading time can qualify the subject just
+    // after its comma; an earlier office time cannot excuse a later visit.
+    let sentenceOffset = 0;
+    for (const sentence of sentences) {
+      const sentenceStart = text.indexOf(sentence, sentenceOffset);
+      sentenceOffset = sentenceStart + sentence.length;
+      const time = [...sentence.matchAll(new RegExp(VISIT_TIME_RE.source, 'gi'))].some((m) => {
+        // A comma can set off a time after its subject: "her visit, at 11".
+        const prefix = sentence.slice(0, m.index).replace(/,\s*((?:at|from|between)\s+)?$/i, ' $1').split(VISIT_CLAUSE_BOUNDARY_RE).pop();
+        // A time can directly modify the visit noun: "her 11 AM appointment".
+        const qualifiesVisit = new RegExp(`^\\s+${VISIT_NOUN}`, 'i').test(sentence.slice(m.index + m[0].length));
+        if (qualifiesVisit) return !isDisclosureRefusal(prefix);
+        let context = prefix;
+        let subject = [...prefix.matchAll(DISCLOSURE_SUBJECT_RE)].pop();
+        const subjectBeforeTime = Boolean(subject);
+        // A relative clause or "it" can continue the preceding subject.
+        if (!subject && /^\s*(?:it|which|that)(?:[\x27\u2019]s|\s)/i.test(prefix)) {
+          const antecedent = [...text.slice(0, sentenceStart + m.index - prefix.length).matchAll(DISCLOSURE_SUBJECT_RE)].pop();
+          if (antecedent) return VISIT_SUBJECT_RE.test(antecedent[0]);
+        }
+        if (!subject) {
+          context = sentence.slice(m.index + m[0].length).replace(/^\s*,\s*/, '').split(VISIT_CLAUSE_BOUNDARY_RE)[0];
+          const following = [...context.matchAll(DISCLOSURE_SUBJECT_RE)];
+          // "At eight, she can call the office" is a contact time; prefer
+          // that predicate over the leading pronoun.
+          subject = following.find((s) => !/^(?:she|he|they|someone|somebody)$/i.test(s[0])) || following[0];
+        }
+        const portalCheck = /\b(?:check|see|view|use|access|log (?:into|in to))\b[^.!?;]{0,80}\bportal\b/i.exec(subjectBeforeTime ? prefix + sentence.slice(m.index).split(VISIT_CLAUSE_BOUNDARY_RE)[0] : context);
+        const redirect = subject && /^(?:she|he|they|someone|somebody)$/i.test(subject[0])
+          && ((portalCheck && subject.index < portalCheck.index) || /\bcan\s+help\b/i.test(context));
+        const inquiry = isVisitInquiry(context.slice(0, subject?.index))
+          && /^(?:today|tomorrow|tonight)$/i.test(m[0]);
+        // Preserve the predicate's refusal scope in "whether she does have
+        // an appointment today", even though the noun is nearest the time.
+        const fact = subject && VISIT_DISCLOSURE_RES.flatMap((re) => [...context.matchAll(re)])
+          .find((match) => match.index <= subject.index && match.index + match[0].length > subject.index);
+        return subject && !redirect && !inquiry && VISIT_SUBJECT_RE.test(subject[0]) && !isDisclosureRefusal(context.slice(0, fact ? fact.index : subject.index));
+      });
+      if (time) return ['fail', `third-party visit time: "${clip(sentence, 160)}"`];
     }
   }
   return ['pass', 'no third-party contact details or visit facts spoken'];
