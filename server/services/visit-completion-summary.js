@@ -477,6 +477,13 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
         }
       }).select('id');
     for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
+    // The review ask was deferred while this delivery was uncertain. A packet
+    // that already closed goes back on the recovery queue so the coordinator
+    // re-observes the settled summary and enrolls the review it still owes.
+    if (!otherUncertain) {
+      await trx('visit_completion_packets').where({ visit_id: visitId, status: 'done' })
+        .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
+    }
     return { reconciled: true };
   });
 }

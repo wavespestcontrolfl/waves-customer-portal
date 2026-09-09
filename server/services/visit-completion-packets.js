@@ -340,7 +340,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   // Review outreach follows the summary: enrollment waits until every
   // requested delivery leg has settled and never runs for an uncertain one.
   const reviewEnrollment = delivery.state === 'delivered'
-    ? await enrollVisitCompletionReview(packet.id, database)
+    ? await enrollVisitCompletionReview(packet.id, database, { deliverySettled: true })
     : { enrolled: false, reason: delivery.state };
   const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
   const pending = paymentPending || delivery.state === 'delivery_pending' || reviewEnrollment.retryable === true;
@@ -402,9 +402,9 @@ async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
 // already closed awaiting payment. Any failure along the way, not only the
 // final enrollment call, must put the packet back on the recovery queue or
 // the requested review is lost with that one-shot signal.
-async function enrollVisitCompletionReview(packetId, database = db) {
+async function enrollVisitCompletionReview(packetId, database = db, options = {}) {
   try {
-    return await enrollVisitCompletionReviewOnce(packetId, database);
+    return await enrollVisitCompletionReviewOnce(packetId, database, options);
   } catch (err) {
     await database('visit_completion_packets').where({ id: packetId }).update({
       status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now(),
@@ -413,7 +413,7 @@ async function enrollVisitCompletionReview(packetId, database = db) {
   }
 }
 
-async function enrollVisitCompletionReviewOnce(packetId, database = db) {
+async function enrollVisitCompletionReviewOnce(packetId, database = db, { deliverySettled = false } = {}) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   if (!packet) return { enrolled: false, reason: 'packet_missing' };
   const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
@@ -426,14 +426,19 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db) {
   // A paid signal can arrive while the summary is still being delivered or
   // after an uncertain handoff: the ask never goes out ahead of the summary
   // it follows, and an uncertain delivery stays with the office.
-  const legs = await database('visit_effects').where({ visit_id: packet.visit_id })
-    .whereIn('effect_type', ['completion_sms', 'completion_email']).select('status');
-  if (legs.some((leg) => leg.status === 'unknown_delivery')) return { enrolled: false, reason: 'delivery_review' };
-  if (legs.some((leg) => !['sent', 'suppressed'].includes(leg.status))) {
-    await database('visit_completion_packets').where({ id: packet.id }).update({
-      status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now(),
-    });
-    return { enrolled: false, retryable: true, reason: 'delivery_pending' };
+  // The coordinator passes deliverySettled after observing 'delivered';
+  // every other caller reads the two delivery effects itself. Absent rows
+  // mean delivery has not run yet, not that nothing was requested.
+  if (!deliverySettled) {
+    const legs = await database('visit_effects').where({ visit_id: packet.visit_id })
+      .whereIn('effect_type', ['completion_sms', 'completion_email']).select('status');
+    if (legs.some((leg) => leg.status === 'unknown_delivery')) return { enrolled: false, reason: 'delivery_review' };
+    if (legs.length < 2 || legs.some((leg) => !['sent', 'suppressed'].includes(leg.status))) {
+      await database('visit_completion_packets').where({ id: packet.id }).update({
+        status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now(),
+      });
+      return { enrolled: false, retryable: true, reason: 'delivery_pending' };
+    }
   }
   const members = await database('visit_completion_packet_items as i')
     .join('service_records as r', 'r.id', 'i.service_record_id')

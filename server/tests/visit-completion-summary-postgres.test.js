@@ -48,6 +48,12 @@ async function deliver() {
   return Summary.deliverVisitCompletionSummary(fixture.packetId, fixture.token);
 }
 
+// Both delivery legs already settled: the state a paid signal normally finds.
+async function settledDelivery() {
+  await priorClaim('completion_sms', { status: 'suppressed' });
+  await priorClaim('completion_email', { status: 'sent', sent_at: new Date() });
+}
+
 // Emulates the canonical sender's locked handoff and the provider wrapper's
 // contract: a throw before dispatch is a retryable block, a throw from the
 // provider request itself is the (ambiguous) provider outcome.
@@ -1111,6 +1117,7 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test('a packet with one recorded member still enrolls its requested review', async () => {
+    await settledDelivery();
     await mockPg('visit_completion_packet_items').where({ packet_id: fixture.packetId, scheduled_service_id: fixture.serviceIds[1] }).del();
     await mockPg('service_records').where({ id: fixture.recordIds[0] })
       .update({ structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }) });
@@ -1166,6 +1173,7 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test('a paid invoice projection applies the whole packet review policy before representative-record enrollment', async () => {
+    await settledDelivery();
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
       customer_id: fixture.customerId, status: 'paid', visit_completion_packet_id: fixture.packetId });
@@ -1278,6 +1286,7 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test.each([undefined, false])('the canonical review default preserves an omitted field but honors %s', async (requested) => {
+    await settledDelivery();
     for (const item of fixture.payload.items) item.body.requestReview = requested;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     await mockPg('service_records').whereIn('id', fixture.recordIds).update({
@@ -1289,6 +1298,7 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test('a thrown legacy review enrollment reopens a done packet for recovery', async () => {
+    await settledDelivery();
     fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({
       status: 'done', payload: JSON.stringify(fixture.payload),
@@ -1336,6 +1346,44 @@ postgres('visit summary recipient recovery', () => {
     expect(await enrollVisitCompletionReview(fixture.packetId)).toMatchObject({ enrolled: false, reason: 'delivery_review' });
     expect(reviews).not.toHaveBeenCalled();
     expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'done' });
+  });
+
+  test('a paid signal before any delivery effect exists keeps the review behind the summary', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    const reviews = jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId })).toHaveLength(0);
+    expect(await require('../services/review-request').enrollForPaidInvoice({ visit_completion_packet_id: fixture.packetId }))
+      .toMatchObject({ enrolled: false, retryable: true, reason: 'delivery_pending' });
+    expect(reviews).not.toHaveBeenCalled();
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first())
+      .toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(reviews).toHaveBeenCalledTimes(1);
+  });
+
+  test('a recovered summary email reopens the closed packet so the deferred review enrolls', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    const reviews = jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    // One recipient's handoff is uncertain: the packet closes for office review without a review ask.
+    sendOne.mockImplementationOnce(async () => { throw new Error('provider response unavailable'); });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required', delivery: { state: 'delivery_review' } } });
+    expect(reviews).not.toHaveBeenCalled();
+    // The provider-retry rail later resends that recipient and reconciles it.
+    const uncertain = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}`, status: 'failed' }).first();
+    await mockPg('email_messages').where({ id: uncertain.id }).update({ status: 'sent', sent_at: new Date(), provider_message_id: 'recovered', error_message: null });
+    expect(await Summary.reconcileSummaryEmailRecovery({ ...uncertain, status: 'sent' })).toEqual({ reconciled: true });
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first())
+      .toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done', delivery: { state: 'delivered' } } });
+    expect(reviews).toHaveBeenCalledTimes(1);
   });
 
   test('an archived customer settles review enrollment instead of retrying it on every sweep', async () => {
