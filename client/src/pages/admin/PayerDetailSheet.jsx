@@ -83,16 +83,20 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const [statements, setStatements] = useState([]);
   const [ar, setAr] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(""); // UI audit F0502: failures must not read as empty
   const [openStmtId, setOpenStmtId] = useState(null);
 
   const loadStatements = useCallback(async () => {
     setLoading(true);
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/statements`);
-      const d = await r.json();
+      const d = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       setStatements(Array.isArray(d?.statements) ? d.statements : []);
-    } catch {
+      setLoadError("");
+    } catch (e) {
       setStatements([]);
+      setLoadError(e?.message || "Could not load this payer's statements.");
     } finally {
       setLoading(false);
     }
@@ -101,9 +105,12 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const loadAr = useCallback(async () => {
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/ar`);
-      setAr(await r.json());
-    } catch {
+      const d = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+      setAr(d);
+    } catch (e) {
       setAr(null);
+      setLoadError((prev) => prev || e?.message || "Could not load this payer's balance.");
     }
   }, [payer.id]);
 
@@ -150,9 +157,17 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
           </TabList>
 
           <TabPanel value="statements" className="pt-3">
+            {loadError && !loading && (
+              <p role="alert" className="text-13 text-alert-fg py-2">
+                {loadError}{" "}
+                <Button size="sm" variant="ghost" onClick={refresh}>
+                  Retry
+                </Button>
+              </p>
+            )}
             {loading ? (
               <p className="text-13 text-zinc-400 py-4">Loading statements…</p>
-            ) : statements.length === 0 ? (
+            ) : loadError ? null : statements.length === 0 ? (
               <p className="text-13 text-zinc-400 py-4">
                 No statements yet. NET-terms visits accrue here once payer statements are enabled.
               </p>

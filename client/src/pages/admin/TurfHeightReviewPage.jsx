@@ -59,7 +59,17 @@ export default function TurfHeightReviewPage() {
         method: "PATCH",
         body: JSON.stringify({ status: "verified" }),
       });
-      if (r.ok) setItems((prev) => prev.filter((it) => it.id !== id));
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}));
+        setError(b.error || `Could not confirm reading (HTTP ${r.status})`);
+        return;
+      }
+      setError(null);
+      setItems((prev) => prev.filter((it) => it.id !== id));
+    } catch {
+      // UI audit F0558: a rejected PATCH used to escape the click handler
+      // unhandled while the row silently stayed put.
+      setError("Could not confirm reading — check your connection and try again.");
     } finally {
       setResolving(null);
     }
@@ -77,7 +87,7 @@ export default function TurfHeightReviewPage() {
       </p>
 
       {loading && <div style={{ color: M.muted }}>Loading…</div>}
-      {error && <div style={{ color: M.red }}>{error}</div>}
+      {error && <div role="alert" style={{ color: M.red }}>{error}</div>}
       {!loading && !error && items.length === 0 && (
         <div style={{ background: M.card, border: `1px solid ${M.line}`, borderRadius: 12, padding: 28, textAlign: "center", color: M.muted }}>
           Nothing to review — every captured reading agrees with its gauge photo.

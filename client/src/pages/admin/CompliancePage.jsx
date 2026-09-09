@@ -84,18 +84,29 @@ const sTableWrap = {
 function useFetch(url, token, deps = []) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const reload = useCallback(() => {
     setLoading(true);
+    setError(null);
     fetch(url, { headers: headers(token) })
-      .then((r) => r.json())
+      .then(async (r) => {
+        // A 403/500 JSON body used to parse as "data" and render a blank
+        // dashboard of dashes; a network error left the loading line up
+        // forever (UI audit F0406). Both are errors with a retry now.
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then(setData)
-      .catch(console.error)
+      .catch((e) => {
+        console.error(e);
+        setError(e?.message || "Request failed");
+      })
       .finally(() => setLoading(false));
   }, [url, token]);
   useEffect(() => {
     reload();
   }, [reload, ...deps]);
-  return { data, loading, reload };
+  return { data, loading, error, reload };
 }
 
 function StatCard({ label, value, sub, accent = D.ink }) {
@@ -131,9 +142,16 @@ function StatCard({ label, value, sub, accent = D.ink }) {
 
 // ═══════════ DASHBOARD TAB ═══════════
 function DashboardTab({ token }) {
-  const { data, loading } = useFetch(`${API}/dashboard`, token);
+  const { data, loading, error, reload } = useFetch(`${API}/dashboard`, token);
   const { data: nData } = useFetch(`${API}/nitrogen-status`, token);
 
+  if (error)
+    return (
+      <div role="alert" style={{ color: D.red, padding: 20 }}>
+        Couldn't load the dashboard — {error}
+        <button type="button" onClick={reload} style={{ marginLeft: 8, padding: "4px 10px", borderRadius: 6, border: `1px solid ${D.red}`, background: "transparent", color: D.red, cursor: "pointer", font: "inherit" }}>Retry</button>
+      </div>
+    );
   if (loading || !data)
     return (
       <div style={{ color: D.muted, padding: 20 }}>Loading dashboard…</div>
@@ -699,7 +717,7 @@ function ProductLimitsTab({ token }) {
 
 // ═══════════ LICENSES TAB ═══════════
 function LicensesTab({ token }) {
-  const { data, loading, reload } = useFetch(`${API}/licenses`, token);
+  const { data, loading, error, reload } = useFetch(`${API}/licenses`, token);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
 
@@ -744,6 +762,13 @@ function LicensesTab({ token }) {
     );
   };
 
+  if (error)
+    return (
+      <div role="alert" style={{ color: D.red, padding: 20 }}>
+        Couldn't load licenses — {error}
+        <button type="button" onClick={reload} style={{ marginLeft: 8, padding: "4px 10px", borderRadius: 6, border: `1px solid ${D.red}`, background: "transparent", color: D.red, cursor: "pointer", font: "inherit" }}>Retry</button>
+      </div>
+    );
   if (loading)
     return <div style={{ color: D.muted, padding: 20 }}>Loading…</div>;
 

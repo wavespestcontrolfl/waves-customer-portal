@@ -1409,7 +1409,7 @@ function InfoRow({ label, value }) {
 // ═══════════════════════════════════════════════════════════════════
 // RECORD MAINTENANCE FORM
 // ═══════════════════════════════════════════════════════════════════
-function MaintenanceForm({ equipmentId, schedules, onDone }) {
+export function MaintenanceForm({ equipmentId, schedules, onDone }) {
   const isMobile = useIsMobile(768);
   const [form, setForm] = useState({
     scheduleId: "",
@@ -1440,9 +1440,11 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
     set("scheduleId", id);
   };
 
+  const [error, setError] = useState("");
   const submit = async () => {
     if (!form.taskName) return;
     setSaving(true);
+    setError("");
     try {
       await af(`/admin/equipment-maintenance/${equipmentId}/records`, {
         method: "POST",
@@ -1478,6 +1480,8 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
       onDone();
     } catch (e) {
       console.error(e);
+      // Stay open with the operator's form intact and say why (UI audit F0441).
+      setError(`Save failed: ${e.message}`);
     }
     setSaving(false);
   };
@@ -1755,6 +1759,11 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
           </>
         )}
       </div>{" "}
+      {error && (
+        <div role="alert" style={{ color: D.red, fontSize: 13, marginTop: 12 }}>
+          {error}
+        </div>
+      )}
       <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
         {" "}
         <button
@@ -1775,7 +1784,7 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
 // ═══════════════════════════════════════════════════════════════════
 // LOG MILEAGE FORM
 // ═══════════════════════════════════════════════════════════════════
-function MileageForm({ vehicleId, currentMiles, onDone }) {
+export function MileageForm({ vehicleId, currentMiles, onDone }) {
   const isMobile = useIsMobile(768);
   const today = etDateString();
   const [form, setForm] = useState({
@@ -1800,9 +1809,11 @@ function MileageForm({ vehicleId, currentMiles, onDone }) {
       ? ((totalMiles - parseFloat(form.personalMiles || 0)) * 0.7).toFixed(2)
       : "0.00";
 
+  const [error, setError] = useState("");
   const submit = async () => {
     if (!form.odometerStart || !form.odometerEnd) return;
     setSaving(true);
+    setError("");
     try {
       await af(`/admin/equipment-maintenance/${vehicleId}/mileage`, {
         method: "POST",
@@ -1822,6 +1833,7 @@ function MileageForm({ vehicleId, currentMiles, onDone }) {
       onDone();
     } catch (e) {
       console.error(e);
+      setError(`Save failed: ${e.message}`);
     }
     setSaving(false);
   };
@@ -1959,6 +1971,11 @@ function MileageForm({ vehicleId, currentMiles, onDone }) {
           <span style={{ color: D.green, fontWeight: 700 }}>
             ${irsDeduction}
           </span>{" "}
+        </div>
+      )}
+      {error && (
+        <div role="alert" style={{ color: D.red, fontSize: 13, marginTop: 12 }}>
+          {error}
         </div>
       )}
       <div style={{ marginTop: 12 }}>

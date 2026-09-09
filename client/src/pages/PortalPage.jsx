@@ -15725,6 +15725,11 @@ export default function PortalPage() {
       setShowMenu(false);
       setShowMoreSheet(false);
       setRequestRefreshKey(key => key + 1);
+    } else {
+      // UI audit F0314: switchProperty stores the failure on AuthContext.error,
+      // which nothing on this page renders — the "Switching" label just
+      // vanished and the menu stayed on the old property.
+      showCustomerAlert('We could not switch to that property just now. Please try again.');
     }
   };
   const activePropertyAddress = formatPropertyAddress(customer);
