@@ -52,9 +52,10 @@ async function main() {
         const page = await context.newPage();
         page.setDefaultTimeout(20000);
         await page.routeWebSocket('**/socket.io/**', (socket) => socket.close());
-        const state = { device, errors: [], consoleErrors: [], unmatched: [], writes: [], geometry: [], passed: false };
+        const state = { device, errors: [], consoleErrors: [], injectedFailures: [], photoRequests: [], unmatched: [], writes: [], geometry: [], passed: false };
         report.scenarios.push(state);
-        const rows = structuredClone(services), photos = [], completed = new Map();
+        const rows = structuredClone(services), photosByVisit = new Map(rows.map((service) => [service.id, []])), completed = new Map();
+        let activeVisit = 'visit-a';
         let failPhoto = true, failCompletion = true, releasePhoto, releaseCompletion, marksEnabled = false, failPhotoList = false;
         const pendingPhoto = new Promise((resolve) => { releasePhoto = resolve; });
         const pendingCompletion = new Promise((resolve) => { releaseCompletion = resolve; });
@@ -68,7 +69,7 @@ async function main() {
             : originalFetch(input, options);
         }, user);
         page.on('pageerror', (error) => state.errors.push(error.message));
-        page.on('console', (message) => { if (message.type() === 'error') state.consoleErrors.push(message.text()); });
+        page.on('console', (message) => { if (message.type() === 'error') state.consoleErrors.push({ text: message.text(), url: message.location().url }); });
         const routes = new Map(Object.entries({
           '/api/admin/auth/me': user,
           '/api/admin/feature-flags': { flags: {} },
@@ -81,6 +82,7 @@ async function main() {
           '/api/tech/timetracking/pending-signoff': { pending: false },
         }).map(([endpoint, response]) => [`GET ${endpoint}`, () => ({ response })]));
         for (const service of rows) {
+          const photos = photosByVisit.get(service.id);
           const schedule = `/api/admin/schedule/${service.id}`;
           const recap = `/api/admin/dispatch/${service.id}/pest-recap`;
           const photoPath = `/api/tech/services/${service.id}`;
@@ -127,6 +129,8 @@ async function main() {
           if (url.origin !== server.baseUrl || url.pathname.startsWith('/socket.io')) return route.abort();
           if (!url.pathname.startsWith('/api/')) return route.continue();
           const method = request.method(), endpoint = url.pathname;
+          const photoVisit = endpoint.match(/^\/api\/tech\/services\/([^/]+)\/photos$/)?.[1];
+          if (photoVisit) state.photoRequests.push({ method, visitId: photoVisit, expectedVisitId: activeVisit });
           const body = method === 'GET' ? null : request.headers()['content-type']?.includes('application/json') ? request.postDataJSON() : request.postData();
           if (method !== 'GET') state.writes.push({ endpoint, method, body });
           const handler = routes.get(`${method} ${endpoint}`);
@@ -135,6 +139,7 @@ async function main() {
             return route.fulfill({ status: 501, contentType: 'application/json', body: JSON.stringify({ error: 'Unmatched synthetic endpoint' }) });
           }
           const { response, status = 200 } = await handler(body);
+          if (status === 503) state.injectedFailures.push(request.url());
           return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(response) });
         });
         async function screenshot(name, locator) {
@@ -213,6 +218,7 @@ async function main() {
           const uploads = state.writes.filter((write) => write.endpoint.endsWith('/photos'));
           assert.equal(uploads.length, 2);
           for (const upload of uploads) {
+            assert.equal(upload.endpoint, '/api/tech/services/visit-a/photos');
             assert.ok(upload.body.includes('Example side gate before treatment'));
             assert.ok(upload.body.includes('name="photoType"\r\n\r\nbefore'));
             assert.ok(upload.body.includes('filename="example.png"'));
@@ -252,12 +258,17 @@ async function main() {
           assert.equal(state.choiceAppearance.borderStyle, 'solid');
           await page.keyboard.press('Escape');
           assert.equal(await page.getByRole('button', { name: '🗂️ Report', exact: true }).evaluate((node) => node === document.activeElement), true);
+          activeVisit = 'visit-b';
           await page.getByRole('button', { name: /Jordan Example.*on site/ }).click();
           await page.getByRole('button', { name: '🗂️ Report', exact: true }).click();
           await dialog.getByRole('button', { name: 'Example gel', exact: true }).waitFor();
           assert.equal(await note.inputValue(), '');
           assert.equal(await dialog.getByRole('button', { name: 'Restore draft', exact: true }).count(), 0);
           await page.keyboard.press('Escape');
+          await page.getByRole('button', { name: /Photos/ }).click();
+          await page.getByRole('dialog', { name: 'Service Photos', exact: true }).getByText('No photos yet.', { exact: true }).waitFor();
+          await page.keyboard.press('Escape');
+          activeVisit = 'visit-a';
           await stop.click();
           await page.getByRole('button', { name: '🗂️ Report', exact: true }).click();
           await dialog.getByRole('button', { name: 'Restore draft', exact: true }).click();
@@ -313,7 +324,7 @@ async function main() {
           // The next read also supplies an eligible after-photo fixture to
           // exercise the existing optional marking gate and nested dialog.
           marksEnabled = true;
-          photos.push({ id: 'photo-after-example', s3_key: 'synthetic/after.jpg', photo_type: 'after',
+          photosByVisit.get('visit-a').push({ id: 'photo-after-example', s3_key: 'synthetic/after.jpg', photo_type: 'after',
             caption: 'Example completed treatment area', url: photoPreview });
           await page.keyboard.press('Escape');
           await page.getByRole('button', { name: /Photos/ }).click();
@@ -329,7 +340,10 @@ async function main() {
           assert.equal(await mark.evaluate((node) => node === document.activeElement), true);
           assert.equal(await photoDialog.count(), 1);
           state.pendingCompletion = { width: pending.width, height: pending.height, duplicateSuppressed: true };
-          assert.deepEqual(state.consoleErrors.filter((error) => !/\b503\b/.test(error)), []);
+          const resourceError = 'Failed to load resource: the server responded with a status of 503 (Service Unavailable)';
+          assert.deepEqual(state.consoleErrors.filter(({ text, url }) => text !== resourceError || !state.injectedFailures.includes(url)), []);
+          assert.ok(state.photoRequests.every(({ visitId, expectedVisitId }) => visitId === expectedVisitId), 'Photo requests must use the active visit');
+          assert.deepEqual(photosByVisit.get('visit-b'), [], 'The second visit must retain its separate empty photo list');
           assert.ok(state.writes.every((write) => !/\/sms$|\/call$|\/send$/.test(write.endpoint)));
         }
         assert.deepEqual(state.errors, []);
