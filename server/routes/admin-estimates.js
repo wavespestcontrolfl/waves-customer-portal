@@ -4106,6 +4106,10 @@ router.put('/:id/proposal', async (req, res, next) => {
       || (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(locked))) {
       throw retry('The saved proposal changed while you were editing. Reload and review the current proposal before saving.');
     }
+    if (locked.status === 'scheduled' && locked.scheduled_at && authoredExpiry
+      && authoredExpiry < new Date(locked.scheduled_at)) {
+      throw retry('Valid through must include the scheduled send date. Extend the validity date or reschedule before saving.');
+    }
     // The engine block is carried from the LOCKED row, never the pre-read:
     // a clarify re-price guard stamped between the two would otherwise be
     // dropped by this whole-blob write. And the guard this save OBSERVED on
@@ -4145,6 +4149,12 @@ router.put('/:id/proposal', async (req, res, next) => {
         .where((q) => q.where({ status: 'sending' }).orWhereRaw(`NOT (${DELIVERY_CLAIM_NOT_LIVE_SQL})`))
         .first('id');
       if (inFlightMember) throw retry('This multi-property group is being sent right now — wait a moment and retry.');
+      if (authoredExpiry && ['draft', 'scheduled', 'send_failed'].includes(locked.status)) {
+        const laterSchedule = await trx('estimates').where({ estimate_group_id: groupId, status: 'scheduled' })
+          .whereNot({ id: estimate.id }).whereNull('archived_at').whereNull('price_locked_at')
+          .where('scheduled_at', '>', authoredExpiry).first('id');
+        if (laterSchedule) throw retry('Valid through must include this group’s scheduled send date. Extend the validity date or reschedule before saving.');
+      }
     }
     const updateQuery = trx('estimates')
       .where({ id: estimate.id })

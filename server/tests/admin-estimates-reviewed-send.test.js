@@ -207,6 +207,16 @@ describe('commercial bid authoring', () => {
     expect(badQuantity.statusCode).toBe(400);
     expect(mutations).toHaveLength(0);
   });
+  test.each([['2099-12-22T04:59:59.999Z', 200], ['2099-12-22T05:00:00Z', 409]])('scheduled proposal edits respect the full Eastern day at %s', async (scheduledAt, status) => {
+    Object.assign(row, { status: 'scheduled', scheduled_at: new Date(scheduledAt), estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
+    const res = await invoke('/:id/proposal', 'put', { proposal: proposal() });
+    expect(res.statusCode).toBe(status);
+    if (status === 409) {
+      expect(res.body.error).toMatch(/scheduled send date/);
+      expect(mutations).toHaveLength(0);
+      expect(dataOf().proposal.validThrough).toBe('2099-12-31');
+    }
+  });
   test('an older editor omitting validity preserves the saved price hold', async () => {
     gateEnvValue.mockReturnValue(false);
     row.status = 'draft'; row.estimate_data = { proposal: proposal() };
