@@ -2087,6 +2087,9 @@ export function ProductsTab({
           type="button"
           style={{ ...sBtn(D.teal, D.white), marginLeft: 8 }}
           onClick={() => {
+            // Clear the error first so the loading branch renders during the
+            // retry; leaving it up allowed repeated clicks and overlapping loads.
+            setLoadError(null);
             setLoading(true);
             load();
           }}

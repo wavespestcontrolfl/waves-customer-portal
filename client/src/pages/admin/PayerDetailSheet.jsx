@@ -83,7 +83,11 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const [statements, setStatements] = useState([]);
   const [ar, setAr] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(""); // UI audit F0502: failures must not read as empty
+  // UI audit F0502: failures must not read as empty. The two endpoints are
+  // independent, so each keeps its own error — a failed AR read must not hide
+  // loaded statements, and a later statements success must not erase it.
+  const [statementsError, setStatementsError] = useState("");
+  const [arError, setArError] = useState("");
   const [openStmtId, setOpenStmtId] = useState(null);
 
   const loadStatements = useCallback(async () => {
@@ -93,10 +97,10 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
       const d = await r.json().catch(() => null);
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       setStatements(Array.isArray(d?.statements) ? d.statements : []);
-      setLoadError("");
+      setStatementsError("");
     } catch (e) {
       setStatements([]);
-      setLoadError(e?.message || "Could not load this payer's statements.");
+      setStatementsError(e?.message || "Could not load this payer's statements.");
     } finally {
       setLoading(false);
     }
@@ -108,9 +112,10 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
       const d = await r.json().catch(() => null);
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       setAr(d);
+      setArError("");
     } catch (e) {
       setAr(null);
-      setLoadError((prev) => prev || e?.message || "Could not load this payer's balance.");
+      setArError(e?.message || "Could not load this payer's balance.");
     }
   }, [payer.id]);
 
@@ -157,17 +162,17 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
           </TabList>
 
           <TabPanel value="statements" className="pt-3">
-            {loadError && !loading && (
+            {statementsError && !loading && (
               <p role="alert" className="text-13 text-alert-fg py-2">
-                {loadError}{" "}
-                <Button size="sm" variant="ghost" onClick={refresh}>
+                {statementsError}{" "}
+                <Button size="sm" variant="ghost" onClick={loadStatements}>
                   Retry
                 </Button>
               </p>
             )}
             {loading ? (
               <p className="text-13 text-zinc-400 py-4">Loading statements…</p>
-            ) : loadError ? null : statements.length === 0 ? (
+            ) : statementsError ? null : statements.length === 0 ? (
               <p className="text-13 text-zinc-400 py-4">
                 No statements yet. NET-terms visits accrue here once payer statements are enabled.
               </p>
@@ -188,7 +193,16 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
           </TabPanel>
 
           <TabPanel value="ar" className="pt-3">
-            <ArSummary summary={ar?.summary} />
+            {arError ? (
+              <p role="alert" className="text-13 text-alert-fg py-2">
+                {arError}{" "}
+                <Button size="sm" variant="ghost" onClick={loadAr}>
+                  Retry
+                </Button>
+              </p>
+            ) : (
+              <ArSummary summary={ar?.summary} />
+            )}
           </TabPanel>
         </Tabs>
       </SheetBody>

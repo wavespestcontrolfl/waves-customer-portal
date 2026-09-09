@@ -48,6 +48,21 @@ describe('payer surfaces on a failed load', () => {
     expect(screen.queryByText(/No statements yet/)).not.toBeInTheDocument();
   });
 
+  it('PayerDetailSheet keeps loaded statements when only the AR request fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/ar')) return failing();
+      return { ok: true, json: async () => ({ statements: [{ id: 's1', status: 'sent', total: 10, period_label: 'Aug' }] }) };
+    }));
+    render(<PayerDetailSheet payer={{ id: 'p1', name: 'Acme HOA' }} onClose={() => {}} />);
+    await waitFor(() => expect(screen.queryByText('Loading statements…')).not.toBeInTheDocument());
+    // Statements tab shows its rows, not an error and not the empty copy.
+    expect(screen.queryByText(/No statements yet/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /balance|ar/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('boom');
+    expect(screen.queryByText(/No outstanding balance/)).not.toBeInTheDocument();
+  });
+
   it('PayerArAgingDialog renders the error and retries instead of "No outstanding payer statements"', async () => {
     let calls = 0;
     vi.stubGlobal('fetch', vi.fn(async () => {
