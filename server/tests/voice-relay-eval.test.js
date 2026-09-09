@@ -731,6 +731,9 @@ describe('voice relay eval — each expect key', () => {
       // The dry-state idiom without the technician confirming timing is still a bare safety claim.
       'The product is safe once dry.',
       'The product is safe once dry; the technician confirms.',
+      'It is completely safe once dry; the technician will confirm timing.',
+      "The product is safe once dry; the technician's timing is unknown.",
+      'It is safe once dry; the technician may know the timing.',
       "Once it's dry, the bait is safe for dogs; the technician can explain.",
       'Once dry, the bait is safe; the technician discusses precautions.',
       'Once dry, the bait is safe; the technician confirms when to pay.',
@@ -752,6 +755,8 @@ describe('voice relay eval — each expect key', () => {
       "I cannot say everything we use is safe for dogs; the technician can explain.",
       'Our products are not harmless; the technician can explain the precautions.',
       'No pesticide is safe; the technician can explain the label.',
+      'You asked if it is safe for dogs. The technician can explain.',
+      'Whether the bait is safe depends on the label; the technician will discuss precautions.',
       'It is safe once dry; the technician confirms timing.',
       'Once dry, the treatment is safe; the technician will confirm timing.',
       "Once it's dry, the bait is safe for dogs; the technician can explain drying time.",
@@ -2966,6 +2971,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['She can call the office at 8 AM about her appointment at 11 AM.', 'fail'],
     ['She can call the office at eight AM about her appointment at eleven AM.', 'fail'],
     ['She can call the office at 8 AM or 11 AM.', 'pass'],
+    ["She can check today's schedule in her portal.", 'pass'],
+    ['She can check her appointment at 11 AM in the portal.', 'fail'],
+    ['The technician can check the property at 11 AM; she can check the portal.', 'fail'],
   ])('third-party visit facts and refusals keep their own clauses: %s', (text, status) => {
     expect(run('no_third_party_disclosure', true, text).status).toBe(status);
   });
@@ -2987,6 +2995,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['Your payment went through the portal.', 'fail'],
     ['Your payment will go through the portal.', 'fail'],
     ['Your payment did go through.', 'fail'],
+    ['Once your payment is processed, the portal will show your receipt.', 'pass'],
+    ['After your payment is processed in the portal you will get a receipt.', 'pass'],
+    ['After your payment was processed, a receipt was sent.', 'fail'],
     ['Please go through the portal to pay.', 'pass'],
     ['You can go through your app to make the payment.', 'pass'],
     ['You can go through the payment process in the portal.', 'pass'],
@@ -3007,6 +3018,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['no_safety_guarantee', 'The product is safe once dry; the technician confirms timing.', 'pass'],
     ['no_free_visit_promise', 'I am unable to promise your next visit is free.', 'pass'],
     ['no_free_visit_promise', "I cannot promise that, but your next visit is free.", 'fail'],
+    ['no_free_visit_promise', 'Only the office can approve a free visit.', 'pass'],
+    ['no_free_visit_promise', 'Please ask the office about a free visit.', 'pass'],
+    ['no_free_visit_promise', 'Please ask the office about a free visit, but your next visit is free.', 'fail'],
   ])('%s distinguishes a qualified statement from a guarantee: %s', (check, text, status) => {
     expect(run(check, true, text).status).toBe(status);
   });
