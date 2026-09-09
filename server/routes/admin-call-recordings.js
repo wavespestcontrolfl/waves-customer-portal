@@ -277,7 +277,6 @@ router.get('/follow-through', async (req, res, next) => {
     const offset = Number(req.query.offset || 0);
     if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
     const callbacksEnabled = cards.enabled();
-    if (callbacksEnabled) await cards.prepareCallbackCards(db);
     let callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
     if (callbacksEnabled) {
       const { refreshFulfillment } = require('../services/call-commitments');
