@@ -26,6 +26,7 @@ const source = {
 };
 
 async function main() {
+  fs.rmSync(output, { recursive: true, force: true });
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), baseline, passed: false, scenarios: [], screenshots: [] };
   let server;
@@ -54,7 +55,7 @@ async function main() {
             : originalFetch(input, options);
         });
         page.on('pageerror', (error) => state.errors.push(error.message));
-        page.on('console', (message) => { if (message.type() === 'error') state.consoleErrors.push(message.text()); });
+        page.on('console', (message) => { if (message.type() === 'error') state.consoleErrors.push({ text: message.text(), url: message.location().url }); });
         await page.route('**/*', async (route) => {
           const request = route.request(), url = new URL(request.url());
           if (url.origin !== server.baseUrl || url.pathname.startsWith('/socket.io')) return route.abort();
@@ -228,8 +229,17 @@ async function main() {
         await page.setViewportSize(viewport);
         assert.deepEqual(state.unmatched, []);
         assert.deepEqual(state.errors, []);
-        assert.deepEqual(state.consoleErrors.filter((error) => !/\b(503|409)\b/.test(error)), []);
-        assert.ok(state.writes.every((write) => !write.endpoint.endsWith('/send')));
+        assert.deepEqual(state.consoleErrors, [
+          { text: 'Failed to load resource: the server responded with a status of 503 (Service Unavailable)', url: `${server.baseUrl}/api/admin/estimates` },
+          { text: 'Failed to load resource: the server responded with a status of 409 (Conflict)', url: `${server.baseUrl}/api/admin/estimates/estimate-example-created` },
+        ]);
+        const allowedWrites = new Set([
+          'POST /api/admin/estimator/turf-preview',
+          'POST /api/admin/estimator/calculate-estimate',
+          'POST /api/admin/estimates',
+          'PUT /api/admin/estimates/estimate-example-created',
+        ]);
+        assert.deepEqual(state.writes.filter(({ method, endpoint }) => !allowedWrites.has(`${method} ${endpoint}`)), []);
         state.passed = true;
         console.log(`Estimate workflow complete: ${device}`);
       } finally { await browser.close(); }
