@@ -94,7 +94,7 @@ function apnsCollapseId(tag) {
 function buildApnsPayload(notification = {}) {
   const { title, body, badge, sound, url, aps: _ignore, ...rest } = notification;
   const aps = {
-    alert: { title: title || 'Waves Pest Control', body: body || '' },
+    alert: { title: title || 'Waves', body: body || '' },
     sound: sound || 'default',
   };
   if (typeof badge === 'number') aps.badge = badge;

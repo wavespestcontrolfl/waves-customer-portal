@@ -22,6 +22,7 @@ import { Button } from '../ui';
 import { useSlotConflicts } from './useSlotConflicts';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useBestTimes } from './useBestTimes';
+import { etDateString } from '../../lib/timezone';
 import BestTimeHint from './BestTimeHint';
 import SeriesMoveNotice from './SeriesMoveNotice';
 import {
@@ -115,7 +116,7 @@ export default function RescheduleConfirmModal({
   // window is fixed by the drop, so the chips carry no onPick (cancel and
   // re-drop to take a suggestion). If the drop IS a best time, its chip
   // shows as selected.
-  const { bestTimes } = useBestTimes({
+  const { bestTimes, picked, bestInRange } = useBestTimes({
     arrivalWindows: true,
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
     serviceId: serviceId != null ? serviceId : undefined,
@@ -127,6 +128,9 @@ export default function RescheduleConfirmModal({
     // all-tech detours would advertise a route the confirm can't take —
     // display-only chips can't adopt a technician. No tech, no hint.
     enabled: open && technicianId != null,
+    pickedStart: toStart || undefined,
+    pickedEnd: toEnd || undefined,
+    rangeFrom: etDateString(),
   });
 
   // The modal stays mounted between drags (open just flips), so a previous
@@ -196,7 +200,7 @@ export default function RescheduleConfirmModal({
           <button
             onClick={busy ? undefined : onCancel}
             disabled={busy}
-            className="text-zinc-500 hover:text-zinc-900 text-20 leading-none w-6 h-6 flex items-center justify-center"
+            className="text-zinc-500 hover:text-zinc-900 text-18 leading-none w-6 h-6 flex items-center justify-center"
             aria-label="Close"
           >
             ×
@@ -263,7 +267,7 @@ export default function RescheduleConfirmModal({
           )}
 
           <SlotConflictNotice conflicts={conflicts} />
-          <BestTimeHint bestTimes={bestTimes} currentStart={toStart} />
+          <BestTimeHint bestTimes={bestTimes} picked={picked} bestInRange={bestInRange} currentStart={toStart} currentDate={toDate} />
         </div>
 
         {/* Footer */}

@@ -13,6 +13,8 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
+jest.mock('../services/messaging/audit', () => ({ persistAudit: jest.fn(async () => ({ id: 'audit-test' })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
 jest.mock('../services/estimate-card-holds', () => ({
@@ -29,6 +31,7 @@ jest.mock('../services/visit-groups', () => ({
   renewNotificationLease: jest.fn(async () => true),
   notificationLeaseLive: jest.fn(async () => true),
   windowedMembersConnected: jest.fn(() => true),
+  appointmentSendHeld: jest.fn(async () => false),
 }));
 
 const db = require('../models/db');
@@ -63,7 +66,7 @@ function reminderRow(overrides = {}) {
  * whose `first` resolves null (move-hold check) and whose updates are
  * recorded into `state.reminderUpdates` with the preceding where args.
  */
-function installDb({ rows, visitIdByService = {}, holdUntil = null, prefsRow = {} }) {
+function installDb({ rows, visitIdByService = {}, holdUntil = null, prefsRow = {}, customerExtra = {} }) {
   const state = { reminderUpdates: [], arChains: [], ssChains: [] };
   let arCalls = 0;
   const genericChain = (firstValue = null) => {
@@ -139,7 +142,7 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null, prefsRow = {
       return genericChain({ sms_enabled: true, service_reminder_24h: true, service_reminder_72h: true, ...prefsRow });
     }
     if (String(table).startsWith('customers')) {
-      return genericChain({ id: 'customer-1', first_name: 'Ada', phone: '+19415551212' });
+      return genericChain({ id: 'customer-1', first_name: 'Ada', phone: '+19415551212', ...customerExtra });
     }
     return genericChain();
   });
@@ -292,6 +295,137 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
       { dedupeKey: `${VISIT}:reminder_24h:2026-05-07` },
     );
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
+  });
+
+  test.each(['72h', '24h'].flatMap(tier => ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].map(code => [tier, code])))('%s App hold %s leaves the reminder open with no fallback email', async (tier, code) => {
+    const date = tier === '72h' ? '2026-05-08' : '2026-05-07';
+    const kind = `reminder_${tier}`;
+    const row = reminderRow({ appointment_time: new Date(`${date}T13:00:00Z`),
+      reminder_72h_sent: tier !== '72h', reminder_24h_sent: tier !== '24h' });
+    const state = installDb({ rows: [row], visitIdByService: { 'svc-1': VISIT } });
+    const dedupeKey = `${VISIT}:${kind}:${date}`;
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-app', dedupeKey });
+    sendCustomerMessage.mockResolvedValue({ sent: false, code, deferred: true, retryable: true });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(result[`sent${tier}`]).toBe(0);
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
+      VISIT, kind, 'retry', expect.any(Date), 'tok-app', { dedupeKey },
+    );
+    expect(flagUpdates(state, `${kind}_sent`)).toHaveLength(0);
+  });
+
+  test.each(['72h', '24h'])('%s grouped App retry shares one event across sibling owners and preserves new occurrences', async (tier) => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    try {
+      const date = tier === '72h' ? '2026-05-08' : '2026-05-07';
+      const kind = `reminder_${tier}`;
+      const rows = ['svc-1', 'svc-2'].map((id, index) => reminderRow({
+        id: `rem-${index + 1}`, scheduled_service_id: id, appointment_time: new Date(`${date}T13:00:00Z`),
+        reminder_72h_sent: tier !== '72h', reminder_24h_sent: tier !== '24h',
+      }));
+      const contactPhone = '+19415551213';
+      const dbArgs = { rows, visitIdByService: { 'svc-1': VISIT, 'svc-2': VISIT },
+        prefsRow: { [`service_reminder_${tier}_channel`]: 'push' },
+        customerExtra: { service_contact_phone: contactPhone, service_contacts_consent_at: fixedNow } };
+      const state = installDb(dbArgs);
+      const dedupeKey = `${VISIT}:${kind}:${date}`;
+      const owner = { state: 'owner', token: 'tok-retry', dedupeKey };
+      VisitGroups.claimVisitNotification.mockResolvedValue(owner);
+      sendCustomerMessage.mockImplementation(jest.requireActual('../services/messaging/send-customer-message').sendCustomerMessage);
+      const Twilio = require('../services/twilio');
+      const events = new Map();
+      Twilio.sendSMS.mockImplementation(async (to, body, options) => {
+        if (!options.explicitPushOnly) return { success: true, sid: 'SMcontact' };
+        const key = options.notificationEventKey;
+        if (!events.has(key)) events.set(key, 'pending');
+        return events.get(key) === 'accepted'
+          ? { success: true, pushRouted: true, sid: `push:${key}` } : { success: false, appPending: true };
+      });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(flagUpdates(state, `${kind}_sent`)).toHaveLength(0);
+      expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledTimes(2);
+      expect(Twilio.sendSMS.mock.calls.map(([to]) => to)).toEqual(['+19415551212', '+19415551212']);
+      expect([...events.keys()]).toEqual([dedupeKey]);
+
+      // The sibling reclaims after the original push was accepted. It
+      // observes that same event, then delivers the authorized contact text.
+      events.set(dedupeKey, 'accepted');
+      const replay = installDb({ ...dbArgs, rows: [...rows].reverse() });
+      VisitGroups.claimVisitNotification.mockResolvedValueOnce(owner).mockResolvedValueOnce({ state: 'taken' });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(events.size).toBe(1);
+      expect(Twilio.sendSMS.mock.calls.filter(([to]) => to === contactPhone)).toHaveLength(1);
+      expect(flagUpdates(replay, `${kind}_sent`)).toHaveLength(2);
+
+      const nextDate = tier === '72h' ? '2026-05-09' : '2026-05-08';
+      jest.setSystemTime(new Date('2026-05-07T14:00:00Z'));
+      installDb({ ...dbArgs, rows: rows.map(row => ({ ...row, appointment_time: new Date(`${nextDate}T13:00:00Z`) })) });
+      const nextKey = `${VISIT}:${kind}:${nextDate}`;
+      VisitGroups.claimVisitNotification.mockResolvedValue({ ...owner, dedupeKey: nextKey });
+      await AppointmentReminders.checkAndSendReminders();
+      expect([...events.keys()]).toEqual([dedupeKey, nextKey]);
+    } finally { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; }
+  });
+
+  test.each(['72h', '24h'])('%s App rollback retains allowed email backup when texts are off', async (tier) => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
+    try {
+      const row = reminderRow({ appointment_time: new Date(`2026-05-${tier === '72h' ? '08' : '07'}T13:00:00Z`),
+        reminder_72h_sent: tier !== '72h', reminder_24h_sent: tier !== '24h' });
+      const state = installDb({ rows: [row], prefsRow: {
+        [`service_reminder_${tier}_channel`]: 'push', sms_enabled: false, email_enabled: true,
+      } });
+      sendCustomerMessage.mockResolvedValue({ sent: false, code: 'SMS_OPTED_OUT' });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+      expect(flagUpdates(state, `reminder_${tier}_sent`)).toHaveLength(1);
+    } finally { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; }
+  });
+
+  test.each([false, true])('a late App reminder sends only an allowed email backup: email_enabled=%s', async (emailEnabled) => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    const gates = require('../config/feature-gates').gates;
+    const previousWindowGate = gates.smsSendWindow;
+    gates.smsSendWindow = true;
+    jest.setSystemTime(new Date('2026-05-07T00:30:00Z')); // 20:30 ET, day before the visit
+    try {
+      const state = installDb({ rows: [reminderRow()], prefsRow: {
+        service_reminder_24h_channel: 'push', email_enabled: emailEnabled,
+      } });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(emailEnabled ? 1 : 0);
+      expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(1);
+    } finally { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; gates.smsSendWindow = previousWindowGate; }
+  });
+
+  test.each(['sms', 'email', 'both'])('a late App reminder holds when its channel changes to %s during preparation', async (channel) => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    const gates = require('../config/feature-gates').gates;
+    const previousWindowGate = gates.smsSendWindow;
+    gates.smsSendWindow = true;
+    jest.setSystemTime(new Date('2026-05-07T00:30:00Z'));
+    try {
+      const prefsRow = { service_reminder_24h_channel: 'push', email_enabled: true };
+      const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT }, prefsRow });
+      const dedupeKey = `${VISIT}:reminder_24h:2026-05-07`;
+      VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-night', dedupeKey });
+      VisitGroups.renewNotificationLease.mockImplementationOnce(async () => {
+        prefsRow.service_reminder_24h_channel = channel;
+        return true;
+      });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+      expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
+      expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
+        VISIT, 'reminder_24h', 'retry', expect.any(Date), 'tok-night', { dedupeKey },
+      );
+    } finally { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; gates.smsSendWindow = previousWindowGate; }
   });
 
   test('retryable provider failure on the grouped send, no fallback delivery: claim released as retryable, row unmarked — never suppressed (GH codex r6 P1)', async () => {
@@ -477,8 +611,10 @@ describe('round-3 wiring pins (source contracts)', () => {
   const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
 
   test('the SMS-fallback email carries the aggregated grouped hold note', () => {
-    expect(src).toContain("async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null })");
-    expect(src).toContain('sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey })');
+    const params = src.match(/async function deliverAppointmentEmailFallback\(([^)]*)\)/)?.[1];
+    expect(params).toContain('cardHoldNote = null');
+    const forwarded = src.match(/const res = await sendAppointmentNoticeEmail\(\{([^}]+)\}\)/)?.[1];
+    expect(forwarded).toContain('cardHoldNote');
   });
 
   test('the night-email leg rechecks the grouped date before sending', () => {

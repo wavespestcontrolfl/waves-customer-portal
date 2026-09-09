@@ -34,8 +34,9 @@ import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
-import BestTimeHint from './BestTimeHint';
+import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
+import { etDateString } from '../../lib/timezone';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -73,7 +74,8 @@ function adminFetch(path, options = {}) {
   });
 }
 
-const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0A7EC2' };
+// Tier chips stay on the file's zinc palette — the label carries the tier, not a metal colour.
+const TIER_COLORS = { Platinum: D.text, Gold: D.text, Silver: D.text, Bronze: D.text, 'One-Time': D.text };
 
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
 
@@ -135,6 +137,19 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
+
+// Second line of a Find-a-Time result: the drive the van makes INTO the
+// stop from the anchor it leaves (home base for the first stop), then what
+// the insertion adds to the route — same wording as the picker hint, so
+// "+57 min" never reads as a drive time. A result without a single
+// insertion leg (arrival-window mode) keeps the detour-only form.
+export function findTimeSlotDetail(slot) {
+  const added = detourPhrase({ detourMinutes: slot.detour_minutes });
+  const driveIn = Math.round(Number(slot.drive_in_minutes));
+  if (slot.drive_in_minutes == null || !Number.isFinite(driveIn) || !slot.insertion) return added;
+  const from = slot.insertion.after_stop_id ? (slot.insertion.after_name || 'the previous stop') : 'home base';
+  return `${driveIn} min drive from ${from} · ${added} · before ${slot.insertion.before}`;
+}
 
 function normalizeHourTime(value, fallback = '09:00') {
   const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
@@ -415,6 +430,16 @@ export function quickAddConfirmFlags(conflict, { separateAccount = false } = {})
 // Multi-property booking helpers (pure — unit-tested).
 // The picker defaults to the customer's PRIMARY property (customers.address_*
 // mirrors it, so this is the address every other reader already assumes).
+// Customer-search dropdown chip: "N properties" for a customer with 2+
+// ACTIVE saved properties (the list endpoint's propertyCount), nothing for
+// 0/1 — a single property is the default and needs no callout. The chip is
+// a heads-up only; which property gets booked is still the picker below.
+export function customerPropertyCountLabel(propertyCount) {
+  const n = Number(propertyCount);
+  if (!Number.isFinite(n) || n < 2) return null;
+  return `${n} properties`;
+}
+
 export function defaultBookingPropertyId(properties = []) {
   const primary = properties.find((p) => p && p.is_primary) || properties[0];
   return primary ? String(primary.id) : '';
@@ -912,6 +937,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return () => { cancelled = true; };
   }, []);
   const [saving, setSaving] = useState(false);
+  // State updates are async — two clicks in one tick both saw saving=false
+  // during the awaited re-quote and booked twice; the ref is synchronous.
+  const submittingRef = useRef(false);
   const [toast, setToast] = useState('');
 
   // Per-line helpers. Each entry in `services` carries its own `price`
@@ -1734,7 +1762,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
   const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
-  const { bestTimes } = useBestTimes({
+  const { bestTimes, picked, bestInRange } = useBestTimes({
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
     // Rank at the CHOSEN property, not the customer's primary.
@@ -1744,11 +1772,25 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     durationMinutes: slotCheckDuration,
     // Same tech scoping as the ranged search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
+    // The picked-hour verdict is priced on ONE technician's route. In Auto
+    // mode the booking's server-side matcher picks its own tech (or leaves
+    // the visit unassigned), and the typed hour has no chip to adopt the
+    // scored one — a cost for a route the booking will not use. Chips stay:
+    // picking one adopts its technician (Codex #4120 r5 P2).
+    pickedStart: techMode === 'choose' && techId ? windowStart : undefined,
+    rangeFrom: etDateString(),
   });
 
   // Submit
   const handleSubmit = async () => {
     if (!selectedCustomer || services.length === 0 || bookingPropertyState === 'loading') return;
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setSaving(true);
+    const releaseSubmit = () => {
+      submittingRef.current = false;
+      setSaving(false);
+    };
     // An auto-priced mosquito line must not be booked until the live server
     // quote resolved — otherwise the operator confirms a total that omits (or
     // misstates) what the server will stamp. On a failed quote, clear the
@@ -1762,6 +1804,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setToast('Fetching the lot-based mosquito price — try again in a moment or enter a price');
       }
       setTimeout(() => setToast(''), 2800);
+      releaseSubmit();
       return;
     }
     // Revalidate a cached quote at the moment of booking: lot data or the
@@ -1776,6 +1819,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           setMosquitoQuote({ customerId: selectedCustomer.id, status: 'ready', price: freshPrice });
           setToast('The lot-based mosquito price changed — totals updated, review and submit again');
           setTimeout(() => setToast(''), 3200);
+          releaseSubmit();
           return;
         }
       } catch {
@@ -1783,10 +1827,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setMosquitoQuote(null);
         setToast('Could not re-verify the mosquito price — retrying; submit again in a moment or enter a price');
         setTimeout(() => setToast(''), 3200);
+        releaseSubmit();
         return;
       }
     }
-    setSaving(true);
     const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
     let firstError = null;
@@ -1996,7 +2040,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         break;
       }
     }
-    setSaving(false);
+    releaseSubmit();
     if (firstError) {
       const created = createdGroupKeysRef.current.size;
       const total = groups.length;
@@ -2322,7 +2366,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 {customerSearch.trim().length >= 2 && (
                   <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch', zIndex: 20 }}>
                     {customerResults.map(c => (
-                      <div key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row" style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                      <button type="button" key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row u-focus-ring" style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 500 }}>
                             {c.firstName} {c.lastName}
@@ -2332,8 +2376,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                             {c.address || c.phone || ''}
                           </div>
                         </div>
-                        {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal, flex: '0 0 auto' }}>{c.tier}</span>}
-                      </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flex: '0 0 auto' }}>
+                          {customerPropertyCountLabel(c.propertyCount) && (
+                            <span style={{ fontSize: 14, lineHeight: '18px', padding: '1px 8px', borderRadius: 6, border: `1px solid ${D.border}`, color: D.muted, whiteSpace: 'nowrap' }}>
+                              {customerPropertyCountLabel(c.propertyCount)}
+                            </span>
+                          )}
+                          {c.tier && <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
+                        </div>
+                      </button>
                     ))}
                     {!customerLoading && customerResults.length === 0 && (
                       <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
@@ -2564,7 +2615,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                               background: D.bg,
                               textTransform: 'uppercase',
                               letterSpacing: 0.5,
-                              fontSize: 10,
+                              fontSize: 11,
                             }}>
                               {accepted ? 'Accepted' : 'Not yet accepted'}
                             </span>
@@ -2636,13 +2687,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           fontSize: 12,
                           fontWeight: 500,
                           cursor: 'pointer',
-                          border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
-                          background: active ? '#DCFCE7' : D.bg,
-                          color: active ? '#166534' : D.muted,
+                          border: active ? `1.5px solid ${D.text}` : `1px solid ${D.border}`,
+                          background: active ? D.card : D.bg,
+                          color: active ? D.text : D.muted,
                         });
                         return (
                           <div style={{ marginTop: 10 }}>
-                            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+                            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
                               Billing on acceptance
                             </div>
                             <div style={{ display: 'flex', gap: 8 }}>
@@ -2754,7 +2805,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</span>
                   </div>
                   {!isMobile && idx === 0 && services.length > 1 && (
-                    <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4 }}>Primary</div>
+                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4 }}>Primary</div>
                   )}
                 </div>
 
@@ -2931,7 +2982,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 })()}
 
                 {!svc.lineDiscount && (
-                  <div style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}>
+                  <div
+                    style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}
+                    // Close only when focus leaves the whole picker: the options are
+                    // real buttons now, so Tab must be able to reach them.
+                    onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setLineDiscountOpenIdx((current) => (current === idx ? null : current)); }}
+                  >
                     {serviceFieldLabel('Discount')}
                     <input
                       value={lineDiscountQueries[svc.lineId || idx] || ''}
@@ -2940,7 +2996,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx);
                       }}
                       onFocus={() => { if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx); }}
-                      onBlur={() => setTimeout(() => setLineDiscountOpenIdx((current) => (current === idx ? null : current)), 150)}
                       placeholder={lineDiscountPresets.length === 0 ? 'No invoice discounts are available' : `Search discounts${svc.name ? ` for ${svc.name}` : ''}...`}
                       disabled={lineDiscountPresets.length === 0}
                       style={{ ...inputStyle, fontSize: isMobile ? 15 : 12, minHeight: isMobile ? 42 : 36, padding: isMobile ? '10px 12px' : '8px 10px', opacity: lineDiscountPresets.length === 0 ? 0.65 : 1 }}
@@ -2950,14 +3005,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         {matchingLineDiscounts(idx).length === 0 ? (
                           <div style={{ padding: '10px 12px', color: D.muted, fontSize: 12 }}>No discounts match.</div>
                         ) : matchingLineDiscounts(idx).map((d) => (
-                          <div
+                          <button type="button"
                             key={d.id}
-                            onMouseDown={(e) => { e.preventDefault(); applyLineDiscount(idx, d); }}
-                            style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => applyLineDiscount(idx, d)}
+                            className="u-focus-ring"
+                            style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
                           >
                             <span style={{ color: D.text, fontWeight: 500, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
                             <span style={{ color: D.text, fontFamily: ROBOTO_STACK, fontSize: 12, whiteSpace: 'nowrap' }}>{formatDiscountLabel(d)}</span>
-                          </div>
+                          </button>
                         ))}
                       </div>
                     )}
@@ -3013,11 +3070,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               {serviceSearch.trim().length > 0 && (
                 <div style={{ marginTop: 8, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 280, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
                   {serviceResults.map((svc, i) => (
-                    <div
+                    <button type="button"
                       key={`${svc.id || svc.name}-${i}`}
                       onClick={() => addServiceFromCatalog(svc)}
-                      className="waves-sq-row"
-                      style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
+                      className="waves-sq-row u-focus-ring"
+                      style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
                     >
                       <span style={{ flex: 1, fontWeight: 500, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</span>
                       {(svc.base_price != null || svc.priceMin != null) && (
@@ -3025,7 +3082,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           ${Number(svc.base_price ?? svc.priceMin).toFixed(2)}
                         </span>
                       )}
-                    </div>
+                    </button>
                   ))}
                   {!serviceLoading && serviceResults.length === 0 && (
                     <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
@@ -3143,16 +3200,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             fontSize: 14,
             fontWeight: 500,
             cursor: 'pointer',
-            border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
-            background: active ? '#DCFCE7' : D.bg,
-            color: active ? '#166534' : D.muted,
+            border: active ? `1.5px solid ${D.text}` : `1px solid ${D.border}`,
+            background: active ? D.card : D.bg,
+            color: active ? D.text : D.muted,
           });
           const prepayLabel = manualPrepayLoading
             ? 'Annual prepay — pricing…'
             : (eligible ? `Annual prepay — invoices ${formatMoney(manualPrepay.prepayTotal)}` : 'Annual prepay');
           return (
             <div style={sectionStyle}>
-              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
                 Billing
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -3231,9 +3288,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         onClick={() => setPrepayMethod(m)}
                         style={{
                           padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 500,
-                          border: prepayMethod === m ? '1.5px solid #166534' : '1px solid #D4D4D8',
-                          background: prepayMethod === m ? '#DCFCE7' : '#fff',
-                          color: prepayMethod === m ? '#166534' : '#52525B',
+                          border: prepayMethod === m ? `1.5px solid ${D.text}` : '1px solid #D4D4D8',
+                          background: prepayMethod === m ? D.bg : '#fff',
+                          color: prepayMethod === m ? D.text : '#52525B',
                           cursor: 'pointer',
                         }}
                       >
@@ -3306,7 +3363,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               {timeSlots.length > 0 && (
                 <>
                 {!timeSlots.some(slot => Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= 15) && (
-                  <div style={{ background: '#EFF6FF', border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
+                  <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
                     No route near this customer that day yet — here's what's close.
                   </div>
                 )}
@@ -3330,7 +3387,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
                         </div>
                         <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
+                          {findTimeSlotDetail(slot)}
                         </div>
                       </div>
                       <div style={{ fontSize: 11, color: D.teal, fontWeight: 500 }}>Use →</div>
@@ -3359,13 +3416,25 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
           <BestTimeHint
             bestTimes={bestTimes}
+            picked={picked}
+            bestInRange={bestInRange}
             currentStart={windowStart}
+            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentTechnicianId={techMode === 'choose' ? techId : null}
             onPick={(slot) => {
               // Mirror applySlot: the detour was scored for a specific
               // technician, so picking the chip adopts that tech too —
               // leaving auto mode would let assignment land elsewhere and
               // falsify the advertised detour.
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            onPickDate={(slot) => {
+              setApptDate(slot.date);
               setWindowStart(slot.start);
               if (slot.technicianId) {
                 setTechMode('choose');

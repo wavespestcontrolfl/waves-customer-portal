@@ -22,6 +22,9 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const db = require('../models/db');
 const { subscribe } = require('../routes/admin-push')._handlers;
+const pushService = require('../services/push-notifications');
+const testPush = require('../routes/admin-push').stack
+  .find((layer) => layer.route?.path === '/test').route.stack[0].handle;
 
 function builder({ first, rows = [], returning = [], updateResult = 1 } = {}) {
   const query = {};
@@ -146,5 +149,42 @@ describe('admin push staff-session binding', () => {
     }));
     expect(duplicates.whereIn).toHaveBeenCalledWith('id', ['sub-duplicate']);
     expect(duplicates.update).toHaveBeenCalledWith({ active: false });
+  });
+});
+
+describe('admin push previews', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    pushService.status.mockReturnValue({ available: true, configured: true });
+    pushService.sendToAdminUser.mockResolvedValue({ sent: 1, subscriptions: 1 });
+  });
+
+  test('sends the irrigation sample only to the authenticated staff user', async () => {
+    const res = response();
+    await testPush({ technicianId: 'tech-1', body: {
+      preview: 'irrigation', customerId: 'customer-2', technicianId: 'tech-2',
+    } }, res, jest.fn());
+    expect(pushService.sendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: 'Your weekly watering plan',
+      body: expect.stringMatching(/^Preview only:/),
+      url: '/admin/communications#notifications',
+      tag: 'waves-irrigation-preview',
+    }));
+    expect(res.body.sent).toBe(1);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('keeps the existing empty-body test working', async () => {
+    await testPush({ technicianId: 'tech-1', body: {} }, response(), jest.fn());
+    expect(pushService.sendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: 'Waves test notification', tag: 'waves-test',
+    }));
+  });
+
+  test('rejects unknown previews before sending', async () => {
+    const res = response();
+    await testPush({ technicianId: 'tech-1', body: { preview: 'unknown' } }, res, jest.fn());
+    expect(res.statusCode).toBe(400);
+    expect(pushService.sendToAdminUser).not.toHaveBeenCalled();
   });
 });

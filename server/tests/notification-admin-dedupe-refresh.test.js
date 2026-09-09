@@ -65,3 +65,27 @@ test('without refreshOnDedupe the old behavior stands — the existing row is re
   expect(mockRows.notifications[0].body).toBe('first body');
   expect(mockUpdates).toEqual([]);
 });
+
+test('a customer merge refreshes the standing bell destination even when its wording is unchanged', async () => {
+  const opts = { dedupeKey: 'sms-commitment:fixture', refreshOnDedupe: true };
+  await NotificationService.notifyAdmin('alert', 'SMS needs follow-up', 'Open the customer profile', {
+    ...opts, link: '/admin/customers?customerId=loser', metadata: { customerId: 'loser' },
+  });
+  mockRows.notifications[0].read_at = new Date();
+  const moved = await NotificationService.notifyAdmin('alert', 'SMS needs follow-up', 'Open the customer profile', {
+    ...opts, link: '/admin/customers?customerId=winner', metadata: { customerId: 'winner' },
+  });
+  expect(moved.refreshed).toBe(true);
+  expect(mockRows.notifications).toHaveLength(1);
+  expect(mockRows.notifications[0]).toMatchObject({ link: '/admin/customers?customerId=winner', read_at: null });
+  expect(JSON.parse(mockRows.notifications[0].metadata).customerId).toBe('winner');
+});
+
+test('a content refresh without a supplied link preserves the existing destination', async () => {
+  const opts = { dedupeKey: 'sms-commitment:fixture', refreshOnDedupe: true };
+  await NotificationService.notifyAdmin('alert', 'SMS needs follow-up', 'Before', {
+    ...opts, link: '/admin/customers?customerId=fixture',
+  });
+  await NotificationService.notifyAdmin('alert', 'SMS needs follow-up', 'After', opts);
+  expect(mockRows.notifications[0].link).toBe('/admin/customers?customerId=fixture');
+});

@@ -19,6 +19,8 @@ jest.mock('../services/review-ask-drafter', () => ({
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The per-customer send lock needs a real pool; its own suite covers it.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (_key, fn) => fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
@@ -145,7 +147,7 @@ describe('review sequences — cadence engine', () => {
     // The touch is recorded in review_requests with channel + template + sequence linkage,
     // and marked followup_sent so the legacy Day-3 auto-followup skips it.
     const touch = mock.__state.rows.review_requests[0];
-    expect(touch).toMatchObject({ channel: 'sms', template_key: 'friendly_ask', sequence_step: 0, followup_sent: true, status: 'sent' });
+    expect(touch).toMatchObject({ channel: 'sms', template_key: 'day0_ask', sequence_step: 0, followup_sent: true, status: 'sent' });
     expect(touch.sequence_id).toBe(result.sequence.id);
   });
 
@@ -2395,23 +2397,39 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('superseded');
   });
 
-  test('a personalized draft becomes the touch body (persisted as custom_body, link substituted)', async () => {
+  // A sequence sitting at its Day-4 reminder (step 1), Day-0 already sent 4
+  // days ago — the drafter's remaining home after the Day-0 touch became
+  // controlled composition (owner decision 2026-09-07).
+  function reminderStepFixture(id, customer, extra = {}) {
+    return {
+      customers: [customer],
+      review_sequences: [{
+        id, customer_id: customer.id, status: 'active', current_step: 1, touches_sent: 1, service_type: 'pest control', tech_name: 'Adam',
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [
+        { id: `${id}-day0`, sequence_id: id, sequence_step: 0, customer_id: customer.id, channel: 'sms', template_key: 'day0_ask', status: 'sent', sms_sent_at: new Date(Date.now() - 4 * 86400000), created_at: new Date(Date.now() - 4 * 86400000) },
+        ...(extra.review_requests || []),
+      ],
+    };
+  }
+
+  test('a personalized draft becomes the Day-4 reminder body (persisted as custom_body, link substituted)', async () => {
     const draft = 'Hi Stan, Adam here — hope the ants are staying gone after Tuesday. If we earned it: {review_url}. Anything off, just reply here.';
     mockDraftAskBody.mockResolvedValue(draft);
-    const mock = makeMock({
-      customers: [{ id: 'pd-1', first_name: 'Stan', last_name: 'Q', phone: '+19410000040', nearest_location_id: 'bradenton' }],
-    });
+    const mock = makeMock(reminderStepFixture('seq-pd1', { id: 'pd-1', first_name: 'Stan', last_name: 'Q', phone: '+19410000040', nearest_location_id: 'bradenton' }));
     db.mockImplementation(mock);
 
-    const result = await ReviewService.startReviewSequence({ customerId: 'pd-1', serviceType: 'pest control', techName: 'Adam', startedBy: 'admin-1' });
+    const out = await ReviewService.processReviewSequences();
 
-    expect(result.started).toBe(true);
-    expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'pest control', techName: 'Adam', recipientFirstName: 'Stan' }));
-    const touch = mock.__state.rows.review_requests[0];
+    expect(out.sent).toBe(1);
+    expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'pest control', techName: 'Adam', recipientFirstName: 'Stan', sequenceStep: 1 }));
+    const touch = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1);
     expect(touch.custom_body).toBe(draft);
     // Personalized provenance: the outreach funnel groups by template_key, so
     // a drafted touch must not be credited to the control template.
-    expect(touch.template_key).toBe('friendly_ask_personalized');
+    expect(touch.template_key).toBe('soft_reminder_personalized');
     // The sent SMS is the draft with {review_url} resolved to the tokenized link.
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).toContain('hope the ants are staying gone after Tuesday');
@@ -2419,21 +2437,208 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(sentBody).not.toContain('{review_url}');
   });
 
-  test('a rejected/failed draft falls back to the standard template (ask still sends)', async () => {
+  test('a rejected/failed draft falls back to the standard template (reminder still sends)', async () => {
     mockDraftAskBody.mockResolvedValue(null);
-    const mock = makeMock({
-      customers: [{ id: 'pd-2', first_name: 'Ada', last_name: 'V', phone: '+19410000041', nearest_location_id: 'venice' }],
-    });
+    const mock = makeMock(reminderStepFixture('seq-pd2', { id: 'pd-2', first_name: 'Ada', last_name: 'V', phone: '+19410000041', nearest_location_id: 'venice' }));
     db.mockImplementation(mock);
 
-    const result = await ReviewService.startReviewSequence({ customerId: 'pd-2', serviceType: 'pest control', techName: 'Adam', startedBy: 'admin-1' });
+    const out = await ReviewService.processReviewSequences();
 
-    expect(result.started).toBe(true);
-    const touch = mock.__state.rows.review_requests[0];
+    expect(out.sent).toBe(1);
+    const touch = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1);
     expect(touch.custom_body == null).toBe(true);
-    expect(touch.template_key).toBe('friendly_ask');
+    expect(touch.template_key).toBe('soft_reminder');
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-    expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template copy
+    expect(sentBody).toContain('quick nudge from Waves'); // soft_reminder template copy
+  });
+
+  describe('controlled Day-0 composition (owner decision 2026-09-07)', () => {
+    const { countSegments } = require('../services/messaging/segment-counter');
+    const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+    const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+
+    test('the Day-0 SMS is composed from verified fields — never the drafter, no "today", one segment as sent', async () => {
+      mockDraftAskBody.mockResolvedValue('SHOULD NOT BE USED {review_url}');
+      const mock = makeMock({
+        customers: [{ id: 'd0-1', first_name: 'Christopher2', last_name: 'K', phone: '+19410000090', nearest_location_id: 'bradenton' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'd0-1', serviceType: 'Quarterly Pest Control', techName: 'Christopher Adams', startedBy: 'admin-1' });
+
+      expect(result.started).toBe(true);
+      expect(mockDraftAskBody).not.toHaveBeenCalled();
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+      expect(touch.custom_body == null).toBe(true);
+      const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sentBody).toBe(`Hi Christopher2! Christopher with Waves. If we earned it, a Google review means a lot: https://portal.test/rate/${touch.token} Reply if anything's off.`);
+      expect(sentBody).not.toMatch(/\btoday\b|\btonight\b|\bthis morning\b/i);
+      // As sent: scheme stripped at the Twilio boundary, GSM-normalized.
+      const seg = countSegments(normalizeGsmPunctuation(stripSmsUrlScheme(sentBody.replace(`https://portal.test/rate/${touch.token}`, 'https://portal.wavespestcontrol.com/l/abcde'))));
+      expect(seg).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
+    });
+
+    test('no technician on the record → the company signs, never "Your tech with Waves"', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'd0-2', first_name: 'Mae', last_name: 'R', phone: '+19410000091', nearest_location_id: 'venice' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'd0-2', serviceType: 'pest control', startedBy: 'admin-1' });
+
+      expect(result.started).toBe(true);
+      const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sentBody).toContain('Hi Mae! Waves Pest Control. If we earned it');
+      expect(sentBody).not.toContain('Your tech');
+    });
+
+    test('a plan persisted before the change (friendly_ask at step 0) gets the controlled body too', async () => {
+      mockDraftAskBody.mockResolvedValue('SHOULD NOT BE USED {review_url}');
+      const mock = makeMock({
+        customers: [{ id: 'd0-3', first_name: 'Robin', last_name: 'T', phone: '+19410000092', nearest_location_id: 'bradenton' }],
+        review_sequences: [{
+          id: 'seq-d03', customer_id: 'd0-3', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mockDraftAskBody).not.toHaveBeenCalled();
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Robin! Adam with Waves.');
+    });
+
+    test('a Day-0 draft persisted by an earlier deferred attempt is NOT reused — the controlled body sends', async () => {
+      // Prod case 2026-08-25: drafted "Thanks for having us out today" at 8 PM,
+      // held by quiet hours, sent verbatim at 8 AM the next day.
+      const staleDraft = 'Thanks for having us out today, Robin! Mind leaving a review? {review_url}';
+      const mock = makeMock({
+        customers: [{ id: 'd0-4', first_name: 'Robin', last_name: 'T', phone: '+19410000093', nearest_location_id: 'bradenton' }],
+        review_sequences: [{
+          id: 'seq-d04', customer_id: 'd0-4', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 12 * 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+        review_requests: [{ id: 'rr-d04', sequence_id: 'seq-d04', sequence_step: 0, customer_id: 'd0-4', channel: 'sms', template_key: 'friendly_ask_personalized', custom_body: staleDraft, status: 'deferred', created_at: new Date(Date.now() - 12 * 3600000) }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-d04');
+      expect(retry.custom_body == null).toBe(true);
+      expect(retry.template_key).toBe('day0_ask');
+      const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sentBody).not.toContain('today');
+      expect(sentBody).toContain('Hi Robin! Adam with Waves.');
+    });
+
+    test('the multi-treatment first-visit ask keeps its own template', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'd0-5', first_name: 'Ken', last_name: 'T', phone: '+19410000094', nearest_location_id: 'venice' }],
+        review_sequences: [{
+          id: 'seq-d05', customer_id: 'd0-5', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mock.__state.rows.review_requests[0].template_key).toBe('first_treatment_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain("First treatment's done");
+    });
+
+    test('a quiet-hours retry through sendSMS signs the Day-0 ask the same way: first name with Waves, else the company (codex #4139 r1)', async () => {
+      const mock = makeMock({
+        customers: [
+          { id: 'd0-6', first_name: 'Lee', last_name: 'P', phone: '+19410000095', nearest_location_id: 'venice' },
+          { id: 'd0-7', first_name: 'Kim', last_name: 'P', phone: '+19410000096', nearest_location_id: 'venice' },
+        ],
+        review_requests: [
+          { id: 'rr-d06', customer_id: 'd0-6', channel: 'sms', status: 'pending', template_key: 'day0_ask', tech_name: 'Christopher Longname', token: 'tok-d06', location_id: 'venice' },
+          { id: 'rr-d07', customer_id: 'd0-7', channel: 'sms', status: 'pending', template_key: 'day0_ask', tech_name: null, token: 'tok-d07', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.sendSMS('rr-d06');
+      await ReviewService.sendSMS('rr-d07');
+
+      const bodies = mockSendCustomerMessage.mock.calls.map((c) => c[0].body);
+      expect(bodies[0]).toContain('Hi Lee! Christopher with Waves.');
+      expect(bodies[0]).not.toContain('Longname');
+      expect(bodies[1]).toContain('Hi Kim! Waves Pest Control.');
+      expect(bodies[1]).not.toContain('Our team');
+    });
+
+    test('a record-scoped enrollment signs with the linked visit\'s technician, never a newer visit\'s (codex #4139 r2)', async () => {
+      const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+      const mock = makeMock({
+        customers: [{ id: 'd0-9', first_name: 'Ivy', last_name: 'P', phone: '+19410000098', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d09', customer_id: 'd0-9', scheduled_service_id: 'ss-d09-old' }],
+        // tech_name rides the visit rows (the mock's leftJoin is a no-op).
+        scheduled_services: [
+          { id: 'ss-d09-old', customer_id: 'd0-9', status: 'completed', scheduled_date: d(30), service_type: 'pest control', technician_id: 'tech-a', tech_name: 'Older Tech' },
+          { id: 'ss-d09-new', customer_id: 'd0-9', status: 'completed', scheduled_date: d(1), service_type: 'pest control', technician_id: 'tech-b', tech_name: 'Newer Tech' },
+        ],
+        technicians: [{ id: 'tech-a', name: 'Older Tech' }, { id: 'tech-b', name: 'Newer Tech' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'd0-9', serviceRecordId: 'sr-d09', startedBy: 'invoice' });
+
+      expect(result.started).toBe(true);
+      expect(mock.__state.rows.review_sequences[0].tech_name).toBe('Older Tech');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Ivy! Older with Waves.');
+    });
+
+    test('a cadence touch signs with the record\'s technician even when the sequence cached another name (codex #4139 r3)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'd0-10', first_name: 'Uma', last_name: 'P', phone: '+19410000099', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d10', customer_id: 'd0-10', technician_id: 'tech-a', service_type: 'pest control', service_date: '2026-09-01' }],
+        technicians: [{ id: 'tech-a', name: 'Older Tech' }, { id: 'tech-b', name: 'Newer Tech' }],
+        review_sequences: [{
+          id: 'seq-d10', customer_id: 'd0-10', status: 'active', current_step: 0, touches_sent: 0,
+          // Enrolled before the deployment: the cache holds a newer visit's tech.
+          tech_name: 'Newer Tech', service_record_id: 'sr-d10',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Uma! Older with Waves.');
+    });
+
+    test('a drawer send with no techName resolves the technician from the latest completed visit (codex #4139 r1)', async () => {
+      const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+      const mock = makeMock({
+        customers: [{ id: 'd0-8', first_name: 'Ora', last_name: 'P', phone: '+19410000097', nearest_location_id: 'venice' }],
+        // The mock's leftJoin is a no-op, so the technician's name rides the
+        // visit row under the joined alias.
+        scheduled_services: [{ id: 'ss-d08', customer_id: 'd0-8', status: 'completed', scheduled_date: d(1), service_type: 'pest control', technician_id: 'tech-9', tech_name: 'Christopher Longname' }],
+        technicians: [{ id: 'tech-9', name: 'Christopher Longname' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.sendGatedAsk({ customerId: 'd0-8', channel: 'sms', templateId: 'day0_ask', triggeredBy: 'admin' });
+
+      expect(result.outcome).toBe('sent');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Ora! Christopher with Waves.');
+    });
   });
 
   test('a one-off send (no sequence) NEVER drafts — the operator template is exactly what sends', async () => {
@@ -2457,25 +2662,19 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(touch.template_key).toBe('friendly_ask');
   });
 
-  test('a retried cadence step reuses the previously persisted draft instead of re-drafting', async () => {
+  test('a retried reminder step reuses the previously persisted draft instead of re-drafting', async () => {
     const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
-    const mock = makeMock({
-      customers: [{ id: 'rt-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }],
-      review_sequences: [{
-        id: 'seq-rt', customer_id: 'rt-1', status: 'active', current_step: 0, touches_sent: 0,
-        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
-        started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
-      }],
+    const mock = makeMock(reminderStepFixture('seq-rt', { id: 'rt-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
       // A prior attempt already drafted + persisted for this step (send deferred).
-      review_requests: [{ id: 'rr-rt', sequence_id: 'seq-rt', sequence_step: 0, customer_id: 'rt-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
-    });
+      review_requests: [{ id: 'rr-rt', sequence_id: 'seq-rt', sequence_step: 1, customer_id: 'rt-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    }));
     db.mockImplementation(mock);
 
     const out = await ReviewService.processReviewSequences();
 
     expect(out.sent).toBe(1);
     expect(mockDraftAskBody).not.toHaveBeenCalled();
-    const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-rt');
+    const retry = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1 && r.id !== 'rr-rt');
     expect(retry.custom_body).toBe(priorDraft);
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).toContain('hope the ants stayed gone');
@@ -2483,28 +2682,24 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
   test('a retry does NOT reuse a persisted draft when the recipient is no longer the account holder', async () => {
     const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
-    const mock = makeMock({
+    const mock = makeMock(reminderStepFixture('seq-rc', {
       // SMS now routes to a service contact whose phone differs from the
       // account holder's — the account-holder draft must NOT follow them.
-      customers: [{ id: 'rc-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', service_contact_phone: '+19419999999', nearest_location_id: 'bradenton' }],
-      review_sequences: [{
-        id: 'seq-rc', customer_id: 'rc-1', status: 'active', current_step: 0, touches_sent: 0,
-        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
-        started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
-      }],
-      review_requests: [{ id: 'rr-rc', sequence_id: 'seq-rc', sequence_step: 0, customer_id: 'rc-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
-    });
+      id: 'rc-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', service_contact_phone: '+19419999999', nearest_location_id: 'bradenton',
+    }, {
+      review_requests: [{ id: 'rr-rc', sequence_id: 'seq-rc', sequence_step: 1, customer_id: 'rc-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    }));
     db.mockImplementation(mock);
 
     const out = await ReviewService.processReviewSequences();
 
     expect(out.sent).toBe(1);
     expect(mockDraftAskBody).not.toHaveBeenCalled();
-    const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-rc');
+    const retry = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1 && r.id !== 'rr-rc');
     expect(retry.custom_body == null).toBe(true);
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).not.toContain('hope the ants stayed gone');
-    expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template
+    expect(sentBody).toContain('quick nudge from Waves'); // soft_reminder template
   });
 
   test('a scheduled-but-never-sent review-looking SMS does not trigger the manual-ask standdown', async () => {

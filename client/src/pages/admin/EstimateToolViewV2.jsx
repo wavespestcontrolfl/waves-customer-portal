@@ -4299,7 +4299,7 @@ export default function EstimateToolViewV2({
           if (!dirty || window.confirm("Leave this estimate with unsaved changes?")) onBack?.();
         }}>← Back to Pipeline</Button>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h1 className="text-24 font-semibold">{editMode ? "Edit estimate" : "Create estimate"}</h1>
+          <h1 className="text-22 font-medium">{editMode ? "Edit estimate" : "Create estimate"}</h1>
           <span role="status" className="text-14 text-zinc-600">{saving ? "Saving…" : generating ? "Recalculating pricing…" : dirty ? "Unsaved changes" : editMode ? "Saved estimate loaded" : "New estimate"}</span>
         </div>
         {form.customerPhone && <Button variant="secondary" className="min-h-11" onClick={() => { void openEstimateMessages(form, openMessages); }}>Message contact</Button>}
@@ -4484,7 +4484,7 @@ export default function EstimateToolViewV2({
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-6 min-w-0">
             <section id="estimate-customer" className="estimate-workflow-section space-y-4" aria-label="Customer and property">
-            <h2 className="text-20 font-semibold">Customer & property</h2>
+            <h2 className="text-18 font-medium">Customer & property</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
               <FieldV2 label="Customer name"><InputV2 k="customerName" /></FieldV2>
               <FieldV2 label="Phone"><InputV2 k="customerPhone" type="tel" /></FieldV2>
@@ -5278,7 +5278,7 @@ export default function EstimateToolViewV2({
             <div>
               {" "}
               <PanelTitle>Property Features</PanelTitle>{" "}
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {" "}
                 <FieldV2 label="Pool">
                   <SelectV2
@@ -5313,7 +5313,7 @@ export default function EstimateToolViewV2({
                   />{" "}
                 </FieldV2>
               )}
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {" "}
                 <FieldV2 label="Shrub Density">
                   <SelectV2
@@ -5396,7 +5396,7 @@ export default function EstimateToolViewV2({
             </section>
             {/* Services */}
             <section id="estimate-services" className="estimate-workflow-section" aria-label="Services">
-              <h2 className="text-20 font-semibold mb-4">Services</h2>
+              <h2 className="text-18 font-medium mb-4">Services</h2>
               {" "}
               <PanelTitle>Services to Quote</PanelTitle>{" "}
               <SubGroupLabel>Recurring Programs</SubGroupLabel>{" "}
@@ -5972,7 +5972,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>
                   <CheckboxV2 k="dethatchingDebrisRemovalIncluded" label="Debris removal included" />
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <FieldV2 label="Thatch Probe #1">
                       <InputV2 k="thatchProbe1Inches" type="number" min="0" placeholder="inches" />
                     </FieldV2>
@@ -6056,7 +6056,7 @@ export default function EstimateToolViewV2({
                           />
                         </FieldV2>
                       </div>
-                      <div className="grid grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <FieldV2 label="Layout">
                           <SelectV2
                             k="termiteBaitComplexity"
@@ -6140,7 +6140,7 @@ export default function EstimateToolViewV2({
                           options={TRENCHING_PRODUCT_OPTIONS}
                         />
                       </FieldV2>
-                      <div className="grid grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <FieldV2 label="Application Rate">
                           <SelectV2
                             k="trenchingApplicationRate"
@@ -6661,7 +6661,7 @@ export default function EstimateToolViewV2({
                       />
                     </FieldV2>{" "}
                   </div>{" "}
-                  <div className="grid grid-cols-3 gap-3 mt-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
                     <FieldV2 label="Severity">
                       <SelectV2
                         k="bedbugSeverity"
@@ -6697,7 +6697,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>
                   {form.bedbugMethod !== "CHEMICAL" && (
-                    <div className="grid grid-cols-3 gap-3 mt-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
                       <FieldV2 label="Equipment">
                         <SelectV2
                           k="bedbugEquipment"
@@ -6827,7 +6827,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>
                   <p className="text-14 tracking-label uppercase text-zinc-400 font-medium">Bird Boxes</p>
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <FieldV2 label="Standard — $150">
                       <InputV2 k="exclStandardBirdBox" type="number" min="0" />
                     </FieldV2>
@@ -6875,7 +6875,7 @@ export default function EstimateToolViewV2({
               )}
             </section>
             <section id="estimate-pricing" className="estimate-workflow-section space-y-4" aria-label="Pricing and terms">
-            <h2 className="text-20 font-semibold">Pricing & terms</h2>
+            <h2 className="text-18 font-medium">Pricing & terms</h2>
             <label className="block text-14 font-medium">Customer-visible notes
               <textarea className={`${INPUT_CLS} h-24 mt-2 py-2`} value={form.notes || ""} onChange={(event) => set("notes", event.target.value)} />
             </label>
@@ -7039,7 +7039,7 @@ export default function EstimateToolViewV2({
             )}
             </section>
             <section id="estimate-review" className="estimate-workflow-section space-y-4" aria-label="Review and send">
-            <h2 className="text-20 font-semibold">Review & send</h2>
+            <h2 className="text-18 font-medium">Review & send</h2>
             {saveError && <p role="alert" className="text-14 text-alert-fg">{saveError}</p>}
             {/* Action buttons */}
             <div
@@ -7196,7 +7196,7 @@ export default function EstimateToolViewV2({
                 <Card className="p-5">
                   {" "}
                   <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                    <h2 className="text-18 font-semibold">Pricing summary</h2>
+                    <h2 className="text-18 font-medium">Pricing summary</h2>
                     <Button variant="secondary" onClick={previewCustomerEstimate} disabled={generateBusy || !savedId}>
                       <ExternalLink size={16} aria-hidden /> Preview saved estimate
                     </Button>
@@ -7204,8 +7204,8 @@ export default function EstimateToolViewV2({
                   <p className="text-14 text-zinc-600 mb-4">{savedId ? "Saved pricing. Preview shows the customer document." : "Working pricing. Save this version before previewing or sending."}</p>
                   {presentQuoteRequired ? <p role="status" className="text-14 mb-4">This scope requires a quote review before a firm price can be sent.</p> : (
                     <dl className="grid grid-cols-2 gap-3 mb-4 text-14">
-                      <div><dt className="text-zinc-600">Recurring monthly equivalent</dt><dd className="text-20 font-semibold">{fmt(E.recurring?.grandTotal || 0)}</dd></div>
-                      <div><dt className="text-zinc-600">One-time and setup charges</dt><dd className="text-20 font-semibold">{fmt(E.oneTime?.total || 0)}</dd></div>
+                      <div><dt className="text-zinc-600">Recurring monthly equivalent</dt><dd className="text-22 font-medium u-nums">{fmt(E.recurring?.grandTotal || 0)}</dd></div>
+                      <div><dt className="text-zinc-600">One-time and setup charges</dt><dd className="text-22 font-medium u-nums">{fmt(E.oneTime?.total || 0)}</dd></div>
                     </dl>
                   )}
                   <p className="text-14 text-zinc-600 mb-4">Service cadence, per-application amounts and payment choices appear in the saved customer preview.</p>

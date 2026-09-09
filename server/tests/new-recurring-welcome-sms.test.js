@@ -7,6 +7,8 @@ const mockLogger = {
 };
 
 let mockSequenceExists = false;
+let mockEmailSequenceExists = false;
+let mockEmailProviderRow = null;
 let mockPriorRecurringSeries = null;
 let mockPriorServicedVisit = null;
 let mockPriorServiceRecord = null;
@@ -18,6 +20,7 @@ let mockPrefsError = null;
 let mockClaimResults = []; // shift()ed per sms_sequences update; empty = always 1
 let mockCustomerRow = null;
 let mockScheduledServiceRow = null;
+let mockScheduledServicesById = {}; // by-id lookups consult this first, then mockScheduledServiceRow
 let mockInserts = [];
 let mockUpdates = [];
 
@@ -44,7 +47,7 @@ const mockDb = jest.fn((table) => {
         // told apart by their filters, honoring the created_at scope the
         // gate applies when excludeServiceId is passed.
         const byId = wheres.find((w) => w && typeof w === 'object' && !Array.isArray(w) && 'id' in w);
-        if (byId) return mockScheduledServiceRow;
+        if (byId) return Object.hasOwn(mockScheduledServicesById, byId.id) ? mockScheduledServicesById[byId.id] : mockScheduledServiceRow;
         const scope = wheres.find((w) => Array.isArray(w) && w[0] === 'created_at' && w[1] === '<');
         const inScope = (row) => {
           if (!row) return null;
@@ -65,8 +68,11 @@ const mockDb = jest.fn((table) => {
         return mockPriorServiceRecord;
       }
       if (table === 'sms_sequences') {
-        return mockSequenceExists ? { id: 'seq-1' } : null;
+        const kind = wheres.find(w => w?.sequence_type)?.sequence_type;
+        const exists = kind === 'new_customer_welcome_email' ? mockEmailSequenceExists : mockSequenceExists;
+        return exists ? { id: 'seq-1' } : null;
       }
+      if (table === 'email_messages') return mockEmailProviderRow;
       if (table === 'customers') {
         return mockCustomerRow;
       }
@@ -110,6 +116,8 @@ const mockDb = jest.fn((table) => {
     update: jest.fn(async (data) => {
       mockUpdates.push({ table, data, wheres: [...wheres] });
       if (table === 'sms_sequences' && mockClaimResults.length) return mockClaimResults.shift();
+      // A retired (superseded) email row no longer holds the email guard.
+      if (table === 'sms_sequences' && data.status === 'cancelled' && String(data.metadata || '').includes('superseded_by_rebooking')) mockEmailSequenceExists = false;
       return 1;
     }),
   };
@@ -139,6 +147,8 @@ jest.mock('../routes/admin-sms-templates', () => ({
 }));
 // Email twin of the welcome: SendGrid configured so the leg runs;
 // sendTemplate captured.
+const mockTierLabelStatus = jest.fn(async () => 'not_label');
+jest.mock('../services/self-booking-plan-sync', () => ({ tierLabelStatus: (...args) => mockTierLabelStatus(...args) }));
 const mockSendTemplate = jest.fn(async () => ({ sent: true }));
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => true),
@@ -154,6 +164,10 @@ describe('new recurring welcome SMS', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockSequenceExists = false;
+    mockEmailSequenceExists = false;
+    mockEmailProviderRow = null;
+    delete process.env.GATE_ONE_TIME_WELCOME_EMAIL;
+    mockTierLabelStatus.mockResolvedValue('not_label');
     mockPriorRecurringSeries = null;
     mockPriorServicedVisit = null;
     mockPriorServiceRecord = null;
@@ -165,6 +179,7 @@ describe('new recurring welcome SMS', () => {
     mockClaimResults = [];
     mockCustomerRow = null;
     mockScheduledServiceRow = null;
+    mockScheduledServicesById = {};
     mockInserts = [];
     mockUpdates = [];
     service = require('../services/new-recurring-welcome-sms');
@@ -655,4 +670,128 @@ describe('new recurring welcome SMS', () => {
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
+
+  function firstOneTimeBooking() {
+    process.env.GATE_ONE_TIME_WELCOME_EMAIL = 'true';
+    mockCustomerRow = { id: 'customer-1', first_name: 'Fixture', email: 'fixture@example.invalid', phone: '+19415550101', active: true };
+    mockScheduledServiceRow = { id: 'one-time-1', customer_id: 'customer-1', is_recurring: false, status: 'confirmed', created_at: '2030-01-02T12:00:00Z' };
+    return mockScheduledServiceRow;
+  }
+
+  function emailSequence() {
+    return { id: 'email-seq-1', sequence_type: service.EMAIL_SEQUENCE_TYPE, customer_id: 'customer-1', step: 0, metadata: { scheduled_service_id: 'one-time-1' } };
+  }
+
+  test('one-time welcome is dark by default and does not read or enqueue', async () => {
+    const booking = firstOneTimeBooking();
+    delete process.env.GATE_ONE_TIME_WELCOME_EMAIL;
+    expect(await service.queueOneTimeWelcomeEmail(booking)).toMatchObject({ queued: false, reason: 'gate_off' });
+    expect(mockInserts).toEqual([]);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('one-time welcome enqueues the email sequence at the existing delay', async () => {
+    const booking = firstOneTimeBooking();
+    expect(await service.queueOneTimeWelcomeEmail(booking)).toMatchObject({ queued: true });
+    const queued = mockInserts.find(r => r.table === 'sms_sequences');
+    expect(queued.data.sequence_type).toBe(service.EMAIL_SEQUENCE_TYPE);
+    expect(new Date(queued.data.next_send_at).getTime() - Date.now()).toBeGreaterThan(59 * 60 * 1000);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an earlier email-only queue guard does not consume the recurring SMS guard', async () => {
+    firstOneTimeBooking();
+    mockEmailSequenceExists = true;
+    expect(await service.queueOneTimeWelcomeEmail(mockScheduledServiceRow)).toMatchObject({ reason: 'already_sent' });
+    expect(await service.sendNewRecurringWelcome({ customer: mockCustomerRow, scheduledServiceId: 'recurring-2' })).toMatchObject({ queued: true });
+    expect(mockInserts.find(r => r.table === 'sms_sequences').data.sequence_type).toBe(service.SEQUENCE_TYPE);
+  });
+
+  test('a cancel-and-rebook inside the delay retires the queued row for the dead booking and enqueues the rebook', async () => {
+    firstOneTimeBooking();
+    mockEmailSequenceExists = true;
+    mockDueSequences = [{ ...emailSequence(), status: 'active', metadata: { scheduled_service_id: 'one-time-old' } }];
+    mockScheduledServicesById['one-time-old'] = { id: 'one-time-old', status: 'cancelled' };
+    expect(await service.queueOneTimeWelcomeEmail(mockScheduledServiceRow)).toMatchObject({ queued: true });
+    const retired = mockUpdates.find(u => u.table === 'sms_sequences' && u.data.status === 'cancelled');
+    expect(retired.wheres).toContainEqual({ id: 'email-seq-1', status: 'active' });
+    expect(JSON.parse(retired.data.metadata)).toMatchObject({ scheduled_service_id: 'one-time-old', skip_reason: 'superseded_by_rebooking', superseded_by_service_id: 'one-time-1' });
+    expect(mockInserts.find(r => r.table === 'sms_sequences').data.sequence_type).toBe(service.EMAIL_SEQUENCE_TYPE);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each(['pending', 'confirmed', 'en_route', 'on_site'])('a queued row for another booking still %s is not retired by a second booking', async status => {
+    firstOneTimeBooking();
+    mockEmailSequenceExists = true;
+    mockDueSequences = [{ ...emailSequence(), status: 'active', metadata: { scheduled_service_id: 'one-time-old' } }];
+    mockScheduledServicesById['one-time-old'] = { id: 'one-time-old', status };
+    expect(await service.queueOneTimeWelcomeEmail(mockScheduledServiceRow)).toMatchObject({ reason: 'already_sent' });
+    expect(mockUpdates.filter(u => u.table === 'sms_sequences')).toEqual([]);
+    expect(mockInserts).toEqual([]);
+  });
+
+  test('a replayed enqueue for the same booking never retires its own queued row', async () => {
+    firstOneTimeBooking();
+    mockEmailSequenceExists = true;
+    mockDueSequences = [{ ...emailSequence(), status: 'active' }];
+    expect(await service.queueOneTimeWelcomeEmail(mockScheduledServiceRow)).toMatchObject({ reason: 'already_sent' });
+    expect(mockUpdates.filter(u => u.table === 'sms_sequences')).toEqual([]);
+  });
+
+  test.each(['label', 'unknown'])('one-time email fails closed on tier provenance: %s', async label => {
+    firstOneTimeBooking();
+    mockTierLabelStatus.mockResolvedValue(label);
+    expect(await service.queueOneTimeWelcomeEmail(mockScheduledServiceRow)).toMatchObject({ queued: false, reason: 'label_only_tier' });
+    expect(mockInserts).toEqual([]);
+  });
+
+  test('one-time email excludes existing service history and missing email', async () => {
+    firstOneTimeBooking();
+    mockPriorServicedVisit = { id: 'legacy', created_at: '2029-01-01T12:00:00Z' };
+    expect(await service.queueOneTimeWelcomeEmail(mockScheduledServiceRow)).toMatchObject({ queued: false, reason: 'not_new_customer' });
+    mockPriorServicedVisit = null;
+    mockCustomerRow.email = null;
+    expect(await service.queueOneTimeWelcomeEmail(mockScheduledServiceRow)).toMatchObject({ queued: false, reason: 'no_email' });
+  });
+
+  test('email-only delivery with a phone sends one email and never invokes the SMS leg', async () => {
+    firstOneTimeBooking();
+    expect(await service._internals.deliverQueuedWelcome(emailSequence())).toMatchObject({ sent: true, channel: 'email' });
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: 'welcome.new_recurring:customer-1', to: 'fixture@example.invalid' }));
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockGetTemplate).not.toHaveBeenCalled();
+  });
+
+  test('revoking the gate cancels the queued email without sending', async () => {
+    firstOneTimeBooking();
+    process.env.GATE_ONE_TIME_WELCOME_EMAIL = 'false';
+    expect(await service._internals.deliverQueuedWelcome(emailSequence())).toMatchObject({ sent: false, skipped: true });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('email-only retries a transient failure without falling through to SMS', async () => {
+    firstOneTimeBooking();
+    mockSendTemplate.mockRejectedValueOnce(new Error('fixture provider unavailable'));
+    expect(await service._internals.deliverQueuedWelcome(emailSequence())).toMatchObject({ requeued: true });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a queued provider ledger row is not mistaken for a sent email', async () => {
+    firstOneTimeBooking();
+    mockSendTemplate.mockResolvedValueOnce({ sent: false, deduped: true, message: { status: 'queued' } });
+    expect(await service._internals.deliverQueuedWelcome(emailSequence())).toMatchObject({ requeued: true });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('email-only respects the customer email opt-out with no SMS fallback', async () => {
+    firstOneTimeBooking();
+    mockPrefsRow = { email_enabled: false };
+    expect(await service._internals.deliverQueuedWelcome(emailSequence())).toMatchObject({ sent: false, skipped: true });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  afterAll(() => { delete process.env.GATE_ONE_TIME_WELCOME_EMAIL; });
+
 });

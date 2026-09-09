@@ -316,6 +316,7 @@ function normalizeBlocks(blocks) {
       return {
         type,
         label: String(block.label || 'Open'),
+        ...(block.variant === 'link' ? { variant: 'link' } : {}),
         url_variable: String(block.url_variable || ''),
         url: block.url ? String(block.url) : '',
       };
@@ -409,9 +410,13 @@ function renderBlocks(blocks, payload) {
       const href = block.url_variable ? textFor(payload, block.url_variable) : block.url;
       if (href) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
-        const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
-        renderedCtaCount += 1;
-        htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0 9px 0' : '9px 0 24px 0'};text-align:center;">${render(escapeHtml(safeUrl(href)), escapeHtml(label))}</div>`);
+        if (block.variant === 'link') {
+          htmlParts.push(`<p style="margin:0 0 10px;font-family:${B.font};font-size:13px;line-height:1.58;"><a class="dm-link" href="${escapeHtml(safeUrl(href))}" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(label)}</a></p>`);
+        } else {
+          const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
+          renderedCtaCount += 1;
+          htmlParts.push(`<div style="margin:${renderedCtaCount === 1 ? '24px 0 9px 0' : '9px 0 24px 0'};text-align:center;">${render(escapeHtml(safeUrl(href)), escapeHtml(label))}</div>`);
+        }
         textParts.push(`${label}: ${href}`);
       }
     } else if (block.type === 'image') {

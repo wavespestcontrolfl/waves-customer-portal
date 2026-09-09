@@ -243,6 +243,7 @@ export default function IntelligenceBarShell({
           {" "}
           <input
             ref={inputRef}
+            aria-label="Ask Waves AI"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -324,7 +325,7 @@ export default function IntelligenceBarShell({
                 onClick={() => removeAttachment(i)}
                 title="Remove"
                 aria-label={`Remove ${a.name}`}
-                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-10 leading-none border-hairline border-zinc-200"
+                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-11 leading-none border-hairline border-zinc-200"
               >
                 ×
               </button>
@@ -431,7 +432,7 @@ export default function IntelligenceBarShell({
                   title={isFav ? "Unpin" : "Pin"}
                   aria-label={isFav ? `Unpin ${p}` : `Pin ${p}`}
                   className={cn(
-                    "h-5 min-w-8 px-1.5 flex items-center justify-center text-10 rounded-xs u-focus-ring transition-colors",
+                    "h-5 min-w-8 px-1.5 flex items-center justify-center text-11 rounded-xs u-focus-ring transition-colors",
                     isFav
                       ? "text-ink-primary"
                       : "text-ink-tertiary hover:text-ink-primary",
@@ -447,7 +448,7 @@ export default function IntelligenceBarShell({
 
       {/* Loading skeleton */}
       {loading && (
-        <div className="px-4 pb-4">
+        <div className="px-4 pb-4" role="status" aria-live="polite" aria-label="Thinking">
           {" "}
           <div className="flex flex-col gap-1.5">
             {skeletonBars.map((w, i) => (
@@ -466,9 +467,11 @@ export default function IntelligenceBarShell({
         <div
           className="px-4 pb-4 pt-1 border-t border-hairline border-zinc-200 overflow-y-auto"
           style={{ maxHeight: responseMaxHeight }}
+          aria-live="polite"
         >
           {" "}
           <div
+            role={isError ? "alert" : undefined}
             className={cn(
               "text-13 leading-relaxed mt-3",
               isError ? "text-alert-fg" : "text-ink-primary",
@@ -497,6 +500,7 @@ export default function IntelligenceBarShell({
           <div className="mt-3 flex gap-2">
             {" "}
             <input
+              aria-label="Follow-up question"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}

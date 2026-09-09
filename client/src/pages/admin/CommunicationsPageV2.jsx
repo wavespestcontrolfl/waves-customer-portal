@@ -53,6 +53,7 @@
 //   messages. This is the untrusted-input boundary — flag any
 //   missing signature verification or path that creates customers
 //   from arbitrary inbound numbers without rate-limiting.
+import { isAcceptedSms } from "../../utils/sms-delivery";
 import React, {
   useState,
   useEffect,
@@ -102,6 +103,7 @@ import {
 } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
+import { notifyUnreadChanged } from "../../hooks/useUnreadConversations";
 import {
   MMS_TOTAL_BUDGET_BYTES,
   fitImagesToBudget,
@@ -364,7 +366,7 @@ function TypeBadgeV2({ type }) {
   return <Badge tone="neutral">{type.replace(/_/g, " ")}</Badge>;
 }
 
-function MessageMediaV2({ media = [], inverted = false }) {
+export function MessageMediaV2({ media = [], inverted = false }) {
   // A signed media URL that fails to load (expired signature, offline) left a
   // blank image box inside the bubble — on an outbound (dark) bubble that
   // reads as a big empty black rectangle. Swap failed loads for a labeled
@@ -750,7 +752,10 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   return `Hi ${first}, it's Waves Pest Control. ${line}`;
 }
 
-function SmsTab({ active }) {
+// With a customer, render the same composer used by Messages, locked to that
+// profile. The caller keys it by customer id/phone to discard another person's
+// draft, attachments, and minted links when the selected record changes.
+export function SmsTab({ active, customer = null, customerMessages = [], customerReadScope = null, onSent, linkRequest = 0 }) {
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
   // /revise 403 for technicians). A tech following a draftId deep link
   // still gets the prefilled text/recipient, but sends as a plain manual
@@ -759,17 +764,17 @@ function SmsTab({ active }) {
   const smsIsAdminRole = smsOutletContext?.user?.role === "admin";
   const [messages, setMessages] = useState([]);
   const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!customer);
   const [smsFilter, setSmsFilter] = useState("all");
 
   const [aiAutoReply, setAiAutoReply] = useState(false);
   const [togglingAi, setTogglingAi] = useState(false);
 
   // Compose
-  const [toNumber, setToNumber] = useState("");
+  const [toNumber, setToNumber] = useState(customer?.phone || "");
   const [toSearch, setToSearch] = useState("");
   const [toResults, setToResults] = useState([]);
-  const [selectedCustomerId, setSelectedCustomerId] = useState(null);
+  const [selectedCustomerId, setSelectedCustomerId] = useState(customer?.id || null);
   const [fromNumber, setFromNumber] = useState("+19413187612");
   const [msgBody, setMsgBody] = useState("");
   const [sending, setSending] = useState(false);
@@ -819,6 +824,7 @@ function SmsTab({ active }) {
   // Insert Link sheet — the searchable link library (customer links +
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
+  useEffect(() => { if (linkRequest > 0) setShowLinkSheet(true); }, [linkRequest]);
   const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
@@ -857,7 +863,17 @@ function SmsTab({ active }) {
     activeThreadKey: activeThread?.contactPhone ? smsThreadKey(activeThread.contactPhone) : "",
   };
 
+  useEffect(() => {
+    if (!customer) return;
+    const latest = customerMessages.find((message) => message.channel === "sms" && phoneKey(message.contactPhone) === phoneKey(customer.phone));
+    if (latest?.ourEndpointId) {
+      setFromNumber(latest.ourEndpointId);
+      setThreadLock({ contactPhone: customer.phone, ourNumber: latest.ourEndpointId, label: latest.ourEndpointLabel || latest.ourEndpointId });
+    }
+  }, [customer?.id, customer?.phone]);
+
   const loadData = useCallback((search = "", options = {}) => {
+    if (customer) return Promise.resolve();
     const normalizedSearch = search.trim();
     const page = options.page || 1;
     const append = !!options.append;
@@ -887,11 +903,11 @@ function SmsTab({ active }) {
       setStats(statsData);
       setLoading(false);
     });
-  }, []);
+  }, [customer?.id]);
 
   useEffect(() => {
     smsSearchRef.current = smsSearch.trim();
-    if (!active) return;
+    if (!active || customer) return;
     const t = setTimeout(() => {
       loadData(smsSearch.trim());
     }, 300);
@@ -910,7 +926,7 @@ function SmsTab({ active }) {
         .map((m) => m.id)
         .filter(Boolean);
       const conversationIds = [
-        ...new Set(threadMessages.map((m) => m.conversationId).filter(Boolean)),
+        ...new Set([...(thread?.conversationIds || []), ...threadMessages.map((m) => m.conversationId)].filter(Boolean)),
       ];
       const readBefore =
         thread?.lastTimestamp ||
@@ -948,6 +964,7 @@ function SmsTab({ active }) {
             readBefore,
           }),
         });
+        notifyUnreadChanged();
       } catch {
         loadData(smsSearch.trim());
       }
@@ -956,12 +973,22 @@ function SmsTab({ active }) {
   );
 
   useEffect(() => {
+    if (!active || !customer) return;
+    const messages = customerMessages.filter((message) => message.channel === "sms");
+    // The read boundary comes from the loaded customer thread, including its
+    // older conversations; SMS arriving after that snapshot remain unread.
+    if (messages.length || customerReadScope?.conversationIds?.length) void markMessagesRead({ messages, conversationIds: customerReadScope?.conversationIds, lastTimestamp: customerReadScope?.readBefore });
+  }, [active, customer?.id, customerMessages, customerReadScope, markMessagesRead]);
+
+  useEffect(() => {
+    if (customer) return;
     adminFetch("/admin/communications/ai-auto-reply-status")
       .then((d) => setAiAutoReply(d.enabled))
       .catch(() => {});
   }, []);
 
   useEffect(() => {
+    if (!active) return undefined;
     const phone = toNumber.trim();
     if (!phone && !selectedCustomerId) {
       setAgentDraft(null);
@@ -992,7 +1019,7 @@ function SmsTab({ active }) {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [toNumber, selectedCustomerId]);
+  }, [active, toNumber, selectedCustomerId]);
 
   useEffect(() => {
     setSelectedAgentDraft(null);
@@ -1007,6 +1034,7 @@ function SmsTab({ active }) {
 
   // Prefill compose from deep links (Estimates/Customers SMS button, Agent Ops drafts).
   useEffect(() => {
+    if (customer) return;
     const params = new URLSearchParams(window.location.search);
     const phone = params.get("phone");
     const queryFromNumber = findKnownWavesNumber(params.get("fromNumber"));
@@ -1152,6 +1180,7 @@ function SmsTab({ active }) {
   };
 
   const handleSend = async () => {
+    if (sendInFlightRef.current || uploading || rewritingSms || aiDrafting || listening) return;
     if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
       return;
     const { value: scheduledFor, error: scheduleErr } = resolveScheduledFor();
@@ -1293,11 +1322,14 @@ function SmsTab({ active }) {
             contractId: insertedCustomerLinks.contract?.contractId || undefined,
           }),
         });
-        setSendResult({ ok: true, text: `Message sent.${reviewEmailNote(sent?.reviewEmail)}` });
+        if (!isAcceptedSms(sent)) {
+          throw new Error(sent?.reason || sent?.error || "Text was not handed to the provider. Your draft is retained.");
+        }
+        setSendResult({ ok: true, text: `Provider accepted; delivery is not yet confirmed.${reviewEmailNote(sent?.reviewEmail)}` });
       }
-      setToNumber("");
+      setToNumber(customer?.phone || "");
       setToSearch("");
-      setSelectedCustomerId(null);
+      setSelectedCustomerId(customer?.id || null);
       setMsgBody("");
       // Cleared in the same batch as the body: the strip effect must see the
       // sent links as already forgotten, not as operator-withdrawn (which
@@ -1313,7 +1345,8 @@ function SmsTab({ active }) {
       setAttachments([]);
       setSendTiming("now");
       setSendCustomAt("");
-      loadData(smsSearch.trim());
+      if (customer) await onSent?.();
+      else await loadData(smsSearch.trim());
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
     } finally {
@@ -1403,9 +1436,11 @@ function SmsTab({ active }) {
       alert("Enter a To number first");
       return;
     }
+    const requestBody = msgBody;
+    const requestContext = { ...rewriteContextRef.current };
     setAiDrafting(true);
     try {
-      const lastMsg = messages.find(
+      const lastMsg = customer ? customerMessages.find((message) => message.channel === "sms" && message.direction === "inbound" && phoneKey(message.contactPhone) === phoneKey(customer.phone)) : messages.find(
         (m) =>
           m.direction === "inbound" &&
           (m.from === toNumber.trim() ||
@@ -1418,7 +1453,13 @@ function SmsTab({ active }) {
           lastMessage: lastMsg?.body || "",
         }),
       });
-      if (d.draft) setMsgBody(d.draft.slice(0, 160));
+      if (d.draft) setMsgBody((current) => {
+        const latest = rewriteContextRef.current;
+        const sameRecipient = phoneKey(latest.toNumber) === phoneKey(requestContext.toNumber)
+          && latest.selectedCustomerId === requestContext.selectedCustomerId
+          && latest.fromNumber === requestContext.fromNumber;
+        return sameRecipient && current === requestBody ? d.draft.slice(0, 160) : current;
+      });
     } catch (e) {
       alert("AI draft failed: " + e.message);
     } finally {
@@ -1949,8 +1990,11 @@ function SmsTab({ active }) {
     const requestActiveThreadKey = activeThreadMatchesRecipient
       ? smsThreadKey(activeThread.contactPhone)
       : "";
-    const recentNewestMessages =
-      activeThreadMatchesRecipient && Array.isArray(activeThread?.messages)
+    const recentNewestMessages = customer
+      ? customerMessages.filter((message) => message.channel === "sms"
+          && phoneKey(message.contactPhone) === requestRecipientKey
+          && phoneKey(message.ourEndpointId) === requestFromNumberKey).slice(0, 8)
+      : activeThreadMatchesRecipient && Array.isArray(activeThread?.messages)
         ? activeThread.messages
             .filter((m) => smsMessageMatchesLine(m, requestFromNumber))
             .slice(0, 8)
@@ -2219,7 +2263,7 @@ function SmsTab({ active }) {
   return (
     <div>
       {/* Stats + auto-reply */}
-      <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
+      {!customer && <div className="hidden md:flex items-center gap-2 mb-4 flex-wrap">
         {" "}
         <StatCardV2
           label="Sent This Month"
@@ -2278,11 +2322,11 @@ function SmsTab({ active }) {
             setSmsFilter((f) => (f === "estimate" ? "all" : "estimate"))
           }
         />{" "}
-      </div>
+      </div>}
       {/* Compose */}
       <Card id="sms-compose-v2" className="p-5 mb-5">
         {" "}
-        <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
+        {!customer && <div className="flex items-center justify-end mb-3 flex-wrap gap-2">
           <button
             type="button"
             onClick={toggleAiAutoReply}
@@ -2311,29 +2355,31 @@ function SmsTab({ active }) {
               />{" "}
             </span>{" "}
           </button>{" "}
-        </div>
+        </div>}
+        {customer && <h3 className="mb-4 text-18 font-medium">Text message</h3>}
         {/* PR 4 — thread-reply lock banner */}
         {threadLock && (
           <div className="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-900 rounded-sm mb-3">
             {" "}
             <Badge tone="strong">Locked</Badge>{" "}
             <span className="text-12 text-zinc-900 flex-1">
-              Replying from <strong>{threadLock.label}</strong>to continue
+              Replying from <strong>{threadLock.label}</strong>{" "}to continue
               thread with {threadLock.contactPhone}
             </span>{" "}
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               onClick={() => setThreadLock(null)}
               className="text-13 md:text-11 min-h-[44px] md:min-h-0 inline-flex items-center px-2 text-ink-secondary underline hover:text-zinc-900 u-focus-ring"
             >
               Override
-            </button>{" "}
+            </Button>{" "}
           </div>
         )}
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           From{threadLock && " (locked to thread)"}
         </label>{" "}
-        <select
+        <Select
+          aria-label="Send from"
           value={fromNumber}
           onChange={(e) => setFromNumber(e.target.value)}
           disabled={!!threadLock}
@@ -2361,7 +2407,8 @@ function SmsTab({ active }) {
             && !ALL_NUMBERS.some((g) => g.numbers.some((n) => n.number === fromNumber)) && (
             <option value={fromNumber}>{threadLock.label}</option>
           )}
-        </select>{" "}
+        </Select>{" "}
+        {!customer && <>
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           To
         </label>{" "}
@@ -2445,7 +2492,7 @@ function SmsTab({ active }) {
                 <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">
                   Last message from customer
                 </div>{" "}
-                <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+                <div className="text-16 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
                   {lastInbound.body}
                 </div>{" "}
                 <div className="text-12 md:text-11 text-ink-tertiary mt-1">
@@ -2454,6 +2501,7 @@ function SmsTab({ active }) {
               </div>
             );
           })()}
+        </>}
         {(agentDraft || agentDraftLoading) && (
           <div className="mb-3 px-3 py-2.5 bg-white border-hairline border-zinc-300 rounded-sm">
             <div className="flex items-center gap-2 mb-2">
@@ -2489,7 +2537,7 @@ function SmsTab({ active }) {
             {agentDraftLoading ? (
               <div className="text-13 text-ink-secondary">Checking pending review…</div>
             ) : (
-              <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+              <div className="text-16 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
                 {agentDraft.suggestedMessage}
               </div>
             )}
@@ -2517,6 +2565,8 @@ function SmsTab({ active }) {
         </label>{" "}
         <div>
           <textarea
+            aria-label="Text message"
+            name="smsMessage"
             placeholder={listening ? "Listening…" : "Type your message…"}
             value={msgBody}
             onChange={(e) => setMsgBody(e.target.value)}
@@ -2538,7 +2588,7 @@ function SmsTab({ active }) {
               aria-label="Rewrite message in Waves tone"
               title="Rewrite in Waves tone"
               className={cn(
-                "inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
+                "sms-writing-tool inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
                 "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
                 "disabled:opacity-50 disabled:cursor-not-allowed",
               )}
@@ -2557,7 +2607,7 @@ function SmsTab({ active }) {
                 aria-label={listening ? "Stop dictation" : "Start voice dictation"}
                 title={listening ? "Stop dictation" : "Start voice dictation"}
                 className={cn(
-                  "inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
+                  "sms-writing-tool inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
                   listening
                     ? "bg-alert-fg text-white animate-pulse"
                     : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
@@ -2639,7 +2689,8 @@ function SmsTab({ active }) {
         <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
           Send
         </label>{" "}
-        <select
+        <Select
+          aria-label="Send timing"
           value={sendTiming}
           onChange={(e) => setSendTiming(e.target.value)}
           className={cn(
@@ -2652,10 +2703,11 @@ function SmsTab({ active }) {
           <option value="now">Immediately</option>{" "}
           <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
           <option value="custom">Custom time…</option>{" "}
-        </select>
+        </Select>
         {sendTiming === "custom" && (
           <input
             type="datetime-local"
+            aria-label="Scheduled send time (Eastern)"
             value={sendCustomAt}
             onChange={(e) => setSendCustomAt(e.target.value)}
             className={cn(
@@ -2674,7 +2726,7 @@ function SmsTab({ active }) {
               disabled={uploading}
               aria-label="Add attachment"
               title="Add image"
-              className="flex items-center justify-center h-11 w-11 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
+              className="sms-writing-tool flex items-center justify-center h-11 w-11 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
             >
               {" "}
               <svg
@@ -2729,6 +2781,8 @@ function SmsTab({ active }) {
               sending ||
               uploading ||
               rewritingSms ||
+              aiDrafting ||
+              listening ||
               // Mid-lookup send would go out WITHOUT the link the operator
               // just asked for (and clearing the recipient on send discards
               // the response) — wait out the link fetches.
@@ -2756,7 +2810,7 @@ function SmsTab({ active }) {
           <Button
             variant="secondary"
             onClick={handleAiDraft}
-            disabled={aiDrafting || !toNumber.trim()}
+            disabled={aiDrafting || sending || uploading || rewritingSms || listening || !toNumber.trim()}
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
           </Button>{" "}
@@ -2812,6 +2866,7 @@ function SmsTab({ active }) {
           </div>
         )}
       </Card>
+      {!customer && <>
       {/* View toggle — desktop power-user feature; mobile just shows Conversations */}
       <div className="hidden md:flex items-center gap-3 mb-3 flex-wrap">
         {" "}
@@ -3003,7 +3058,7 @@ function SmsTab({ active }) {
                       </div>{" "}
                       <div
                         className={cn(
-                          "text-15 md:text-12 truncate leading-snug",
+                          "text-16 md:text-12 truncate leading-snug",
                           hasUnseen ? "text-zinc-900" : "text-ink-secondary",
                         )}
                       >
@@ -3099,6 +3154,7 @@ function SmsTab({ active }) {
           onClose={() => setSelected360Id(null)}
         />
       )}
+      </>}
     </div>
   );
 }

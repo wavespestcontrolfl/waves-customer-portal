@@ -57,6 +57,24 @@ async function acquireScheduledInvoiceMintLock(trx, scheduledServiceId) {
   );
 }
 
+// Call under the existing mint lock. Packet creation takes those same locks
+// before freezing its members, so a legacy writer cannot slip past a packet
+// that has committed while the writer waited. Do not adopt the shared invoice
+// into a member's old billing flow: that flow also owns delivery and credits.
+async function assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId, packetId = null) {
+  const scheduled = await trx('scheduled_services').where({ id: scheduledServiceId }).first('visit_id');
+  const owner = scheduled?.visit_id
+    ? await trx('visit_completion_packets').where({ visit_id: scheduled.visit_id }).first('id')
+    : null;
+  if (owner && owner.id !== packetId) {
+    const err = new Error('This service is billed by its saved visit closeout. Resume that closeout.');
+    err.status = 409;
+    err.code = 'VISIT_PACKET_OWNS_BILLING';
+    throw err;
+  }
+  if (packetId && owner?.id !== packetId) throw new Error('Visit invoice ownership mismatch');
+}
+
 // The ONE lock chain every scheduled-price invoice writer takes, in the ONE
 // order: advisory mint lock → customer KEY SHARE → (caller eligibility
 // hook) → visit row FOR UPDATE.
@@ -126,7 +144,8 @@ function scheduledPriceMovedError(lockedSvc) {
 // invoice; adoption = a replay transaction waking under the mint lock to
 // find another writer (Charge Now / completion mint) already committed one.
 // Same predicate either way — the ONE terminal-status filter.
-function findAdoptableScheduledInvoice(trx, scheduledServiceId) {
+async function findAdoptableScheduledInvoice(trx, scheduledServiceId) {
+  await assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId);
   return trx('invoices')
     .where({ scheduled_service_id: scheduledServiceId })
     .whereNot('status', 'void')
@@ -239,6 +258,7 @@ module.exports = {
   SCHEDULED_SERVICE_INVOICE_MINT_LOCK,
   TERMINAL_INVOICE_STATUSES,
   acquireScheduledInvoiceMintLock,
+  assertScheduledInvoiceNotPacketOwned,
   acquireScheduledMintLockChain,
   findAdoptableScheduledInvoice,
   adoptScheduledInvoiceUnderMintLock,

@@ -106,7 +106,7 @@ export default function useModalFocus(active = true, onEscape = null) {
         typeof previouslyFocused.focus === 'function' &&
         document.contains(previouslyFocused)
       ) {
-        previouslyFocused.focus();
+        previouslyFocused.focus({ preventScroll: true });
       }
     };
   }, [active]);

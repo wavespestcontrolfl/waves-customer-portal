@@ -36,6 +36,17 @@ function daysOverdueOn(now, dueDay) {
   return Math.round((Date.UTC(ny, nm - 1, nd) - Date.UTC(dy, dm - 1, dd)) / DAY_MS);
 }
 
+// SQL companion to dueDayOf/invoiceDaysOverdue for invoice reads. A DATE
+// stays a calendar day; a legacy created_at fallback is converted from its
+// stored instant to ET. Dunning's first-contact grace period is separate
+// from whether a delivered invoice has passed its due day.
+function invoiceOverdueSql(database, now = new Date()) {
+  return database.raw(
+    "(invoices.status = 'overdue' OR COALESCE(invoices.due_date, (invoices.created_at AT TIME ZONE 'America/New_York')::date) < ?::date)",
+    [etDateString(now)],
+  );
+}
+
 /** Epoch ms of a timestamp column (string or Date); unparseable sorts LAST. */
 function epochOf(value) {
   const t = value ? new Date(value).getTime() : NaN;
@@ -91,4 +102,4 @@ function registerForTier(tier) {
   return 'friendly';
 }
 
-module.exports = { dueDayOf, daysOverdueOn, invoiceDaysOverdue, orderByDue, anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, registerForTier };
+module.exports = { invoiceOverdueSql, dueDayOf, daysOverdueOn, invoiceDaysOverdue, orderByDue, anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, registerForTier };
