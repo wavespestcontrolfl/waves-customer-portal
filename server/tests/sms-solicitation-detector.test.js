@@ -11,6 +11,8 @@ describe('shared SMS vendor-pitch detector', () => {
     'Our network offers exclusive lawn jobs.',
     'Do you offer unlimited estimates for contractors managing rentals?',
     'We provide housing for contractors. Can we get unlimited estimates for our rentals?',
+    'We provide housing; can you send pest control estimates for contractors staying here? Would you like more details?',
+    'We provide housing and need estimates for contractors staying here. Want more details?',
     'We manage several rentals and can fill your schedule; please quote pest control',
     'We can fill your calendar with rental pest services. Want more details?',
     'I need pest control while we grow our business. Is there a free trial?',

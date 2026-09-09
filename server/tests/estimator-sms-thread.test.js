@@ -323,6 +323,7 @@ describe('_private.threadQuoteSignal', () => {
       'Can I get unlimited estimates for my rental properties?',
       'Do qualified customers get a discount on pest control?',
       'We manage several rentals and can fill your schedule; please quote pest control',
+      'We provide housing; can you send pest control estimates for contractors staying here? Would you like more details?',
       'Can you fill your calendar with our rental pest services? I can send more details?',
       'We are growing our business and need a quote for pest control.',
     ];
