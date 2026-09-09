@@ -150,11 +150,7 @@ export default function EmailAutomationsPanelV2() {
                     </td>{" "}
                     <td className="px-4 py-3">
                       {" "}
-                      <Badge
-                        tone={
-                          t.asm_group === "newsletter" ? "muted" : "neutral"
-                        }
-                      >
+                      <Badge tone="neutral">
                         {t.asm_group}
                       </Badge>{" "}
                     </td>{" "}
@@ -704,12 +700,10 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
             </p>{" "}
             <div className="flex items-center gap-2 mt-2">
               {" "}
-              <Badge
-                tone={template.asm_group === "newsletter" ? "muted" : "neutral"}
-              >
+              <Badge tone="neutral">
                 {template.asm_group}
               </Badge>{" "}
-              <Badge tone={template.enabled ? "strong" : "muted"}>
+              <Badge tone={template.enabled ? "strong" : "neutral"}>
                 {template.enabled ? "Enabled" : "Disabled"}
               </Badge>{" "}
               <span className="text-11 text-ink-tertiary">
@@ -942,7 +936,7 @@ function StepEditor({
             />
             Step enabled
           </label>
-          {!enabled && <Badge tone="muted">Disabled — skipped</Badge>}
+          {!enabled && <Badge tone="neutral">Disabled — skipped</Badge>}
         </div>{" "}
       </div>{" "}
       <div className="mb-3">

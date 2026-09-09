@@ -116,7 +116,7 @@ function normalizeContactInput(contact = {}) {
 // Delivery-channel options for per-notification channel selection.
 const CHANNEL_VALUES = ['sms', 'email', 'both'];
 const APP_CHANNEL_KEYS = new Set([
-  'appointmentConfirmationChannel', 'enRouteChannel', 'techArrivedChannel',
+  'appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel',
   'serviceCompleteChannel', 'paymentConfirmationChannel',
 ]);
 
@@ -217,8 +217,8 @@ function preferencePayload(prefs = {}, { includeChannels = true, appPreferences 
     ...(includeChannels ? {
       // Per-notification delivery channel (sms | email | both)
       appointmentConfirmationChannel: channelValue(prefs.appointment_confirmation_channel, appPreferences),
-      serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
-      serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
+      serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel, appPreferences),
+      serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel, appPreferences),
       enRouteChannel: channelValue(prefs.en_route_channel, appPreferences),
       techArrivedChannel: channelValue(prefs.tech_arrived_channel, appPreferences),
       // Billing delivery channels reuse the migration-104 columns so the
@@ -322,7 +322,7 @@ const CHANNEL_PREF_KEYS = new Set([
   'paymentConfirmationChannel',
 ]);
 
-const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email', push: 'App first' };
+const CHANNEL_DISPLAY = { sms: 'Text', email: 'Email', both: 'Text & Email', push: 'App' };
 
 const DB_FIELD_BY_PREF = {
   appointmentConfirmation: 'appointment_confirmation',
@@ -549,8 +549,8 @@ router.put('/preferences', async (req, res, next) => {
       paymentConfirmationSms: Joi.boolean(),
       serviceReportNotifyPrimary: Joi.boolean(),
       appointmentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
-      serviceReminder72hChannel: Joi.string().valid(...CHANNEL_VALUES),
-      serviceReminder24hChannel: Joi.string().valid(...CHANNEL_VALUES),
+      serviceReminder72hChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
+      serviceReminder24hChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
       enRouteChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
       techArrivedChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
       serviceCompleteChannel: Joi.string().valid('sms', 'push'),
@@ -599,7 +599,7 @@ router.put('/preferences', async (req, res, next) => {
       && (CHANNEL_DB_COLUMNS.includes(DB_FIELD_BY_PREF[key]) ? existingPrimary : existing)?.[DB_FIELD_BY_PREF[key]] !== 'push')) {
       const status = await require('../services/push-notifications').customerStatus(req.customerId);
       if (!status.fresh || updates.pushEnabled === false || (updates.pushEnabled !== true && !status.enabled)) {
-        return res.status(409).json({ error: 'Connect the app and enable notifications before choosing App first.' });
+        return res.status(409).json({ error: 'Connect the app and enable notifications before choosing App.' });
       }
     }
 
