@@ -395,6 +395,30 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect((await service.previewManualPropertyChange(customerId, 'primary', {}, rentalId)).primary_property.id).toBe(rentalId);
   }, 30000);
 
+  test('tenant accounts refuse primary promotion in the list, preview and confirmation even with unknown occupancy', async () => {
+    const service = require('../services/customer-properties');
+    const saved = await service.addManualProperty(customerA, address(1800), { actorId: actor });
+    const beforeCustomer = await db('customers').where({ id: customerA }).first();
+    const beforeProperty = await db('customer_properties').where({ id: saved.propertyId }).first();
+    const preview = await service.previewManualPropertyChange(customerA, 'primary', {}, saved.propertyId);
+    const proposed = await propose('set_primary_property', { customer_id: customerA, property_id: saved.propertyId }, 'Make the saved 1800 Example Grove property primary');
+    await db('customers').where({ id: customerA }).update({ contact_role: 'tenant', updated_at: db.fn.now() });
+    try {
+      const listed = await api(`/api/admin/customers/${customerA}/properties`);
+      expect(listed.body.properties.find(p => p.id === saved.propertyId)).toMatchObject({ primary_change_eligible: false,
+        primary_change_unavailable: expect.stringContaining('tenant') });
+      expect(await api(`/api/admin/customers/${customerA}/properties/${saved.propertyId}/primary-preview`))
+        .toMatchObject({ status: 409, body: { code: 'primary_role_unavailable' } });
+      expect(await api(`/api/admin/customers/${customerA}/properties/${saved.propertyId}/primary`, { expectedVersion: preview._version }))
+        .toMatchObject({ status: 409, body: { code: 'primary_role_unavailable' } });
+      expect(await confirm(proposed)).toMatchObject({ status: 409, body: { code: 'target_changed' } });
+      const refused = await propose('set_primary_property', { customer_id: customerA, property_id: saved.propertyId }, 'Make the saved 1800 Example Grove property primary');
+      expect(refused.body.pendingActions || []).toHaveLength(0);
+      expect(await db('customer_properties').where({ id: saved.propertyId }).first()).toEqual(beforeProperty);
+      expect((await db('customers').where({ id: customerA }).first()).address_line1).toBe(beforeCustomer.address_line1);
+    } finally { await db('customers').where({ id: customerA }).update({ contact_role: beforeCustomer.contact_role, updated_at: db.fn.now() }); }
+  }, 30000);
+
   test.each([['itself', true], ['another property', false]])('a legacy account row saved as non-primary supports selecting %s', async (_choice, selectAccountRow) => {
     const service = require('../services/customer-properties');
     const customerId = crypto.randomUUID(), savedAccountRow = crypto.randomUUID(), targetId = crypto.randomUUID();
@@ -411,6 +435,7 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect(await db('customer_properties').where({ customer_id: customerId }).count('* as count').first()).toEqual({ count: '2' });
     expect(await db('customer_properties').where({ id: savedAccountRow }).first('is_primary', 'label')).toEqual({ is_primary: selectAccountRow, label: 'Home' });
     expect(await db('customer_properties').where({ id: targetId }).first('is_primary')).toEqual({ is_primary: !selectAccountRow });
+    expect((await db('customer_properties').where({ id: selectedId }).first()).occupancy_type).toBe('owner_occupied');
   }, 30000);
 
   test('a primary change preserves linked unstamped completed visits without rewriting saved or other-property addresses', async () => {
@@ -423,10 +448,18 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     const oldPrimary = await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first();
     const target = await service.addManualProperty(customerId, address(1600), { actorId: actor });
     const unstamped = crypto.randomUUID(), stamped = crypto.randomUUID(), otherProperty = crypto.randomUUID();
+    const legacyVisits = [
+      { address: '1600 Example Grove, Sarasota, FL 34201', preserved: false },
+      { address: '1500 Example Grove Unit 5', preserved: false },
+      { address: '1500 Example Grove, Sarasota, FL 34201', preserved: true },
+      { address: null, preserved: true },
+    ].map(row => ({ ...row, estimateId: crypto.randomUUID(), visitId: crypto.randomUUID() }));
+    await db('estimates').insert(legacyVisits.map(row => ({ id: row.estimateId, customer_id: customerId, address: row.address, property_id: null })));
     await db('scheduled_services').insert([
       { id: unstamped, property_id: oldPrimary.id },
       { id: stamped, property_id: oldPrimary.id, service_address_line1: '1550 Saved Address', service_address_city: 'Sarasota' },
       { id: otherProperty, property_id: target.propertyId },
+      ...legacyVisits.map(row => ({ id: row.visitId, source_estimate_id: row.estimateId, property_id: null })),
     ].map(row => ({ customer_id: customerId, scheduled_date: '2026-08-01', service_type: 'General Pest Control', status: 'completed', ...row })));
     const preview = await api(`/api/admin/customers/${customerId}/properties/${target.propertyId}/primary-preview`);
     expect(preview.status).toBe(200);
@@ -437,6 +470,12 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     });
     expect(await db('scheduled_services').where({ id: stamped }).first()).toMatchObject({ property_id: oldPrimary.id, service_address_line1: '1550 Saved Address' });
     expect(await db('scheduled_services').where({ id: otherProperty }).first()).toMatchObject({ property_id: target.propertyId, service_address_line1: null });
+    for (const row of legacyVisits) {
+      expect(await db('scheduled_services').where({ id: row.visitId }).first()).toMatchObject({
+        property_id: row.preserved ? oldPrimary.id : null,
+        service_address_line1: row.preserved ? oldPrimary.address_line1 : null,
+      });
+    }
     expect(await db('customers').where({ id: customerId }).first('address_line1')).toEqual({ address_line1: '1600 Example Grove' });
   }, 30000);
 
