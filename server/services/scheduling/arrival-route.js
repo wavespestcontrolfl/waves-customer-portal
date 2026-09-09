@@ -166,18 +166,6 @@ function groupRouteStops(rows) {
   return result;
 }
 
-function routeFingerprint(context) {
-  const { createHash } = require('crypto');
-  const rows = [...context.rows, context.target].map(row => Object.fromEntries(
-    [...COLUMNS, 'lat', 'lng'].map(key => [key, row[key] ?? null]),
-  )).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-  // Prospective creation time is bookkeeping, not a changed route input.
-  for (const row of rows) if (row.id === '__candidate__') row.created_at = null;
-  return createHash('sha256').update(JSON.stringify({ rows,
-    members: currentOrder(context.visitMembers || []),
-    blocks: [...(context.blocks || [])].sort((a, b) => String(a.id).localeCompare(String(b.id))) })).digest('hex');
-}
-
 function unverified(target, date) {
   return {
     feasible: false, target, reason: 'route_unverified',
@@ -362,20 +350,6 @@ function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin
   return { placements, evaluated, rejections };
 }
 
-async function certifyArrivalPlacement(context, options) {
-  if (!context) return unverified(null, 'this date');
-  if (!capacityEnabled() && !context.preserveCapacity) return evaluateArrivalPlacement(context, options);
-  context.travel ||= RouteOptimizer.createSchedulingTravel();
-  // Recompute departure times after road estimates change a leg. A final
-  // uncovered leg retains the conservative model and is labelled accordingly.
-  for (let pass = 0; pass < 3; pass++) {
-    const legs = [];
-    evaluateArrivalPlacement(context, { ...options, collectLegs: legs });
-    await context.travel.preload(legs);
-  }
-  return evaluateArrivalPlacement(context, options);
-}
-
 async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, ...options }) {
   const context = await loadArrivalRouteContext(options);
   return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes });
@@ -384,5 +358,5 @@ async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, 
 module.exports = {
   arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
-  certifyArrivalPlacement, routeFingerprint, groupRouteStops, workDuration,
+  groupRouteStops, workDuration,
 };

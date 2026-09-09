@@ -5,6 +5,7 @@ let mockConn;
 jest.mock('../models/db', () => {
   const proxy = (...args) => mockConn(...args);
   proxy.raw = (...args) => mockConn.raw(...args);
+  proxy.transaction = (...args) => mockConn.transaction(...args);
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -71,6 +72,28 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     await acquireOccupancyLock(mockConn, DAY);
   });
   afterEach(async () => { await mockConn.rollback(); });
+
+  test('capacity finder reads live blocks, eligibility and whole-hour arrivals from PostgreSQL', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      for (const table of ['tech_schedule_blocks', 'technician_capabilities', 'system_settings', 'schedule_blackout_dates']) {
+        await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
+      }
+      const offers = await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control' });
+      expect(offers.slots.length).toBeGreaterThan(0);
+      expect(offers.slots.every(slot => /^\d{2}:00$/.test(slot.start_time) && slot.start_time <= '16:00')).toBe(true);
+      expect(offers.slots.every(slot => slot.travel_source === 'conservative_model')).toBe(true);
+      await mockConn('tech_schedule_blocks').insert({ date: DAY, technician_id: TECH, block_type: 'unavailable', start_time: '08:00', end_time: '18:00' });
+      expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
+      await mockConn('tech_schedule_blocks').delete();
+      await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'general', active: false });
+      expect((await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control' })).slots).toEqual([]);
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
 
   test('ranks the nearby morning placement first, and picker/live-check/save agree without rewriting other promises', async () => {
     const offers = await findAvailableSlots(OPTIONS);

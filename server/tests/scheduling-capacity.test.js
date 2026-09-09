@@ -1,7 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { evaluateArrivalPlacement, groupRouteStops, routeFingerprint } = require('../services/scheduling/arrival-route');
+const { evaluateArrivalPlacement, groupRouteStops } = require('../services/scheduling/arrival-route');
 const { simulateArrivalRoute, effectiveWindowRange } = require('../services/route-reorder-window-fit');
 const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
 
@@ -71,16 +71,13 @@ test('complete visits sum member work while sharing one arrival anchor', () => {
   expect(groupRouteStops([members[0], { ...members[1], lat: 27.5 }])).toBeNull();
 });
 
-test('existing blocked time interrupts work/travel and invalidates a changed route proof', () => {
+test('existing blocked time interrupts work and travel', () => {
   const optimizer = { HQ: { lat: 27, lng: -82 }, haversine: () => 0, fallbackLegMetrics: () => ({ minutes: 0 }) };
   const result = simulateArrivalRoute(optimizer, effectiveWindowRange, [stop('job', 600, 40)], {
     blockedIntervals: [{ startMin: 615, endMin: 660 }], dayEndMin: 1080, includeReturnInFinish: true,
   });
   expect(result.arrivals[0]).toEqual({ id: 'job', arrivalMin: 660, departureMin: 700 });
-  const input = context([], { blocks: [{ id: 'blocked', start_time: '12:00', end_time: '13:00' }] });
-  const fingerprint = routeFingerprint(input);
-  input.blocks[0].end_time = '14:00';
-  expect(routeFingerprint(input)).not.toBe(fingerprint);
+
 });
 
 test('unknown coordinates, active work and unassigned blockers cannot create capacity', () => {

@@ -10,7 +10,7 @@
  * auto-dispatch scores a visit's current placement with. Both sides MUST use
  * it: auto-dispatch compares a current placement against the candidates this
  * module produces, so a local copy of the constants here would put the two
- * sides on different scales. No API calls per request.
+ * sides on different scales. Capacity reads use one bounded traffic budget.
  */
 
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
