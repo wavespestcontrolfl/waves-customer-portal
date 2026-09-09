@@ -1,4 +1,5 @@
 'use strict';
+/* global window, document, getComputedStyle, innerWidth, innerHeight, matchMedia, scrollTo */
 // Actual Tech route, entirely synthetic APIs. No customer/provider requests.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -68,6 +69,59 @@ async function main() {
         }, user);
         page.on('pageerror', (error) => state.errors.push(error.message));
         page.on('console', (message) => { if (message.type() === 'error') state.consoleErrors.push(message.text()); });
+        const routes = new Map(Object.entries({
+          '/api/admin/auth/me': user,
+          '/api/admin/feature-flags': { flags: {} },
+          '/api/tech/staff-documents/availability': { available: false },
+          '/api/admin/schedule': { services: rows },
+          '/api/tech/notifications': { notifications: [] },
+          '/api/tech/line': { line: null },
+          '/api/admin/intelligence-bar/quick-actions': { actions: [] },
+          '/api/tech/timetracking/status': { clockedIn: true, currentJob: { jobId: 'visit-a' }, todaySummary: { shiftMinutes: 120, jobCount: 1 } },
+          '/api/tech/timetracking/pending-signoff': { pending: false },
+        }).map(([endpoint, response]) => [`GET ${endpoint}`, () => ({ response })]));
+        for (const service of rows) {
+          const schedule = `/api/admin/schedule/${service.id}`;
+          const recap = `/api/admin/dispatch/${service.id}/pest-recap`;
+          const photoPath = `/api/tech/services/${service.id}`;
+          routes.set(`GET ${schedule}/estimate-source`, () => ({ response: {
+            linked: true, estimateId: 'estimate-example', estimateSlug: 'EXAMPLE-001',
+            lines: [{ name: 'Quarterly Pest Control', cadence: 'quarterly', perApplicationPrice: 95 }], payment: { billingTerm: 'per_service' },
+          } }));
+          routes.set(`GET ${schedule}/visit-brief`, () => ({ response: { brief: null, facts: {
+            access: { codes: { propertyGate: 'EXAMPLE 1234' }, pets: 'Dogs secured indoors', accessNotes: 'Use the side gate.', alerts: [] },
+            last_visit: { date: '2026-06-02', type: 'Quarterly Pest Control', products: [{ name: 'Prior example product' }] },
+          } } }));
+          routes.set(`GET ${recap}/context`, () => ({ response: {
+            service: { ...service, hasPhone: false }, products: [product], existingRecord: completed.get(service.id) || null,
+            timeline: [{ to_status: 'on_site', transitioned_at: '2026-09-08T18:00:00Z' }],
+          } }));
+          routes.set(`POST ${recap}/draft`, () => ({ status: 503, response: { error: 'Example AI unavailable. Complete manually.' } }));
+          routes.set(`POST ${recap}`, async (body) => {
+            if (failCompletion) {
+              await pendingCompletion; failCompletion = false;
+              return { status: 503, response: { error: 'Example completion failed. Your draft is retained.' } };
+            }
+            completed.set(service.id, { technician_notes: body.technicianNotes, products: body.products });
+            service.status = 'completed';
+            photos.forEach((photo) => { photo.staged = false; });
+            return { response: { ok: true } };
+          });
+          routes.set(`GET ${photoPath}/photo-marks`, () => ({ response: {
+            supported: marksEnabled, kinds: [{ kind: 'foam_injection', label: 'Example treated point' }], defaultKind: 'foam_injection', marksByS3Key: {},
+          } }));
+          routes.set(`GET ${photoPath}/photos`, () => failPhotoList
+            ? { status: 503, response: { error: 'Example photo list unavailable.' } }
+            : { response: { photos } });
+          routes.set(`POST ${photoPath}/photos`, async () => {
+            if (failPhoto) {
+              await pendingPhoto; failPhoto = false;
+              return { status: 503, response: { error: 'Example photo upload failed.' } };
+            }
+            photos.push({ id: 'photo-example', photo_type: 'before', caption: 'Example side gate before treatment', staged: true, url: photoPreview });
+            return { response: { photo: photos[0] } };
+          });
+        }
         await page.route('**/*', async (route) => {
           const request = route.request(), url = new URL(request.url());
           if (url.origin !== server.baseUrl || url.pathname.startsWith('/socket.io')) return route.abort();
@@ -75,51 +129,12 @@ async function main() {
           const method = request.method(), endpoint = url.pathname;
           const body = method === 'GET' ? null : request.headers()['content-type']?.includes('application/json') ? request.postDataJSON() : request.postData();
           if (method !== 'GET') state.writes.push({ endpoint, method, body });
-          let response, status = 200;
-          if (endpoint === '/api/admin/auth/me') response = user;
-          else if (endpoint === '/api/admin/feature-flags') response = { flags: {} };
-          else if (endpoint === '/api/tech/staff-documents/availability') response = { available: false };
-          else if (endpoint === '/api/admin/schedule') response = { services: rows };
-          else if (endpoint === '/api/tech/notifications') response = { notifications: [] };
-          else if (endpoint === '/api/tech/line') response = { line: null };
-          else if (endpoint === '/api/admin/intelligence-bar/quick-actions') response = { actions: [] };
-          else if (endpoint === '/api/tech/timetracking/status') response = { clockedIn: true, currentJob: { jobId: 'visit-a' }, todaySummary: { shiftMinutes: 120, jobCount: 1 } };
-          else if (endpoint === '/api/tech/timetracking/pending-signoff') response = { pending: false };
-          else if (endpoint.endsWith('/estimate-source')) response = { linked: true, estimateId: 'estimate-example', estimateSlug: 'EXAMPLE-001',
-            lines: [{ name: 'Quarterly Pest Control', cadence: 'quarterly', perApplicationPrice: 95 }], payment: { billingTerm: 'per_service' } };
-          else if (endpoint.endsWith('/visit-brief')) response = { brief: null, facts: {
-            access: { codes: { propertyGate: 'EXAMPLE 1234' }, pets: 'Dogs secured indoors', accessNotes: 'Use the side gate.', alerts: [] },
-            last_visit: { date: '2026-06-02', type: 'Quarterly Pest Control', products: [{ name: 'Prior example product' }] } } };
-          else if (endpoint.endsWith('/pest-recap/context')) {
-            const id = endpoint.split('/').at(-3);
-            response = { service: { ...rows.find((row) => row.id === id), hasPhone: false }, products: [product], existingRecord: completed.get(id) || null,
-              timeline: [{ to_status: 'on_site', transitioned_at: '2026-09-08T18:00:00Z' }] };
-          } else if (endpoint.endsWith('/pest-recap/draft')) { status = 503; response = { error: 'Example AI unavailable. Complete manually.' }; }
-          else if (endpoint.endsWith('/pest-recap') && method === 'POST') {
-            const id = endpoint.split('/').at(-2);
-            if (failCompletion) {
-              await pendingCompletion; failCompletion = false;
-              status = 503; response = { error: 'Example completion failed. Your draft is retained.' };
-            } else {
-              completed.set(id, { technician_notes: body.technicianNotes, products: body.products });
-              rows.find((row) => row.id === id).status = 'completed';
-              photos.forEach((photo) => { photo.staged = false; });
-              response = { ok: true };
-            }
-          } else if (endpoint.endsWith('/photo-marks')) response = { supported: marksEnabled, kinds: [{ kind: 'foam_injection', label: 'Example treated point' }], defaultKind: 'foam_injection', marksByS3Key: {} };
-          else if (endpoint.endsWith('/photos') && method === 'GET') {
-            if (failPhotoList) { status = 503; response = { error: 'Example photo list unavailable.' }; }
-            else response = { photos };
+          const handler = routes.get(`${method} ${endpoint}`);
+          if (!handler) {
+            state.unmatched.push({ endpoint, method });
+            return route.fulfill({ status: 501, contentType: 'application/json', body: JSON.stringify({ error: 'Unmatched synthetic endpoint' }) });
           }
-          else if (endpoint.endsWith('/photos') && method === 'POST') {
-            if (failPhoto) { await pendingPhoto; failPhoto = false; status = 503; response = { error: 'Example photo upload failed.' }; }
-            else {
-              photos.push({ id: 'photo-example', photo_type: 'before', caption: 'Example side gate before treatment', staged: true,
-                url: photoPreview });
-              response = { photo: photos[0] };
-            }
-          }
-          if (response === undefined) { state.unmatched.push({ endpoint, method }); status = 501; response = { error: 'Unmatched synthetic endpoint' }; }
+          const { response, status = 200 } = await handler(body);
           return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(response) });
         });
         async function screenshot(name, locator) {
@@ -337,7 +352,14 @@ async function main() {
       if (!baseline) fs.rmSync(path.join(root, '.tmp/tech-foundation/review.html'), { force: true });
       throw error;
     } finally {
-      fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
+      const reportPath = path.join(output, 'report.json');
+      try { fs.writeFileSync(reportPath, JSON.stringify(report, null, 2)); }
+      catch (error) {
+        report.passed = false;
+        if (!baseline) fs.rmSync(path.join(root, '.tmp/tech-foundation/review.html'), { force: true });
+        fs.rmSync(reportPath, { force: true });
+        throw error;
+      }
     }
   }
 }
