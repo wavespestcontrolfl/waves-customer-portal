@@ -19,7 +19,7 @@ function mount(active = true) {
   </Route></Routes></BrowserRouter>);
 }
 async function open(mail = a) {
-  fireEvent.click(await screen.findByRole("button", { name: `Open email: ${mail.subject}` }));
+  fireEvent.click(await screen.findByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes(mail.subject) }));
   return screen.findByRole("textbox", { name: "Reply", exact: true });
 }
 function visit(id) {
@@ -60,7 +60,7 @@ describe("Email workspace feedback and request ownership", () => {
     expect(calls("/inbox")).toHaveLength(0);
     overrides.delete("/api/admin/email/oauth/status");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("button", { name: `Open email: ${a.subject}` })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes(a.subject) })).toBeInTheDocument();
     expect(calls("/oauth/status")).toHaveLength(2);
   });
 

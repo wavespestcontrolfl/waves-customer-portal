@@ -54,12 +54,12 @@ export default function EmailPage({ navigation, active }) {
         <Button onClick={handleConnectGmail} loading={connecting}>Connect Gmail account</Button>
       </div> : <>
         {(hasDrafts || storageError) && <ActionFeedback error={storageError} className="mb-4">{recoveryNotice}</ActionFeedback>}
-        {tab === "blocked" && <BlockedSenders mailbox={mailbox} />}
-        {tab === "inbox" && <EmailInbox active={active} mailbox={mailbox} editor={editor} />}
-        <details className="group mt-5 rounded-md border-hairline border-zinc-200 bg-white">
+        <details open className="group mb-5 rounded-md border-hairline border-zinc-200 bg-white">
           <summary className="u-focus-ring min-h-11 cursor-pointer px-4 py-3 font-medium">Email activity</summary>
           <div className="px-4 pb-1"><EmailSummary mailbox={mailbox} /></div>
         </details>
+        {tab === "blocked" && <BlockedSenders mailbox={mailbox} />}
+        {tab === "inbox" && <EmailInbox active={active} mailbox={mailbox} editor={editor} />}
       </>}
     <EmailComposer active={active && connected} editor={editor} onSent={mailbox.loadStats} />
   </UiSurface>;
