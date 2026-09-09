@@ -325,7 +325,7 @@ export default function IntelligenceBarShell({
                 onClick={() => removeAttachment(i)}
                 title="Remove"
                 aria-label={`Remove ${a.name}`}
-                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-10 leading-none border-hairline border-zinc-200"
+                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-11 leading-none border-hairline border-zinc-200"
               >
                 ×
               </button>
@@ -432,7 +432,7 @@ export default function IntelligenceBarShell({
                   title={isFav ? "Unpin" : "Pin"}
                   aria-label={isFav ? `Unpin ${p}` : `Pin ${p}`}
                   className={cn(
-                    "h-5 min-w-8 px-1.5 flex items-center justify-center text-10 rounded-xs u-focus-ring transition-colors",
+                    "h-5 min-w-8 px-1.5 flex items-center justify-center text-11 rounded-xs u-focus-ring transition-colors",
                     isFav
                       ? "text-ink-primary"
                       : "text-ink-tertiary hover:text-ink-primary",

@@ -43,7 +43,9 @@ const builder = {
   offset: jest.fn(() => builder),
   limit: jest.fn(async () => pages.shift() || []),
 };
-const mockDb = jest.fn(() => builder);
+const context = { leadId: 'l1', customerId: 'c1' };
+const subjectBuilder = { where: jest.fn(() => subjectBuilder), whereNull: jest.fn(() => subjectBuilder), first: jest.fn(async () => ({ id: 'c1', customer_id: 'c1', phone: '+19415550100' })) };
+const mockDb = jest.fn(table => ['leads', 'customers'].includes(table) ? subjectBuilder : builder);
 jest.mock('../models/db', () => mockDb);
 
 const { executeLeadTool } = require('../services/lead-response-tools');
@@ -69,7 +71,7 @@ beforeEach(() => {
 describe('check_existing_estimates viewability', () => {
   test('an expired newest row is hidden; the older open estimate still links', async () => {
     pages.push([row({ id: 'e-new', status: 'expired' }), row({ id: 'e-old' })]);
-    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out.hasEstimates).toBe(true);
     expect(out.estimates.map((e) => e.id)).toEqual(['e-old']);
     expect(out.estimates[0].viewUrl).toBe('https://portal.wavespestcontrol.com/estimate/tk-e-old');
@@ -83,7 +85,7 @@ describe('check_existing_estimates viewability', () => {
       row({ id: 'e-draft', status: 'draft', sent_at: null }),
       row({ id: 'e-failed', status: 'send_failed' }),
     ]);
-    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out).toEqual({ hasEstimates: false, estimates: [], unviewableEstimates: 3 });
     expect(JSON.stringify(out)).not.toMatch(/tk-|149/);
   });
@@ -91,7 +93,7 @@ describe('check_existing_estimates viewability', () => {
   test('pages past a full page of hidden rows so they cannot mask an older open estimate', async () => {
     const hidden = Array.from({ length: 15 }, (_, i) => row({ id: `h${i}`, status: 'expired' }));
     pages.push(hidden, [row({ id: 'e-old' })]);
-    const out = await executeLeadTool('check_existing_estimates', { phone: '(941) 555-0100' });
+    const out = await executeLeadTool('check_existing_estimates', { phone: '(941) 555-0100' }, context);
     expect(out.estimates.map((e) => e.id)).toEqual(['e-old']);
     expect(builder.offset).toHaveBeenNthCalledWith(1, 0);
     expect(builder.offset).toHaveBeenNthCalledWith(2, 15);
@@ -100,7 +102,7 @@ describe('check_existing_estimates viewability', () => {
 
   test('stops at five viewable rows; valid rows beyond the cap are never counted as hidden', async () => {
     pages.push(Array.from({ length: 15 }, (_, i) => row({ id: `v${i}` })));
-    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out.estimates).toHaveLength(5);
     expect(out.unviewableEstimates).toBeUndefined();
     expect(builder.limit).toHaveBeenCalledTimes(1);
@@ -108,7 +110,7 @@ describe('check_existing_estimates viewability', () => {
 
   test('the hidden count reports only rows evaluated as not openable', async () => {
     pages.push([row({ id: 'e-expired', status: 'expired' }), ...Array.from({ length: 14 }, (_, i) => row({ id: `v${i}` }))]);
-    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out.estimates.map((e) => e.id)).toEqual(['v0', 'v1', 'v2', 'v3', 'v4']);
     expect(out.unviewableEstimates).toBe(1);
   });
@@ -117,7 +119,7 @@ describe('check_existing_estimates viewability', () => {
     mockGate.applies = true;
     mockGate.deliverable = false;
     pages.push([row({ id: 'e-fallback' })]);
-    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out.estimates[0]).toMatchObject({
       id: 'e-fallback', token: null, viewUrl: null,
       totalWithheld: 'pricing-authority-not-server', viewUrlWithheld: 'pricing-authority-not-server',
@@ -128,7 +130,7 @@ describe('check_existing_estimates viewability', () => {
   test('a durable call-side block hides an otherwise open row (public data route parity)', async () => {
     mockCallSide.block = 'call_missing';
     pages.push([row({ id: 'e-blocked', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }) })]);
-    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out).toEqual({ hasEstimates: false, estimates: [], unviewableEstimates: 1 });
     expect(JSON.stringify(out)).not.toMatch(/tk-|149/);
   });
@@ -136,13 +138,13 @@ describe('check_existing_estimates viewability', () => {
   test('an unreadable call-side verdict fails closed', async () => {
     mockCallSide.throws = true;
     pages.push([row({ id: 'e-unknown' })]);
-    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out.hasEstimates).toBe(false);
     expect(out.unviewableEstimates).toBe(1);
   });
 
   test('no candidates at all', async () => {
-    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' });
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
     expect(out).toEqual({ hasEstimates: false, estimates: [] });
   });
 });

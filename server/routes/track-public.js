@@ -33,6 +33,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
+const { isTrackTokenLive } = require('../services/track-token-expiry');
 const logger = require('../services/logger');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const PhotoService = require('../services/photos');
@@ -118,12 +119,6 @@ function durationMinutes(windowStart, windowEnd) {
   const [eh, em] = String(windowEnd).split(':').map(Number);
   if ([sh, sm, eh, em].some(Number.isNaN)) return null;
   return (eh * 60 + em) - (sh * 60 + sm);
-}
-
-function isTrackTokenLive(expiresAt) {
-  if (!expiresAt) return true;
-  const expiresMs = new Date(expiresAt).getTime();
-  return Number.isFinite(expiresMs) && expiresMs >= Date.now();
 }
 
 function isFreshVehicleTimestamp(updatedAt) {
@@ -647,7 +642,6 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
 });
 
 router._test = {
-  isTrackTokenLive,
   isFreshVehicleTimestamp,
   ensureEnRouteDestinationGeocoded,
   buildSummary,

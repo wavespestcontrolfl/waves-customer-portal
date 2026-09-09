@@ -26,12 +26,12 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
         <TH aria-sort={sortBy === "lastName" ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
           <button type="button" onClick={() => onSort("lastName")} className="customer-directory-sort u-focus-ring">Customer{sortBy === "lastName" && (sortDir === "asc" ? <ArrowUp size={15} /> : <ArrowDown size={15} />)}</button>
         </TH>
-        <TH>Property</TH><TH>Services on record</TH><TH>Next service</TH><TH>Attention</TH><TH><span className="sr-only">Actions</span></TH>
+        <TH>Property</TH><TH>WaveGuard Tier</TH><TH>Next service</TH><TH>Attention</TH><TH><span className="sr-only">Actions</span></TH>
       </TR></THead>
       <TBody>{customers.map((customer) => {
         const name = [customer.firstName, customer.lastName].filter(Boolean).join(" ") || "Unnamed customer";
         const address = customer.address;
-        const serviceNames = String(customer.serviceTypes || "").split(",").map((item) => item.trim()).filter(Boolean);
+        const tier = ["Bronze", "Silver", "Gold", "Platinum"].find((label) => label.toLowerCase() === String(customer.tier || "").trim().toLowerCase());
         return <Fragment key={customer.id}>
           <TR className="customer-directory-record">
             <TD className="customer-directory-identity">
@@ -39,11 +39,10 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
                 <button type="button" className="customer-directory-name u-focus-ring" onClick={() => onOpen(customer.id)} aria-label={`Open ${name} customer profile`}>{name}</button>
                 <CustomerHealthGrade score={customer.healthScore} />
               </div>
-              <span>{customer.email || customer.phone || "No contact on file"}</span>
               {customer.profileLabel && customer.profileLabel !== "Primary" && <span>{customer.profileLabel}</span>}
             </TD>
             <TD data-label="Property" className="customer-directory-property">{address ? <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer" className="u-focus-ring">{address}</a> : "No address on file"}</TD>
-            <TD data-label="Services on record">{serviceNames.length ? serviceNames.join(", ") : "No service history"}</TD>
+            <TD data-label="WaveGuard Tier">{tier}</TD>
             <TD data-label="Next service">{customer.nextServiceDate ? formatETDateOnly(customer.nextServiceDate, { month: "short", day: "numeric" }) : "Not scheduled"}</TD>
             <TD data-label="Attention" className="customer-directory-attention">
               {customer.overdueInvoiceCount > 0 && <span className="text-alert-fg">{customer.overdueInvoiceCount} overdue invoice{customer.overdueInvoiceCount === 1 ? "" : "s"}</span>}

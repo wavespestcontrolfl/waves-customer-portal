@@ -2325,3 +2325,7 @@ migration, and exercises the run insert, review write and confirm-score
 resolution. Gate off = the existing code paths; the existing lawn suites must stay
 green unchanged. No customer communications are sent or triggered anywhere in this
 change.
+
+## 2026-09-08 — Simplify Customer directory labels and contact display
+
+The owner replaced the historical services column with WaveGuard Tier, showing the stored Bronze, Silver, Gold, or Platinum tier and leaving other cells blank. The directory no longer displays the contact line beneath customer names. Outreach & Upsells is now Opportunities; its existing view key and actions stay the same. This supersedes the earlier directory column and navigation copy decisions without changing stored tier values, pricing, or membership rules.
