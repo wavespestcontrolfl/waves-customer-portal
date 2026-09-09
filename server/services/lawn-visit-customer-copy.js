@@ -47,9 +47,29 @@ function customerObservations(text, findings = []) {
 const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
 // Generic cause words never authorize prose on their own.
 const GENERIC_CAUSE_TERMS = ['insect', 'pest', 'disease', 'infestation'];
+// Distinct-cause counting for a finding name. Synonyms of one cause fold together
+// ("Drought stress (water stress)"), and a family's generic word is absorbed by a
+// specific member ("Large patch (fungal) activity", "Armyworm caterpillars",
+// "Chlorosis (iron deficiency)") — so those stay one cause, while two specific
+// causes ("Large patch and dollar spot", "Chinch bugs, drought stress") are two.
+const CAUSE_SYNONYMS = { 'water stress': 'drought', underwater: 'drought', wilt: 'drought', 'brown patch': 'large patch', mold: 'fungal', mildew: 'fungal' };
+const GENERIC_FAMILY_WORDS = { fungal: 'fungal', caterpillar: 'caterpillar', worm: 'caterpillar', chlorosis: 'nutrient', sedge: 'weed', weed: 'weed' };
+const SPECIFIC_FAMILY = {
+  'large patch': 'fungal', 'gray leaf': 'fungal', 'dollar spot': 'fungal', 'leaf spot': 'fungal', rhizoctonia: 'fungal', 'take all': 'fungal',
+  armyworm: 'caterpillar', 'sod webworm': 'caterpillar',
+  'iron deficiency': 'nutrient', 'nitrogen deficiency': 'nutrient', 'magnesium deficiency': 'nutrient',
+  nutsedge: 'weed', crabgrass: 'weed', dollarweed: 'weed', clover: 'weed', spurge: 'weed',
+};
+function distinctCauseCount(name) {
+  const terms = new Set([...governedTerms(name)].filter((term) => !GENERIC_CAUSE_TERMS.includes(term)).map((term) => CAUSE_SYNONYMS[term] || term));
+  const specifics = [...terms].filter((term) => !GENERIC_FAMILY_WORDS[term]);
+  const coveredFamilies = new Set(specifics.map((term) => SPECIFIC_FAMILY[term]).filter(Boolean));
+  const generics = [...terms].filter((term) => GENERIC_FAMILY_WORDS[term] && !coveredFamilies.has(GENERIC_FAMILY_WORDS[term]));
+  return specifics.length + generics.length;
+}
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
-  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\bpatches\b/g, 'patch').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
+  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\bpatches\b/g, 'patch').replace(/deficiencies\b/, 'deficiency').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:ed|ing)?\b/, 'wilt').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
   if (CAUSE_TERM_SYNONYMS[base]) return CAUSE_TERM_SYNONYMS[base];
   return /(?:ss|us|is)$/.test(base) ? base : base.replace(/(?<=[a-z])s$/, '');
 };
@@ -64,7 +84,8 @@ function governedTerms(text) {
 // its name and label carry. A negated name ("Chinch bugs weren't observed",
 // "Neither chinch bugs nor drought stress"), an unresolved differential ("Chinch
 // bugs or drought stress", "chinch vs. drought", "chinch/drought", "Chinch bugs?")
-// and a conjunctive pair of governed causes ("Chinch bugs and drought stress")
+// and any name carrying more than one distinct governed cause ("Chinch bugs and
+// drought stress", "Chinch bugs & drought stress", "Chinch bugs, drought stress")
 // established no single cause; the prompt keeps inseparable causes together, so
 // such a name authorizes nothing until review picks one. One cause plus a symptom
 // ("Chinch bug damage and thinning") is still a single cause.
@@ -74,8 +95,7 @@ function establishesCause(finding) {
   const name = finding.name || '';
   if (/\b(?:no|not|none|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|excluded|free)\b/i.test(name)) return false;
   if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(name)) return false;
-  const namedCauses = [...governedTerms(name)].filter((term) => !GENERIC_CAUSE_TERMS.includes(term));
-  return !(namedCauses.length > 1 && /\b(?:and|plus|with|as well as|along with|together with|alongside)\b/i.test(name));
+  return distinctCauseCount(name) <= 1;
 }
 
 function namesUnpublishedCause(text, findings) {

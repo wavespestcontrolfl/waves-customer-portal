@@ -68,7 +68,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?', 'Chinch bugs and drought stress', 'Chinch bugs plus drought stress', 'Chinch bugs along with drought stress', 'Chinch bugs with drought stress', 'Neither chinch bugs nor drought stress observed'])(
+  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?', 'Chinch bugs and drought stress', 'Chinch bugs plus drought stress', 'Chinch bugs along with drought stress', 'Chinch bugs with drought stress', 'Neither chinch bugs nor drought stress observed', 'Chinch bugs & drought stress', 'Chinch bugs + drought stress', 'Chinch bugs, drought stress', 'Chinch bug drought stress', 'Large patch and dollar spot'])(
     'an unresolved differential named %s cannot authorize either cause', (name) => {
       const evidence = { name, label: 'general lawn stress', confidence: 'high' };
       expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [evidence])).toBe(copy.NO_OBSERVATIONS);
@@ -76,6 +76,26 @@ describe('customer publication', () => {
       expect(copy.safeConfirmationStep('Check for chinch bugs at the edge.', evidence)).toBe('');
       const resolved = { name: 'Chinch bug activity', label: 'chinch bug activity', confidence: 'moderate' };
       expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [resolved])).toMatch(/chinch/i);
+    },
+  );
+
+  test.each([
+    ['Large patch (fungal) activity', 'Large patch is spreading in the shade.', /large patch/i],
+    ['Armyworm caterpillars', 'Armyworm feeding is visible along the edge.', /armyworm/i],
+    ['Chlorosis (iron deficiency)', 'Iron deficiency is showing in the front.', /iron deficiency/i],
+    ['Drought stress (water stress)', 'Drought stress is spreading along the edge.', /drought/i],
+    ['Underwatered turf', 'Underwatered turf along the edge.', /underwatered/i],
+    ['Iron deficiencies', 'Iron deficiencies across the front.', /deficiencies/i],
+  ])('a single cause spelled %s still authorizes its prose', (name, text, expected) => {
+    const evidence = { name, label: 'general lawn stress', confidence: 'moderate' };
+    expect(copy.customerObservations(text, [evidence])).toMatch(expected);
+    expect(copy.customerObservations(text, [])).toBe(copy.NO_OBSERVATIONS);
+  });
+
+  test.each(['Underwatered turf', 'Molds are spreading', 'Iron deficiencies', 'Wilting turf', 'Mildews', 'Droughts'])(
+    'allowlisted spelling %s never publishes without evidence', (text) => {
+      expect(copy.customerObservations(`${text} along the edge.`, [])).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.safeConfirmationStep(`${text} along the edge.`)).toBe('');
     },
   );
 
