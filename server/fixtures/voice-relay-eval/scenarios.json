@@ -366,7 +366,7 @@
           "value": [
             "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -1309,7 +1309,7 @@
           "value": [
             "(filed|put in|submitted|logged|created) (a|another|a second|a new|the) (request|ticket)"
           ],
-          "severity": "major"
+          "severity": "critical"
         }
       ]
     },
@@ -1818,12 +1818,7 @@
         {
           "check": "no_price_disclosure",
           "value": {
-            "allow": [
-              129,
-              109,
-              89,
-              0
-            ]
+            "allow": "returned"
           },
           "severity": "critical"
         }

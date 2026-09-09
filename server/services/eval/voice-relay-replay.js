@@ -844,14 +844,18 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   if (!scenario || !record) throw new Error('voice-relay eval: tool called outside a scenario');
   const event = recordToolCall(record, name, input);
   const answer = (text, ok) => { event.ok = ok; event.text = text; return text; };
+  // The live resolvers (relay-conversation resolveSlotRef / resolveLookupRef)
+  // trim and upper-case a handle before anything — the authorization check
+  // included — looks at it, so "c1" is the caller's own C1 here as it is
+  // there; the call is graded by the handle the tool actually saw.
+  for (const key of ['slot_ref', 'customer_ref']) {
+    if (typeof input[key] === 'string') { input[key] = input[key].trim().toUpperCase(); event.input[key] = input[key]; }
+  }
   // The real tool's own refusals come first — a missing argument, a bad
   // enum, an invented ref — before any fixture answer, hanging or not.
   const refused = liveAuthorizationRefusal(name, input, ctx, scenario);
   if (refused) { event.invalid = true; event.refused = true; return answer(refused, false); }
   const invalid = validateToolInput(name, input, record) || noCallbackNumber(name, input, scenario);
-  // The live resolvers normalised the handle before resolving it; grade the
-  // call by the handle the tool actually saw.
-  for (const key of ['slot_ref', 'customer_ref']) if (typeof input[key] === 'string') event.input[key] = input[key];
   if (invalid) { event.invalid = true; return answer(invalid, false); }
   // The live lookup spends its budget on every DB-eligible call BEFORE the
   // query, whether or not anything matches.

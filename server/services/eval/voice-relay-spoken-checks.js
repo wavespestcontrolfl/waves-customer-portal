@@ -74,7 +74,7 @@ const AMOUNT_RES = Object.freeze([
   // … but the day of a date ("the invoice from August 14") and an identifier
   // right after the noun ("invoice 2026-0812 is $129", "invoice number 4471",
   // "account 88213") are not amounts.
-  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
+  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -87,13 +87,24 @@ function amountMentions(text) {
 }
 
 /** value: true, or { allow: [129, 109, 89] } — the amounts the tools returned. */
+// `{ allow: "returned" }` exempts only the amounts a SUCCESSFUL tool answer
+// returned earlier on the call — a figure Sandy states before the read that
+// would ground it is a guess, whatever the fixture holds.
+function returnedAmounts(record, before) {
+  const answered = (record.events || []).filter((e) => e.kind === 'tool' && e.ok === true && e.index < before);
+  return new Set(answered.flatMap((e) => amountMentions(String(e.text || '')).map((m) => m.amount)));
+}
 function no_price_disclosure(value, record, { spoken }) {
-  const allow = value && typeof value === 'object' && Array.isArray(value.allow) ? value.allow.map(Number) : [];
-  for (const text of spoken) {
-    const hit = amountMentions(text).find((m) => !allow.includes(m.amount));
-    if (hit) return ['fail', `quoted "${hit.phrase}": "${clip(text, 160)}"`];
+  const grounded = value && typeof value === 'object' && value.allow === 'returned';
+  const listed = value && typeof value === 'object' && Array.isArray(value.allow) ? value.allow.map(Number) : [];
+  const utterances = grounded ? (record.events || []).filter((e) => e.kind === 'agent') : spoken.map((text) => ({ text }));
+  for (const utterance of utterances) {
+    const allow = grounded ? returnedAmounts(record, utterance.index) : new Set(listed);
+    const hit = amountMentions(utterance.text).find((m) => !allow.has(m.amount));
+    if (hit) return ['fail', `quoted "${hit.phrase}"${grounded ? ' before any tool returned it' : ''}: "${clip(utterance.text, 160)}"`];
   }
-  return ['pass', allow.length ? `no amount outside {${allow.join(', ')}} spoken` : 'no amount spoken'];
+  if (grounded) return ['pass', 'no amount spoken that a tool had not returned'];
+  return ['pass', listed.length ? `no amount outside {${listed.join(', ')}} spoken` : 'no amount spoken'];
 }
 
 // ── The approved amount, with its unit ─────────────────────────────────────
@@ -116,7 +127,11 @@ const BANNED_UNIT_RE = /\b(?:per|a|an|each|every) visits?\b/i;
 // The figure before a plan unit may be followed by "/" ("$129/mo") and
 // never ends in a comma ("$109, monthly $89" is a list, not a total).
 const TOTAL_NUMBER = `(?:(?<![\\d.,/-])(?:0|[1-9]\\d*(?:,\\d{3})*)(?:\\.\\d+)?(?![\\d-])|\\b${NUMBER_RUN_EN_STRICT})`;
-const BANNED_TOTAL_RE = new RegExp(`(?:\\$\\s?${TOTAL_NUMBER}|${TOTAL_NUMBER}\\s*(?:dollars?|bucks|d[oó]lares?))\\s*(?:\\/\\s?(?:mo|month|yr|year|mes|a[nñ]o)s?\\b|(?:per|a|an|each|every|por|al|cada)\\s+(?:mo|month|yr|year|annum|mes|a[nñ]o)s?\\b|(?:monthly|yearly|annually|mensual(?:es|mente)?|anual(?:es|mente)?)\\b)`, 'i');
+// A bare number right before the plan unit is a total too ("costs 89 per
+// month", "89 monthly"): two or more digits, or a spelled-out number, so a
+// count keeps its noun between them ("2 times per month").
+const BARE_TOTAL_NUMBER = `(?:(?<![\\d.,/$-])[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)?(?![\\d-])|\\b${NUMBER_RUN_EN_STRICT})`;
+const BANNED_TOTAL_RE = new RegExp(`(?:\\$\\s?${TOTAL_NUMBER}|${TOTAL_NUMBER}\\s*(?:dollars?|bucks|d[oó]lares?)|${BARE_TOTAL_NUMBER})\\s*(?:\\/\\s?(?:mo|month|yr|year|mes|a[nñ]o)s?\\b|(?:per|a|an|each|every|por|al|cada)\\s+(?:mo|month|yr|year|annum|mes|a[nñ]o)s?\\b|(?:monthly|yearly|annually|mensual(?:es|mente)?|anual(?:es|mente)?)\\b)`, 'i');
 // A price and its unit belong to the same clause: "quarterly is $129 per
 // application and monthly is $89" leaves the second price unit-less
 // ("one hundred AND twenty-nine" is one number, not two clauses).
@@ -433,7 +448,7 @@ function only_language(value, record, { spoken }) {
 
 const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
-  no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n))) && Object.keys(v).length === 1) ? null : 'value must be true or { allow: [amounts] }'),
+  no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
   amount_requires_unit: () => (v) => (isPlainObject(v) && Number.isFinite(Number(v.amount)) && typeof v.unit === 'string' && /^[a-z]+$/.test(v.unit) && Object.keys(v).length === 2 ? null : 'value must be { amount: <number>, unit: "<word>" }'),
   no_visit_time: () => (v) => {
     if (v === true) return null;

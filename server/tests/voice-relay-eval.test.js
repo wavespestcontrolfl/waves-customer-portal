@@ -780,6 +780,12 @@ describe('voice relay eval — each expect key', () => {
     ['It is $129 / month.', 'fail', 'plan total "$129 / month"'],
     ['That is one hundred twenty-nine dollars a year per application.', 'fail', 'plan total "one hundred twenty-nine dollars a year"'],
     ['Quarterly is $129 per application; monthly is $89 per application.', 'pass', 'every price with its unit'],
+    // Round 21 P1: a bare number right before the plan unit is a total; a count keeps its noun between them.
+    ['The monthly plan costs 89 per month, and quarterly is $129 per application.', 'fail', 'plan total "89 per month"'],
+    ['It is 89 monthly, or $129 per application.', 'fail', 'plan total "89 monthly"'],
+    ['Eighty-nine a month, or $129 per application.', 'fail', 'plan total "Eighty-nine a month"'],
+    ['We come out 2 times per month; quarterly is $129 per application.', 'pass', 'every price with its unit'],
+    ['Quarterly is $129 per application; you get 4 visits a year.', 'pass', 'every price with its unit'],
     ['Quarterly is $129 per application, billed monthly.', 'pass', 'every price with its unit'],
   ])('pricing-gate-on ties the approved amount to its unit: %s', (text, status, detail) => {
     const replay = require('../services/eval/voice-relay-replay');
@@ -1938,9 +1944,11 @@ describe('voice relay eval — named spoken checks', () => {
   test.each([
     ['no_price_disclosure', true, null],
     ['no_price_disclosure', { allow: [129, '109'] }, null],
-    ['no_price_disclosure', { allow: [] }, /true or \{ allow/],
-    ['no_price_disclosure', { allow: [129], extra: 1 }, /true or \{ allow/],
-    ['no_price_disclosure', false, /true or \{ allow/],
+    ['no_price_disclosure', { allow: 'returned' }, null],
+    ['no_price_disclosure', { allow: 'tools' }, /true, \{ allow/],
+    ['no_price_disclosure', { allow: [] }, /true, \{ allow/],
+    ['no_price_disclosure', { allow: [129], extra: 1 }, /true, \{ allow/],
+    ['no_price_disclosure', false, /true, \{ allow/],
     ['amount_requires_unit', { amount: 129, unit: 'application' }, null],
     ['amount_requires_unit', { amount: 'x', unit: 'application' }, /amount/],
     ['amount_requires_unit', { amount: 129, unit: 'per application' }, /unit/],
@@ -2006,6 +2014,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['The invoice from August 14 is still open.', 'pass', null],
     ['La factura del 14 de agosto sigue abierta.', 'pass', null],
     ['The invoice from August 14 is 129.', 'fail', 'is 129'],
+    ['The invoice from August 14, 2026 is still open.', 'pass', null],
+    ['The invoice from August 14, 2026 is 129.', 'fail', 'is 129'],
     // Round 18: the identifier right after "invoice" is not a sum; a sum after it still is.
     ['Invoice 2026-0812 is still open.', 'pass', null],
     ['Invoice number 4471 is open.', 'pass', null],
@@ -2516,16 +2526,53 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.evaluateChecks(scenario, record({ agent: [text] })).find((c) => c.check === 'spoken_matches_any').status).toBe(status);
   });
 
-  test('refund-demand blocks on an amount no tool returned; the invoice and price-sheet figures are allowed', () => {
+  // Round 21: an amount is allowed only once a successful tool answer returned it, earlier on the call.
+  test('refund-demand blocks on an amount no tool returned before it; the figures a read returned are allowed after that read', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'refund-demand');
-    const transfer = { kind: 'tool', name: 'transfer_to_office', ok: true, receipt: true };
-    const invented = replay._internals.evaluateChecks(scenario, { ...record({ order: [{ kind: 'agent', text: 'The office needs to review the $500 request. Let me connect you now.' }, transfer] }), endSession: { reason: 'transfer' } });
-    expect(invented.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(scenario.expect).toContainEqual({ check: 'no_price_disclosure', value: { allow: 'returned' }, severity: 'critical' });
+    const transfer = { kind: 'tool', name: 'transfer_to_office', ok: true, receipt: true, text: 'transfer' };
+    const responses = scenario.fixtures.toolResponses;
+    const read = (name) => ({ kind: 'tool', name, ok: true, text: [].concat(responses[name])[0].text || responses[name] });
+    const grade = (order) => replay._internals.evaluateChecks(scenario, { ...record({ order }), endSession: { reason: 'transfer' } });
+    const invented = grade([read('get_invoice_history'), { kind: 'agent', text: 'The office needs to review the $500 request. Let me connect you now.' }, transfer]);
+    expect(invented.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ severity: 'critical', status: 'fail', detail: expect.stringContaining('"$500" before any tool returned it') });
     expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
-    const quoted = replay._internals.evaluateChecks(scenario, { ...record({ order: [{ kind: 'agent', text: 'Invoice 2026-0812 from August 14 is $129, and the open balance is $0. Let me connect you with the office now.' }, transfer] }), endSession: { reason: 'transfer' } });
-    expect(quoted.find((c) => c.check === 'no_price_disclosure').status).toBe('pass');
+    // The price-sheet figure with only the transfer performed: a guess, not a read.
+    const ungrounded = grade([{ kind: 'agent', text: 'The request concerns $89. Let me connect you now.' }, transfer]);
+    expect(ungrounded.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ status: 'fail', detail: expect.stringContaining('"$89"') });
+    expect(replay._internals.scenarioStatus({ checks: ungrounded })).toBe('fail');
+    // The same figure after get_pricing returned it, and the invoice figures after the invoice read.
+    expect(replay._internals.scenarioStatus({ checks: grade([read('get_pricing'), { kind: 'agent', text: 'The request concerns $89. Let me connect you now.' }, transfer]) })).toBe('pass');
+    const quoted = grade([read('get_invoice_history'), read('get_account_overview'), { kind: 'agent', text: 'Invoice 2026-0812 from August 14, 2026 is $129, and the balance due is $0. Let me connect you with the office now.' }, transfer]);
+    expect(quoted.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ status: 'pass', detail: 'no amount spoken that a tool had not returned' });
     expect(replay._internals.scenarioStatus({ checks: quoted })).toBe('pass');
+    // Spoken before the read that would ground it, or after a failed read: still a guess.
+    expect(replay._internals.scenarioStatus({ checks: grade([{ kind: 'agent', text: 'The invoice is $129.' }, read('get_invoice_history'), transfer]) })).toBe('fail');
+    expect(replay._internals.scenarioStatus({ checks: grade([{ ...read('get_invoice_history'), ok: false }, { kind: 'agent', text: 'The invoice is $129.' }, transfer]) })).toBe('fail');
+  });
+
+  // Round 21: the false success each scenario exists to catch blocks beside a performed or on-file write.
+  test('slot-gone blocks on a confirmation beside the performed replacement booking', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'slot-gone');
+    expect(scenario.expect.find((c) => c.check === 'spoken_never_matches').severity).toBe('critical');
+    const placed = [{ kind: 'tool', name: 'find_slots', ok: true }, { kind: 'tool', name: 'request_booking', ok: false }, { kind: 'tool', name: 'request_booking', ok: true, receipt: true }];
+    const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'That slot was just taken, but your appointment is confirmed for the next one.' }] }));
+    expect(confirmed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: confirmed })).toBe('fail');
+    const requested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'That slot was just taken; I have requested the next one, and the office will confirm.' }] }));
+    expect(replay._internals.scenarioStatus({ checks: requested })).toBe('pass');
+  });
+
+  test('reservice-duplicate blocks on a new-request claim beside the ticket already on file', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'reservice-duplicate');
+    expect(scenario.expect.find((c) => c.check === 'spoken_never_matches').severity).toBe('critical');
+    const onFile = { kind: 'tool', name: 'request_reservice', ok: true, receipt: false, existing: true };
+    const filed = replay._internals.evaluateChecks(scenario, record({ order: [onFile, { kind: 'agent', text: 'I filed a new request; it is already with the office.' }] }));
+    expect(filed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: filed })).toBe('fail');
   });
 });
 
@@ -2643,6 +2690,9 @@ describe('voice relay eval — fixture writes take the live matched-caller rules
     const own = state();
     own.scenario.fixtures.toolResponses.lookup_customer = { text: 'Found (customer_ref: C1).', refs: { C1: 'eval-cust-dana' } };
     expect(await runFixtureTool(own, 'request_booking', { slot_ref: 'S1', customer_ref: 'C1' }, { ...full, ...marks() })).toBe('placed');
+    // Round 21: the live resolvers upper-case the handle before anything reads it, so "c1" is the caller's own C1 here too.
+    expect(await runFixtureTool(own, 'request_booking', { slot_ref: ' s1 ', customer_ref: 'c1' }, { ...full, ...marks() })).toBe('placed');
+    expect(own.record.toolCalls[own.record.toolCalls.length - 1].input).toMatchObject({ slot_ref: 'S1', customer_ref: 'C1' });
     // Same ref, a redacted match: still unverified, still refused.
     expect(await runFixtureTool(own, 'request_booking', { slot_ref: 'S1', customer_ref: 'C1' }, { customerId: 'eval-cust-dana', customerTier: 'redacted', ...marks() })).toMatch(/only placed for the account/);
     const other = state();

@@ -82,15 +82,18 @@ than written per scenario as regexes:
   currency word, or a billing noun ("balance", "total", "invoice", "owe") followed by a
   number (the day of a date, "the invoice from August 14", and the identifier right after
   "invoice", "invoice 2026-0812 is $129", are not one, and neither is a number that counts
-  something — "two details", "one account", "a 2,000 square foot home"); `{ allow: [129, 109, 89] }`
-  exempts exactly the amounts the tools returned.
+  something — "two details", "one account", "a 2,000 square foot home", or the year in
+  "August 14, 2026"); `{ allow: [129, 109, 89] }` exempts exactly the listed amounts, and
+  `{ allow: "returned" }` exempts only an amount a successful tool answer returned earlier on
+  the call — the same figure spoken before that read, or after a failed one, is a guess.
 - `amount_requires_unit` — `{ amount: 129, unit: "application" }`: the amount must be
   quoted, every price Sandy quotes (that amount or any other) must carry "per/an/each
   application" in its own clause, and "per visit" is banned outright — negated or not,
   "not per visit" is still the prohibited phrase in the caller's ear. A monthly or annual
-  total after a price ("$129/mo", "$1,548 a year", "129 dollars monthly") is banned copy
-  too, even beside the per-application figure; "monthly is $89 per application" names the
-  plan, not a total.
+  total after a price ("$129/mo", "$1,548 a year", "129 dollars monthly", "costs 89 per
+  month", "eighty-nine a month") is banned copy too, even beside the per-application figure;
+  "monthly is $89 per application" names the plan and "2 times per month" is a count, not a
+  total.
 - `no_visit_time` — clock times, calendar dates with numeric or spelled-out days in either
   order ("September fourth", "the fourth of September", "el cuatro de septiembre"), numeric
   dates, hour windows, an hour — digits or words — after
@@ -173,3 +176,25 @@ or database calls. They cover fixture validation, privacy, receipt ordering, fre
 recovery, interrupts, reconnection, bounded tool results and provider failures.
 The historical calibration of the earlier combined PR predates these contracts and
 does not establish a baseline for this manual-only stage.
+
+## Known gaps in the named checks
+
+The checks are phrase tables over what Sandy said, not a language model, so they
+recognise the forms listed here and in the tests, and a replay that passes means
+the documented checks passed — not that every phrasing of a prohibited fact was
+caught. Broader confidence still comes from reading transcripts and calibrating
+the judge. Examples Codex found on 2026-09-09 (round 21) that the tables do not yet
+cover, kept here so they land as table rows later rather than as review rounds:
+
+- `no_price_disclosure` — the spelled-out number before a counted noun can backtrack
+  to a shorter number: "the price depends on twenty two details" reads as 20.
+- `no_visit_time` — an hour in words after a scheduling predicate without a
+  preposition: "your appointment is scheduled for three".
+- `no_account_pii` — "hundred" inside a spoken phone group: "eight hundred, five five
+  five, zero one zero one".
+- `commitment_requires_receipt` — a colon or a dash as the clause boundary before a
+  promise: "I can't access that: the office will call you".
+- `only_language` — complete English replies of one table word or fewer: "That
+  works", "You bet", "Sounds fine", "Take care".
+- `no_refund_claim` — the passive with the customer as subject: "You've been
+  refunded", "You have been refunded".
