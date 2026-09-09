@@ -35,7 +35,11 @@ const SKIP = !process.env.DATABASE_URL;
       GATE_PROACTIVE_LINETYPE_LOOKUP: 'true', GATE_PUSH_CHANNEL_ROUTING: 'true', DB_POOL_MAX: '2' })) {
       originalEnv[key] = process.env[key]; process.env[key] = value;
     }
-    require('../knexfile').test.acquireConnectionTimeout = 1500;
+    const databaseConfig = require('../knexfile').test;
+    databaseConfig.acquireConnectionTimeout = 1500;
+    // A nested phone-lock regression must fail instead of hanging this suite.
+    databaseConfig.pool.afterCreate = (connection, done) =>
+      connection.query("SET lock_timeout = '3s'", error => done(error, connection));
     db = require('../models/db');
     const consent = require('../services/messaging/validators/consent');
     const read = consent.loadContactState;
@@ -45,6 +49,8 @@ const SKIP = !process.env.DATABASE_URL;
       return state;
     });
     ({ executeLeadTool } = require('../services/lead-response-tools'));
+    jest.spyOn(require('../services/twilio-failure-alerts'), 'alertTwilioFailure').mockResolvedValue({});
+    jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({});
     // Observe the real detached writes so cleanup waits for their completion.
     for (const [modulePath, method, pending] of [
       ['../services/conversations', 'recordTouchpoint', touchpoints],
@@ -252,4 +258,21 @@ const SKIP = !process.env.DATABASE_URL;
     expect(mockLookup).not.toHaveBeenCalled();
     expect((await db('customers').where({ id: customers[0] }).first()).pipeline_stage).toBe('new_lead');
   });
+
+  test('synchronous 21610 records opt-out after the SDK guard releases its phone lock', async () => {
+    mockCreate.mockRejectedValueOnce(Object.assign(new Error('Recipient opted out'), { code: 21610, status: 400 }));
+    expect(await executeLeadTool('send_lead_response', input, contexts[0])).toMatchObject({ sent: false, failed: true });
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(await db('messaging_suppression').where({ phone: phones[0] }).first()).toMatchObject({ active: true, reason: 'opt_out' });
+    expect((await db('notification_prefs').where({ customer_id: customers[0] }).first()).sms_enabled).toBe(false);
+    expect((await db('leads').where({ id: leads[0] }).first()).status).toBe('new');
+  }, 10000);
+
+  test('proactive landline suppression commits before the SDK handoff lock is acquired', async () => {
+    mockLookup.mockResolvedValueOnce({ lineTypeIntelligence: { type: 'landline' } });
+    expect(await executeLeadTool('send_lead_response', input, contexts[0]))
+      .toMatchObject({ sent: false, blocked: true, code: 'NON_MOBILE_SMS_RECIPIENT' });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(await db('messaging_suppression').where({ phone: phones[0] }).first()).toMatchObject({ active: true, reason: 'non_mobile' });
+  }, 10000);
 });
