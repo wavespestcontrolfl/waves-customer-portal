@@ -821,7 +821,7 @@ async function moveStopsToDay(input, actionContext = {}) {
   }
 
   const services = await db('scheduled_services')
-    .whereIn('id', serviceIds)
+    .whereIn('scheduled_services.id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.*',

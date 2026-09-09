@@ -57,6 +57,19 @@ suite('IB target resolution against isolated PostgreSQL', () => {
     }
   });
 
+  test('a stored city or technician name after "for" is a filter unless a customer carries that name', async () => {
+    await mockDb('customers').where('id', customerId).update({ city: 'Synthetictown' });
+    await mockDb('technicians').insert({ id: randomUUID(), name: 'Synthetic Techfixture', active: true });
+    for (const prompt of ['Show the schedule for Synthetictown', 'Show the route for Techfixture']) {
+      const task = await Context.resolve({ prompt, pageData: {} });
+      expect(task.namesRequested).toBe(false);
+      expect(task.targets).toEqual([]);
+    }
+    expect((await Context.resolve({ prompt: 'Show the schedule for Targtefixture', pageData: {} })).namesRequested).toBe(true);
+    await mockDb('customers').insert({ id: randomUUID(), first_name: 'Synthetic', last_name: 'Synthetictown', phone: '+1555' + (Date.now() + 2).toString().slice(-7), address_line1: '101 Test Street' });
+    expect((await Context.resolve({ prompt: 'Show the schedule for Synthetictown', pageData: {} })).namesRequested).toBe(true);
+  });
+
   test('this/that/selected property pins the persisted row, not another property of the same customer', async () => {
     const ids = [randomUUID(), randomUUID()];
     await mockDb('customer_properties').insert(ids.map((id, i) => ({ id, customer_id: customerId,

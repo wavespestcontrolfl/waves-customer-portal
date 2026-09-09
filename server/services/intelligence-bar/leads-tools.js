@@ -148,12 +148,12 @@ Use for: "move all unresponsive leads older than 30 days to lost", "mark all no-
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeLeadsTool(toolName, input) {
+async function executeLeadsTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'get_lead_overview': return await getLeadOverview(input.days || 30);
-      case 'query_leads': return await queryLeads(input);
-      case 'get_stale_leads': return await getStaleLeads(input);
+      case 'query_leads': return await queryLeads(input, actionContext.readCustomerIds);
+      case 'get_stale_leads': return await getStaleLeads(input, actionContext.readCustomerIds);
       case 'get_lead_funnel': return await getLeadFunnel(input.days || 30);
       case 'get_source_performance': return await getSourcePerformance(input.days || 30);
       case 'get_lost_analysis': return await getLostAnalysis(input.days || 90);
@@ -211,7 +211,7 @@ async function getLeadOverview(days) {
 }
 
 
-async function queryLeads(input) {
+async function queryLeads(input, readCustomerIds = []) {
   const { status, source, search, days_back, sort = 'newest', limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 20, 100);
 
@@ -224,6 +224,10 @@ async function queryLeads(input) {
     )
     .whereNull('leads.deleted_at');
 
+  // Inside a customer-scoped task only that customer's linked leads are
+  // searchable: another customer's or an unlinked same-named lead never
+  // reaches the model.
+  if (readCustomerIds.length) query = query.whereIn('leads.customer_id', readCustomerIds);
   if (status) query = query.where('leads.status', status);
   if (source) query = query.whereILike('lead_sources.name', `%${source}%`);
   if (days_back) query = query.where('leads.first_contact_at', '>=', new Date(Date.now() - days_back * 86400000).toISOString());
@@ -267,7 +271,7 @@ async function queryLeads(input) {
 }
 
 
-async function getStaleLeads(input) {
+async function getStaleLeads(input, readCustomerIds = []) {
   const { hours_threshold = 48, status } = input;
   const cutoff = new Date(Date.now() - hours_threshold * 3600000).toISOString();
 
@@ -276,6 +280,7 @@ async function getStaleLeads(input) {
     .select('leads.*', 'lead_sources.name as source_name')
     .whereNull('leads.deleted_at')
     .where('leads.updated_at', '<', cutoff);
+  if (readCustomerIds.length) query = query.whereIn('leads.customer_id', readCustomerIds);
 
   if (status) {
     query = query.where('leads.status', status);
@@ -632,7 +637,7 @@ async function settleBulkWon(ids) {
 }
 
 async function bulkUpdateLeads(input) {
-  const { current_status, older_than_days, new_status, lost_reason, dry_run = true, lead_ids } = input;
+  const { current_status, older_than_days, new_status, lost_reason, dry_run = true, _approved_lead_ids: lead_ids } = input;
   if (!LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }

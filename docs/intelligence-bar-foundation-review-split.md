@@ -12,7 +12,7 @@ communications are outside the development/testing authorization.
 | A | `feat/ib-registry-coverage-foundation` / #4041 | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
 | B1 | `feat/ib-target-validation-foundation` / #4062 | Current-request identity resolution, fresh parent/child validation and scoped reader input preparation. |
 | B2 | `feat/ib-target-context-foundation` / #4044 | Scoped domain readers, provider outcome classification and identity-bound review publishing. |
-| C | `feat/ib-task-recovery-foundation` | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
+| C | `feat/ib-task-recovery-foundation` / #4049 | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
 | D | `feat/ib-platform-foundation` / #4019 | Route and UI integration, durable conversation continuation, desktop/mobile and real dev-database acceptance tests. |
 
 Property #4021 and inventory #4029 remain dependent on D. Existing-customer
@@ -44,8 +44,9 @@ main source. No runtime or browser proof is attributed to A.
 
 The platform implementation document is the full-stack evidence ledger from
 #4019. Its execution, UI, migration, and test evidence applies to the recorded
-integrated commits, not to this catalog-only branch. Part D restores the ten
-reviewed transport exceptions once their implementation is present. None of
+integrated commits, not to this catalog-only branch. Part D restores the five current
+reviewed transport exceptions after checking their exact fingerprints. The five
+retired transport rows remain unsupported historical entries. None of
 those exceptions grants domain-action coverage.
 
 Part A local checks: catalog/coverage unit suites (9 tests) passed. The coverage
@@ -152,6 +153,17 @@ dev database; no production migration or gate activation is authorized.
   one-use helpers would only move branches. Further simplification must keep
   every tested authorization path.
 
+Part D preserves private execution pins outside model schemas, the native
+owner/idempotency endpoint and persisted approval formats. Its 29 PostgreSQL
+route scenarios pass, including durable receipts returned after Continue.
+The shared hook/shell and global bar pass 33 client tests. Desktop/mobile Chrome
+verifies target selection, confirmation, continuation, Clear/reload recovery,
+A-only persistence, expiry and review cancellation with zero publishing.
+The shared ProtocolPanel consumes the existing task card/endpoints and remounts
+by appointment ID. Trusted confirmation receipts survive failed status reads.
+The current census retains 1,746 sites, including seven reviewed task transport
+exceptions and 1,739 unsupported/unverified entries; no domain parity is inferred.
+
 Main integration at `db70ae441` adds the three new prep-guide/Quick Links
 request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
 Their baseline fingerprints are proved against that already-merged main
@@ -209,6 +221,13 @@ unavailable customers are excluded. The final parent-integrated checks pass
 earlier unchanged provider/publisher checks remain recorded above.
 
 Customer-ID-only searches retain linked history after a phone-number change; only unlinked messages depend on the current saved phone. An explicit phone selector still narrows the results. The final seven adapter DB cases and 32 reader/pinning/history tests pass after this correction, and independent review closed it.
+
+The final D integration passes 29 route/database scenarios (84.38 seconds),
+262 server unit/contract cases and 43 client cases. Production build and
+coverage/domain/brand gates pass. Shared-shell desktop/mobile recovery is
+rerun against the final integrated parent code with independent A-only database
+read-back. Final GitHub Codex review is pending its shared usage-limit reset;
+all PRs remain drafts and no production or merge action is authorized.
 
 B1 also binds explicit child identifiers in the request, requires a deliberate
 reference for customerless calls, and freshly validates every child owner.
