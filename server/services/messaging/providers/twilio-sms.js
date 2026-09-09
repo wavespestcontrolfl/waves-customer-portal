@@ -87,7 +87,7 @@ function providerMediaUrls(input) {
   return urls;
 }
 
-async function sendViaTwilio(input, { preSendCheck } = {}) {
+async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
   // metadata.original_message_type lets a caller force a specific
   // legacy messageType (e.g. 'lead_response', 'invoice', 'manual')
   // through to TwilioService.sendSMS so the existing
@@ -108,10 +108,16 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
   try {
     const result = await TwilioService.sendSMS(input.to, input.body, {
       customerId: input.customerId || null,
+      // The visit this message is about (every appointment purpose carries
+      // it) — push routing hands it to the push sink, which resolves the
+      // visit's saved property for the app's deep link.
+      appointmentId: input.appointmentId || null,
       explicitPushOnly: input.channel === 'push',
       skipPushRouting: Boolean(input.metadata?.appFallbackReason),
       notificationEventKey: input.metadata?.notificationEventKey,
       invoiceId: input.invoiceId,
+      requestNotification: input.metadata?.appOnly ? { id: input.metadata.service_request_id,
+        status: input.metadata.request_status, version: input.metadata.request_status_version } : undefined,
       messageType,
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.
@@ -141,6 +147,7 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
       // handoff, after sendSMS's own internal awaits (redirect check,
       // template lookup, customer/location query).
       preSendCheck,
+      withSmsHandoff,
     });
 
     if (!result) {
@@ -174,7 +181,7 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
         blocked: true,
         code: result.code,
         error: result.error,
-        validator: result.preSendBlocked ? 'check_send_window_boundary' : 'check_owned_number_recipient',
+        validator: result.validator || (result.preSendBlocked ? 'check_send_window_boundary' : 'check_owned_number_recipient'),
         retryable: result.retryable === true,
         deferred: result.deferred === true,
         nextAllowedAt: result.nextAllowedAt,

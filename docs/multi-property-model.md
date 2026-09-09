@@ -130,3 +130,30 @@ Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
   (PR 2 wires them into the schedule routes): a property's visits are the
   customer's visits stamped with it, plus unstamped visits when it is the
   primary. Customers with 0–1 active properties get no property predicate.
+
+### PR 2 of 4 — visits by saved property (client + schedule/tracking routes)
+
+- **Schedule routes** (`routes/schedule.js`): `GET /` and `GET /next` resolve
+  the session scope (`resolveSessionScope`) and apply the property half of the
+  visit rule (`applyPropertyPredicate`) on top of today's customer predicate;
+  the confirm and reschedule lookups do the same, so a visit at another of the
+  customer's properties is a 404 exactly like a foreign id. New
+  `GET /schedule/properties-next` (gate on only, 404 dark): one row per unified
+  entry — `{ key, customerId, propertyId, next }` — with visits assigned by
+  `assignVisitsToEntries` (unstamped → the profile's primary entry; stamped →
+  that entry; a stamp on a property no longer listed → nobody, matching what
+  the list route would show). `/account-next` is unchanged for shipped
+  clients.
+- **Tracking** (`routes/tracking.js`): the canonical tracker query takes the
+  scope (`opts.scope`) so `/tracking/active` and `/tracking/today` follow the
+  house being viewed; the pin/ETA already prefer the visit's stamped geocode.
+- **Client**: `useAuth` asks `GET /auth/properties?scope=saved`, maps saved
+  entries onto the client property shape (`id` = entry key; label = office
+  label → "Home" for the primary → street for a secondary), exposes
+  `propertyScope` + `selectedProperty`, and `switchProperty` takes a string
+  (profile id, legacy) or `{ customerId, propertyId }`. The page compares every
+  switcher against `activePropertyId` (the selection's key, else the profile),
+  keys the read cache on it, and the Visits tab reads `/schedule/properties-next`
+  under the saved scope. Preview harness: `?properties=saved[&selected=<key>]`.
+- Gate off: the server answers the profile list, the client stays in profile
+  mode, every query is byte-identical to today's.
