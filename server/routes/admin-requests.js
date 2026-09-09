@@ -135,6 +135,7 @@ router.patch('/:id', async (req, res, next) => {
 
     const patch = { updated_at: new Date() };
     const statusChanged = value.status !== undefined && value.status !== existing.status;
+    if (statusChanged) patch.status_version = db.raw('status_version + 1');
     if (value.status !== undefined) {
       patch.status = value.status;
       // Stamp resolved_at the first time it resolves; clear if reopened.

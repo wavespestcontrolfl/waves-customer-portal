@@ -588,8 +588,8 @@ export class ApiClient {
     });
   }
 
-  getRequests() {
-    return this.request('/requests');
+  getRequests(requestId) {
+    return this.request(requestId ? `/requests?requestId=${encodeURIComponent(requestId)}` : '/requests');
   }
 
   // Cancel-flow v2 (GATE_CANCEL_FLOW_V2). Preview is read-only despite the

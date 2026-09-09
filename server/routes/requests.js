@@ -1226,6 +1226,7 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
 // GET /api/requests — List current customer's service requests
 // =========================================================================
 const listSchema = Joi.object({
+  requestId: Joi.string().uuid(),
   limit: Joi.number().integer().min(1).max(100).default(50),
   offset: Joi.number().integer().min(0).default(0),
 });
@@ -1234,10 +1235,10 @@ router.get('/', authenticate, async (req, res, next) => {
   try {
     const { value, error } = listSchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { limit, offset } = value;
+    const { limit, offset, requestId } = value;
 
     const requests = await db('service_requests')
-      .where({ customer_id: req.customer.id })
+      .where({ customer_id: req.customer.id, ...(requestId ? { 'service_requests.id': requestId } : {}) })
       // Admin-originated rows (the C3 cancel acceptance) are internal ops
       // records: their subject embeds the staff actor and their description
       // is the operator's free-text note — neither is customer-facing.
@@ -1265,7 +1266,7 @@ router.get('/', authenticate, async (req, res, next) => {
       .offset(offset);
 
     const total = await db('service_requests')
-      .where({ customer_id: req.customer.id })
+      .where({ customer_id: req.customer.id, ...(requestId ? { 'service_requests.id': requestId } : {}) })
       // Same admin-row exclusion as the page above — a total that counts
       // hidden rows produces empty or phantom pages (codex GH r28 P2).
       .where((qb) => { qb.whereNull('source').orWhereNot('source', 'admin'); })

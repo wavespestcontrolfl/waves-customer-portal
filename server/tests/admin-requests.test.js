@@ -30,6 +30,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+db.raw = jest.fn((sql) => ({ sql }));
 const AccountMembershipEmail = require('../services/account-membership-email');
 const requestsRouter = require('../routes/admin-requests');
 
