@@ -318,7 +318,7 @@ const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "customer_specific_concern", label: "Customer had specific concern" },
 ];
 // Completion panel review timing (owner decisions 2026-09-07). "Automatic"
-// is the cadence's smart send window — the server's calculateReviewSendTime,
+// is the cadence's smart send window — the server's calculateReviewSendPlan,
 // previewed through /admin/reviews/send-time-preview so the panel shows the
 // decision dispatch will make. "Customer asked for the link" is recorded on
 // the sequence (who/when/source) and goes at the next cadence tick; it is
