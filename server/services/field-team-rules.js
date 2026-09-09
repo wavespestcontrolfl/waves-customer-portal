@@ -121,17 +121,19 @@ function splitCents(total, participants) {
 }
 function production({ roleKey, rule, serviceKey, allocation, ordinal, participant, exclusion, provenance }) {
   const result = { status: 'not_enough_evidence', amount_cents: null, rate_bps: null, value_cents: null, reason: null };
-  if (exclusion !== 'none') return { ...result, status: 'excluded', amount_cents: 0, reason: `Excluded service: ${exclusion}.` };
+  const serviceRule = rule?.service_rules.find(item => item.service_key === serviceKey);
   const reasons = [
     [provenance !== 'verified', 'Verified service-value evidence is required.'],
     [!rule, 'No simulation definition effective on the service date.'],
-    [!roleKey, 'No simulation level effective on the service date.'],
-    [!allocation, 'Accepted service-value allocation is not recorded.'],
+    [!serviceRule, 'This service key is not included in the simulation definition.'],
   ];
   const problem = reasons.find(([blocked]) => blocked);
   if (problem) return { ...result, reason: problem[1] };
-  const serviceRule = rule.service_rules.find(item => item.service_key === serviceKey);
-  if (!serviceRule || serviceRule.credit_type !== allocation.credit_type) return { ...result, reason: 'This service key and credit type are not included in the simulation definition.' };
+  // Verified, mapped corrective work earns zero without consuming an allocation.
+  if (exclusion !== 'none') return { ...result, status: 'excluded', amount_cents: 0, reason: `Excluded service: ${exclusion}.` };
+  if (!roleKey) return { ...result, reason: 'No simulation level effective on the service date.' };
+  if (!allocation) return { ...result, reason: 'Accepted service-value allocation is not recorded.' };
+  if (allocation.service_key !== serviceKey || serviceRule.credit_type !== allocation.credit_type) return { ...result, reason: 'This allocation does not match the service key and credit type.' };
   const rate = formulaForRule(rule)?.production_bps[roleKey];
   if (rate == null) return { ...result, reason: 'A production rate is not defined for this role and effective rule.' };
   // Specialty compensation needs a separate pre-assignment amount; do not
@@ -155,16 +157,19 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
   const rework = kind === 'rework';
   for (const row of evidence) {
     const facts = row.facts;
+    const serviceDate = dateOnly(row.service_date);
+    const returnDate = dateOnly(facts.return_service_date);
     const serviceRule = rule.service_rules.find(item => item.service_key === row.service_key);
     const window = serviceRule?.rework_window_days;
-    const mature = window == null ? null : etDateString(addETDays(parseETDateTime(`${row.service_date}T12:00`), window));
+    const mature = window == null || !serviceDate ? null : etDateString(addETDays(parseETDateTime(`${serviceDate}T12:00`), window));
     const reviewedDate = row.created_at ? etDateString(new Date(row.created_at)) : '';
     const returnOutcome = !['no_return', 'unobserved', 'unresolved'].includes(facts.rework_outcome);
-    const linkedReturn = [facts.return_service_id, facts.same_issue_confirmed, facts.return_service_date, facts.return_service_date >= row.service_date].every(Boolean);
+    const linkedReturn = [facts.return_service_id, facts.same_issue_confirmed, returnDate, returnDate >= serviceDate].every(Boolean);
     // First matching reason owns the observation; excluded work and missing
     // evidence can never increment the observed denominator.
     const checks = [
       [!serviceRule, 'unresolved'],
+      [!serviceDate, 'unresolved'],
       [facts.provenance !== 'verified', 'unresolved'],
       [facts.exclusion !== 'none', 'excluded'],
       ...(rework ? [
@@ -174,7 +179,7 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
         [facts.rework_outcome === 'no_return' && reviewedDate < mature, 'unresolved'],
         [['unobserved', 'unresolved'].includes(facts.rework_outcome), 'unresolved'],
         [returnOutcome && !linkedReturn, 'unresolved'],
-        [facts.return_service_date > mature, 'unresolved'],
+        [returnDate > mature, 'unresolved'],
       ] : [
         [facts.complete_at_cutoff == null, 'unresolved'],
         [!facts.cutoff_at, 'unresolved'],

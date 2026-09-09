@@ -2,7 +2,7 @@ const { PROGRAM, ruleDefinition, allocatedCents, splitCents, production, outcome
 const { execFileSync } = require('node:child_process');
 
 const rule = ruleDefinition({ service_rules: [{ service_key: 'pest_quarterly', credit_type: 'routine', rework_window_days: 30 }], rework_minimum: 10, handoff_minimum: 10, activation_share_bps: null });
-const allocation = { net_value_cents: 60000, planned_visits: 4, credit_type: 'routine' };
+const allocation = { service_key: 'pest_quarterly', net_value_cents: 60000, planned_visits: 4, credit_type: 'routine' };
 const productionInput = { rule, allocation, roleKey: 'technician_i', serviceKey: 'pest_quarterly', ordinal: 1, participant: { value_cents: 15000, share_bps: 10000 }, exclusion: 'none', provenance: 'verified' };
 const linkedReturn = { return_service_id: 'return-service', same_issue_confirmed: true, return_service_date: '2026-03-10' };
 const evidence = (overrides = {}) => ({ service_key: 'pest_quarterly', service_date: '2026-03-01', created_at: '2026-04-01T16:00:00Z', facts: { provenance: 'verified', exclusion: 'none', complete_at_cutoff: true, cutoff_at: '2026-03-01T23:00:00Z', repair_reason: 'none', rework_outcome: 'no_return', ...overrides } });
@@ -18,6 +18,12 @@ describe('Field Team Program revision 2b simulation contract', () => {
     expect(PROGRAM.roles.slice(1).map(role => role.annualBaseCents + role.targetIncentiveCents)).toEqual([6800000, 7960000, 9000000, 12000000]);
     expect(PROGRAM.roles[0].hourlyCents).toBeNull();
     expect(PROGRAM.notice).toContain('not earned compensation');
+  });
+  test.each(['UTC', 'America/New_York'])('normalizes database dates before outcome arithmetic under %s', timezone => {
+    const input = { rule, rows: cohort(10, 1) };
+    const script = "const {outcomeBonus}=require(process.argv[1]); const parse=require('pg').types.getTypeParser(1082); const {rule,rows}=JSON.parse(process.argv[2]); rows.forEach(row=>{ row.service_date=parse(row.service_date); if(row.facts.return_service_date) row.facts.return_service_date=parse(row.facts.return_service_date); }); process.stdout.write(JSON.stringify(['rework','handoff'].map(kind=>outcomeBonus(kind,rows,rule,'2026-04-01'))));";
+    const result = execFileSync(process.execPath, ['-e', script, require.resolve('../services/field-team-rules'), JSON.stringify(input)], { env: { ...process.env, TZ: timezone }, encoding: 'utf8' });
+    expect(JSON.parse(result)).toMatchObject([{ status: 'simulated', failures: 1, amount_cents: 0 }, { status: 'simulated', amount_cents: 10000 }]);
   });
   test('allocates accepted program value by scheduled applications regardless of billing cadence', () => {
     expect(allocatedCents(60000, 4, 1)).toBe(15000);
@@ -35,6 +41,13 @@ describe('Field Team Program revision 2b simulation contract', () => {
   });
   test.each(['corrective', 'duplicate', 'unnecessary', 'planned_followup', 'inspection'])('%s produces no credit', exclusion => {
     expect(production({ ...productionInput, exclusion })).toMatchObject({ status: 'excluded', amount_cents: 0 });
+  });
+  test.each([{ provenance: 'backfilled' }, { rule: null }, { serviceKey: 'unknown' }])('exclusions cannot hide unverified or unmapped production: %j', change => {
+    expect(production({ ...productionInput, exclusion: 'corrective', ...change }).amount_cents).toBeNull();
+  });
+  test('verified corrective work needs no allocation, while production must use the matching service key', () => {
+    expect(production({ ...productionInput, exclusion: 'corrective', allocation: null, roleKey: null })).toMatchObject({ status: 'excluded', amount_cents: 0 });
+    expect(production({ ...productionInput, allocation: { ...allocation, service_key: 'different_routine' } }).amount_cents).toBeNull();
   });
   test.each([
     { provenance: 'synthetic' }, { provenance: 'backfilled' }, { rule: null }, { roleKey: null },
@@ -55,6 +68,7 @@ describe('Field Team Program revision 2b simulation contract', () => {
     expect(outcomeBonus('rework', cohort(100), rule, '2026-03-30').status).toBe('observing');
     expect(outcomeBonus('rework', [evidence({ rework_outcome: 'unresolved' })], rule, '2026-04-01').status).toBe('unresolved');
     expect(outcomeBonus('handoff', [evidence({ complete_at_cutoff: null })], rule, '2026-04-01').amount_cents).toBeNull();
+    expect(outcomeBonus('rework', [{ ...evidence(), service_date: null }], rule, '2026-04-01').status).toBe('unresolved');
   });
   test('a return outside the observation window does not become technician fault', () => {
     expect(outcomeBonus('rework', [evidence({ ...linkedReturn, rework_outcome: 'technician_execution', return_service_date: '2026-05-01' })], { ...rule, rework_minimum: 1 }, '2026-05-02')).toMatchObject({ status: 'unresolved', amount_cents: null });
