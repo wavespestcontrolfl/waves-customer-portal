@@ -5,7 +5,7 @@ const { recordAuditEvent } = require('./audit-log');
 const { resolveServiceRecord } = require('./job-costing');
 const { etDateString, parseETDateTime, addETDays, etWeekStart } = require('../utils/datetime-et');
 const {
-  PROGRAM, schemas, validate, reject, dateOnly, allocatedCents, splitCents,
+  PROGRAM, schemas, validate, reject, dateOnly, ruleDefinition, allocatedCents, splitCents,
   production, outcomeBonus, commission, assessmentResult,
 } = require('./field-team-rules');
 
@@ -54,7 +54,7 @@ async function saveRule(input, actor) {
     const keys = data.service_rules.map(row => row.service_key);
     const catalog = await trx('services').whereIn('service_key', keys).pluck('service_key');
     if (keys.some(key => !catalog.includes(key))) reject('Choose service keys from the current service catalog.');
-    const [row] = await trx('field_program_rules').insert({ ...baseRow(data, actor), label: data.label, effective_date: data.effective_date, definition: { ...data, program_version: PROGRAM.version } }).returning('*');
+    const [row] = await trx('field_program_rules').insert({ ...baseRow(data, actor), label: data.label, effective_date: data.effective_date, definition: ruleDefinition(data) }).returning('*');
     await audit(trx, 'field_program_rules', row, actor);
     return row;
   });
