@@ -198,8 +198,11 @@ function buildLawnCompletionDefaults(plan, context) {
     // An option carries the protocol row's application mode: the catalog
     // category alone reads a broadcast herbicide (SpeedZone in its window) as
     // spot work, and the closeout must record the mode the protocol prescribes.
+    // A protocol row whose catalog product was deactivated is not offered:
+    // the completion writer rejects an inactive product row, so the option
+    // would be an action that cannot be completed (Codex r12 P2).
     options: eligible ? [...plan.mixCalculator.items, ...plan.mixCalculator.conditionalOptions]
-      .filter(item => protocolProductFor(item))
+      .filter(item => protocolProductFor(item) && item.product?.active !== false)
       .map(item => ({ product: { id: item.product.id, name: item.product.name }, applicationMethod: completionMethod(item, protocolProductFor(item)) })) : [],
     message: !context.propertyMatchesProfile ? 'The saved turf profile could not be matched to this property. Enter the actual work.'
       : !programApplies ? 'No assigned lawn plan for this visit. Add the products actually applied.'

@@ -10622,6 +10622,15 @@ export function CompletionPanel({
     return () => { live = false; };
   }, [service.customerId, service.customer_id, service.serviceType, service.service_type]);
   const [selectedProducts, setSelectedProducts] = useState([]);
+  // The plan request's failure path runs outside the render that scheduled
+  // it; it withdraws suggestions from the rows as they stand at failure time.
+  const selectedProductsRef = useRef([]);
+  selectedProductsRef.current = selectedProducts;
+  // The visit whose plan this session has resolved at least once. Until then
+  // a governed draft's saved application mode is a suggestion no plan of this
+  // session stands behind, whether the draft is restored after the initial
+  // failure or before a still-pending request fails (pre-push audit P1).
+  const lawnPlanVerifiedRef = useRef(null);
   // Treatment Zone mapper (owner 2026-07-22): the same tracer the tech portal
   // has — admin closeouts can trace where we sprayed without switching apps.
   const [zoneMapOpen, setZoneMapOpen] = useState(false);
@@ -12557,6 +12566,7 @@ export function CompletionPanel({
     const timer = setTimeout(() => adminFetch(endpoint, request)
       .then((data) => {
         if (cancelled) return;
+        lawnPlanVerifiedRef.current = service.id;
         setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id });
         const blocks =
           data?.plan?.propertyGate?.blocks ||
@@ -12618,7 +12628,15 @@ export function CompletionPanel({
       .catch((err) => {
         if (!cancelled) {
           setTreatmentPlanError(err.message || "Could not load WaveGuard plan");
-          setSelectedProducts(withdrawLawnPlanSuggestions);
+          // Withdrawing plan-derived rates, areas and methods changes the
+          // product payload exactly as a successful refresh does: an
+          // untouched generated report described the old quantities and
+          // must not ride along beside the changed rows (Codex r12 P1).
+          const withdrawn = withdrawLawnPlanSuggestions(selectedProductsRef.current, { planUnverified: lawnPlanVerifiedRef.current !== service.id });
+          if (JSON.stringify(withdrawn) !== JSON.stringify(selectedProductsRef.current)) {
+            invalidateGeneratedReportOnTypedEdit();
+            setSelectedProducts(withdrawn);
+          }
         }
       })
       .finally(() => {
@@ -12938,7 +12956,7 @@ export function CompletionPanel({
     // suggestions saved under an earlier plan, and the reconcile effect stays
     // off during a plan error — withdraw them exactly as the failed request
     // does for rows it can see (Codex r8 P1).
-    const restoreProducts = (rows) => (treatmentPlanError ? withdrawLawnPlanSuggestions(rows) : rows);
+    const restoreProducts = (rows) => (treatmentPlanError ? withdrawLawnPlanSuggestions(rows, { planUnverified: lawnPlanVerifiedRef.current !== service.id }) : rows);
     setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
@@ -14258,6 +14276,20 @@ export function CompletionPanel({
           if (p.lawnPlanDefaults && !p.lawnPlanManualFields?.includes("rate")) {
             next.rate = "";
             if (!p.lawnPlanManualFields?.includes("rateUnit")) next.rateUnit = "";
+          }
+        }
+        if (governed && field === "rateUnit" && p.lawnPlanDefaults && !p.lawnPlanManualFields?.includes("rate")
+          && value !== p.lawnPlanDefaults.rateUnit) {
+          // A still-derived rate is the plan's quantity in the plan's unit:
+          // changing the unit alone withdraws the rate and its derived total
+          // (3 fl oz must never stand as 3 lb) until the tech enters the
+          // actual or returns to the plan's unit, when reconciliation
+          // restores them. The amount unit followed the rate unit above, so
+          // it is the tech's choice now too (Codex r12 P1).
+          next.rate = "";
+          if (!next.totalAmountManual) {
+            next.totalAmount = "";
+            next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "amountUnit"])];
           }
         }
         return next;
