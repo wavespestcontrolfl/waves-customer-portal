@@ -7,12 +7,81 @@ const NotificationService = require('../services/notification-service');
 const PushService = require('../services/push-notifications');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
+const Joi = require('joi');
+const { gateEnvValue } = require('../config/feature-gates');
+const { recordAuditEvent } = require('../services/audit-log');
 // Live-overlay math (per-admin dismissals, cron-row dedup, the combined
 // unread count) lives in services/admin-unread.js — shared with the push
 // app-icon badge in notification-triggers so the two counts can't drift.
 const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
 
 router.use(adminAuthenticate);
+
+const inboxTestInput = Joi.object({
+  customerId: Joi.string().guid().required(),
+  execute: Joi.boolean().default(false),
+});
+const INBOX_TEST_ACTION = 'customer.notification_inbox_test.created';
+
+// One owner-approved pair, not a general notification sender. No provider path:
+// create() only persists inbox rows. Keep the audit marker after items are read
+// or pruned so retries can never create another pair for this customer.
+router.post('/customer-inbox-test', requireAdmin, async (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  const target = (process.env.CUSTOMER_INBOX_TEST_CUSTOMER_ID || '').trim().toLowerCase();
+  if (!gateEnvValue('GATE_CUSTOMER_INBOX_TEST') || Joi.string().guid().required().validate(target).error) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const { value, error } = inboxTestInput.validate(req.body, { convert: false });
+  if (error || !value) return res.status(400).json({ error: 'customerId and optional boolean execute are required; no other fields are allowed' });
+  if (value.customerId.toLowerCase() !== target) return res.status(404).json({ error: 'Not found' });
+
+  try {
+    const result = await db.transaction(async (trx) => {
+      // Serialize this customer's pair and audit together, across all replicas.
+      const customer = await trx('customers').where({ id: target, active: true })
+        .forUpdate().first('id', 'pipeline_stage');
+      if (!customer || customer.pipeline_stage === 'churned') return null;
+      const previous = await trx('audit_log').where({
+        action: INBOX_TEST_ACTION, resource_type: 'customer', resource_id: target,
+      }).first('metadata');
+      const base = { customerId: target, dryRun: !value.execute, createdCount: 0,
+        delivery: { push: false, sms: false, email: false } };
+      if (previous) {
+        const metadata = parseMetadata(previous.metadata);
+        if (!Array.isArray(metadata.notificationIds) || metadata.notificationIds.length !== 2) {
+          throw new Error('Inbox test audit marker is incomplete');
+        }
+        return { ...base, alreadyCreated: true, wouldCreate: 0, notificationIds: metadata.notificationIds };
+      }
+      if (!value.execute) return { ...base, alreadyCreated: false, wouldCreate: 2, notificationIds: [] };
+
+      const notificationIds = [];
+      for (const index of [1, 2]) {
+        const notification = await NotificationService.create({
+          recipientType: 'customer', recipientId: target, category: 'account',
+          title: `Badge test ${index} of 2`,
+          body: 'Owner-approved inbox-only test. No service or billing action is required.',
+          link: '/?tab=home',
+          metadata: { fixture: 'customer-inbox-test-v1', index },
+          connection: trx,
+        });
+        // create() reports insert failure as null; throwing rolls back BOTH rows.
+        if (!notification?.id) throw new Error('Inbox test notification was not saved');
+        notificationIds.push(notification.id);
+      }
+      const auditId = await recordAuditEvent({
+        actor_type: 'technician', actor_id: req.technicianId,
+        action: INBOX_TEST_ACTION, resource_type: 'customer', resource_id: target,
+        metadata: { notificationIds, delivery: base.delivery }, critical: true, trx,
+      });
+      if (!auditId) throw new Error('Inbox test audit was not saved');
+      return { ...base, alreadyCreated: false, createdCount: 2, wouldCreate: 0, notificationIds };
+    });
+    if (!result) return res.status(404).json({ error: 'Not found' });
+    return res.status(result.createdCount ? 201 : 200).json(result);
+  } catch (err) { next(err); }
+});
 
 function parseMetadata(value) {
   if (!value) return {};

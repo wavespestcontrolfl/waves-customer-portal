@@ -99,6 +99,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Admin-only fixed test pair for one explicitly configured customer; opt-in everywhere.
+  customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
   // Customer iOS icon count; opt-in everywhere, with request-time route checks.
   customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
   // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
