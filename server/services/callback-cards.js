@@ -139,10 +139,8 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     await prepareCallbackCards(trx, { callId: row.call_log_id });
     await recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: `callback_${action}`,
       resource_type: 'call_commitment', resource_id: id, metadata: { snoozed_until: until?.toISOString() || null }, critical: true, trx });
-    await trx('notifications').where({ recipient_type: 'admin' }).where(function containsCallback() {
-      this.whereRaw("metadata->>'commitment_id' = ?", [id])
-        .orWhereRaw("metadata->'overdue_commitment_ids' @> ?::jsonb", [JSON.stringify([id])]);
-    })
+    await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'commitment_id' = ?", [id])
       .whereNull('read_at').update({ read_at: now });
     return require('./call-commitments').normalizeRow(await trx('call_commitments').where({ id }).first());
   });

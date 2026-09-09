@@ -76,9 +76,24 @@ run('callback ledger on PostgreSQL', () => {
       expectedAt: row.updated_at, snooze: 'two_hours', now });
     expect(changed.assigned_to).toBe(staff.id);
     expect(changed.snoozed_until).toEqual(new Date(now.getTime() + 2 * 3600000));
+    const ledger = require('../services/call-commitments');
+    expect(ledger.selectOverdue([changed], { now })).toEqual([]);
+    expect(await ledger.stillOpenIds(trx, [row.id], { now })).toEqual(new Set());
+    expect(await ledger.stillOpenIds(trx, [row.id], { now: new Date(now.getTime() + 3 * 3600000) })).toEqual(new Set([row.id]));
     await expect(cards.actOnCallback(trx, row.id, { action: 'fulfill', actorId: staff.id,
       expectedAt: row.updated_at, now })).rejects.toMatchObject({ status: 409 });
     expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('open');
+  });
+
+  test('acting on one callback preserves a shared reminder for other open promises', async () => {
+    const row = await seed(), other = await seed();
+    const [bell] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Fixture backlog',
+      metadata: { overdue_commitment_ids: [row.id, other.id] } }).returning('*');
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    const claimed = await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at, now });
+    expect((await trx('notifications').where({ id: bell.id }).first()).read_at).toBeNull();
+    await cards.actOnCallback(trx, row.id, { action: 'fulfill', actorId: staff.id, expectedAt: claimed.updated_at, now });
+    expect((await trx('notifications').where({ id: bell.id }).first()).read_at).toBeNull();
   });
 
   test.each(['confirm', 'edit', 'claim'])('a newer extraction rejects a stale %s action without reviving the callback', async (action) => {

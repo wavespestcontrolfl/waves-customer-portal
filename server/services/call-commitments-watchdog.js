@@ -107,7 +107,7 @@ async function runInner({ now = new Date() } = {}) {
   const unverified = unverifiedCalls.size;
   // The snapshot is minutes old by now (one refresh per candidate call):
   // a promise the office marked done or dismissed meanwhile must not ring.
-  const liveIds = await stillOpenIds(db, candidates.map((r) => r.id));
+  const liveIds = await stillOpenIds(db, candidates.map((r) => r.id), { now });
   const overdue = candidates.filter((r) => liveIds.has(r.id));
   if (!overdue.length) return { skipped: false, scanned: rows.length, overdue: 0, alerted: 0, unverified };
 

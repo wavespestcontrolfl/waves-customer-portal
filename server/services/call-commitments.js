@@ -1416,7 +1416,10 @@ function staleAiRowSql(cc = 'cc') {
 
 // Pure, exported for the watchdog tests.
 function selectOverdue(rows, { now = new Date() } = {}) {
-  return (rows || []).filter((r) => isOverdue(r, now));
+  const callbacksEnabled = require('./callback-cards').enabled();
+  return (rows || []).filter((r) => isOverdue(r, now)
+    && !(callbacksEnabled && r.kind === 'callback' && r.party === 'waves'
+      && r.snoozed_until && new Date(r.snoozed_until) > now));
 }
 
 async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
@@ -1476,7 +1479,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
 // out of the queue). The watchdog re-checks its snapshot immediately
 // before paging, so a promise the office settled — or a pass withdrew —
 // while the scan was refreshing never rings.
-async function stillOpenIds(conn, ids) {
+async function stillOpenIds(conn, ids, { now = new Date() } = {}) {
   if (!ids?.length) return new Set();
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
@@ -1484,6 +1487,10 @@ async function stillOpenIds(conn, ids) {
     .where('cc.status', 'open')
     .whereRaw("cc.human_state IS DISTINCT FROM 'dismissed'")
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
+    .modify((q) => {
+      if (require('./callback-cards').enabled()) q.whereRaw(
+        "(cc.kind <> 'callback' OR cc.party <> 'waves' OR cc.snoozed_until IS NULL OR cc.snoozed_until <= ?)", [now]);
+    })
     .select('cc.id');
   return new Set(rows.map((r) => r.id));
 }

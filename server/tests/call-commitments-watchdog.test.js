@@ -5,7 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'test-account') }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
@@ -126,7 +126,7 @@ test('a promise the office settled after the snapshot was taken never rings: row
   listOpenCommitments.mockResolvedValue([row('a'), row('b')]);
   stillOpenIds.mockResolvedValueOnce(new Set(['b']));
   const out = await runCallCommitmentsWatchdog({ now: NOW });
-  expect(stillOpenIds).toHaveBeenCalledWith(expect.anything(), ['a', 'b']);
+  expect(stillOpenIds).toHaveBeenCalledWith(expect.anything(), ['a', 'b'], { now: NOW });
   expect(out).toMatchObject({ overdue: 1, alerted: 1 });
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ triggerKey: 'call_commitment_overdue', commitment_id: 'b' });
