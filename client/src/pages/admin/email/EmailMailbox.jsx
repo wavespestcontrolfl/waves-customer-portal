@@ -200,6 +200,13 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
   </section>;
 }
 
+function LinkedEmailError({ mailbox, onBack }) {
+  return <div className="min-h-48 space-y-3 rounded-md border-hairline border-zinc-200 bg-white p-6">
+    {mailbox.selectedEmail && <Button variant="ghost" onClick={onBack} className="gap-2"><ArrowLeft size={16} aria-hidden />Back to inbox</Button>}
+    <ActionFeedback error onRetry={mailbox.retrySelection}>The linked email is unavailable.</ActionFeedback>
+  </div>;
+}
+
 export function EmailInbox({ active, mailbox, editor }) {
   const { stats, total, visibleEmails, filter, setFilter, search, setSearch, page, setPage, showArchived, setShowArchived } = mailbox;
   const counts = mailbox.statsState.error ? {} : stats || {};
@@ -255,7 +262,7 @@ export function EmailInbox({ active, mailbox, editor }) {
           <Button variant="secondary" onClick={() => setPage((current) => current + 1)} disabled={page >= Math.ceil(total / 50) || mailbox.inboxState.loading || mailbox.inboxState.error}>Next</Button>
         </div>}
       </section>
-      {mailbox.messageState.error ? <div className="min-h-48 rounded-md border-hairline border-zinc-200 bg-white p-6"><ActionFeedback error onRetry={mailbox.retrySelection}>The linked email is unavailable.</ActionFeedback></div>
+      {mailbox.messageState.error ? <LinkedEmailError mailbox={mailbox} onBack={backToInbox} />
         : mailbox.messageState.loading && !selected ? <div role="status" className="min-h-48 rounded-md border-hairline border-zinc-200 bg-white p-6">Loading linked email…</div>
         : selected ? <EmailConversation active={active} mailbox={mailbox} editor={editor} onBack={backToInbox} />
         : <div className="hidden min-h-80 flex-col items-center justify-center rounded-md border-hairline border-zinc-200 bg-white p-8 text-center xl:flex">

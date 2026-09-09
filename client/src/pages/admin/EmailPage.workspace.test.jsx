@@ -123,6 +123,20 @@ describe("Email workspace feedback and request ownership", () => {
     expect(screen.getByRole("textbox", { name: "Reply", exact: true })).toHaveValue("Keep the selected reply");
   });
 
+  it("returns to the inbox when a retained message cannot be refreshed", async () => {
+    const view = mount();
+    fireEvent.change(await open(), { target: { value: "Keep this reply" } });
+    view.rerender(emailRoute(false));
+    overrides.set(`/api/admin/email/message/${a.id}`, () => response({}, 404));
+    view.rerender(emailRoute(true));
+    await screen.findByText("The linked email is unavailable.");
+    fireEvent.click(screen.getByRole("button", { name: "Back to inbox", exact: true }));
+    await waitFor(() => expect(window.location.search).toBe(""));
+    await waitFor(() => expect(screen.queryByText("The linked email is unavailable.")).not.toBeInTheDocument());
+    expect(await open(b)).toHaveValue("");
+    expect(await open(a)).toHaveValue("Keep this reply");
+  });
+
   it("retries an unavailable linked message and preserves the previous message's draft", async () => {
     mount(); fireEvent.change(await open(), { target: { value: "Draft for the first message" } });
     overrides.set(`/api/admin/email/message/${b.id}`, () => response({}, 404));
@@ -243,6 +257,25 @@ describe("Email workspace feedback and request ownership", () => {
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Email sent."));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+  it.each(["compose", "reply"].flatMap(kind => ["sent", "not_sent"].map(outcome => [kind, outcome])))
+    ("clears %s feedback after a successful %s verdict", async (kind, outcome) => {
+      overrides.set("/api/admin/email/send", () => response({}, 503));
+      mount();
+      if (kind === "compose") {
+        fireEvent.click(await screen.findByRole("button", { name: "New email", exact: true }));
+        fireEvent.change(screen.getByLabelText("To *"), { target: { value: "fixture@example.invalid" } });
+      } else await open();
+      const field = kind === "compose" ? screen.getByLabelText("Message *") : screen.getByRole("textbox", { name: "Reply", exact: true });
+      fireEvent.change(field, { target: { value: "Recovery fixture" } });
+      fireEvent.click(screen.getByRole("button", { name: kind === "compose" ? "Send" : "Send reply", exact: true }));
+      const feedback = `${kind === "compose" ? "Email" : "Reply"} send was not confirmed. Your draft is still here.`;
+      await screen.findByText(feedback);
+      fireEvent.click(screen.getByRole("button", { name: `I checked Sent: it was ${outcome === "sent" ? "sent" : "not sent"}`, exact: true }));
+      expect(screen.queryByText(feedback)).not.toBeInTheDocument();
+      expect(field).toHaveValue(outcome === "sent" ? "" : "Recovery fixture");
+      expect(calls("/send")).toHaveLength(1);
+    });
 
   it("keeps a failed reply and its feedback scoped to the original message while browsing", async () => {
     let finish;
