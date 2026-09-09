@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { completionDraftKey } from '../lib/completion-drafts';
 import { getAdminUser } from '../lib/adminAuth';
 
-export default function useServiceRecapDraft(serviceId, ready, snapshot) {
+export default function useServiceRecapDraft(serviceId, ready, snapshot, sourceIdentity) {
   const user = getAdminUser();
   const [key] = useState(() => completionDraftKey(serviceId, `recap_${user?.id || 'local'}_${user?.role || 'local'}`));
   const [storageError, setStorageError] = useState('');
@@ -19,18 +19,25 @@ export default function useServiceRecapDraft(serviceId, ready, snapshot) {
 
   useEffect(() => {
     if (!ready || complete.current) return;
-    if (baseline.current === null) { baseline.current = serialized; return; }
+    if (baseline.current === null) { baseline.current = { serialized, sourceIdentity }; return; }
     if (candidate) return;
     try {
-      if (serialized === baseline.current) localStorage.removeItem(key);
-      else localStorage.setItem(key, JSON.stringify({ ...JSON.parse(serialized), serviceId, savedAt: Date.now() }));
-      setSaved(serialized !== baseline.current);
+      if (serialized === baseline.current.serialized) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify({ ...JSON.parse(serialized), serviceId, sourceIdentity: baseline.current.sourceIdentity, savedAt: Date.now() }));
+      setSaved(serialized !== baseline.current.serialized);
       setStorageError('');
     } catch {
       setSaved(false);
       setStorageError('Draft could not be saved on this device. Keep this visit open until completion succeeds.');
     }
-  }, [candidate, key, ready, serialized, serviceId]);
+  }, [candidate, key, ready, serialized, serviceId, sourceIdentity]);
+
+  useEffect(() => {
+    if (!storageError || candidate || complete.current || serialized === baseline.current?.serialized) return undefined;
+    const warn = (event) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [candidate, serialized, storageError]);
 
   const discard = () => {
     try { localStorage.removeItem(key); }
@@ -49,5 +56,7 @@ export default function useServiceRecapDraft(serviceId, ready, snapshot) {
     discard();
   };
 
-  return { candidate, saved, storageError, discard, finish, restored: () => setCandidate(null) };
+  const restoreError = candidate && (!ready || sourceIdentity === null || candidate.sourceIdentity !== sourceIdentity)
+    ? 'Could not verify this draft against the current visit. Close and reopen to refresh, or discard the draft to use the current record.' : '';
+  return { candidate, saved, storageError, restoreError, discard, finish, restored: () => setCandidate(null) };
 }

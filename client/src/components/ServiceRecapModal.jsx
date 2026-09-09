@@ -236,11 +236,19 @@ export default function ServiceRecapModal({
 
   const [restoredNames, setRestoredNames] = useState({});
   const missingSelections = [...selected].filter((id) => !productById.has(id));
+  const record = ctx?.existingRecord;
+  const recordIdentity = !ctx || !selectionAuthoritative.current || loadError ? null : JSON.stringify([
+    ctx.service?.status ?? null,
+    record ? [record.id, record.status, record.technician_notes, (record.products || []).map((p) => JSON.stringify([
+      p.product_id, p.product_name, p.product_category, p.active_ingredient, p.moa_group, p.application_rate, p.rate_unit,
+    ])).sort()] : null,
+  ]);
   const draft = useServiceRecapDraft(serviceId, !loading && !loadError, {
     note, message, rates, sendText, includeComms,
     selectedProducts: [...selected].map((id) => ({ id, name: productById.get(id)?.name || restoredNames[id] || String(id) })),
-  });
+  }, recordIdentity);
   const restoreDraft = () => {
+    if (draft.restoreError) return;
     const saved = draft.candidate;
     setNote(saved.note || '');
     setMessage(saved.message || '');
@@ -403,8 +411,9 @@ export default function ServiceRecapModal({
           ) : <>
             {draft.candidate && <div className="tech-visit-card">
               <ActionFeedback className="tech-visit-feedback">A saved draft is available for this visit.</ActionFeedback>
+              {draft.restoreError && <ActionFeedback error className="tech-visit-feedback">{draft.restoreError}</ActionFeedback>}
               <div className="tech-visit-actions">
-                <Button className="tech-visit-action tech-visit-primary" onClick={restoreDraft}>Restore draft</Button>
+                <Button className="tech-visit-action tech-visit-primary" disabled={!!draft.restoreError} onClick={restoreDraft}>Restore draft</Button>
                 <Button variant="secondary" className="tech-visit-action" onClick={draft.discard}>Discard draft</Button>
               </div>
             </div>}

@@ -17,6 +17,48 @@ beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); })
 afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
 describe('recap interruption recovery', () => {
+  it.each(['completed elsewhere', 'record edited', 'record lookup failed', 'product lookup failed'])('blocks restoring a draft when %s', async (change) => {
+    const currentProduct = { ...product, id: 2, name: 'Current product' };
+    const initial = { ...structuredClone(context), products: [product, currentProduct] };
+    if (change === 'record edited') initial.existingRecord = { id: 'record-a', status: 'completed', technician_notes: 'Initial record', products: [] };
+    let current = initial;
+    const request = vi.fn(async (path) => path.endsWith('/context') ? structuredClone(current) : { ok: true });
+    const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
+    const first = open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Example gel', exact: true }));
+    fireEvent.change(noteInput(), { target: { value: 'Stale local treatment' } });
+    first.unmount();
+    current = { ...initial, existingRecord: { id: 'record-a', status: 'completed', technician_notes: 'Current treatment', products: [{ product_id: 2, product_name: 'Current product', application_rate: 0.2, rate_unit: 'g/spot' }] } };
+    if (change === 'record lookup failed') current = { ...initial, existingRecordLoadFailed: true };
+    if (change === 'product lookup failed') current.existingRecord.productsLoadFailed = true;
+    open();
+    expect(await screen.findByRole('button', { name: 'Restore draft', exact: true })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Complete Service', exact: true })).toBeDisabled();
+    if (!change.includes('failed')) {
+      fireEvent.click(screen.getByRole('button', { name: 'Discard draft', exact: true }));
+      expect(noteInput()).toHaveValue('Current treatment');
+      fireEvent.click(screen.getByRole('button', { name: 'Complete Service', exact: true }));
+      await waitFor(() => expect(request.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(true));
+      const payload = JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'POST')[1].body);
+      expect(payload.products).toMatchObject([{ product_id: 2, application_rate: 0.2 }]);
+    }
+  });
+
+  it('warns before unloading dirty edits that device storage could not save', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Storage unavailable'); });
+    render(<ServiceRecapModal service={{ id: 'visit-a' }} request={requestFor()} onClose={vi.fn()} />);
+    await screen.findByRole('button', { name: 'Example gel', exact: true });
+    fireEvent.change(noteInput(), { target: { value: 'Unsaved treatment' } });
+    await screen.findByText(/Draft could not be saved on this device/);
+    const pending = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(pending);
+    expect(pending.defaultPrevented).toBe(true);
+    fireEvent.change(noteInput(), { target: { value: '' } });
+    const clean = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(clean);
+    expect(clean.defaultPrevented).toBe(false);
+  });
+
   it('restores the selected visit draft after close and reopen, including actual rates', async () => {
     const request = requestFor();
     const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
@@ -89,9 +131,11 @@ describe('recap interruption recovery', () => {
   });
 
   it('requires review when a restored product is no longer in the catalog', async () => {
-    localStorage.setItem('waves_completion_draft_visit-a_recap_local_local', JSON.stringify({
-      serviceId: 'visit-a', note: 'Review actual treatment.', selectedProducts: [{ id: 99, name: 'Unavailable example' }], rates: {},
-    }));
+    const initialRequest = vi.fn(async () => ({ ...structuredClone(context), products: [{ ...product, id: 99, name: 'Unavailable example' }] }));
+    const first = render(<ServiceRecapModal service={{ id: 'visit-a' }} request={initialRequest} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Unavailable example', exact: true }));
+    fireEvent.change(noteInput(), { target: { value: 'Review actual treatment.' } });
+    first.unmount();
     render(<ServiceRecapModal service={{ id: 'visit-a' }} request={requestFor()} onClose={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Restore draft', exact: true }));
     expect(screen.getByRole('button', { name: 'Complete Service', exact: true })).toBeDisabled();
