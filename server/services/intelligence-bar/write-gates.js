@@ -13,6 +13,9 @@
 // Writes with a structural preview→confirmed two-step in their executor.
 // Their no-confirmed call produces the rich preview shown to the operator.
 const WRITE_TWO_STEP_TOOL_NAMES = new Set([
+  'add_customer_property',
+  'update_customer_property',
+  'set_primary_property',
   'switch_appointment_property',
   'create_agent_estimate_draft',
   'set_estimate_presentation',

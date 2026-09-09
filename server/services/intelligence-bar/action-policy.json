@@ -1,4 +1,11 @@
 {
+  "add_customer_property": {
+    "module": "property-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
   "adjust_stock": {
     "module": "procurement-tools.js",
     "domain": "procurement",
@@ -1385,6 +1392,13 @@
     "role": "admin",
     "approval": "ui_confirm"
   },
+  "set_primary_property": {
+    "module": "property-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
   "sitemap_validation": {
     "module": "seo-tools.js",
     "domain": "seo",
@@ -1436,6 +1450,13 @@
   },
   "update_customer": {
     "module": "tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "update_customer_property": {
+    "module": "property-tools.js",
     "domain": "customers",
     "kind": "internal_write",
     "role": "admin",

@@ -12,6 +12,7 @@ const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 
 const MODULES = [
+  ['property-tools', 'PROPERTY_TOOLS', 'executePropertyTool'],
   ['tools', 'TOOLS', 'executeTool'],
   ['schedule-tools', 'SCHEDULE_TOOLS', 'executeScheduleTool'],
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
