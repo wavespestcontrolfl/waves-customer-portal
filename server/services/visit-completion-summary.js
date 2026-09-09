@@ -156,8 +156,12 @@ async function recheckDeferredSummarySms(meta, database = db) {
 async function claimDispatchForRecipient({ visitId, customerId, kind, token, authorized }) {
   return db.transaction(async (trx) => {
     await trx('customers').where({ id: customerId }).forShare().first('id');
+    // The preference routes update notification_prefs directly; the row is
+    // held with the customer so an opt-out cannot commit between this read
+    // and the claim.
+    const prefs = await trx('notification_prefs').where({ customer_id: customerId }).forShare().first() || {};
     const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(), { db: trx });
-    if (!(await authorized(customer, trx))) return false;
+    if (!(await authorized(customer, prefs, trx))) return false;
     return VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { database: trx });
   });
 }
@@ -296,11 +300,8 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
             // the library, so convert it to an explicit dispatch refusal.
             try {
               dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_email',
-                token: claim.token, authorized: async (current, trx) => {
-                  const currentPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first() || {};
-                  return summaryEmailRecipients(current, currentPrefs)
-                    .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase());
-                } });
+                token: claim.token, authorized: (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
+                  .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase()) });
               return dispatched;
             } catch { return false; }
           },
@@ -377,8 +378,11 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
   const visitId = match[1];
   return database.transaction(async (trx) => {
-    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email',
-      status: 'unknown_delivery', last_error: 'provider_bounce' }).forUpdate().first('id');
+    // provider_bounce: a bounce reopened a sent aggregate. provider_outcome_unknown:
+    // the bounce landed before the initial send returned, or the handoff was
+    // ambiguous — a delivery event is the proof either lacked.
+    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
+      .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
     if (!effect) return { reconciled: false };
     const messages = await trx('email_messages').where({ trigger_event_id: message.trigger_event_id,
       template_key: 'service.visit_summary', recipient_id: message.recipient_id })
@@ -386,8 +390,16 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     if (!messages.map(summaryEmailState).includes('sent')) return { reconciled: false };
     await trx('visit_effects').where({ id: effect.id })
       .update({ status: 'sent', sent_at: trx.fn.now(), last_error: null, updated_at: trx.fn.now() });
+    // The bounce alert, or the coordinator's delivery-review alert when the
+    // email leg was the only reason for review.
     const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
-      .whereRaw("payload->>'visitId' = ?", [visitId]).whereRaw("payload->>'reason' = 'summary_email_bounced'").select('id');
+      .whereRaw("payload->>'visitId' = ?", [visitId])
+      .where(function reviewOnlyForDelivery() {
+        this.whereRaw("payload->>'reason' = 'summary_email_bounced'")
+          .orWhere(function coordinator() {
+            this.whereRaw("payload->>'delivery' = 'delivery_review'").whereRaw("COALESCE(payload->>'payment', '') <> 'office_required'");
+          });
+      }).select('id');
     for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
     return { reconciled: true };
   });

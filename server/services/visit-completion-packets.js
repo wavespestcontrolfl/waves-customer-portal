@@ -384,6 +384,24 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
 }
 
 /** Completion and a later paid webhook share the same representative record. */
+// The paid signal carries only the invoice; resolving its packet is part of
+// the same one-shot boundary, so a failed lookup reopens the packet through
+// the invoice link in one statement instead of losing the review.
+async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
+  let packetId;
+  try {
+    packetId = (await database('invoices').where({ id: invoiceId }).first('visit_completion_packet_id'))?.visit_completion_packet_id;
+  } catch (err) {
+    const reopened = await database('visit_completion_packets')
+      .whereIn('id', database('invoices').where({ id: invoiceId }).whereNotNull('visit_completion_packet_id').select('visit_completion_packet_id'))
+      .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now() })
+      .catch(() => 0);
+    return { enrolled: false, retryable: true, reason: 'error', error: err.message, reopened: Number(reopened) > 0 };
+  }
+  if (!packetId) return null;
+  return enrollVisitCompletionReview(packetId, database);
+}
+
 // A paid webhook or manual settlement reaches this once for a packet that
 // already closed awaiting payment. Any failure along the way, not only the
 // final enrollment call, must put the packet back on the recovery queue or
@@ -455,4 +473,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
