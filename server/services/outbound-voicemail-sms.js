@@ -97,9 +97,13 @@ function normalizePhoneE164(raw) {
   return trimmed;
 }
 
+// Records created from a call or text with no name carry placeholders — the
+// replay over real calls rendered "Hi Unknown". Those greet as "Hi there".
+const PLACEHOLDER_NAMES = new Set(['unknown', 'unknown caller', 'n/a', 'na', 'none', 'customer', 'caller', 'test', '-', '?']);
 function capitalizeName(name) {
   const trimmed = String(name || '').trim();
   if (!trimmed) return '';
+  if (PLACEHOLDER_NAMES.has(trimmed.toLowerCase()) || !/[a-z]/i.test(trimmed)) return '';
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 

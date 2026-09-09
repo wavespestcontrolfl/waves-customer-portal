@@ -19,6 +19,7 @@ const db = require('../models/db');
 const {
   REASONS,
   LOOKBACK_MS,
+  QUOTE_BRIDGE_LOOKBACK_MS,
   resolveOutboundCallReason,
   _private,
 } = require('../services/outbound-call-reason');
@@ -41,8 +42,14 @@ function installDb(byTable = {}) {
     b.whereRaw = jest.fn((...a) => { q.raws.push(a); return b; });
     b.orderBy = jest.fn(() => b);
     b.limit = jest.fn(() => b);
-    b.select = jest.fn(async () => state.byTable[table] || []);
-    b.first = jest.fn(async () => (state.byTable[table] || [])[0]);
+    const rowsFor = () => {
+      const isQuoteBridge = q.wheres.some((w) => w[0] === 'direction' && w[1] === 'outbound');
+      if (isQuoteBridge) return state.byTable.quote_bridges || [];
+      return state.byTable[table] || [];
+    };
+    b.whereIn = jest.fn((...a) => { q.wheres.push(['IN', ...a]); return b; });
+    b.select = jest.fn(async () => rowsFor());
+    b.first = jest.fn(async () => rowsFor()[0]);
     return b;
   });
 }
@@ -88,12 +95,12 @@ describe('resolveOutboundCallReason', () => {
     // The lookback probe returns the same spam row → filtered → no call; no text → generic.
     const r = await resolveOutboundCallReason({ call: call({ metadata: { relatedCallId: 'in-9' } }), phone: PHONE });
     expect(r.reason).toBe(REASONS.GENERIC);
-    expect(state.queries.map((q) => q.table)).toEqual(['call_log', 'call_log', 'sms_log']);
+    expect(state.queries.map((q) => q.table)).toEqual(['call_log', 'call_log', 'sms_log', 'call_log']);
   });
 
   test('the literal "undefined" relatedCallId is not looked up', async () => {
     await resolveOutboundCallReason({ call: call({ metadata: { relatedCallId: 'undefined' } }), phone: PHONE });
-    expect(state.queries.map((q) => q.table)).toEqual(['call_log', 'sms_log']);
+    expect(state.queries.map((q) => q.table)).toEqual(['call_log', 'sms_log', 'call_log']);
   });
 
   test('inbound call inside 48h, no text → returning_call', async () => {
@@ -163,7 +170,7 @@ describe('resolveOutboundCallReason', () => {
   test('no customer and no usable phone → contact predicate is false, generic', async () => {
     const r = await resolveOutboundCallReason({ call: call({ customer_id: null }), phone: '' });
     expect(r.reason).toBe(REASONS.GENERIC);
-    expect(state.queries[0].raws).toEqual([['false']]);
+    for (const q of state.queries) expect(q.raws).toEqual([['false']]);
   });
 
   test('phone-only contact (no customer) uses a plain where on the last-10', async () => {
@@ -171,6 +178,28 @@ describe('resolveOutboundCallReason', () => {
     const r = await resolveOutboundCallReason({ call: call({ customer_id: null }), phone: PHONE });
     expect(r.reason).toBe(REASONS.SAW_TEXT);
     expect(state.queries[1].wheres.some((w) => w[0] === 'OR')).toBe(false);
+  });
+
+  test('our own quote-form bridge to them inside 72h → quote_request (the follow-up call is about the quote)', async () => {
+    installDb({ quote_bridges: [{ id: 'ab-1', created_at: hoursAgo(45) }] });
+    const r = await resolveOutboundCallReason({ call: call({ source: 'admin-callback' }), phone: PHONE });
+    expect(r).toEqual({ reason: REASONS.QUOTE_REQUEST, evidence: { quote_bridge_call_id: 'ab-1', at: hoursAgo(45) } });
+    const q = state.queries.find((x) => x.wheres.some((w) => w[0] === 'direction' && w[1] === 'outbound'));
+    expect(q.wheres).toEqual(expect.arrayContaining([
+      ['IN', 'source', ['lead-webhook-auto-bridge']],
+      ['created_at', '>=', new Date(T0.getTime() - QUOTE_BRIDGE_LOOKBACK_MS)],
+    ]));
+    expect(q.wheres.find((w) => w[0] === 'OR')[1].__raw).toContain("metadata->>'leadPhone'");
+    expect(QUOTE_BRIDGE_LOOKBACK_MS).toBe(72 * 3600000);
+  });
+
+  test('a quote bridge loses to a MORE RECENT inbound call or text', async () => {
+    installDb({
+      quote_bridges: [{ id: 'ab-1', created_at: hoursAgo(70) }],
+      call_log: [{ id: 'in-1', created_at: hoursAgo(7), ai_extraction_enriched: { call_nature: 'new_lead' } }],
+    });
+    const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
+    expect(r.reason).toBe(REASONS.RETURNING_CALL);
   });
 
   test('nothing in the lookback → generic', async () => {

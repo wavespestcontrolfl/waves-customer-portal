@@ -289,6 +289,14 @@ describe('_private helpers', () => {
     expect(_private.callbackClause(null)).toBe('');
   });
 
+  test('placeholder first names greet as "there"', () => {
+    for (const n of ['Unknown', 'unknown', 'UNKNOWN CALLER', 'N/A', 'Customer', '-', '???', '12345', '']) {
+      expect(_private.capitalizeName(n)).toBe('');
+    }
+    expect(_private.capitalizeName('maria')).toBe('Maria');
+    expect(_private.capitalizeName("O'Brien")).toBe("O'Brien");
+  });
+
   test('normalizePhoneE164 matches the pipeline shape', () => {
     expect(_private.normalizePhoneE164('941-555-0101')).toBe(PHONE);
     expect(_private.normalizePhoneE164('19415550101')).toBe(PHONE);

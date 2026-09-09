@@ -6,7 +6,10 @@
  * only reasons the data supports naming to a customer, in priority order:
  *
  *   quote_request   the web quote-form auto-bridge (call_log.source) — they
- *                   just submitted a quote request.
+ *                   just submitted a quote request; or a manual follow-up
+ *                   call to someone we quote-bridged inside the last 72h
+ *                   (the replay showed the office redialing a form lead a
+ *                   day or two later).
  *   returning_call  a callback of a specific inbound call
  *                   (call_log.metadata.relatedCallId, set by the call-log
  *                   Call button), or the most recent inbound call from them
@@ -15,8 +18,9 @@
  *   saw_text        an inbound text from them inside the lookback.
  *   generic         nothing we can honestly name — "Sorry we missed you."
  *
- * When BOTH an inbound call and an inbound text fall inside the lookback,
- * the more recent one wins (that is what the office was reacting to).
+ * When several of {inbound call, inbound text, quote bridge} fall inside
+ * their lookbacks, the most recent wins (that is what the office was
+ * reacting to).
  * Estimate follow-ups, visit reminders, service requests and billing were
  * deliberately left out (owner ruling). No model call; plain queries only.
  */
@@ -35,6 +39,7 @@ const QUOTE_REQUEST_SOURCES = new Set(['lead-webhook-auto-bridge']);
 // Same set context-aggregator uses to keep junk calls out of customer context.
 const NON_CONTACT_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
 const LOOKBACK_MS = 48 * 60 * 60 * 1000;
+const QUOTE_BRIDGE_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 
 function last10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -104,6 +109,28 @@ async function latestInboundText({ customerId, phoneLast10, before, since }) {
     .first('id', 'created_at');
 }
 
+// Our own quote-form auto-bridge to this person inside the last 72h: the
+// follow-up call is still about their quote request. The bridge row's
+// to_phone is the admin cell; the prospect's number is metadata.leadPhone.
+async function latestQuoteBridge({ customerId, phoneLast10, before }) {
+  const since = new Date(before.getTime() - QUOTE_BRIDGE_LOOKBACK_MS);
+  return db('call_log')
+    .where('direction', 'outbound')
+    .whereIn('source', [...QUOTE_REQUEST_SOURCES])
+    .where('created_at', '<', before)
+    .where('created_at', '>=', since)
+    .where(function contact() {
+      if (customerId) this.where('customer_id', customerId);
+      if (phoneLast10) {
+        const clause = db.raw("right(regexp_replace(metadata->>'leadPhone', '\\D', '', 'g'), 10) = ?", [phoneLast10]);
+        if (customerId) this.orWhere(clause); else this.where(clause);
+      }
+      if (!customerId && !phoneLast10) this.whereRaw('false');
+    })
+    .orderBy('created_at', 'desc')
+    .first('id', 'created_at');
+}
+
 /**
  * @param {object} p
  * @param {object} p.call      call_log row: source, customer_id, metadata, created_at
@@ -128,15 +155,20 @@ async function resolveOutboundCallReason({ call = {}, phone } = {}) {
       return { reason: REASONS.RETURNING_CALL, evidence: { related_call_id: related.id, at: related.created_at } };
     }
 
-    const [inboundCall, inboundText] = await Promise.all([
+    const [inboundCall, inboundText, quoteBridge] = await Promise.all([
       latestInboundCall({ customerId, phoneLast10, before, since }),
       latestInboundText({ customerId, phoneLast10, before, since }),
+      latestQuoteBridge({ customerId, phoneLast10, before }),
     ]);
-    if (inboundCall && (!inboundText || new Date(inboundCall.created_at) >= new Date(inboundText.created_at))) {
-      return { reason: REASONS.RETURNING_CALL, evidence: { inbound_call_id: inboundCall.id, at: inboundCall.created_at } };
-    }
-    if (inboundText) {
-      return { reason: REASONS.SAW_TEXT, evidence: { inbound_sms_id: inboundText.id, at: inboundText.created_at } };
+    const candidates = [
+      inboundCall && { reason: REASONS.RETURNING_CALL, at: inboundCall.created_at, evidence: { inbound_call_id: inboundCall.id, at: inboundCall.created_at } },
+      inboundText && { reason: REASONS.SAW_TEXT, at: inboundText.created_at, evidence: { inbound_sms_id: inboundText.id, at: inboundText.created_at } },
+      quoteBridge && { reason: REASONS.QUOTE_REQUEST, at: quoteBridge.created_at, evidence: { quote_bridge_call_id: quoteBridge.id, at: quoteBridge.created_at } },
+    ].filter(Boolean);
+    if (candidates.length) {
+      // Most recent wins; on a tie the order above (call, text, bridge) holds.
+      const best = candidates.reduce((a, b) => (new Date(b.at) > new Date(a.at) ? b : a));
+      return { reason: best.reason, evidence: best.evidence };
     }
   } catch (e) {
     // A probe failure must never block the text — fall back to the generic
@@ -150,6 +182,7 @@ async function resolveOutboundCallReason({ call = {}, phone } = {}) {
 module.exports = {
   REASONS,
   LOOKBACK_MS,
+  QUOTE_BRIDGE_LOOKBACK_MS,
   QUOTE_REQUEST_SOURCES,
   NON_CONTACT_NATURES,
   resolveOutboundCallReason,
