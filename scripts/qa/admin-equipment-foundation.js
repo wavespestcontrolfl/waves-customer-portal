@@ -1166,7 +1166,8 @@ async function writes(page, server, state, report, device) {
   assert.deepEqual(verified, {
     verified_test_area_sqft: 2000,
     verified_captured_gallons: 4,
-    verified_at: `${verifyDate}T12:00:00`,
+    // The fixture browser uses America/New_York; noon must be serialized with its DST offset.
+    verified_at: await page.evaluate((date) => new Date(`${date}T12:00:00`).toISOString(), verifyDate),
     verification_notes: "Synthetic verification draft",
   });
   await verifyCalibration.waitFor({ state: "hidden" });
