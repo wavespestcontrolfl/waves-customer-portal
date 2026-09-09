@@ -2229,3 +2229,8 @@ The owner replaced the historical services column with WaveGuard Tier, showing t
 The owner-approved audit sequence promotes comfortable 44px controls, sentence-case 14px labels/actions, and 16px field text for new and migrated admin surfaces. Compact density reaches 36px only on desktop widths without a coarse pointer; touch density is 48px. Existing unmigrated pages retain their presentation. This supersedes the older type/case defaults for migrated work.
 
 The existing `/admin/_design-system` route demonstrates labeled fields, stable loading and retry states, missing values versus zero, nested overlays, and record/role draft ownership, with the source for each example. `AdminCommandHeader` gains an explicit workspace variant. These examples do not establish estimate pricing, durable offline recovery, or technician completion behavior; those remain separate workflow proofs in the approved sequence.
+
+
+## 2026-09-09 — Group the admin sidebar around daily work
+
+The owner-approved navigation scope retains every destination while grouping the sidebar into six daily links, four expandable management areas, direct Agent Ops and footer Settings. Leaf roles and feature gates remain authoritative. The default-off `admin-navigation` per-user flag enables the shared desktop/mobile workspace metadata, account-specific expansion and rendered-tab selection. Existing routes, mobile tabs, settings leaves, page data and usage beacons remain intact. New chrome uses the incoming shared UI foundation and its 14px text and responsive control density. See `docs/admin-sidebar-navigation.md` for behavior, rollout and integration dependencies.
