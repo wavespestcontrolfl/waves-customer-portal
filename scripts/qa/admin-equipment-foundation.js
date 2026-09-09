@@ -585,6 +585,65 @@ async function widths(page, state, surface) {
   }
   await page.setViewportSize(original);
 }
+async function retryWrite(page, state, key, button, verify, pending) {
+  const before = state.requests.filter((r) => r.key === key).length;
+  const original = await button.boundingBox();
+  state.failures.add(key);
+  let release;
+  state.hold = {
+    key,
+    promise: new Promise((r) => {
+      release = r;
+    }),
+  };
+  state.hold.release = release;
+  await button.evaluate((n) => {
+    n.click();
+    n.click();
+  });
+  await button.and(page.locator('[aria-busy="true"]')).waitFor();
+  assert.equal(await button.isDisabled(), true, key + " disabled while saving");
+  const held = await button.boundingBox();
+  assert.ok(
+    Math.abs(original.width - held.width) < 1 &&
+      Math.abs(original.height - held.height) < 1,
+    key + " stable pending button",
+  );
+  if (pending) await pending();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(
+    state.requests.filter((r) => r.key === key).length,
+    before + 1,
+    key + " single pending write",
+  );
+  release();
+  state.hold = null;
+  await page
+    .getByRole("alert")
+    .filter({
+      hasText: /Synthetic request failed|HTTP 503/,
+    })
+    .waitFor();
+  if (verify) await verify();
+  const first = state.requests.filter((r) => r.key === key).at(-1).body;
+  await button.click();
+  await page.waitForTimeout(250);
+  assert.equal(
+    state.requests.filter((r) => r.key === key).length,
+    before + 2,
+    key + " retry",
+  );
+  assert.deepEqual(
+    state.requests.filter((r) => r.key === key).at(-1).body,
+    first,
+    key + " preserved payload",
+  );
+  state.checks.push(
+    key + " pending, failed draft, retry and preserved payload",
+  );
+  console.log(key + " retry passed");
+  return first;
+}
 function gallery(report) {
   const files = report.screenshots.map((f) => path.basename(f));
   const keys = [
@@ -745,6 +804,374 @@ async function views(page, server, state, report, device) {
     page.getByRole("button", { name: "Mark Field Verified", exact: true }));
   await mileageHeader(page, server, state, report, device);
 }
+async function fillFields(page, fields) {
+  for (const [label, value] of Object.entries(fields))
+    await page.getByLabel(label, { exact: true }).fill(value);
+}
+async function writes(page, server, state, report, device) {
+  await page.goto(server.baseUrl + "/admin/equipment?source=synthetic");
+  await page.getByText(equipment.name, { exact: true }).waitFor();
+  assert.equal(
+    await page.locator("main").getByText("toast &&", { exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await page.locator("main").getByRole("status").count(),
+    0,
+    "No empty toast",
+  );
+  await page
+    .getByRole("button", { name: "Add Equipment", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await dialog
+    .getByRole("alert")
+    .filter({ hasText: "Name is required" })
+    .waitFor();
+  assert.equal(
+    state.requests.filter(
+      (r) => r.key === "POST /api/admin/equipment/equipment",
+    ).length,
+    0,
+  );
+  await fillFields(page, {
+    "Name *": "Example spare sprayer",
+    "Purchase Price ($)": "1250.50",
+    "Current Hours": "0",
+    Notes: "Synthetic asset draft",
+  });
+  const created = await retryWrite(
+    page,
+    state,
+    "POST /api/admin/equipment/equipment",
+    dialog.getByRole("button", { name: "Save", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByLabel("Name *", { exact: true }).inputValue(),
+        "Example spare sprayer",
+      );
+      await shot(page, report, device + "-failed-equipment-save");
+    },
+    async () => {
+      await page.keyboard.press("Escape");
+      assert.equal(await dialog.isVisible(), true, "Pending dialog stays open");
+      assert.equal(
+        await dialog
+          .locator("input,select,textarea")
+          .evaluateAll((nodes) => nodes.every((n) => n.disabled)),
+        true,
+      );
+    },
+  );
+  assert.deepEqual(created, {
+    name: "Example spare sprayer",
+    category: "other",
+    make: "",
+    model: "",
+    serial_number: "",
+    purchase_date: null,
+    purchase_price: 1250.5,
+    current_hours: 0,
+    next_service_hours: null,
+    next_service_type: "",
+    assigned_to: "",
+    status: "active",
+    book_value: null,
+    notes: "Synthetic asset draft",
+  });
+  await dialog.waitFor({ state: "hidden" });
+  await page
+    .getByRole("status")
+    .filter({ hasText: "Equipment added" })
+    .waitFor();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page
+    .getByLabel("Name *", { exact: true })
+    .fill("Example updated truck");
+  const updated = await retryWrite(
+    page,
+    state,
+    `PUT /api/admin/equipment/equipment/${id}`,
+    dialog.getByRole("button", { name: "Save", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByLabel("Name *", { exact: true }).inputValue(),
+        "Example updated truck",
+      );
+    },
+  );
+  assert.deepEqual(updated, { ...equipment, name: "Example updated truck" });
+  await dialog.waitFor({ state: "hidden" });
+  await page
+    .getByRole("status")
+    .filter({ hasText: "Equipment updated" })
+    .waitFor();
+
+  await section(page, "Tank Mixes");
+  const recalculated = await retryWrite(
+    page,
+    state,
+    "POST /api/admin/equipment/tank-mixes/mix-example/recalculate",
+    page.getByRole("button", { name: "Recalc", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByText("Synthetic tank mix", { exact: true }).isVisible(),
+        true,
+      );
+    },
+  );
+  assert.equal(recalculated, null);
+  await page
+    .getByRole("status")
+    .filter({ hasText: "Costs recalculated" })
+    .waitFor();
+
+  await section(page, "Maintenance");
+  const resolved = await retryWrite(
+    page,
+    state,
+    "PUT /api/admin/equipment-maintenance/alerts/alert-example",
+    page.getByRole("button", { name: "Dismiss", exact: true }),
+  );
+  assert.deepEqual(resolved, { status: "resolved", resolved_by: "admin" });
+  assert.equal(
+    await page
+      .getByText("Synthetic maintenance review", { exact: true })
+      .count(),
+    0,
+  );
+  await fleetDetail(page);
+  await page
+    .getByRole("button", { name: "Record Maintenance", exact: true })
+    .click();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Save Record", exact: true })
+      .isDisabled(),
+    true,
+  );
+  await page
+    .getByLabel("Schedule (optional)", { exact: true })
+    .selectOption(schedule.id);
+  await fillFields(page, {
+    "Performed By": "Fixture operator",
+    "Miles at Service": "12010",
+    "Parts Cost": "12.50",
+    "Labor Cost": "0",
+  });
+  const maintenance = await retryWrite(
+    page,
+    state,
+    `POST /api/admin/equipment-maintenance/${id}/records`,
+    page.getByRole("button", { name: "Save Record", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByLabel("Task Name *", { exact: true }).inputValue(),
+        schedule.task_name,
+      );
+      assert.equal(
+        await page.getByLabel("Parts Cost", { exact: true }).inputValue(),
+        "12.50",
+      );
+      await shot(page, report, device + "-failed-maintenance-save",
+        page.getByRole("alert").filter({ hasText: /Synthetic request failed|HTTP 503/ }));
+      await shot(page, report, device + "-failed-maintenance-save-actions",
+        page.getByRole("button", { name: "Save Record", exact: true }));
+    },
+    async () => {
+      assert.equal(await page.getByRole("button", { name: "Cancel", exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: `Open ${equipment.name}`, exact: true }).isDisabled(), true);
+    },
+  );
+  assert.deepEqual(maintenance, {
+    scheduleId: schedule.id,
+    maintenanceType: "scheduled",
+    taskName: schedule.task_name,
+    description: null,
+    performedBy: "Fixture operator",
+    vendorName: null,
+    milesAtService: 12010,
+    hoursAtService: null,
+    conditionBefore: null,
+    conditionAfter: null,
+    partsCost: 12.5,
+    laborCost: 0,
+    vendorCost: 0,
+    downtimeHours: 0,
+    followUpNeeded: false,
+    followUpNotes: null,
+    followUpDate: null,
+    warrantyClaim: false,
+  });
+  await page
+    .getByRole("status")
+    .filter({ hasText: "Maintenance recorded" })
+    .waitFor();
+  await page.getByRole("button", { name: "Log Mileage", exact: true }).click();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Save Mileage", exact: true })
+      .isDisabled(),
+    true,
+  );
+  const logDate = await page.getByLabel("Date", { exact: true }).inputValue();
+  await fillFields(page, {
+    "Odometer End": "12100",
+    "Personal Miles": "10",
+    "Fuel Gallons": "5",
+    "Fuel Cost ($)": "20",
+    "Jobs Serviced": "3",
+    "Logged By": "Fixture operator",
+    Notes: "Synthetic mileage draft",
+  });
+  const logged = await retryWrite(
+    page,
+    state,
+    `POST /api/admin/equipment-maintenance/${id}/mileage`,
+    page.getByRole("button", { name: "Save Mileage", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByLabel("Odometer End", { exact: true }).inputValue(),
+        "12100",
+      );
+      assert.equal(
+        await page.getByLabel("Notes", { exact: true }).inputValue(),
+        "Synthetic mileage draft",
+      );
+      await shot(page, report, device + "-failed-mileage-save",
+        page.getByRole("alert").filter({ hasText: /Synthetic request failed|HTTP 503/ }));
+      await shot(page, report, device + "-failed-mileage-save-actions",
+        page.getByRole("button", { name: "Save Mileage", exact: true }));
+    },
+    async () => {
+      assert.equal(await page.getByRole("button", { name: "Cancel", exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: `Open ${equipment.name}`, exact: true }).isDisabled(), true);
+    },
+  );
+  assert.deepEqual(logged, {
+    logDate,
+    odometerStart: 12000,
+    odometerEnd: 12100,
+    personalMiles: 10,
+    fuelGallons: 5,
+    fuelCost: 20,
+    jobsServiced: 3,
+    loggedBy: "Fixture operator",
+    notes: "Synthetic mileage draft",
+    source: "manual",
+  });
+  await page
+    .getByRole("status")
+    .filter({ hasText: "Mileage logged" })
+    .waitFor();
+
+  await section(page, "Maintenance", "Calibrations");
+  const saveCalibration = page.getByRole("button", {
+    name: "Save Calibration (expires in 30 days)",
+    exact: true,
+  });
+  assert.equal(await saveCalibration.isDisabled(), true);
+  await page
+    .getByLabel("Equipment system", { exact: true })
+    .selectOption(systemId);
+  await page.getByText("Current active calibration", { exact: true }).waitFor();
+  await fillFields(page, {
+    "Test area (sqft)": "1500",
+    "Captured gallons": "3",
+    "Pressure (PSI, optional)": "40",
+    "Engine RPM (optional)": "1800",
+    "Notes (optional)": "Synthetic calibration draft",
+  });
+  const calibrated = await retryWrite(
+    page,
+    state,
+    `POST /api/admin/equipment-systems/${systemId}/calibrations`,
+    saveCalibration,
+    async () => {
+      assert.equal(
+        await page.getByLabel("Test area (sqft)", { exact: true }).inputValue(),
+        "1500",
+      );
+      assert.equal(
+        await page.getByLabel("Notes (optional)", { exact: true }).inputValue(),
+        "Synthetic calibration draft",
+      );
+      await shot(page, report, device + "-failed-calibration-save",
+        page.getByRole("alert").filter({ hasText: /Synthetic request failed|HTTP 503/ }));
+      await shot(page, report, device + "-failed-calibration-save-actions",
+        page.getByRole("button", { name: "Save Calibration (expires in 30 days)", exact: true }));
+    },
+    async () =>
+      assert.equal(
+        await page.getByLabel("Equipment system", { exact: true }).isDisabled(),
+        true,
+      ),
+  );
+  assert.deepEqual(calibrated, {
+    carrier_gal_per_1000: 2,
+    test_area_sqft: 1500,
+    captured_gallons: 3,
+    pressure_psi: 40,
+    engine_rpm_setting: "1800",
+    notes: "Synthetic calibration draft",
+  });
+  await page.getByText(/Calibration saved at/).waitFor();
+  assert.equal(
+    await page.getByLabel("Test area (sqft)", { exact: true }).inputValue(),
+    "",
+  );
+  assert.equal(
+    await page.getByLabel("Equipment system", { exact: true }).inputValue(),
+    systemId,
+  );
+  await page
+    .getByRole("button", { name: "Verify Calibration", exact: true })
+    .click();
+  const verifyCalibration = page.getByRole("button", {
+    name: "Mark Field Verified",
+    exact: true,
+  });
+  assert.equal(await verifyCalibration.isDisabled(), true);
+  const verifyDate = await page
+    .getByLabel("Verification date", { exact: true })
+    .inputValue();
+  await fillFields(page, {
+    "Measured sqft": "2000",
+    "Measured gallons": "4",
+    "Verification notes": "Synthetic verification draft",
+  });
+  const verified = await retryWrite(
+    page,
+    state,
+    `POST /api/admin/equipment-systems/calibrations/${calibrationId}/verify`,
+    verifyCalibration,
+    async () => {
+      assert.equal(
+        await page.getByLabel("Measured sqft", { exact: true }).inputValue(),
+        "2000",
+      );
+      assert.equal(
+        await page
+          .getByLabel("Verification notes", { exact: true })
+          .inputValue(),
+        "Synthetic verification draft",
+      );
+      await shot(page, report, device + "-failed-calibration-verification",
+        page.getByRole("alert").filter({ hasText: /Synthetic request failed|HTTP 503/ }));
+      await shot(page, report, device + "-failed-calibration-verification-actions",
+        page.getByRole("button", { name: "Mark Field Verified", exact: true }));
+    },
+  );
+  assert.deepEqual(verified, {
+    verified_test_area_sqft: 2000,
+    verified_captured_gallons: 4,
+    verified_at: `${verifyDate}T12:00:00`,
+    verification_notes: "Synthetic verification draft",
+  });
+  await verifyCalibration.waitFor({ state: "hidden" });
+  await page.getByText("Field verified", { exact: true }).waitFor();
+}
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const sourceFiles = [
@@ -803,6 +1230,7 @@ async function main() {
       try {
         await install(page, server, state);
         await views(page, server, state, report, device);
+        await writes(page, server, state, report, device);
         assert.deepEqual(state.pageErrors, [], "Page errors");
         assert.deepEqual(state.unmatched, [], "Unmatched API");
         assert.deepEqual(
