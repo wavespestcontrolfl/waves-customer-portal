@@ -3727,3 +3727,93 @@ describe('codex #3235 r19 — first-send re-resolution failure defers', () => {
     }
   });
 });
+
+describe('shared ask history foundation', () => {
+  const history = require('../services/review-ask-history');
+  const base = new Date('2035-01-01T15:00:00Z').getTime();
+  function installHistory({ sms = [], sends = [] } = {}) {
+    const mock = makeMock({
+      sms_log: sms.map(({ at, body }) => ({
+        customer_id: 'history-customer', direction: 'outbound', status: 'sent',
+        message_body: body || 'Please review us: https://g.page/r/example/review', created_at: new Date(at),
+      })),
+      review_requests: sends.map(at => ({ customer_id: 'history-customer', sms_sent_at: new Date(at) })),
+    });
+    db.mockImplementation(mock);
+    return mock;
+  }
+
+  test('the newest manual ask retains its own timestamp after a pipeline ask', async () => {
+    installHistory({ sms: [{ at: base }, { at: base + 240000 }], sends: [base] });
+    const at = await ReviewService.manualReviewAskSentRecently('history-customer', {
+      since: new Date(base - 1), returnAt: true, failClosed: true,
+    });
+    expect(at).toEqual(new Date(base + 240000));
+    expect(at.getTime() + history.ASK_SPACING_MS).toBe(base + 240000 + 72 * 3600000);
+  });
+
+  test('a manual ask inside the correspondence window cannot steal the exact pipeline match', async () => {
+    installHistory({ sms: [{ at: base }, { at: base + 30000 }], sends: [base] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) }))
+      .toEqual(new Date(base + 30000));
+  });
+
+  test('correlation includes the pipeline log immediately before the history boundary', async () => {
+    installHistory({ sms: [{ at: base - 30000 }, { at: base + 30000 }], sends: [base - 30000] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base) }))
+      .toEqual(new Date(base + 30000));
+  });
+
+  test('multiple pipeline logs are each consumed once before selecting a manual ask', async () => {
+    installHistory({ sms: [{ at: base }, { at: base + 60000 }, { at: base + 90000 }], sends: [base, base + 60000] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) }))
+      .toEqual(new Date(base + 90000));
+  });
+
+  test('an orphan pipeline stamp does not erase a later manual ask', async () => {
+    installHistory({ sms: [{ at: base + 240000 }], sends: [base] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) }))
+      .toEqual(new Date(base + 240000));
+  });
+
+  test.each([
+    'Thanks for your Google review',
+    'Your invoice is ready: https://portal.test/l/abc123',
+    'We discussed your Google review yesterday.',
+  ])('unrelated acknowledgment/support text is not an ask: %s', async body => {
+    installHistory({ sms: [{ at: base, body }] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
+  });
+
+  test.each([
+    'Could you leave a Google review?',
+    'Please review us when you have a moment.',
+    'Share your experience in a review.',
+    'A review would mean a lot: https://portal.test/l/abc123',
+    'https://www.yelp.com/writeareview/biz/example',
+    'https://facebook.com/example/reviews',
+    'https://maps.app.goo.gl/abc123',
+  ])('request intent and review destinations count: %s', body => {
+    expect(history.looksLikeReviewAsk(body)).toBe(true);
+  });
+
+  test('no manual ask returns null for timestamps and false for the enrollment contract', async () => {
+    installHistory({ sms: [{ at: base }], sends: [base] });
+    expect(await ReviewService.manualReviewAskSentRecently('history-customer', { since: new Date(base - 1), returnAt: true })).toBeNull();
+    expect(await ReviewService.manualReviewAskSentRecently('history-customer', { since: new Date(base - 1) })).toBe(false);
+  });
+
+  test('dispatch history errors propagate while enrollment retains its fail-open contract', async () => {
+    db.mockImplementation(() => { throw new Error('history unavailable'); });
+    await expect(ReviewService.manualReviewAskSentRecently('history-customer', { failClosed: true, returnAt: true })).rejects.toThrow('history unavailable');
+    expect(await ReviewService.manualReviewAskSentRecently('history-customer')).toBe(false);
+  });
+
+  test('the later delivered channel anchors spacing even when requests arrive out of order', () => {
+    expect(history.latestDeliveredAt([
+      { sms_sent_at: new Date(base), sent_at: new Date(base + 3600000) },
+      { sms_sent_at: new Date(base + 60000), sent_at: null },
+    ])).toEqual(new Date(base + 3600000));
+    expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null }])).toBeNull();
+  });
+});

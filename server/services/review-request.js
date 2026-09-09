@@ -44,6 +44,7 @@ async function technicianFirstName(technicianId) {
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
+const ASK_HISTORY = require("./review-ask-history");
 const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
 // Trapping-family catalog keys (owner ruling 2026-08-06: "rodent/wildlife
 // should be deemed multiple visits") — multi-treatment REVIEW-CADENCE
@@ -930,79 +931,16 @@ const ReviewService = {
    * bound total volume, and an sms_log blip must not silently kill every
    * post-service enrollment.
    */
-  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null } = {}) {
-    // yelp.com/writeareview and facebook.com/<page>/reviews are the Insert
-    // Link sheet's seeded write-a-review destinations (link-library.js) —
-    // an operator texting one is a personal ask exactly like a pasted
-    // g.page link, and must stand the cadence down the same way.
-    const MANUAL_ASK_RE = /g\.page\/|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b|maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i;
-    // A forwarded copy of one of our own (now shorter) templates says just
-    // "review" with a branded /l/ short link (codex #3235 r4 P1) — /l/ alone
-    // is any portal short link (reports, appointments), so require BOTH the
-    // short-link shape and review wording before treating it as an ask.
-    const SHORT_LINK_RE = /\/l\/[A-Za-z0-9]{3,}\b/;
-    const REVIEW_WORD_RE = /\breview/i;
-    const looksLikeAsk = (body) => MANUAL_ASK_RE.test(body)
-      || (SHORT_LINK_RE.test(body) && REVIEW_WORD_RE.test(body));
+  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null, failClosed = false, returnAt = false } = {}) {
     try {
-      const sinceAt = since ? new Date(since) : new Date(Date.now() - windowDays * 86400000);
-      const outbound = await db("sms_log")
-        .where({ customer_id: customerId, direction: "outbound" })
-        .where("created_at", ">=", sinceAt)
-        // Rows that never reached the customer are not asks: scheduled rows
-        // are inserted pre-delivery (and stay on cancel), failed/undelivered
-        // never landed, the scheduled-SMS executor stamps 'blocked' on
-        // pre-delivery rejections and holds 'sending' during the in-flight
-        // claim window (codex #3235 r1 P2 + r3 P2 + r4 P2).
-        .whereNotIn("status", ["scheduled", "sending", "canceled", "cancelled", "failed", "undelivered", "blocked"])
-        .orderBy("created_at", "desc")
-        .limit(200)
-        .select("message_body", "created_at");
-      const candidates = outbound.filter((r) => looksLikeAsk(String(r.message_body || "")));
-      if (!candidates.length) return false;
-      // SMS sends only (codex #3235 r6 P2): correlating against email
-      // sends would let an automated Day-0 EMAIL excuse the owner's hand
-      // TEXT sent minutes later, defeating the standdown.
-      const sends = await db("review_requests")
-        .where({ customer_id: customerId })
-        .whereNotNull("sms_sent_at")
-        .select("sms_sent_at");
-      const sentTimes = sends
-        .map((r) => new Date(r.sms_sent_at).getTime())
-        .filter((t) => Number.isFinite(t));
-      // One pipeline send excuses ONE sms_log row (codex #3235 r12 P2): a
-      // hand-sent ask minutes after an automated one must not share the
-      // automated send's timestamp alibi. Greedy nearest-match consumption.
-      // And a send whose own sms_log insert failed (twilio.js swallows the
-      // post-send log error) is an ORPHAN — with no row of its own within
-      // ±90s it may not excuse anything (codex r13 P2): the pipeline logs
-      // at send time, so its row is seconds away; a manual text minutes
-      // later is not.
-      const TEN_MIN = 10 * 60 * 1000;
-      const CORRESPONDENCE_MS = 90 * 1000;
-      // Correspondence counts REVIEW-LOOKING rows only (codex #3235 r15 P2):
-      // an unrelated invoice/report text logged near an orphaned review send
-      // must not legitimize its timestamp.
-      const candidateTimes = candidates
-        .map((r) => new Date(r.created_at).getTime())
-        .filter((t) => Number.isFinite(t));
-      const unused = sentTimes.filter((sT) =>
-        candidateTimes.some((cT) => Math.abs(cT - sT) <= CORRESPONDENCE_MS));
-      return candidates.some((c) => {
-        const t = new Date(c.created_at).getTime();
-        let best = -1;
-        let bestGap = Infinity;
-        unused.forEach((sT, i) => {
-          const gap = Math.abs(sT - t);
-          if (gap <= TEN_MIN && gap < bestGap) { best = i; bestGap = gap; }
-        });
-        if (best === -1) return true; // no unconsumed pipeline send → manual ask
-        unused.splice(best, 1);
-        return false;
+      const manualAt = await ASK_HISTORY.lastManualAskAt(customerId, {
+        since: since || new Date(Date.now() - windowDays * 86400000),
       });
+      return returnAt ? manualAt : manualAt != null;
     } catch (err) {
+      if (failClosed) throw err;
       logger.warn(`[review] manual-ask lookup failed (customerId=${customerId}): ${err.message} — enrolling anyway`);
-      return false;
+      return returnAt ? null : false;
     }
   },
 
