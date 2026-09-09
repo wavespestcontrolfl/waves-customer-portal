@@ -102,6 +102,8 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'general', active: false });
       expect((await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control' })).slots).toEqual([]);
       await mockConn('scheduled_services').where({ id: TARGET }).update({ service_type: 'Lawn Care' });
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ service_type: 'Lawn Care' });
+      expect((await findAvailableSlots({ ...OPTIONS, arrivalWindow: undefined, serviceTypes: ['Lawn Care'] })).slots.some(slot => slot.service_family_score > 0)).toBe(true);
       expect((await findAvailableSlots(OPTIONS)).slots.length).toBeGreaterThan(0);
       await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'lawn', active: false });
       expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
@@ -118,7 +120,7 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = gate;
     }
-  });
+  }, 30000);
 
   test('ranks the nearby morning placement first, and picker/live-check/save agree without rewriting other promises', async () => {
     const offers = await findAvailableSlots(OPTIONS);
