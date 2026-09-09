@@ -128,6 +128,40 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/unread-count'))).toBe(false);
   });
 
+  it('refreshes the profile and timeline once after an admin message is sent', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    let sent = false;
+    const fetchMock = vi.fn(url => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', sent ? 'Updated' : 'Avery');
+        detail.customer.phone = '+19415550100';
+        return response(detail);
+      }
+      if (path.endsWith('/timeline')) return response({ timeline: [{ type: 'interaction', title: sent ? 'Saved message activity' : 'Existing activity', date: '2024-08-01T16:00:00Z' }] });
+      if (path.endsWith('/communications/sms')) {
+        sent = true;
+        return response({ sent: true, providerMessageId: 'SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
+      }
+      return response({ comms: [] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
+    const field = await screen.findByRole('textbox', { name: 'Text message' });
+    fireEvent.change(field, { target: { value: 'Fixture service update' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
+    await waitFor(() => expect(field).toHaveValue(''));
+    await screen.findByRole('heading', { name: 'Updated Customer' });
+    fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity', exact: true }));
+    expect(await screen.findByText('Saved message activity')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/timeline'))).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
+  });
+
   it('shows this customer\'s unread count beside Message and clears it after reading', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });

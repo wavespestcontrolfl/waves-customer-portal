@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import CustomerPropertiesPanelV2 from './CustomerPropertiesPanelV2';
 
@@ -55,6 +55,32 @@ describe('CustomerPropertiesPanelV2', () => {
     finishPreview(await jsonResponse({ _version: 'old', primary_property: { address: 'Old customer address' }, effects: [] }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Make primary' })).toBeEnabled());
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it.each(['success', 'error'])('discards a preview %s from before a same-customer refresh without releasing the new request', async outcome => {
+    const pending = [];
+    vi.stubGlobal('fetch', vi.fn(url => {
+      if (url.endsWith('/primary-preview')) return new Promise(resolve => { pending.push(resolve); });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
+    }));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit refreshToken="before" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c1" canEdit refreshToken="after" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Make primary' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Make primary' }));
+    await act(async () => {
+      pending[0](await jsonResponse(outcome === 'success'
+        ? { _version: 'old', primary_property: { address: 'Old preview address' }, effects: [] }
+        : { error: 'Old preview failed' }, outcome === 'success' ? 200 : 503));
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByText('Old preview failed')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Make primary' })).toBeDisabled();
+    await act(async () => {
+      pending[1](await jsonResponse({ _version: 'new', primary_property: { address: '20 Oak St' }, effects: ['Fresh property version.'] }));
+    });
+    expect(await screen.findByText('Fresh property version.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm primary property' })).toBeEnabled();
   });
 
   it('a hung preview for the previous customer neither blocks the new customer nor clears its busy state later', async () => {

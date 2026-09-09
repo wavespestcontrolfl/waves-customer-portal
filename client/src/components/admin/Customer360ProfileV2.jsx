@@ -6663,7 +6663,7 @@ export default function Customer360ProfileV2({
               {embedded && c.phone && (commsComposerReady || !isAdmin) && <Suspense fallback={<p className="py-3 text-14 text-ink-secondary">Loading message tools…</p>}>
                 <CustomerSmsComposer key={`${c.id}:${c.phone}`} active={embedded ? messageOpen : activeTab === "comms"} linkRequest={linkRequest} customer={c} customerMessages={comms} customerReadScope={commsReadScope} onSent={async () => {
                   setCommsLoaded(false);
-                  await Promise.allSettled([reloadCustomer(), ...(isAdmin ? [retryTimeline()] : [])]);
+                  try { await reloadCustomer(); } catch { /* the message was already sent */ }
                 }} />
               </Suspense>}
               {!embedded && c.phone && (
