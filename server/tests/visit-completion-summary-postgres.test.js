@@ -800,6 +800,60 @@ postgres('visit summary recipient recovery', () => {
     expect(providerCalls).toBe(1);
   });
 
+  test('a link revoked between the durable mark and the provider request is refused at the held re-authorization', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    const execute = mockPg.client.constructor.prototype._query;
+    let locks = 0;
+    let revoked = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function revokeAfterMark(connection, query) {
+      if (!revoked && query.sql.includes('from "customers"') && query.sql.includes('for share') && query.sql.includes('"id"')) {
+        locks += 1;
+        if (locks === 2) {
+          revoked = true;
+          await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
+        }
+      }
+      return execute.call(this, connection, query);
+    });
+    let providerCalls = 0;
+    sendCustomerMessage.mockImplementation(handoffSender(async () => { providerCalls += 1; return { sent: true }; }));
+    await deliver();
+    expect(revoked).toBe(true);
+    expect(providerCalls).toBe(0);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'suppressed' });
+  });
+
+  test('an unreadable account primary fails delivery for retry instead of settling as no recipient', async () => {
+    const primaryId = randomUUID();
+    const accountId = randomUUID();
+    await mockPg('customer_accounts').insert({ id: accountId, first_name: 'Primary' });
+    await mockPg('customers').insert({ id: primaryId, first_name: 'Primary', phone: '+12025550199',
+      email: `${primaryId}@example.invalid`, account_id: accountId, is_primary_profile: true });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: accountId, is_primary_profile: false });
+    const execute = mockPg.client.constructor.prototype._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failPrimaryRead(connection, query) {
+      if (!interrupted && query.sql.includes('"is_primary_profile" = ')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic account primary outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      await expect(deliver()).rejects.toThrow('Synthetic account primary outage');
+      expect(interrupted).toBe(true);
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      jest.restoreAllMocks();
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: null });
+      await mockPg('customers').where({ id: primaryId }).del();
+      await mockPg('customer_accounts').where({ id: accountId }).del();
+    }
+  });
+
   test('the email retry rail holds the recipient rows through its provider request', async () => {
     const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_email_snapshot: fixture.serviceEmail };

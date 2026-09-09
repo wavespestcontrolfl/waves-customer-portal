@@ -190,6 +190,9 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     // claim read, not a silently different recipient.
     const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(),
       { db: trx, forShare: true, rethrow: true });
+    // A link revoked after the mark committed must not reach the provider.
+    const live = await trx('service_visits').where({ id: visitId }).whereNull('summary_token_revoked_at').first('id');
+    if (!live) return false;
     return authorized(customer, prefs, trx, phase);
   };
   const marked = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'claim'))
@@ -514,8 +517,10 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
 async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
+  // An unreadable account primary is a failed read the coordinator retries,
+  // never a secondary profile with no recipient.
   const customer = await withAccountPrimaryContact(
-    await database('customers').where({ id: visit.customer_id }).first(), { db: database },
+    await database('customers').where({ id: visit.customer_id }).first(), { db: database, rethrow: true },
   );
   const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
   // A recorded member owns the effects; retained history never qualifies.
