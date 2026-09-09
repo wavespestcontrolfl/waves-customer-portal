@@ -460,6 +460,43 @@ postgres('visit summary recipient recovery', () => {
     expect(sendOne).toHaveBeenCalledTimes(2);
   });
 
+  test('one bounced recipient reopens review even when another recipient was sent', async () => {
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    const message = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).first();
+    await mockPg('email_messages').where({ id: message.id }).update({ status: 'bounced' });
+    expect(await mockPg.transaction((trx) => Summary.reconcileSummaryEmailBounce(message, trx)))
+      .toEqual({ reconciled: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery' });
+  });
+
+  test('one delivered recipient cannot clear another recipient with uncertain delivery', async () => {
+    sendOne.mockRejectedValueOnce(new Error('provider response unavailable'));
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId });
+    const sent = messages.find((message) => message.status === 'sent');
+    expect(await Summary.reconcileSummaryEmailRecovery(sent)).toEqual({ reconciled: false });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery' });
+    const uncertain = messages.find((message) => message.id !== sent.id);
+    await mockPg('email_messages').where({ id: uncertain.id }).update({ status: 'delivered' });
+    expect(await Summary.reconcileSummaryEmailRecovery(uncertain)).toEqual({ reconciled: true });
+  });
+
+  test('a successful replacement settles only its own original summary recipient', async () => {
+    sendOne.mockRejectedValueOnce(new Error('provider response unavailable'));
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId });
+    const uncertain = messages.find((message) => message.status !== 'sent');
+    const replacementId = randomUUID();
+    await priorEmail('replacement@example.invalid', { id: replacementId, status: 'delivered' });
+    await mockPg('email_bounce_recoveries').insert({ original_message_id: uncertain.id,
+      recovery_message_id: replacementId, bounced_email: uncertain.recipient_email_snapshot,
+      corrected_email: 'replacement@example.invalid', customer_id: fixture.customerId, status: 'delivered' });
+    const replacement = await mockPg('email_messages').where({ id: replacementId }).first();
+    expect(await Summary.reconcileSummaryEmailRecovery(replacement)).toEqual({ reconciled: true });
+  });
+
   test('a hidden service cannot enable SMS for a visible service that opted out', async () => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
