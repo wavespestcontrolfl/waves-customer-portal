@@ -3326,14 +3326,16 @@ router.post('/outbound-amd', async (req, res) => {
     }
     res.sendStatus(200);
   } catch (err) {
-    logger.error(`Outbound AMD webhook error: ${err.message}`);
+    // Database errors can embed the destination and the complete SMS body.
+    const errorCode = err?.code || err?.name || 'unknown_error';
+    logger.error(`Outbound AMD webhook error: ${errorCode}`);
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'outbound',
       phase: 'outbound_amd_webhook',
       status: 'failed',
       sid: CallSid,
-      errorMessage: err.message,
+      errorMessage: errorCode,
       to: customerNumber,
       link: '/admin/communications',
     });
@@ -3361,7 +3363,7 @@ router.post('/outbound-dial-complete', async (req, res) => {
     twiml.hangup();
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
-    logger.error(`Outbound dial-complete error: ${err.message}`);
+    logger.error(`Outbound dial-complete error: ${err?.code || err?.name || 'unknown_error'}`);
     twiml.hangup();
     res.type('text/xml').send(twiml.toString());
   }

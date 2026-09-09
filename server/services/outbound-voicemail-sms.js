@@ -274,7 +274,14 @@ async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, f
     return { sent: false, skipped: 'template_disabled', reason };
   }
 
-  const result = await sendCustomerMessage(buildSendInput({ phone, body, customerId, callerId, callSid, callLogId, reason, templateKey }));
+  const result = await sendCustomerMessage(buildSendInput({ phone, body, customerId, callerId, callSid, callLogId, reason, templateKey })).catch((err) => {
+    // The pipeline carries Twilio's known result when the final audit write
+    // fails. A real acceptance still owns the claim and permits the hangup;
+    // never invite a second message just because its audit could not save.
+    if (!isRealProviderSend(err?.providerOutcome)) throw err;
+    logger.error(`[outbound-voicemail-sms] Text accepted but audit write failed (${err.code || err.name || 'error'}) for call_log ${callLogId || 'n/a'}`);
+    return err.providerOutcome;
+  });
   const outcome = classifyOutcome(result, { phone, reason, templateKey, callLogId });
   if (!outcome.sent && !outcome.ambiguous) await releaseClaim(phone);
   return outcome;

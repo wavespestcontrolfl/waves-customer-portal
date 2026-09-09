@@ -39,6 +39,7 @@ const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const logger = require('../services/logger');
 const { visitInProgress, nonServiceCaller } = require('../services/outbound-call-reason');
 const {
   MESSAGE_TYPE,
@@ -261,6 +262,35 @@ describe('sendOutboundVoicemailText', () => {
     expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ call_reason: 'returning_call', template_key: 'outbound_voicemail_returning_call' });
     // The dedupe key stays the lane-wide message_type regardless of reason.
     expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type).toBe(MESSAGE_TYPE);
+  });
+
+  test('a provider-accepted text still succeeds when the final audit write throws, without leaking the audit payload', async () => {
+    const privateBody = 'Synthetic customer message for audit failure';
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error(`insert failed: ${PHONE} ${privateBody}`), {
+      code: 'XX000',
+      providerOutcome: { sent: true, providerMessageId: 'SM_accepted_before_audit' },
+    }));
+    await expect(sendOutboundVoicemailText({ phone: PHONE, reason: 'returning_call', callLogId: 'cl-1' })).resolves.toEqual({
+      sent: true, providerMessageId: 'SM_accepted_before_audit', reason: 'returning_call', templateKey: 'outbound_voicemail_returning_call',
+    });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(claimDel).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('XX000'));
+    const logs = JSON.stringify([logger.info.mock.calls, logger.warn.mock.calls, logger.error.mock.calls]);
+    expect(logs).not.toContain(PHONE);
+    expect(logs).not.toContain(privateBody);
+  });
+
+  test.each([
+    undefined,
+    { sent: true, providerMessageId: 'template-disabled' },
+    { sent: false, retryable: true, code: 'TWILIO_TIMEOUT' },
+    { sent: true, providerMessageId: null },
+  ])('an audit error without a real accepted provider send is not converted into success (%j)', async (providerOutcome) => {
+    const err = Object.assign(new Error('Synthetic audit failure'), { code: 'XX000', providerOutcome });
+    sendCustomerMessage.mockRejectedValueOnce(err);
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).rejects.toBe(err);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
   test('every reason maps to a template key; unknown reasons render the generic one', async () => {

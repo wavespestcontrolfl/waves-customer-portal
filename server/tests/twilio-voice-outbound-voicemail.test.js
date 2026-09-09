@@ -51,6 +51,7 @@ const twilio = require('twilio');
 const { isEnabled } = require('../config/feature-gates');
 const { sendOutboundVoicemailText } = require('../services/outbound-voicemail-sms');
 const { resolveOutboundCallReason } = require('../services/outbound-call-reason');
+const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 
@@ -310,11 +311,23 @@ describe('POST /outbound-amd', () => {
 
   test('a thrown error still answers 200 so Twilio does not retry into a double text', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
-    resolveOutboundCallReason.mockRejectedValueOnce(new Error('resolver exploded'));
     const res = mockRes();
     await amd()(req('machine_start'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Outbound AMD webhook error'));
+  });
+
+  test('a send error reports its code without logging or forwarding a database payload', async () => {
+    const privateBody = 'Synthetic private message body';
+    sendOutboundVoicemailText.mockRejectedValueOnce(Object.assign(new Error(`insert failed: ${CUSTOMER} ${privateBody}`), { code: 'XX000' }));
+    const res = mockRes();
+    await amd()(req('machine_start'), res);
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+    expect(twilio.__calls).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith('Outbound AMD webhook error: XX000');
+    expect(alertTwilioFailure).toHaveBeenCalledWith(expect.objectContaining({ phase: 'outbound_amd_webhook', errorMessage: 'XX000' }));
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(CUSTOMER);
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(privateBody);
   });
 });
 
