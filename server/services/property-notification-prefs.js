@@ -133,7 +133,6 @@ async function recordDecision({ customerId, property, scheduledServiceId, source
         property_decisions: JSON.stringify(effective),
         agreed,
         enforced,
-        created_at: db.fn.now(),
       });
   } catch (err) {
     logger.warn(`[property-texts] shadow log write failed for property ${property.id}: ${err.message}`);
@@ -186,7 +185,26 @@ async function prefsForVisit(prefs, customerId, scheduledServiceId, source, knex
   return resolved.prefs;
 }
 
+// The PRIMARY property never has a row: a house promoted to primary drops
+// its per-property toggles (its texts follow the customer row from now on),
+// so a later demotion starts from the ruling-R1 default, not a stale row.
+// Callers pass their transaction.
+async function clearPrimaryPropertyPrefs(propertyId, knex = db) {
+  if (!propertyId) return 0;
+  return knex('property_notification_prefs').where({ property_id: propertyId }).del();
+}
+
+// A property row moved to another customer (profile merge) keeps its toggles
+// under the new owner — the denormalized customer_id must follow, or the
+// loser's CASCADE deletes them.
+async function repointPropertyPrefs(propertyId, customerId, knex = db) {
+  if (!propertyId || !customerId) return 0;
+  return knex('property_notification_prefs').where({ property_id: propertyId }).update({ customer_id: customerId, updated_at: knex.fn.now() });
+}
+
 module.exports = {
+  clearPrimaryPropertyPrefs,
+  repointPropertyPrefs,
   APPOINTMENT_TOGGLES,
   PROPERTY_PREF_COLUMNS,
   QUIET_RELATIONSHIPS,

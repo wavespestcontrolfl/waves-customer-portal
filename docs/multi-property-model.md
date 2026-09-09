@@ -226,6 +226,21 @@ Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
   Disagreements to eyeball:
   `SELECT created_at, source, relationship, customer_decisions, property_decisions
   FROM property_text_decisions WHERE NOT agreed ORDER BY created_at DESC LIMIT 50;`
+- **Failure posture, one rule.** An unreadable preferences row — the
+  customer row's read, or a saved property's under enforcement — is a
+  RETRYABLE hold everywhere: `safeSendAppointment` sends nothing and stamps
+  `sendOutcome.retryable` (the cancellation / series / admin-reschedule
+  callers keep their claims retryable; the admin sees "could not be read —
+  send again"; a no-show bells the office because it has no retry rail);
+  `sendTemplate` answers `held` without writing an attempt row; the
+  call-booking confirmation throws into its existing fan-out catch; en-route
+  / arrived bell the office before rethrowing (an ungrouped visit has no
+  scheduler retry lane). The scheduled-SMS replay treats a MOVE_HOLD answer
+  (now reachable because the replay names its visit) as a deferral, never a
+  terminal block.
+- **Row hygiene.** The primary never has a row: a primary flip
+  (`applyPropertyRoleProposals`) drops the promoted house's row; a profile
+  merge (`repointCustomerProperties`) re-points a moved row's `customer_id`.
 - **Deferred** — ruling R2 (on-location contacts per property) is its own
   PR; per-house Property-tab details remain Phase C.
 

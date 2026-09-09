@@ -133,7 +133,17 @@ describe('appointment email recipients', () => {
     });
     Prefs.prefsForVisit.mockRejectedValueOnce(new Error('down'));
     const out = await sendTemplate({ customerId: 'c1', templateKey: 'appointment.en_route', eventType: 'appointment.en_route', scheduledServiceId: 'v1' });
-    expect(out).toMatchObject({ ok: false, held: true, reason: 'property_preferences_unavailable' });
+    expect(out).toMatchObject({ ok: false, held: true, reason: 'preferences_unavailable' });
+  });
+  test('an unreadable CUSTOMER row holds the email too — one posture, no fallback to the primary on unknown settings', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain([customer]);
+      if (table === 'notification_prefs') { const c = chain([]); c.first = jest.fn(async () => { throw new Error('prefs down'); }); return c; }
+      const c = chain([]); c.insert = jest.fn(async () => [1]); return c;
+    });
+    const out = await sendTemplate({ customerId: 'c1', templateKey: 'appointment.no_show', eventType: 'appointment.no_show', scheduledServiceId: 'v1' });
+    expect(out).toMatchObject({ ok: false, held: true, reason: 'preferences_unavailable' });
+    expect(Prefs.prefsForVisit).not.toHaveBeenCalled();
   });
 });
 
@@ -161,6 +171,22 @@ describe('safeSendAppointment on an unreadable preferences row', () => {
     expect(sent).toBe(false);
     expect(renderBody).not.toHaveBeenCalled();
     expect(sendOutcome).toMatchObject({ retryable: true, lastCode: 'PREFERENCES_UNAVAILABLE' });
+  });
+});
+
+describe('primary-flip and merge hygiene', () => {
+  const real = jest.requireActual('../services/property-notification-prefs');
+  test('a promoted house drops its row; a moved row follows its new customer', async () => {
+    const calls = [];
+    const knex = Object.assign((table) => {
+      const c = { where: jest.fn((w) => { calls.push([table, 'where', w]); return c; }), del: jest.fn(async () => { calls.push([table, 'del']); return 1; }), update: jest.fn(async (u) => { calls.push([table, 'update', u]); return 1; }) };
+      return c;
+    }, { fn: { now: () => 'now()' } });
+    expect(await real.clearPrimaryPropertyPrefs('pa', knex)).toBe(1);
+    expect(calls).toEqual(expect.arrayContaining([['property_notification_prefs', 'where', { property_id: 'pa' }], ['property_notification_prefs', 'del']]));
+    expect(await real.repointPropertyPrefs('pb', 'winner', knex)).toBe(1);
+    expect(calls[calls.length - 1]).toEqual(['property_notification_prefs', 'update', { customer_id: 'winner', updated_at: 'now()' }]);
+    expect(await real.clearPrimaryPropertyPrefs(null, knex)).toBe(0);
   });
 });
 

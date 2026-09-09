@@ -121,8 +121,11 @@ function looksLikeEmail(value) {
 // phone — matters when the notice routes to a distinct service contact; the
 // owner's phone being reachable doesn't reach the person the appointment
 // notifies. Best-effort — DB misses fail open per leg but never throw.
-async function hasTextReachableApptRecipient(customer) {
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+// `prefsRow` (app property scope, PR 3): the row the send actually used —
+// the visit-resolved one — so the recipient set judged here is the one the
+// reminder notified, never the customer row's answer under enforcement.
+async function hasTextReachableApptRecipient(customer, prefsRow = undefined) {
+  const prefs = prefsRow !== undefined ? prefsRow : await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   // sms_enabled=false blocks every SMS to this customer at send time, so a
   // past delivery can't make them text-reachable today.
   if (prefs?.sms_enabled === false) return false;
@@ -181,7 +184,7 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
     // appointment actually notifies AND their current eligibility, so an old
     // delivery to an opted-out number (or to the owner when the notice routes
     // to a service contact) doesn't swallow a real alert.
-    if (customer && await hasTextReachableApptRecipient(customer)) {
+    if (customer && await hasTextReachableApptRecipient(customer, await visitPrefsRow(customerId, scheduledServiceId))) {
       logger.info(`[appt-remind] Suppressed no-channel alert for customer ${customerId} (${kind}) — recent delivered SMS to an appointment recipient proves text-reachable`);
       return;
     }
@@ -1607,7 +1610,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // `sendOutcome.retryable` and must not finalize their durable claims as
   // suppressed on a transient miss (GitHub codex #4299 r3 P1). Fail closed
   // here — no service-contact fan-out on unknown settings either.
-  if (require('./customer-contact').prefsUnavailable(prefs)) {
+  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true) {
     if (sendOptions.sendOutcome && typeof sendOptions.sendOutcome === 'object') {
       sendOptions.sendOutcome.retryable = true;
       sendOptions.sendOutcome.lastCode = 'PREFERENCES_UNAVAILABLE';
@@ -1927,7 +1930,9 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
 // primary) must follow the property too (GitHub codex r0 P1).
 async function visitPrefsRow(customerId, scheduledServiceId = null) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
-  if (prefs?.__prefsUnavailable === true || !scheduledServiceId) return prefs;
+  // Sentinel read inline: partial test doubles of customer-contact carry
+  // PREFS_UNAVAILABLE but not the prefsUnavailable() helper.
+  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true || !scheduledServiceId) return prefs;
   try {
     return await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders');
   } catch (err) {
@@ -4703,7 +4708,8 @@ const AppointmentReminders = {
         when = `on ${formatDay(dayDate)}, ${formatDate(dayDate)}`;
       }
 
-      await safeSendAppointment(customer, prefs || {}, async (contact) => {
+      const noShowOutcome = {};
+      const noShowSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
         const customerFirst = firstNameFrom(contact.name) || customer?.first_name || 'there';
         return renderTemplate('appointment_no_show', {
           first_name: customerFirst,
@@ -4728,8 +4734,25 @@ const AppointmentReminders = {
         // held-delivery rail with it — none is carried speculatively
         // (codex r25).
         operatorInitiated: options.operatorInitiated === true,
+        sendOutcome: noShowOutcome,
       });
-      logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+      if (noShowSent) {
+        logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+      } else if (noShowOutcome.retryable === true) {
+        // No retry rail carries a no-show notice (the dispatcher's one click
+        // is the send): say so loudly and bell the office rather than log
+        // "sent" over a hold (in-session review on f9945dc89).
+        logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: notification preferences unreadable — office to follow up`);
+        try {
+          await require('./notification-service').notifyAdmin('appointment', 'No-show notice not sent',
+            `The no-show text for ${customer.first_name || ''} ${customer.last_name || ''} could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            { dedupeKey: `no-show-notice-held:${scheduledServiceId}`, metadata: { scheduledServiceId, customerId: svc.customer_id } });
+        } catch (bellErr) {
+          logger.error(`[appt-remind] no-show hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
+        }
+      } else {
+        logger.warn(`[appt-remind] No-show notice not sent for ${scheduledServiceId} (no eligible recipient, opted out, or blocked)`);
+      }
 
       // Email twin (appointment.no_show template) — second channel like the
       // other appointment notices. Best-effort: an email failure never

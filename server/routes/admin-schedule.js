@@ -1174,6 +1174,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
       // owns notify-primary, so the recipient list follows it. Same sentinel
       // on a failed read or an unreadable property under enforcement.
       const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
+      const noticeOutcome = {};
       const apptTime = parseETDateTime(noticeTime);
       const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
       const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
@@ -1214,6 +1215,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
+        sendOutcome: noticeOutcome,
         preDispatchCheck: async () => {
           const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
           if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
@@ -1235,7 +1237,11 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
             : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the reschedule text was sent' };
         },
       });
-      if (!sent) error = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+      if (!sent) {
+        error = noticeOutcome.retryable === true
+          ? 'customer was not notified: notification preferences could not be read — send the reschedule notice again'
+          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+      }
     }
   } catch (e) {
     error = e.message;

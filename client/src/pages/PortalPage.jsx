@@ -4290,9 +4290,11 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
   // — and only the primary PROPERTY reads "Primary residence" (GitHub codex
   // #4299 r2 P2). Profile entries keep the profile label.
   const savedEntry = (p) => p.propertyId !== undefined && p.propertyId !== null;
-  const isPrimaryEntry = (p) => (savedEntry(p) ? p.isPrimaryProperty === true : p.isPrimaryProfile === true);
+  // "Primary residence" = the primary PROFILE's primary property only; a
+  // sibling profile's primary house keeps that profile's identity.
+  const isPrimaryEntry = (p) => p.isPrimaryProfile === true && (!savedEntry(p) || p.isPrimaryProperty === true);
   const label = (p) => (savedEntry(p)
-    ? (p.label || propertyRelationshipChip(p) || (p.isPrimaryProperty ? 'Primary residence' : 'Property'))
+    ? (p.label || propertyRelationshipChip(p) || (isPrimaryEntry(p) ? 'Primary residence' : (p.isPrimaryProfile ? 'Property' : (p.profileLabel || 'Property'))))
     : (p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')));
   const subline = (p) => `${isPrimaryEntry(p) ? 'Primary residence · ' : ''}${formatPropertyAddress(p) || 'No address on file'}`;
   const busy = !!switchingId;

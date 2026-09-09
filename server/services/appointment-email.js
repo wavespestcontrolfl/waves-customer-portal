@@ -128,18 +128,25 @@ const PROPERTY_PREFS_UNAVAILABLE = 'PROPERTY_PREFS_UNAVAILABLE';
 
 async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
-  if (prefs?.__prefsUnavailable !== true && scheduledServiceId) {
+  const unreadable = (p) => p === PREFS_UNAVAILABLE || p?.__prefsUnavailable === true;
+  if (!unreadable(prefs) && scheduledServiceId) {
     try {
       prefs = await require('./property-notification-prefs').prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients');
     } catch (err) {
-      // Enforced and unreadable: the recipient list cannot be built — the
-      // service-contact fan-out and the primary fallback below would send a
-      // notice whose property settings are unknown (GitHub codex r0 P1).
-      // sendTemplate turns this into a HELD result, never a send.
-      const held = new Error(`property notification settings unreadable for visit ${scheduledServiceId}: ${err.message}`);
-      held.code = PROPERTY_PREFS_UNAVAILABLE;
-      throw held;
+      logger.warn(`[appointment-email] property notification settings unreadable for visit ${scheduledServiceId}: ${err.message}`);
+      prefs = PREFS_UNAVAILABLE;
     }
+  }
+  // ONE posture for an unreadable row — the customer row's read or the
+  // property's under enforcement: the recipient list cannot be built (the
+  // service-contact fan-out and the primary fallback below would send a
+  // notice whose notify-primary is unknown), so sendTemplate HOLDS, never
+  // sends — the same fail-closed rule safeSendAppointment applies to the
+  // SMS twin (in-session review on f9945dc89).
+  if (unreadable(prefs)) {
+    const held = new Error(`notification preferences unreadable for customer ${customer.id}`);
+    held.code = PROPERTY_PREFS_UNAVAILABLE;
+    throw held;
   }
   const seen = new Set();
   const recipients = [];
@@ -237,10 +244,11 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
     recipients = await resolveRecipients(customer, { scheduledServiceId });
   } catch (err) {
     if (err?.code !== PROPERTY_PREFS_UNAVAILABLE) throw err;
-    // Held, not skipped: the next scan re-resolves (same posture as the
-    // reminders' preferences_unavailable hold).
-    await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'property_preferences_unavailable', metadata });
-    return { ok: false, held: true, reason: 'property_preferences_unavailable' };
+    // Held, not skipped: the next scan re-resolves — and like the reminders'
+    // preferences_unavailable hold, NO attempt row: a lingering read failure
+    // would otherwise write a "skipped" interaction every 15-minute scan.
+    logger.warn(`[appointment-email] ${templateKey} for ${customer.id} held: ${err.message}`);
+    return { ok: false, held: true, reason: 'preferences_unavailable' };
   }
   // Optional allowlist of addresses: the call-booking confirmation fan-out
   // targets ONLY email-only service-contact slots (a phone-channel customer's

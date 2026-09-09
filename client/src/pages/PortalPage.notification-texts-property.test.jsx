@@ -96,4 +96,12 @@ describe('Appointment texts per saved property', () => {
     expect(select).not.toBeNull();
     expect(select.disabled).toBe(false);
   });
+  it('a SIBLING profile\'s house keeps that profile\'s identity in the picker', async () => {
+    const sibling = { id: 'c2:pc', key: 'c2:pc', customerId: 'c2', propertyId: 'pc', isPrimaryProfile: false, isPrimaryProperty: true, profileLabel: 'Rental - Sandbar Ln', label: null, relationship: null, address: { line1: '9 Sandbar Ln', city: 'Bradenton', state: 'FL', zip: '34205' } };
+    api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [...propertyPrefs, { ...sibling, preferences: prefsOf(true), contactsShared: true, serviceContacts: [], maxServiceContacts: 3 }] });
+    render(<ScheduleTab customer={customer} properties={[...entries, sibling]} activePropertyId="c2:pc" selectedProperty={{ key: 'c2:pc', customerId: 'c2', propertyId: 'pc' }} onSelectProperty={() => {}} />);
+    await screen.findByText('Appointment texts');
+    expect(screen.getAllByText('Rental - Sandbar Ln').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Primary residence · 9 Sandbar Ln/)).not.toBeInTheDocument();
+  });
 });

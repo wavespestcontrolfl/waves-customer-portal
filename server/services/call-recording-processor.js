@@ -14756,7 +14756,10 @@ const CallRecordingProcessor = {
                       // toggle (app property scope, PR 3): resolve the row through
                       // the visit; an unreadable property under enforcement reads as
                       // opted out below (held email, never a send on unknown settings).
-                      const prefsRow = await require('./appointment-reminders').visitPrefsRow(customerId, scheduledServiceId) || {};
+                      const prefsRow = await require('./appointment-reminders').visitPrefsRow(customerId, scheduledServiceId);
+                      if (!prefsRow || prefsRow.__prefsUnavailable === true) {
+                        throw new Error('notification preferences unreadable for the call-booking confirmation');
+                      }
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
                       const { filterRecipientsByOptin } = require('./recipient-optin');
                       const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
@@ -14925,7 +14928,7 @@ const CallRecordingProcessor = {
                       // (same rule deliverConfirmationByChannel encodes).
                       // v2EmailBlocked (do-not-contact) suppresses the email
                       // leg the same way the TCPA gate suppresses SMS.
-                      const confirmationOptedOut = prefsRow?.appointment_confirmation === false || prefsRow?.__prefsUnavailable === true;
+                      const confirmationOptedOut = prefsRow?.appointment_confirmation === false;
                       const { getServiceContactSlots } = require('./customer-contact');
                       const emailOnlySlots = (confirmationOptedOut || v2EmailBlocked) ? [] : getServiceContactSlots(freshCustomer || {})
                         .filter((s) => s.email && !s.phone);
