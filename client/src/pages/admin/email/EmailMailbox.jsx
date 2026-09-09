@@ -192,18 +192,24 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
 export function EmailInbox({ active, mailbox, editor }) {
   const { stats, total, visibleEmails, filter, setFilter, search, setSearch, page, setPage, showArchived, setShowArchived } = mailbox;
   const counts = stats || {};
-  const lastOpenedRef = useRef(null), searchRef = useRef(null);
+  const lastOpenedRef = useRef(null), searchRef = useRef(null), restoreFocusRef = useRef(false);
   const selected = Boolean(mailbox.selectedEmail);
   const openEmail = (event, email) => {
     lastOpenedRef.current = event.currentTarget;
     mailbox.openEmail(email);
   };
-  const backToInbox = () => {
-    mailbox.closeEmail(mailbox.selectedEmail.id);
-    requestAnimationFrame(() => {
+  useEffect(() => {
+    if (selected || !restoreFocusRef.current) return undefined;
+    restoreFocusRef.current = false;
+    const frame = requestAnimationFrame(() => {
       const target = lastOpenedRef.current?.isConnected ? lastOpenedRef.current : searchRef.current;
       target?.focus();
     });
+    return () => cancelAnimationFrame(frame);
+  }, [selected]);
+  const backToInbox = () => {
+    restoreFocusRef.current = true;
+    mailbox.closeEmail(mailbox.selectedEmail.id, true);
   };
   const filters = [
     { key: "all", label: "All", count: counts.total }, { key: "unread", label: "Unread", count: counts.unread },
@@ -222,7 +228,7 @@ export function EmailInbox({ active, mailbox, editor }) {
         <div className="space-y-3 border-b-hairline border-zinc-200 p-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2 className="m-0 text-18 font-medium leading-[1.35]">Inbox</h2>
-            <span className="u-nums text-ui-caption text-ink-secondary">{total} messages</span>
+            <span className="u-nums text-ui-caption text-ink-secondary">{total} matching messages</span>
           </div>
           <Field label="Search emails"><Input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search emails..." /></Field>
         </div>
