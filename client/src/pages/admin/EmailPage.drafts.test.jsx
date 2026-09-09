@@ -52,7 +52,7 @@ function emailRoute(active = true, userId = "fixture-owner") {
 }
 function mount(userId = "fixture-owner") { return render(emailRoute(true, userId)); }
 async function compose() {
-  fireEvent.click(await screen.findByRole("button", { name: "New Email" }));
+  fireEvent.click(await screen.findByRole("button", { name: "New email" }));
   const dialog = screen.getByRole("dialog");
   fireEvent.change(within(dialog).getByLabelText("To *"), { target: { value: "recipient@example.invalid" } });
   fireEvent.change(within(dialog).getByLabelText("Subject"), { target: { value: "Synthetic subject" } });
@@ -101,17 +101,17 @@ describe("Email draft and navigation preservation", () => {
     sendResponse = () => response({ status: "outcome_unknown" }, 202);
     const view = mount(); const reply = await open(a);
     fireEvent.change(reply, { target: { value: "Submitted reply" } });
-    fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Send reply/ }));
     await screen.findByText(/Email outcome unknown/);
     view.unmount(); mount();
     const recovered = await screen.findByRole("textbox", { name: "Reply" });
     fireEvent.change(recovered, { target: { value: "New unsent edit" } });
-    expect(screen.getByRole("button", { name: /Send Reply/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Send reply/ })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "I checked Sent: it was sent" }));
     expect(recovered).toHaveValue("New unsent edit");
-    expect(screen.getByRole("button", { name: /Send Reply/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Send reply/ })).toBeEnabled();
     fireEvent.change(await open(b), { target: { value: "Separate thread" } });
-    expect(screen.getByRole("button", { name: /Send Reply/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Send reply/ })).toBeEnabled();
     expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
   });
 
@@ -131,7 +131,7 @@ describe("Email draft and navigation preservation", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Quota after submit"); });
     await act(async () => finish(status === "provider_accepted"
       ? response({ success: true, status, messageId: "fixture-message" }) : response({ status }, 202)));
-    if (status === "provider_accepted") fireEvent.click(screen.getByRole("button", { name: "New Email" }));
+    if (status === "provider_accepted") fireEvent.click(screen.getByRole("button", { name: "New email" }));
     expect(await screen.findByText(status === "provider_accepted" ? /Gmail accepted this email/ : /Email outcome unknown/)).toBeInTheDocument();
     expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true })).toBeDisabled();
     expect(screen.getByRole("button", { name: status === "provider_accepted" ? "Dismiss accepted send" : "I checked Sent: it was sent" })).toBeInTheDocument();
@@ -226,7 +226,7 @@ describe("Email draft and navigation preservation", () => {
   it("preserves recipient, thread and HTML body fields for replies and new messages", async () => {
     mount();
     fireEvent.change(await open(a), { target: { value: "First line\nSecond line" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send Reply", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Send reply", exact: true }));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue(""));
     const dialog = await compose();
     fireEvent.change(screen.getByLabelText("To *"), { target: { value: "  recipient@example.invalid  " } });
@@ -295,7 +295,7 @@ describe("Email draft and navigation preservation", () => {
     mount(); fireEvent.click(await screen.findByRole("button", { name: "Resume draft" }));
     expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
     fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
-    fireEvent.click(screen.getByRole("button", { name: "New Email" }));
+    fireEvent.click(screen.getByRole("button", { name: "New email" }));
     expect(screen.getByLabelText("Message *")).toHaveValue("");
     expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(0);
   });
@@ -320,10 +320,10 @@ describe("Email draft and navigation preservation", () => {
     expect(screen.getByRole("textbox", { name: "Reply" })).toBeInTheDocument();
   });
 
-  it("opens a newly linked message from Blocked Senders without losing its prior reply", async () => {
+  it("opens a newly linked message from Blocked senders without losing its prior reply", async () => {
     mount();
     fireEvent.change(await open(a), { target: { value: "Retained reply for A" } });
-    fireEvent.click(screen.getByRole("button", { name: "Blocked Senders" }));
+    fireEvent.click(screen.getByRole("button", { name: "Blocked senders" }));
     expect(screen.queryByRole("textbox", { name: "Reply" })).not.toBeInTheDocument();
     act(() => {
       window.history.pushState({}, "", `/admin/communications?id=${b.id}#tab=email`);
@@ -337,11 +337,11 @@ describe("Email draft and navigation preservation", () => {
     let connected = initial;
     loadResponses.status = () => response({ connected });
     const view = mount();
-    await screen.findByRole("button", { name: initial ? "New Email" : "Connect Gmail Account" });
+    await screen.findByRole("button", { name: initial ? "New email" : "Connect Gmail account" });
     view.rerender(emailRoute(false));
     connected = !initial;
     view.rerender(emailRoute());
-    expect(await screen.findByRole("button", { name: connected ? "New Email" : "Connect Gmail Account" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: connected ? "New email" : "Connect Gmail account" })).toBeInTheDocument();
   });
 
   it.each(["disconnected", "failed"])("ignores an older %s connection check after reconnecting", async (stale) => {
@@ -353,10 +353,10 @@ describe("Email draft and navigation preservation", () => {
     view.rerender(emailRoute());
     await waitFor(() => expect(pending).toHaveLength(2));
     await act(async () => pending[1].resolve(response({ connected: true })));
-    await screen.findByRole("button", { name: "New Email" });
+    await screen.findByRole("button", { name: "New email" });
     await act(async () => stale === "failed" ? pending[0].reject(new Error("Synthetic connection check failure")) : pending[0].resolve(response({ connected: false })));
-    expect(screen.getByRole("button", { name: "New Email" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Connect Gmail Account" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New email" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect Gmail account" })).not.toBeInTheDocument();
   });
 
   it.each([404, 503, "network"])("clears the previous message while a changed link loads or fails (%s)", async (failure) => {
@@ -426,7 +426,7 @@ describe("Email draft and navigation preservation", () => {
     const pending = [];
     loadResponses[dataset] = () => new Promise((resolve) => pending.push(resolve));
     const view = mount();
-    if (dataset === "blocked") fireEvent.click(await screen.findByRole("button", { name: "Blocked Senders" }));
+    if (dataset === "blocked") fireEvent.click(await screen.findByRole("button", { name: "Blocked senders" }));
     await waitFor(() => expect(pending).toHaveLength(1));
     view.rerender(emailRoute(false));
     view.rerender(emailRoute());
@@ -463,7 +463,7 @@ describe("Email draft and navigation preservation", () => {
     sendResponse = null;
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "New Email" }));
+    fireEvent.click(screen.getByRole("button", { name: "New email" }));
     expect(screen.getByLabelText("Message *")).toHaveValue("");
   });
 
@@ -471,7 +471,7 @@ describe("Email draft and navigation preservation", () => {
     let finish;
     draftResponse = () => new Promise((resolve) => { finish = resolve; });
     mount(); const reply = await open(a);
-    fireEvent.click(screen.getByRole("button", { name: /AI Draft/ }));
+    fireEvent.click(screen.getByRole("button", { name: /AI draft/ }));
     fireEvent.change(reply, { target: { value: "Owner edited while waiting" } });
     await act(async () => finish(response({ reply_draft: "Late synthetic suggestion" })));
     expect(reply).toHaveValue("Owner edited while waiting");
@@ -481,7 +481,7 @@ describe("Email draft and navigation preservation", () => {
     let finish;
     draftResponse = () => new Promise((resolve) => { finish = resolve; });
     const view = mount(); const reply = await open(a);
-    fireEvent.click(screen.getByRole("button", { name: /AI Draft/ }));
+    fireEvent.click(screen.getByRole("button", { name: /AI draft/ }));
     fireEvent.change(reply, { target: { value: "Discard this reply" } });
     fireEvent.click(screen.getByRole("button", { name: "Discard reply" }));
     view.unmount(); mount();
@@ -506,7 +506,7 @@ describe("Email draft and navigation preservation", () => {
     sendResponse = () => new Promise((resolve) => { finish = resolve; });
     mount(); const reply = await open(a);
     fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
-    fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Send reply/ }));
     fireEvent.change(reply, { target: { value: "New reply edit" } });
     fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
     await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));
@@ -518,7 +518,7 @@ describe("Email draft and navigation preservation", () => {
     sendResponse = () => new Promise((resolve) => { finish = resolve; });
     mount(); const reply = await open(a);
     fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
-    fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Send reply/ }));
     fireEvent.change(reply, { target: { value: "New unsent edit" } });
     await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));
     expect(reply).toHaveValue("New unsent edit");
@@ -546,7 +546,7 @@ describe("Email draft and navigation preservation", () => {
 
   it("does not offer another verified account's draft", async () => {
     const view = mount("fixture-owner-a"); await compose(); view.unmount(); mount("fixture-owner-b");
-    await screen.findByRole("button", { name: "New Email" });
+    await screen.findByRole("button", { name: "New email" });
     expect(screen.queryByRole("button", { name: "Resume draft" })).not.toBeInTheDocument();
   });
 
@@ -558,7 +558,7 @@ describe("Email draft and navigation preservation", () => {
     view.unmount(); mount();
     await screen.findByRole("button", { name: "Resume draft" });
     await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));
-    expect(screen.getByRole("button", { name: "New Email" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New email" })).toBeInTheDocument();
   });
 
   it("keeps a pending compose disabled after remount and warns before leaving", async () => {
@@ -585,10 +585,10 @@ describe("Email draft and navigation preservation", () => {
     sendResponse = () => new Promise((resolve) => { finish = resolve; });
     const view = mount();
     fireEvent.change(await open(a), { target: { value: "Pending reply" } });
-    fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Send reply/ }));
     view.unmount(); mount();
     await screen.findByRole("textbox", { name: "Reply" });
-    const send = screen.getByRole("button", { name: /Sending/ });
+    const send = screen.getByRole("button", { name: "Send reply", exact: true });
     expect(send).toBeDisabled(); fireEvent.click(send);
     expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
     await act(async () => finish(response({ success: true, messageId: "synthetic-gmail-id", status: "provider_accepted" })));

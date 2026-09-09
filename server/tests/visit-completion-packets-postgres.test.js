@@ -774,13 +774,16 @@ postgres('visit completion packet records on PostgreSQL', () => {
       processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_visit',
       is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
     await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    let providerSubmissions = 0;
     chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, selectedMethod, options) => {
       expect(selectedMethod).toBe(methodId);
       expect(options).toMatchObject({ requireAutopayForCustomerId: fixture.customerId, refuseWhenDunningStopped: true });
       await mockPg.transaction(async (trx) => {
         const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        require('../services/invoice-helpers').assertInvoiceCollectible(invoice.status);
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first();
         await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        providerSubmissions += 1;
         await trx('invoices').where({ id: invoiceId }).update({ status: 'paid', stripe_payment_intent_id: 'pi_fixture_visit' });
       });
     });
@@ -788,7 +791,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
     await Promise.all([collectVisitCompletionInvoice(saved.body.packetId), collectVisitCompletionInvoice(saved.body.packetId)]);
     expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'paid' });
-    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    // Another collection's stop claim can refuse the first invocation before
+    // submission. A retry may enter the rail again, but money moves only once.
+    expect(providerSubmissions).toBe(1);
     await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds).update({ status: 'succeeded' });
     const status = await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg });
     expect(status.facts.invoice).toMatchObject({ state: 'done', invoiceId: saved.body.billing.invoiceId, status: 'paid' });
