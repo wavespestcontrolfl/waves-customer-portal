@@ -11,7 +11,8 @@ const { randomUUID } = require('node:crypto');
 const { HQ } = require('../services/route-optimizer');
 const { getScheduleQualityMeasurements } = require('../services/scheduling/day-quality');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
-const postgres = process.env.DATABASE_URL ? describe : describe.skip;
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
 
 postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
   let database;
@@ -99,4 +100,24 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     expect(await mockConnection('plan_holds').where('id', hold.id).first('status')).toEqual({ status: 'active' });
   });
 
+  test.each([
+    [false, 'rescheduled', false],
+    [true, 'rescheduled', true],
+    [false, 'confirmed', true],
+    [true, 'cancelled', false],
+  ])('sibling dates preserve ordinary/due placement semantics (due=%s, sibling=%s)', async (due, status, blocked) => {
+    const { loadGapCandidate, analyzeGapCandidate } = require('../services/scheduling/gap-candidates');
+    await mockConnection('scheduled_services').whereIn('id', ids).update({ is_recurring: true });
+    await mockConnection('scheduled_services').where('id', ids[0]).update({ scheduled_date: '2040-08-01' });
+    await mockConnection('scheduled_services').where('id', ids[1]).update({ recurring_parent_id: ids[0], status });
+    await mockConnection('scheduled_services').where('id', ids[2]).update({ recurring_parent_id: ids[0],
+      scheduled_date: '2040-09-11', recurring_dispatch_due_date: due ? date : null });
+    const before = await mockConnection('scheduled_services').whereIn('id', ids).orderBy('id').select('*');
+    const candidate = await loadGapCandidate(ids[2], mockConnection);
+    const result = analyzeGapCandidate(candidate, [], { date, technicianId, now: new Date('2040-09-09T12:00:00Z'),
+      today: '2040-09-09', departureMinutes: 480, targetReturnMinutes: 1080, breakMinutes: 30, closed: false });
+    expect(result.reason).toBe(blocked ? 'another_series_visit_on_date' : 'route_fit_requires_staff_review');
+    expect(result.routeFits.length > 0).toBe(!blocked);
+    expect(await mockConnection('scheduled_services').whereIn('id', ids).orderBy('id').select('*')).toEqual(before);
+  });
 });

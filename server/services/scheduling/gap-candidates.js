@@ -36,7 +36,11 @@ async function loadGapCandidate(serviceId, conn) {
     if (decision?.resolved_action === 'cancel_series' || lapsed) return { unavailable: 'recurring_plan_stopped_or_lapsed' };
     siblingDates = (await conn('scheduled_services').where('customer_id', service.customer_id)
       .where(query => query.where('id', parentId).orWhere('recurring_parent_id', parentId))
-      .whereNot('id', service.id).whereNot('status', 'cancelled').pluck('scheduled_date')).map(toDateStr);
+      .whereNot('id', service.id)
+      // Match ordinary optimizer moves versus customer due-date placement:
+      // only the latter retains the re-anchor's rescheduled sibling holds.
+      .whereNotIn('status', service.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
+      .pluck('scheduled_date')).map(toDateStr);
   }
   return { service, preferences, holds, siblingDates, deactivated };
 }
