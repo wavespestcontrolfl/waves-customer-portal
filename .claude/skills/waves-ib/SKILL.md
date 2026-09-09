@@ -127,3 +127,12 @@ CI against the migrated DB; warnings block):
 - Wrap uncertain tables/columns in try/catch and declare them
   `optionalTables` / `optionalColumns` — don't crash a tool module on one
   bad query (CLAUDE.md rule 6).
+- **Declare the tool's data `scope`** in
+  `server/services/intelligence-bar/action-policy.json` (reads: `none` /
+  `record` / `scoped` / `broad` / `actor_wide` / `phone_keyed` /
+  `email_keyed`; writes: `none` / `record` / `route_wide`). Classify from
+  what the executor returns, not its description; see
+  `docs/intelligence-bar-read-scope-catalog.md`. A tool without a valid
+  scope never joins the action registry, and any class other than `none`
+  must also be added to `SCOPE_SNAPSHOT` in
+  `server/tests/intelligence-bar-action-registry.test.js`.
