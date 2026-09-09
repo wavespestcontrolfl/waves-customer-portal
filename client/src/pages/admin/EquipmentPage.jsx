@@ -10,7 +10,22 @@ import EquipmentCalibrationPanel from "./EquipmentCalibrationPanel";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly while keeping semantic green/amber/red distinct.
-
+const D = {
+  bg: "#F4F4F5",
+  card: "#FFFFFF",
+  border: "#E4E4E7",
+  teal: "#18181B",
+  green: "#15803D",
+  amber: "#A16207",
+  red: "#991B1B",
+  purple: "#18181B",
+  text: "#27272A",
+  muted: "#71717A",
+  white: "#FFFFFF",
+  input: "#FFFFFF",
+  heading: "#09090B",
+  inputBorder: "#D4D4D8"
+};
 const MONO = "'JetBrains Mono', monospace";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -25,8 +40,8 @@ function adminFetch(path, options = {}) {
   });
 }
 const sCard = {
-  background: "#FFFFFF",
-  border: `1px solid ${"#E4E4E7"}`,
+  background: D.card,
+  border: `1px solid ${D.border}`,
   borderRadius: 12,
   padding: 20,
   marginBottom: 12,
@@ -53,10 +68,10 @@ const sBadge = (bg, color) => ({
 const sInput = {
   width: "100%",
   padding: "8px 12px",
-  background: "#FFFFFF",
-  border: `1px solid ${"#E4E4E7"}`,
+  background: D.input,
+  border: `1px solid ${D.border}`,
   borderRadius: 8,
-  color: "#27272A",
+  color: D.text,
   fontSize: 13,
   outline: "none",
   boxSizing: "border-box"
@@ -100,13 +115,13 @@ function normalizeJobCostSummary(summary) {
   };
 }
 const STATUS_COLORS = {
-  active: "#15803D",
-  maintenance: "#A16207",
-  retired: "#71717A",
-  sold: "#71717A",
-  lost: "#991B1B",
-  in_service: "#15803D",
-  pending: "#18181B"
+  active: D.green,
+  maintenance: D.amber,
+  retired: D.muted,
+  sold: D.muted,
+  lost: D.red,
+  in_service: D.green,
+  pending: D.purple
 };
 const CAT_ICONS = {
   sprayer: "",
@@ -283,8 +298,8 @@ export default function EquipmentPage() {
       position: "fixed",
       bottom: 20,
       right: 20,
-      background: "#FFFFFF",
-      border: `1px solid ${"#15803D"}`,
+      background: D.card,
+      border: `1px solid ${D.green}`,
       borderRadius: 8,
       padding: "10px 16px",
       display: "flex",
@@ -300,10 +315,10 @@ export default function EquipmentPage() {
     }}>
         {" "}
         <span style={{
-        color: "#15803D"
+        color: D.green
       }}></span>
         <span style={{
-        color: "#27272A"
+        color: D.text
       }}>{toast}</span>{" "}
       </div>{" "}
     </div>;
@@ -374,7 +389,7 @@ function EquipmentTab({
     }
   };
   if (loading) return <div style={{
-    color: "#71717A",
+    color: D.muted,
     padding: 40,
     textAlign: "center"
   }}>
@@ -393,7 +408,7 @@ function EquipmentTab({
         return <div key={e.id} style={{
           ...sCard,
           marginBottom: 0,
-          borderLeft: `3px solid ${STATUS_COLORS[e.status] || "#71717A"}`
+          borderLeft: `3px solid ${STATUS_COLORS[e.status] || D.muted}`
         }}>
               {" "}
               <div style={{
@@ -412,13 +427,13 @@ function EquipmentTab({
                   <div style={{
                 fontSize: 14,
                 fontWeight: 500,
-                color: "#09090B"
+                color: D.heading
               }}>
                     {CAT_ICONS[e.category] || ""} {e.name}
                   </div>{" "}
                   <div style={{
                 fontSize: 11,
-                color: "#71717A"
+                color: D.muted
               }}>
                     {[e.make, e.model].filter(Boolean).join(" ")}
                   </div>{" "}
@@ -443,9 +458,9 @@ function EquipmentTab({
               })} style={{
                 padding: "4px 10px",
                 background: "transparent",
-                border: `1px solid ${"#E4E4E7"}`,
+                border: `1px solid ${D.border}`,
                 borderRadius: 6,
-                color: "#71717A",
+                color: D.muted,
                 fontSize: 11,
                 cursor: "pointer"
               }}>
@@ -461,10 +476,10 @@ function EquipmentTab({
           }}>
                 {e.current_hours > 0 && <div>
                     <span style={{
-                color: "#71717A"
+                color: D.muted
               }}>Hours:</span>{" "}
                     <span style={{
-                color: "#09090B",
+                color: D.heading,
                 fontFamily: MONO
               }}>
                       {e.current_hours}
@@ -472,10 +487,10 @@ function EquipmentTab({
                   </div>}
                 {e.purchase_price > 0 && <div>
                     <span style={{
-                color: "#71717A"
+                color: D.muted
               }}>Cost:</span>{" "}
                     <span style={{
-                color: "#15803D",
+                color: D.green,
                 fontFamily: MONO
               }}>
                       {fmt(e.purchase_price)}
@@ -483,7 +498,7 @@ function EquipmentTab({
                   </div>}
                 {e.book_value > 0 && <div>
                     <span style={{
-                color: "#71717A"
+                color: D.muted
               }}>Book:</span>{" "}
                     <span style={{
                 fontFamily: MONO
@@ -493,7 +508,7 @@ function EquipmentTab({
                   </div>}
                 {e.last_service_date && <div>
                     <span style={{
-                color: "#71717A"
+                color: D.muted
               }}>Last Svc:</span>{" "}
                     <span>
                       {new Date(e.last_service_date).toLocaleDateString()}
@@ -506,14 +521,14 @@ function EquipmentTab({
             flexWrap: "wrap",
             marginTop: 8
           }}>
-                  {Object.entries(typeof e.specs === "string" ? JSON.parse(e.specs) : e.specs).map(([k, v]) => <span key={k} style={sBadge(`${"#18181B"}22`, "#18181B")}>
+                  {Object.entries(typeof e.specs === "string" ? JSON.parse(e.specs) : e.specs).map(([k, v]) => <span key={k} style={sBadge(`${D.teal}22`, D.teal)}>
                       {k.replace(/_/g, " ")}: {v}
                     </span>)}
                 </div>}
               {needsService && <div style={{
             marginTop: 8,
             fontSize: 11,
-            color: "#A16207",
+            color: D.amber,
             fontWeight: 500
           }}>
                   Service due in {Math.round(hoursLeft)} hours —{" "}
@@ -540,7 +555,7 @@ function EquipmentEditModal({
       {" "}
       <div style={{
       fontSize: 11,
-      color: "#71717A",
+      color: D.muted,
       fontWeight: 500,
       marginBottom: 4,
       textTransform: "uppercase",
@@ -579,7 +594,7 @@ function EquipmentEditModal({
   }}>
       {" "}
       <div onClick={ev => ev.stopPropagation()} style={{
-      background: "#FFFFFF",
+      background: D.card,
       borderRadius: 12,
       padding: 24,
       width: "100%",
@@ -605,7 +620,7 @@ function EquipmentEditModal({
         <div style={{
         fontSize: 18,
         fontWeight: 700,
-        color: "#09090B",
+        color: D.heading,
         marginBottom: 16
       }}>
           {e.id ? "Edit Equipment" : "Add Equipment"}
@@ -642,12 +657,12 @@ function EquipmentEditModal({
       }}>
           {" "}
           <button onClick={onClose} disabled={saving} style={{
-          ...sBtn("transparent", "#71717A"),
-          border: `1px solid ${"#E4E4E7"}`
+          ...sBtn("transparent", D.muted),
+          border: `1px solid ${D.border}`
         }}>
             Cancel
           </button>{" "}
-          <button onClick={onSave} disabled={saving} style={sBtn("#18181B", "#fff")}>
+          <button onClick={onSave} disabled={saving} style={sBtn(D.teal, "#fff")}>
             {saving ? "Saving..." : "Save"}
           </button>{" "}
         </div>{" "}
@@ -699,7 +714,7 @@ function TankMixTab({
     }
   };
   if (loading && mixes.length === 0) return <div style={{
-    color: "#71717A",
+    color: D.muted,
     padding: 40,
     textAlign: "center"
   }}>
@@ -708,13 +723,13 @@ function TankMixTab({
   return <div>
       {loadError && <div role="alert" style={{
       ...sCard,
-      color: "#991B1B",
+      color: D.red,
       fontSize: 14
     }}>
           Could not load tank mixes.
           {mixes.length > 0 && " Showing previously loaded mixes; costs may be out of date."}
           <button onClick={loadMixes} aria-label="Retry tank mixes" style={{
-        ...sBtn("#18181B", "#fff"),
+        ...sBtn(D.teal, "#fff"),
         marginLeft: 12,
         fontSize: 14
       }}>
@@ -722,13 +737,13 @@ function TankMixTab({
           </button>
         </div>}
       {loading && <div role="status" style={{
-      color: "#71717A"
+      color: D.muted
     }}>Refreshing tank mixes...</div>}
       {mixes.length === 0 ? !loadError && <div style={{
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: "#71717A"
+      color: D.muted
     }}>
           No tank mixes configured yet. Add your standard mixes to track costs
           per application.
@@ -750,13 +765,13 @@ function TankMixTab({
                   <div style={{
               fontSize: 15,
               fontWeight: 500,
-              color: "#09090B"
+              color: D.heading
             }}>
                     {m.name}
                   </div>{" "}
                   <div style={{
               fontSize: 12,
-              color: "#71717A"
+              color: D.muted
             }}>
                     {m.service_type} · {m.tank_size_gal}gal tank · covers{" "}
                     {(m.coverage_sqft || 0).toLocaleString()} sqft
@@ -776,27 +791,27 @@ function TankMixTab({
                 fontFamily: MONO,
                 fontSize: 18,
                 fontWeight: 700,
-                color: m.cost_incomplete ? "#A16207" : "#15803D"
+                color: m.cost_incomplete ? D.amber : D.green
               }}>
                       {fmt(m.cost_per_tank)}/tank
                     </div>{" "}
                     <div style={{
                 fontFamily: MONO,
                 fontSize: 12,
-                color: "#71717A"
+                color: D.muted
               }}>
                       {fmt(m.cost_per_1000sf)}/1000sf
                     </div>{" "}
                     {m.cost_incomplete && <div style={{
                 fontSize: 11,
-                color: "#A16207"
+                color: D.amber
               }}>
                         incomplete — unpriced component excluded
                       </div>}{" "}
                   </div>{" "}
                   <button onClick={() => recalculate(m.id)} style={{
-              ...sBtn("transparent", "#71717A"),
-              border: `1px solid ${"#E4E4E7"}`,
+              ...sBtn("transparent", D.muted),
+              border: `1px solid ${D.border}`,
               padding: "4px 8px",
               fontSize: 10
             }}>
@@ -819,12 +834,12 @@ function TankMixTab({
                     <tr>
                       {["Product", "Rate/1000sf", "Oz/Tank", "Cost"].map(h => <th key={h} style={{
                   fontSize: 10,
-                  color: "#71717A",
+                  color: D.muted,
                   textTransform: "uppercase",
                   letterSpacing: 1,
                   textAlign: "left",
                   padding: "4px 8px",
-                  borderBottom: `1px solid ${"#E4E4E7"}22`
+                  borderBottom: `1px solid ${D.border}22`
                 }}>
                             {h}
                           </th>)}
@@ -836,7 +851,7 @@ function TankMixTab({
                         <td style={{
                   padding: "6px 8px",
                   fontSize: 12,
-                  color: "#09090B"
+                  color: D.heading
                 }}>
                           {p.product_name}
                         </td>{" "}
@@ -858,7 +873,7 @@ function TankMixTab({
                   padding: "6px 8px",
                   fontSize: 12,
                   fontFamily: MONO,
-                  color: "#15803D"
+                  color: D.green
                 }}>
                           {fmt(p.cost)}
                         </td>{" "}
@@ -887,7 +902,7 @@ function JobCostTab() {
     });
   }, []);
   if (loading) return <div style={{
-    color: "#71717A",
+    color: D.muted,
     padding: 40,
     textAlign: "center"
   }}>
@@ -903,19 +918,19 @@ function JobCostTab() {
           {[{
         label: "Avg Margin",
         value: summary.avgMargin != null ? `${summary.avgMargin.toFixed(1)}%` : "—",
-        color: summary.avgMargin == null || summary.avgMargin >= 50 ? "#15803D" : "#A16207"
+        color: summary.avgMargin == null || summary.avgMargin >= 50 ? D.green : D.amber
       }, {
         label: "Avg Revenue/Job",
         value: fmt(summary.avgRevenue),
-        color: "#15803D"
+        color: D.green
       }, {
         label: "Avg Cost/Job",
         value: fmt(summary.avgCost),
-        color: "#A16207"
+        color: D.amber
       }, {
         label: "Total Jobs Costed",
         value: summary.totalJobs || 0,
-        color: "#09090B"
+        color: D.heading
       }].map(s => <div key={s.label} style={{
         ...sCard,
         flex: isMobile ? "1 1 calc(50% - 6px)" : "1 1 140px",
@@ -934,7 +949,7 @@ function JobCostTab() {
               </div>{" "}
               <div style={{
           fontSize: 9,
-          color: "#71717A",
+          color: D.muted,
           textTransform: "uppercase",
           letterSpacing: 1,
           marginTop: 2
@@ -950,7 +965,7 @@ function JobCostTab() {
           <div style={{
         fontSize: 15,
         fontWeight: 500,
-        color: "#09090B",
+        color: D.heading,
         marginBottom: 12
       }}>
             Margins by Service Type
@@ -959,12 +974,12 @@ function JobCostTab() {
         display: "flex",
         justifyContent: "space-between",
         padding: "8px 0",
-        borderBottom: `1px solid ${"#E4E4E7"}22`,
+        borderBottom: `1px solid ${D.border}22`,
         fontSize: 12
       }}>
               {" "}
               <span style={{
-          color: "#09090B",
+          color: D.heading,
           fontWeight: 500
         }}>
                 {svc}
@@ -975,22 +990,22 @@ function JobCostTab() {
         }}>
                 {" "}
                 <span style={{
-            color: "#71717A"
+            color: D.muted
           }}>{stats.count} jobs</span>{" "}
                 <span style={{
-            color: "#15803D",
+            color: D.green,
             fontFamily: MONO
           }}>
                   Rev: {fmt(stats.avgRevenue)}
                 </span>{" "}
                 <span style={{
-            color: "#A16207",
+            color: D.amber,
             fontFamily: MONO
           }}>
                   Cost: {fmt(stats.avgCost)}
                 </span>{" "}
                 <span style={{
-            color: stats.avgMargin >= 50 ? "#15803D" : "#A16207",
+            color: stats.avgMargin >= 50 ? D.green : D.amber,
             fontFamily: MONO,
             fontWeight: 700
           }}>
@@ -1004,7 +1019,7 @@ function JobCostTab() {
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: "#71717A"
+      color: D.muted
     }}>
           No job costs recorded yet
         </div>}
@@ -1028,7 +1043,7 @@ function MaintenanceTab({
     }).catch(() => setLoading(false));
   }, []);
   if (loading) return <div style={{
-    color: "#71717A",
+    color: D.muted,
     padding: 40,
     textAlign: "center"
   }}>
@@ -1039,7 +1054,7 @@ function MaintenanceTab({
       <div style={{
       fontSize: 15,
       fontWeight: 500,
-      color: "#09090B",
+      color: D.heading,
       marginBottom: 12
     }}>
         Upcoming Maintenance
@@ -1048,14 +1063,14 @@ function MaintenanceTab({
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: "#71717A"
+      color: D.muted
     }}>
           No equipment needs service soon
         </div> : equipment.map(e => {
       const hoursLeft = e.next_service_hours - (e.current_hours || 0);
       return <div key={e.id} style={{
         ...sCard,
-        borderLeft: `3px solid ${hoursLeft <= 10 ? "#991B1B" : "#A16207"}`
+        borderLeft: `3px solid ${hoursLeft <= 10 ? D.red : D.amber}`
       }}>
               {" "}
               <div style={{
@@ -1069,13 +1084,13 @@ function MaintenanceTab({
                   <div style={{
               fontSize: 14,
               fontWeight: 500,
-              color: "#09090B"
+              color: D.heading
             }}>
                     {e.name}
                   </div>{" "}
                   <div style={{
               fontSize: 12,
-              color: "#71717A"
+              color: D.muted
             }}>
                     {e.next_service_type} — in {Math.round(hoursLeft)} hours
                   </div>{" "}
@@ -1093,7 +1108,7 @@ function MaintenanceTab({
             } catch (err) {
               showToast(`Failed: ${err.message}`);
             }
-          }} style={sBtn("#15803D", "#FFFFFF")}>
+          }} style={sBtn(D.green, D.white)}>
                   Mark Complete
                 </button>{" "}
               </div>{" "}
