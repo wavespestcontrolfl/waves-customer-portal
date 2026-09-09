@@ -117,12 +117,15 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     const choices = { serviceReminder72hChannel: 'push', serviceReminder24hChannel: 'push' };
     expect((await put(choices)).status).toBe(409);
     await device();
-    expect((await put(choices)).body.preferences).toMatchObject(choices);
+    expect((await put({ ...choices, smsEnabled: false, emailEnabled: false })).body.preferences).toMatchObject(choices);
     expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
       service_reminder_72h_channel: 'push', service_reminder_24h_channel: 'push', service_reminder_72h_channel_explicit: true,
     });
     expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
       service_reminder_72h_channel: 'sms', service_reminder_24h_channel: 'sms',
+    });
+    expect(await require('../services/appointment-reminders')._test.getReminderPrefs(property)).toMatchObject({
+      reminder72hChannel: 'push', reminder24hChannel: 'push', smsEnabled: false, emailEnabled: false, unavailable: false,
     });
     expect((await get()).body).toMatchObject(choices);
     const legacyUrl = '/api/notifications/preferences';

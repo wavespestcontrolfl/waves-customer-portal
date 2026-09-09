@@ -395,8 +395,21 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // `smsOutcome` (optional): the caller's out-param — a grouped-move hold at
 // the email handoff is recorded there as MOVE_HOLD so the notice defers
 // (row unmarked, visit claim released) instead of reading as suppressed.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null }) {
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
   if (!customerId) return false;
+  // App backups honor current email/category consent. This also covers a
+  // backup text that fails later through the Twilio status callback.
+  // AppointmentEmail's transactional stream does not enforce these toggles.
+  if (requestedChannel === 'push') {
+    const prefs = await getReminderPrefs(customerId).catch(() => ({ unavailable: true }));
+    if (prefs.unavailable) {
+      if (smsOutcome) smsOutcome.retryable = true;
+      return false;
+    }
+    const categoryEnabled = kind === '72h' ? prefs.serviceReminder72h
+      : kind === '24h' ? prefs.serviceReminder24h : prefs.appointmentConfirmation;
+    if (!prefs.emailEnabled || !categoryEnabled) return false;
+  }
   const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
   if (res?.ok) {
     logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
@@ -583,7 +596,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     // A successful fallback email IS a real delivery (GH codex r2 P1):
     // callers that ledger the visit effect must see it, or a failed
     // finalize would skip the durable close and a sibling could resend.
-    const fallbackOk = await deliverAppointmentEmailFallback({ ...emailArgs, smsOutcome });
+    const fallbackOk = await deliverAppointmentEmailFallback({ ...emailArgs, smsOutcome, requestedChannel: ch });
     if (fallbackOk && smsOutcome) smsOutcome.fallbackEmailOk = true;
   }
   return smsOk;
@@ -735,6 +748,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
     if (!(await visitStillLive())) return false;
     return deliverAppointmentEmailFallback({
       kind: 'confirmation',
+      requestedChannel: channel,
       customerId,
       scheduledServiceId,
       apptTime: resolvedApptTime,
@@ -1465,6 +1479,15 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
   if (!appSelected && await isLandline(customerId, phone)) {
     return false;
   }
+  // The canonical sender resolves App again and may fall back to SMS. Run
+  // the appointment landline guard on that actual SMS leg, even when the
+  // optional proactive lookup gate is off or the channel changed mid-send.
+  const dispatchCheck = appSelected ? async ({ channel } = {}) => {
+    if (channel === 'sms' && await isLandline(customerId, phone)) {
+      return { ok: false, code: 'NON_MOBILE_SMS_RECIPIENT', reason: 'Appointment recipient cannot receive SMS' };
+    }
+    return typeof preDispatchCheck === 'function' ? preDispatchCheck() : { ok: true };
+  } : preDispatchCheck;
 
   // (The grouped-move hold for appointment notices is enforced inside
   // sendCustomerMessage itself — the canonical path every SMS leg passes,
@@ -1500,7 +1523,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
     // the appointment moved or went terminal while validators ran.
-    ...(typeof preDispatchCheck === 'function' ? { preDispatchCheck } : {}),
+    ...(typeof dispatchCheck === 'function' ? { preDispatchCheck: dispatchCheck } : {}),
   });
   } catch (sendErr) {
     // Only a throw AFTER the provider handoff began is dispatch-uncertain
@@ -3661,7 +3684,7 @@ const AppointmentReminders = {
         }
       }
 
-      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
+      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel });
     } catch (err) {
       logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
     }

@@ -498,7 +498,8 @@ describe('round-3 wiring pins (source contracts)', () => {
   const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
 
   test('the SMS-fallback email carries the aggregated grouped hold note', () => {
-    expect(src).toContain("async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null })");
+    const params = src.match(/async function deliverAppointmentEmailFallback\(([^)]*)\)/)?.[1];
+    expect(params).toContain('cardHoldNote = null');
     expect(src).toContain('sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey })');
   });
 

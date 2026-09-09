@@ -366,7 +366,9 @@ async function sendCustomerMessage(input) {
   if (typeof preDispatchCheck === 'function') {
     let verdict;
     try {
-      verdict = await preDispatchCheck();
+      // Resolve the actual leg before caller guards run: an App attempt and
+      // its SMS fallback have different transport requirements.
+      verdict = await preDispatchCheck({ channel: sendInput.channel });
     } catch (err) {
       verdict = { ok: false, code: 'PRE_DISPATCH_CHECK_FAILED', reason: err.message };
     }

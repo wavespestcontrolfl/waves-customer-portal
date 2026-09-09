@@ -2,14 +2,24 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/messaging/audit', () => ({ persistAudit: jest.fn(async () => ({ id: 'audit-test' })) }));
-jest.mock('../services/messaging/validators/line-type', () => ({ checkLineType: jest.fn(async () => ({ ok: true })) }));
+jest.mock('../services/messaging/validators/line-type', () => ({
+  ...jest.requireActual('../services/messaging/validators/line-type'),
+  readCachedLineType: jest.fn(async () => ({ state: 'hit', lineType: 'mobile' })),
+}));
+jest.mock('../services/appointment-email', () => ({ sendAppointmentReminderEmail: jest.fn(async () => ({ ok: true })) }));
+jest.mock('../services/reschedule-link', () => ({ buildRescheduleLink: jest.fn(async () => ({ url: null })) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
 const db = require('../models/db');
 const Twilio = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { persistAudit } = require('../services/messaging/audit');
+const AppointmentReminders = require('../services/appointment-reminders');
+const { sendAppointmentReminderEmail } = require('../services/appointment-email');
+const { readCachedLineType } = require('../services/messaging/validators/line-type');
 const customerId = '11111111-1111-4111-8111-111111111111';
 let prefs;
+let prefsError;
 let suppression;
 let suppressionError;
 const input = {
@@ -22,7 +32,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
   require('../config/feature-gates').gates.smsSendWindow = true;
+  require('../config/feature-gates').gates.proactiveLineTypeLookup = false;
+  readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'mobile' });
   prefs = { payment_receipt_channel: 'push', payment_receipt: true, sms_enabled: true, payment_confirmation_sms: true };
+  prefsError = false;
   suppression = null;
   suppressionError = false;
   db.mockImplementation((table) => {
@@ -30,7 +43,10 @@ beforeEach(() => {
       where: jest.fn(() => q), whereIn: jest.fn(() => q),
       first: jest.fn(async () => {
         if (table === 'customers') return { id: customerId, account_id: customerId, phone: input.to, is_primary_profile: true };
-        if (table === 'notification_prefs') return { ...prefs };
+        if (table === 'notification_prefs') {
+          if (prefsError) throw new Error('preferences unavailable');
+          return { ...prefs };
+        }
         if (table === 'messaging_suppression') {
           if (suppressionError) throw new Error('read unavailable');
           return suppression;
@@ -183,6 +199,108 @@ describe.each([
     expect(Twilio.sendSMS.mock.calls[1][2]).toMatchObject({ explicitPushOnly: false, skipPushRouting: true });
     await sendCustomerMessage({ ...reminder, to: '+19415550143', identityTrustLevel: 'service_contact_authorized' });
     expect(Twilio.sendSMS.mock.calls[2][2].explicitPushOnly).toBe(false);
+  });
+
+  async function deliverReminder(sendOptions = {}) {
+    const outcome = {};
+    await AppointmentReminders._test.deliverAppointmentNotice({
+      channel: 'push', kind: tier, customerId, scheduledServiceId: reminder.appointmentId,
+      smsOutcome: outcome,
+      smsAttempt: () => AppointmentReminders.safeSendAppointment(
+        { id: customerId, phone: input.to }, prefs, () => reminder.body,
+        messageType, reminder.purpose, { scheduled_service_id: reminder.appointmentId }, { ...sendOptions, sendOutcome: outcome },
+      ),
+    });
+    return outcome;
+  }
+
+  test.each(['email_enabled', enabledColumn])('failed App delivery honors a %s opt-out made during the push', async (preference) => {
+    prefs.sms_enabled = false;
+    prefs.email_enabled = true;
+    Twilio.sendSMS.mockImplementationOnce(async () => {
+      prefs[preference] = false;
+      return { success: false, appUnavailable: true, error: 'no_fresh_device' };
+    });
+    expect(await deliverReminder()).toMatchObject({ blockedCode: 'SMS_OPTED_OUT' });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable preference during App failure cannot enable an email backup', async () => {
+    Twilio.sendSMS.mockImplementationOnce(async () => {
+      prefsError = true;
+      return { success: false, appUnavailable: true, error: 'no_fresh_device' };
+    });
+    expect(await deliverReminder()).toMatchObject({ retryable: true });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
+  });
+
+  test('failed App delivery skips a landline text and uses an allowed email', async () => {
+    readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    prefs.email_enabled = true;
+    Twilio.sendSMS.mockResolvedValueOnce({ success: false, appUnavailable: true, error: 'no_fresh_device' })
+      .mockResolvedValue({ success: true, sid: 'SMshould-not-send' });
+    expect(await deliverReminder()).toMatchObject({ blockedCode: 'NON_MOBILE_SMS_RECIPIENT', fallbackEmailOk: true });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('accepted App delivery reaches a landline owner without a text or email', async () => {
+    readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    expect(await deliverReminder()).toMatchObject({ providerAccepted: true });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+    expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
+  });
+
+  test('App delivery preserves the caller visit fence before any provider handoff', async () => {
+    const preDispatchCheck = jest.fn(async () => ({ ok: false, code: 'MOVE_HOLD' }));
+    expect(await deliverReminder({ preDispatchCheck })).toMatchObject({ blockedCode: 'MOVE_HOLD' });
+    expect(preDispatchCheck).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+    expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
+  });
+
+  test('a channel change before inner routing cannot text a landline', async () => {
+    readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'landline' });
+    const query = db.getMockImplementation();
+    let reads = 0;
+    db.mockImplementation((table) => {
+      const q = query(table);
+      if (table === 'notification_prefs') {
+        const read = q.first;
+        q.first = jest.fn(async () => {
+          const row = await read();
+          if (++reads === 1) prefs[channelColumn] = 'sms';
+          return row;
+        });
+      }
+      return q;
+    });
+    expect(await deliverReminder()).toMatchObject({ blockedCode: 'NON_MOBILE_SMS_RECIPIENT', fallbackEmailOk: true });
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+    expect(sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([false, true])('a delayed App backup text failure honors email_enabled=%s', async (emailEnabled) => {
+    Twilio.sendSMS.mockResolvedValueOnce({ success: false, appUnavailable: true, error: 'no_fresh_device' })
+      .mockResolvedValue({ success: true, sid: 'SMbackup' });
+    await deliverReminder();
+    const sentInput = persistAudit.mock.calls.at(-1)[0].input;
+    expect(sentInput.metadata.requestedChannel).toBe('push');
+    prefs.email_enabled = emailEnabled;
+    const query = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = query(table);
+      q.orderBy = jest.fn(() => q);
+      if (table === 'messaging_audit_log') q.first = jest.fn(async () => ({
+        channel: 'sms', purpose: sentInput.purpose, customer_id: customerId, metadata: sentInput.metadata,
+      }));
+      return q;
+    });
+    await AppointmentReminders.handleUndeliveredSms({ sid: 'SMbackup', status: 'undelivered', errorCode: '30003', to: input.to });
+    expect(sendAppointmentReminderEmail).toHaveBeenCalledTimes(emailEnabled ? 1 : 0);
   });
 });
 
