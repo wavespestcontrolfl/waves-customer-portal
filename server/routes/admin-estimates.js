@@ -4260,14 +4260,31 @@ router.put('/:id/proposal', async (req, res, next) => {
     });
     if (!count) return { updatedCount: 0 };
     if (groupId && authoredExpiry) {
+      // Published members — including an anchor the expiration sweep
+      // already flipped to 'expired' (delivery evidence, never an unsent
+      // expiry) — move forward and revive, so the customer's original
+      // emailed group link assembles the newly valid property again
+      // (pre-push codex P1 on #4309). Unpublished, locked, archived and
+      // terminal rows are untouched.
       await trx('estimates')
         .where({ estimate_group_id: groupId })
         .whereNot({ id: estimate.id })
         .whereNull('archived_at')
         .whereNull('price_locked_at')
-        .whereIn('status', ['sent', 'viewed'])
+        .where((q) => q.whereIn('status', ['sent', 'viewed'])
+          .orWhere((expired) => expired.where({ status: 'expired' })
+            .where((published) => published.whereNotNull('sent_at').orWhereNotNull('viewed_at'))
+            .whereRaw("COALESCE(disposition, '') <> 'expired_unsent'")))
         .where('expires_at', '<', authoredExpiry)
-        .update({ expires_at: authoredExpiry, updated_at: db.fn.now() });
+        .update({
+          expires_at: authoredExpiry,
+          status: db.raw("CASE WHEN status = 'expired' THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),
+          disposition: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition END"),
+          disposition_source: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_source END"),
+          disposition_at: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_at END"),
+          disposition_note: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_note END"),
+          updated_at: db.fn.now(),
+        });
     }
     // The version THIS write committed, read under the same lock: the editor
     // keys its next save and its delivery review on it, so a save that lands
