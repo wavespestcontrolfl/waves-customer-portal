@@ -185,6 +185,11 @@ describe('lawn assessment route contracts', () => {
       // and the review: a failed write rolls the confirm back, so a retry redoes it instead of taking the
       // already-confirmed return past a write that never happened.
       expect(write).toMatch(/if \(protocolFieldChecksProvided\) await persistProtocolFieldChecks\(\{ assessment: row, checks: protocolFieldChecks, trx \}\);\s*return \{ updated: row, reviewedVisitRun: run \};/);
+      // The observation column follows the review, in the same transaction, right after the review is stored:
+      // a rejected or renamed finding withdraws the cause the prose named; technician text (null) is left alone.
+      expect(write).toMatch(/const observations = run \? visitAssessment\.reviewedObservations\(\{ assessment: row, run \}\) : null;\s*if \(observations != null && observations !== row\.observations\) \{\s*await trx\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.update\(\{ observations, updated_at: new Date\(\) \}\);\s*row\.observations = observations;\s*\}/);
+      expect(write.indexOf('reviewRun(')).toBeLessThan(write.indexOf('reviewedObservations('));
+      expect(write.indexOf('reviewedObservations(')).toBeLessThan(write.indexOf('persistProtocolFieldChecks('));
       expect(confirm.match(/persistProtocolFieldChecks\(/g)).toHaveLength(1);
       expect(write.indexOf('reviewRun(')).toBeLessThan(write.indexOf('persistProtocolFieldChecks('));
       // The already-confirmed response reads the row AND the run as the completing confirm left them — never the
