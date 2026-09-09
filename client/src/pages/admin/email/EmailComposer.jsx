@@ -101,7 +101,7 @@ export default function EmailComposer({ active, editor, onSent }) {
       onClick={(event) => { event.stopPropagation(); close(); }}>
       <div onClick={(event) => event.stopPropagation()} role="dialog" ref={composeRef} aria-modal="true" aria-labelledby="email-compose-title"
         className={cn("flex w-full max-w-xl flex-col border-hairline border-zinc-200 bg-white text-ui-body text-ink-primary",
-          isMobile ? "h-full max-w-none" : "max-h-full rounded-md")}
+          isMobile ? "box-border h-full max-w-none" : "max-h-full rounded-md")}
         style={isMobile ? {
           paddingTop: "env(safe-area-inset-top, 0px)", paddingBottom: "env(safe-area-inset-bottom, 0px)",
           paddingLeft: "env(safe-area-inset-left, 0px)", paddingRight: "env(safe-area-inset-right, 0px)",
