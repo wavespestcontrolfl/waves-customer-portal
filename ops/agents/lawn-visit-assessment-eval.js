@@ -94,6 +94,10 @@ function parseArgs(argv) {
   // the level would change nothing while labelling every result with it —
   // a thinking-level comparison built on that would be wrong (Codex #4153 r9).
   if (args.forceFallback && args.thinking) { console.error('--thinking has no effect with --force-fallback (only the Gemini leg takes a thinking level) — drop one of them'); process.exit(2); }
+  // --sample selects cases at EXPORT; a replay takes the fixture as exported
+  // (bounded by --ids / --limit) — accepting it here would look bounded while
+  // replaying the whole corpus with paid calls (Codex #4153 r13).
+  if (args.run && args.sample) { console.error('--sample is an export option; bound a replay with --ids or --limit'); process.exit(2); }
   return args;
 }
 
@@ -134,7 +138,7 @@ async function exportFixture(args) {
       // set: a partial replay is not comparable, so the case is out.
       .whereNotExists(function () { this.select(1).from('lawn_assessment_photos as p').whereRaw('p.assessment_id = la.id').andWhere('p.s3_key', 'like', 'pending/%'); })
       .modify((q) => { if (hasRunTable) q.whereNotExists(function () { this.select(1).from('lawn_assessment_runs as r').whereRaw('r.assessment_id = la.id'); }); })
-      .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.created_at', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date', ...(hasServiceRecordColumn ? ['la.service_record_id'] : []))
+      .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.created_at', 'la.photos', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date', ...(hasServiceRecordColumn ? ['la.service_record_id'] : []))
       .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC, la.created_at DESC');
     // Selection is the library's tested mechanism: the explicit ids plus the
     // deterministic sample, or the whole population with --all.
@@ -172,35 +176,50 @@ async function exportFixture(args) {
 }
 
 // The grass type the route could have known AT THE VISIT. /assess auto-captures
-// the model's own grass read into customer_turf_profiles after scoring, so the
-// current profile may BE this assessment's outcome: the profile counts only
-// when it has not been touched since before the assessment was created
-// (updated_at earlier than la.created_at); otherwise the legacy
-// customers.lawn_type (never written by /assess) or nothing — the same
-// fallback order the route's loader uses, minus anything that cannot be
-// proven to predate the visit (Codex #4153 r8).
+// the model's own grass read into customer_turf_profiles after scoring — and
+// touches the row's updated_at even when COALESCE keeps an existing value —
+// so the timestamp cannot tell a pre-existing value from this assessment's
+// outcome (Codex #4153 r8, r13). What can: the capture only ever FILLS a
+// blank, so a profile row that already EXISTED before the assessment
+// (created_at earlier than la.created_at — intake and estimates create it
+// with the grass) is the value the route read; a row this or a later
+// assessment created is that capture. Otherwise the legacy
+// customers.lawn_type (never written by /assess), or nothing.
 async function loadVisitGrassType(row, knex) {
   const { grassTypeLabel, normalizeGrassType } = require(path.join(REPO, 'server/services/lawn-grass-context'));
-  const assessedAt = row.created_at ? new Date(row.created_at) : null;
-  const profile = await knex('customer_turf_profiles').where({ customer_id: row.customer_id, active: true }).first('grass_type', 'updated_at').catch(() => null);
-  const profilePredates = profile?.grass_type && assessedAt && profile.updated_at && new Date(profile.updated_at) < assessedAt;
-  const customer = profilePredates ? null : await knex('customers').where({ id: row.customer_id }).first('lawn_type');
-  const grassType = profilePredates ? profile.grass_type : normalizeGrassType(customer?.lawn_type) || null;
+  const profile = await visitTimeProfile(row, knex);
+  const customer = profile?.grass_type ? null : await knex('customers').where({ id: row.customer_id }).first('lawn_type');
+  const grassType = profile?.grass_type || normalizeGrassType(customer?.lawn_type) || null;
   return grassType ? grassTypeLabel(grassType) : null;
+}
+
+// The customer's turf profile when it provably existed before this
+// assessment; null otherwise.
+async function visitTimeProfile(row, knex) {
+  const assessedAt = row.created_at ? new Date(row.created_at) : null;
+  const profile = await knex('customer_turf_profiles').where({ customer_id: row.customer_id, active: true }).first('grass_type', 'irrigation_type', 'irrigation_inches_per_week', 'created_at').catch(() => null);
+  if (!profile || !assessedAt || !profile.created_at || !(new Date(profile.created_at) < assessedAt)) return null;
+  return profile;
 }
 
 // The irrigation line the route could have known AT THE VISIT. Both of its
 // sources live on customer_turf_profiles (irrigation_type,
-// irrigation_inches_per_week), and a confirm's protocol field checks write
-// that same row AFTER the model call (persistProtocolFieldChecks), so the
-// profile counts only when untouched since before the assessment was created
-// — the same provenance rule as the grass type; otherwise the line is
-// omitted (Codex #4153 r11). Formatted as lawn-grass-context's
-// loadIrrigationContext formats it.
+// irrigation_inches_per_week); the only assessment writer of those fields is
+// a confirm's protocol field checks (persistProtocolFieldChecks), which also
+// stamp the same inches on the confirming assessment row. So the profile's
+// irrigation is visit-time when the profile existed before this assessment
+// AND no assessment of this customer created at or after it recorded
+// irrigation checks — the assessment ledger proves it where the profile's
+// updated_at (touched by every grass capture) cannot (Codex #4153 r11, r13).
+// Formatted as lawn-grass-context's loadIrrigationContext formats it.
 async function loadVisitIrrigation(row, knex) {
-  const assessedAt = row.created_at ? new Date(row.created_at) : null;
-  const profile = await knex('customer_turf_profiles').where({ customer_id: row.customer_id }).first('irrigation_type', 'irrigation_inches_per_week', 'updated_at').catch(() => null);
-  if (!profile || !assessedAt || !profile.updated_at || !(new Date(profile.updated_at) < assessedAt)) return null;
+  const profile = await visitTimeProfile(row, knex);
+  if (!profile) return null;
+  const hasInches = await knex.schema.hasColumn('lawn_assessments', 'irrigation_inches_per_week');
+  if (hasInches) {
+    const later = await knex('lawn_assessments').where({ customer_id: row.customer_id }).where('created_at', '>=', row.created_at).whereNotNull('irrigation_inches_per_week').first('id');
+    if (later) return null;
+  }
   const parts = [];
   if (profile.irrigation_type) parts.push(String(profile.irrigation_type).replace(/_/g, ' '));
   if (profile.irrigation_inches_per_week != null) parts.push(`${profile.irrigation_inches_per_week} in/wk`);

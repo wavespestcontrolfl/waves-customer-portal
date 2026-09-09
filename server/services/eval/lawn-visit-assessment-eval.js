@@ -89,7 +89,12 @@ function fixtureCase(row, photos = [], context = {}) {
   // would compare a partial-input answer against full-input scores, so the
   // case is exported photo-less and skipped, never replayed partially
   // (Codex #4153 r8).
-  const incompletePhotos = photos.some((photo) => photo && String(photo.s3_key || '').startsWith('pending/'));
+  // … or when fewer rows were stored than the visit submitted (the route
+  // swallows a failed row insert and still returns success — the
+  // assessment's own `photos` metadata lists every submitted image).
+  const submitted = parseJson(row.photos, []);
+  const incompletePhotos = photos.some((photo) => photo && String(photo.s3_key || '').startsWith('pending/'))
+    || (Array.isArray(submitted) && submitted.length > photos.filter(Boolean).length);
   return {
     assessmentId: row.id,
     customerId: row.customer_id,
@@ -154,7 +159,9 @@ function scrubPriorSummary(text, customerNames = []) {
   // garage / lockbox credential (the report's detector) is omitted whole —
   // no credential ever enters a fixture file (Codex #4153 r8).
   if (containsReportAccessCode(out)) return null;
-  return out ? out.slice(0, 400) : null;
+  // The whole scrubbed value: the live route passes the entire summary, so a
+  // cap here would replay a different prompt (Codex #4153 r13).
+  return out || null;
 }
 
 // Deterministic selection, in the population's order: the explicit ids plus
@@ -192,11 +199,17 @@ function contextFor(testCase) {
 }
 
 // ── Scoring (pure) ────────────────────────────────────────────────────
+// Null unless the model is priced AND the usage carries real input and
+// output counts: llm/call.js hands back a usage object with null counts when
+// a provider omits its metadata, and that is an unknown charge, not $0
+// (Codex #4153 r13).
 function costUsd(model, usage) {
   const price = PRICES_PER_M[String(model || '')];
   if (!price || !usage) return null;
-  const input = Number(usage.input_tokens) || 0;
-  const output = (Number(usage.output_tokens) || 0) + (price.reasoningSeparate ? (Number(usage.reasoning_tokens) || 0) : 0);
+  const input = numberOrNull(usage.input_tokens);
+  const outputBase = numberOrNull(usage.output_tokens);
+  if (input == null || outputBase == null) return null;
+  const output = outputBase + (price.reasoningSeparate ? (numberOrNull(usage.reasoning_tokens) || 0) : 0);
   return Math.round(((input * price.input) + (output * price.output)) / 1e6 * 1e4) / 1e4;
 }
 

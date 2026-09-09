@@ -38,7 +38,7 @@ describe('fixture export shape', () => {
     expect(c.confirmed).toEqual({ turf_density: 75, weed_suppression: 85, color_health: 80, fungus_control: 75, thatch_level: 60, stress_damage: 55 });
     expect(c.legacyAi.turf_density).toBe(70);
     expect(c.photos).toEqual([{ id: 'p1', s3Key: 'k1', mimeType: 'image/png', zone: 'front' }, { id: 'p2', s3Key: 'k2', mimeType: 'image/jpeg', zone: null }]); // ordered
-    expect(c.context.priorSummary).toHaveLength(400);
+    expect(c.context.priorSummary).toHaveLength(500); // the whole scrubbed value — the live route passes it all
     // No names, phones, addresses — and no legacy observation text (it can echo technician context).
     expect(JSON.stringify(c)).not.toMatch(/MUST NOT LEAK|\+1555|Private Way|LOCKBOX|Smith|legacy obs/);
     expect(c.legacyObservations).toBeUndefined();
@@ -57,6 +57,9 @@ describe('fixture export shape', () => {
     const partial = evalLib.fixtureCase(row(), [...photos, { id: 'p3', s3_key: 'pending/a1/3.jpg', photo_order: 2 }], {});
     expect(partial).toMatchObject({ incompletePhotos: true, photos: [] });
     expect(evalLib.fixtureCase(row(), photos, {})).toMatchObject({ incompletePhotos: false });
+    // Fewer stored rows than the visit submitted (a swallowed insert failure) is incomplete too.
+    expect(evalLib.fixtureCase(row({ photos: JSON.stringify([{ filename: 'a' }, { filename: 'b' }, { filename: 'c' }]) }), photos, {})).toMatchObject({ incompletePhotos: true, photos: [] });
+    expect(evalLib.fixtureCase(row({ photos: JSON.stringify([{ filename: 'a' }, { filename: 'b' }]) }), photos, {})).toMatchObject({ incompletePhotos: false });
     expect(evalLib.fixtureCase(row(), photos, {}).photos).toHaveLength(2);
     expect(evalLib.fixtureCase(row({ scheduled_date: null, composite_scores: null }), []).visitDate).toBe('2026-09-01');
   });
@@ -115,6 +118,13 @@ describe('scoring', () => {
     expect(evalLib.costUsd('gpt-6-astra', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 8_000 })).toBe(1.5); // reasoning not billed twice
     expect(evalLib.costUsd('mystery', { input_tokens: 1 })).toBeNull();
     expect(evalLib.costUsd('gpt-6-astra', null)).toBeNull();
+    // A usage object with null counts (provider omitted its metadata) is an unknown charge, never $0.
+    expect(evalLib.costUsd('gpt-6-astra', { input_tokens: null, output_tokens: null, reasoning_tokens: null })).toBeNull();
+    expect(evalLib.costUsd('gpt-6-astra', { input_tokens: 100, output_tokens: null })).toBeNull();
+    expect(evalLib.costUsd('gemini-3.8-flash', { input_tokens: 100, output_tokens: 10, reasoning_tokens: null })).toBe(evalLib.costUsd('gemini-3.8-flash', { input_tokens: 100, output_tokens: 10, reasoning_tokens: 0 }));
+    const nullUsage = evalLib.scoreResult(testCase, analysis({ usage: { input_tokens: null, output_tokens: null, reasoning_tokens: null } }), { adjust: (s) => s });
+    expect(nullUsage.costUsd).toBeNull();
+    expect(nullUsage.unpricedLegs).toBe(1);
   });
 
   test('a complete replay scores deltas per known metric, reports undeterminable keys and the model\'s naming discipline', () => {
@@ -218,12 +228,16 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
     const error = jest.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      expect(parseArgs(['node', 'x', '--run', 'f.json', '--sample', '3', '--limit', '5', '--repeat', '2', '--concurrency', '4'])).toMatchObject({ run: 'f.json', sample: 3, limit: 5, repeat: 2, concurrency: 4 });
+      expect(parseArgs(['node', 'x', '--run', 'f.json', '--limit', '5', '--repeat', '2', '--concurrency', '4'])).toMatchObject({ run: 'f.json', limit: 5, repeat: 2, concurrency: 4 });
+      expect(parseArgs(['node', 'x', '--export', '--sample', '3'])).toMatchObject({ export: true, sample: 3 });
+      // --sample is an export option: a replay accepting it would look bounded while replaying the whole fixture.
+      expect(() => parseArgs(['node', 'x', '--run', 'f.json', '--sample', '3'])).toThrow('exit 2');
+      expect(error).toHaveBeenLastCalledWith(expect.stringContaining('--sample is an export option'));
       for (const [flag, value] of [['--sample', '-1'], ['--limit', '0'], ['--repeat', 'Infinity'], ['--concurrency', '1.5'], ['--sample', 'ten'], ['--repeat', undefined]]) {
         expect(() => parseArgs(['node', 'x', '--run', 'f.json', flag, ...(value === undefined ? [] : [value])])).toThrow('exit 2');
         expect(error).toHaveBeenLastCalledWith(expect.stringContaining(`${flag} needs a positive whole number`));
       }
-      expect(exit).toHaveBeenCalledTimes(6);
+      expect(exit).toHaveBeenCalledTimes(7);
       // --thinking reaches the Gemini leg only, so it cannot be combined with a forced fallback.
       expect(() => parseArgs(['node', 'x', '--run', 'f.json', '--force-fallback', '--thinking', 'HIGH'])).toThrow('exit 2');
       expect(error).toHaveBeenLastCalledWith(expect.stringContaining('--thinking has no effect with --force-fallback'));
@@ -258,13 +272,17 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     // The grass type is what the route could have known at the visit: a profile untouched since before the assessment,
     // else customers.lawn_type (never written by /assess) — never the profile /assess captured from this assessment's own read.
     expect(src).toMatch(/grassType: await loadVisitGrassType\(row, knex\),/);
-    expect(src).toMatch(/const profilePredates = profile\?\.grass_type && assessedAt && profile\.updated_at && new Date\(profile\.updated_at\) < assessedAt;/);
+    // Provenance is proven by the ledger, not by the profile's updated_at (touched by every grass capture): the profile
+    // must have EXISTED before the assessment, and irrigation is out when any assessment at or after this one recorded it.
+    expect(src).toMatch(/if \(!profile \|\| !assessedAt \|\| !profile\.created_at \|\| !\(new Date\(profile\.created_at\) < assessedAt\)\) return null;/);
+    expect(src).not.toMatch(/profile\.updated_at/);
+    expect(src).toMatch(/\.where\('created_at', '>=', row\.created_at\)\.whereNotNull\('irrigation_inches_per_week'\)\.first\('id'\)/);
+    expect(src).toMatch(/'la\.photos'/);
     expect(src).toMatch(/'la\.created_at'/);
     expect(src).not.toMatch(/grassType: grassCtx\.grassTypeLabel/);
     // Irrigation follows the same provenance rule (its sources are the turf profile a confirm's field checks write).
     expect(src).toMatch(/loadVisitIrrigation\(row, knex\),/);
     expect(src).not.toMatch(/loadIrrigationContext\(/);
-    expect(src).toMatch(/if \(!profile \|\| !assessedAt \|\| !profile\.updated_at \|\| !\(new Date\(profile\.updated_at\) < assessedAt\)\) return null;/);
     // The read-only promise: dotenv (server/config) loads BEFORE the ledger gates are cleared, and the gates are verified
     // before and after every import the replay uses.
     const run = src.slice(src.indexOf('async function runReplay('), src.indexOf('const fixture = JSON.parse('));
