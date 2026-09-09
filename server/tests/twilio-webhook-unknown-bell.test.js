@@ -1,0 +1,186 @@
+// Real webhook control flow; synthetic persistence and inert delivery seams.
+const mockState = { sms: [], sequence: 0, ai: true, read: false, pending: 0 };
+let mockPg;
+let mockDatabase;
+function mockDb(table) {
+  if (mockPg && table === 'sms_log') {
+    const q = mockPg(table);
+    const insert = q.insert.bind(q);
+    q.insert = (row) => insert({ created_at: new Date(Date.now() + ++mockState.sequence), ...row });
+    for (const method of ['first', 'update']) {
+      const run = q[method].bind(q);
+      q[method] = (...args) => {
+        mockState.pending++;
+        return Promise.resolve(run(...args)).finally(() => { mockState.pending--; });
+      };
+    }
+    return q;
+  }
+  const filters = [];
+  const q = { rows: [] };
+  q.where = (key, op, value) => {
+    if (key && typeof key === 'object') filters.push((r) => Object.entries(key).every(([k, v]) => r[k] === v));
+    else if (typeof key === 'string') filters.push((r) => value === undefined ? r[key] === op : op === '<' ? r[key] < value : r[key] > value);
+    return q;
+  };
+  q.whereNot = (key, value) => { filters.push((r) => r[key] !== value); return q; };
+  q.whereIn = (key, values) => { filters.push((r) => values.includes(r[key])); return q; };
+  q.whereRaw = (sql) => { if (sql.includes("sms_reply_alerted")) filters.push((r) => JSON.parse(r.metadata || '{}').sms_reply_alerted === true); return q; };
+  for (const method of ['whereNull', 'orderBy', 'limit', 'select']) q[method] = () => q;
+  const matches = () => mockState.sms.filter((r) => filters.every((f) => f(r)));
+  q.insert = (row) => {
+    const stored = { id: `synthetic-${++mockState.sequence}`, created_at: new Date(Date.now() + mockState.sequence), ...row };
+    if (table === 'sms_log') mockState.sms.push(stored);
+    q.rows = [stored]; return q;
+  };
+  q.update = async (patch) => {
+    if (table === 'sms_log') for (const row of matches()) {
+      if (patch.metadata?.merge) row.metadata = JSON.stringify({ ...JSON.parse(row.metadata || '{}'), ...patch.metadata.merge });
+    }
+    return matches().length;
+  };
+  q.first = async () => table === 'messages' ? { is_read: mockState.read }
+    : table === 'sms_log' ? matches()[0] || null : null;
+  q.returning = async () => q.rows;
+  q.then = (resolve, reject) => Promise.resolve(q.rows).then(resolve, reject);
+  q.catch = (reject) => Promise.resolve(q.rows).catch(reject);
+  return q;
+}
+mockDb.raw = (sql, values) => mockPg ? mockPg.raw(sql, values) : ({ sql, merge: values?.[0] ? JSON.parse(values[0]) : {} });
+jest.mock('../models/db', () => mockDb);
+jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'webhooks' || (key === 'aiAssistantAutoReply' && mockState.ai) }));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/messaging/validators/suppression', () => ({ recordSuppression: jest.fn(), clearSuppression: jest.fn() }));
+jest.mock('../services/messaging/inbound-dedupe', () => ({ tryClaimInboundWebhook: async () => ({ processable: true, owned: true }), releaseInboundWebhook: jest.fn() }));
+jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => ({ message: { id: 'synthetic-message' } })), updateByTwilioSid: jest.fn() }));
+jest.mock('../services/sms-media', () => ({ uploadTwilioMedia: jest.fn(async () => []) }));
+jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => {}), isFailureStatus: () => false }));
+jest.mock('../middleware/spam-block', () => ({ checkInboundBlock: async () => ({ blocked: false }) }));
+jest.mock('../services/contact-correction', () => ({ detectContactCorrectionIntent: () => false }));
+jest.mock('../services/contact-correction-queue', () => ({}));
+jest.mock('../services/recipient-optin', () => ({ markRecipientOptin: async () => true }));
+jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: async () => ({ handled: false }) }));
+jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => false }));
+jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: async () => ({}) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true, push: { sent: 1 } })) }));
+jest.mock('../services/ai-assistant/assistant', () => ({ processMessage: jest.fn(async () => ({ reply: 'Synthetic answer', escalated: false })) }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
+
+const { EventEmitter } = require('node:events');
+const { triggerNotification } = require('../services/notification-triggers');
+const { processMessage } = require('../services/ai-assistant/assistant');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { uploadTwilioMedia } = require('../services/sms-media');
+const numbers = require('../config/twilio-numbers');
+const handler = require('../routes/twilio-webhook').stack.find((l) => l.route?.path === '/sms').route.stack[0].handle;
+const aiLine = '+18559260203';
+const sender = '+12025550101';
+async function receive(body = 'What services do you offer?', to = aiLine) {
+  const sid = `SM-synthetic-${mockState.sequence + 1}`;
+  const res = new EventEmitter();
+  res.status = (code) => { res.statusCode = code; return res; };
+  res.type = () => res;
+  res.send = (value) => { res.body = value; return res; };
+  await handler({ body: { From: sender, To: to, Body: body, MessageSid: sid } }, res);
+  // The real route acknowledges before its notification work. Drain the
+  // tracked PostgreSQL promises rather than asserting immediately after ACK.
+  let stable = 0;
+  const deadline = Date.now() + 3000;
+  while (stable < 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    stable = mockState.pending ? 0 : stable + 1;
+  }
+  expect(mockState.pending).toBe(0);
+  expect(res.body).toBe('<Response></Response>');
+  const errors = require('../services/logger').error.mock.calls.filter(([message]) => !String(message).startsWith('AI '));
+  expect(errors).toEqual([]);
+  return sid;
+}
+beforeAll(async () => {
+  const connection = process.env.SMS_BELL_QA_URL;
+  if (!connection) return;
+  if (!/^\/waves_qa_[a-f0-9]{32}$/.test(new URL(connection).pathname)) throw new Error('Use a private QA database');
+  mockDatabase = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
+  mockPg = await mockDatabase.transaction();
+  await mockPg.raw(`CREATE TEMP TABLE sms_log (
+    id uuid DEFAULT gen_random_uuid(), customer_id uuid, direction text, from_phone text, to_phone text,
+    message_body text, twilio_sid text, status text, message_type text, is_read boolean,
+    metadata jsonb, created_at timestamptz DEFAULT clock_timestamp()
+  )`);
+});
+afterAll(async () => { await mockPg?.rollback(); await mockDatabase?.destroy(); });
+async function storedMetadata() {
+  const row = mockPg ? await mockPg('sms_log').orderBy('created_at').first() : mockState.sms[0];
+  return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+}
+beforeEach(async () => {
+  if (mockPg) await mockPg.raw('TRUNCATE sms_log');
+  jest.clearAllMocks();
+  mockState.sms = []; mockState.sequence = 0; mockState.ai = true; mockState.read = false;
+  processMessage.mockResolvedValue({ reply: 'Synthetic answer', escalated: false });
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
+  uploadTwilioMedia.mockResolvedValue([]);
+});
+
+test('a delivered non-escalated AI reply does not ring or consume the alert window', async () => {
+  await receive();
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect((await storedMetadata()).sms_reply_alerted).toBeUndefined();
+});
+
+test.each(['escalated', 'no reply', 'model failure', 'blocked send', 'send failure'])('rings when the AI produces %s', async (outcome) => {
+  if (outcome === 'escalated') processMessage.mockResolvedValue({ escalated: true });
+  if (outcome === 'no reply') processMessage.mockResolvedValue({ reply: '' });
+  if (outcome === 'model failure') processMessage.mockRejectedValue(new Error('synthetic model failure'));
+  if (outcome === 'blocked send') sendCustomerMessage.mockResolvedValue({ sent: false, code: 'synthetic_block' });
+  if (outcome === 'send failure') sendCustomerMessage.mockRejectedValue(new Error('synthetic send failure'));
+  await receive();
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: sender }), expect.any(Object));
+  expect((await storedMetadata()).sms_reply_alerted).toBe(true);
+});
+
+test('an MMS-only inbound rings without trying the text-only AI handler', async () => {
+  uploadTwilioMedia.mockResolvedValue([{ url: 'https://example.test/synthetic.jpg' }]);
+  await receive('');
+  expect(processMessage).not.toHaveBeenCalled();
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+});
+
+test('a successfully answered AI turn cannot throttle a later human-bound request', async () => {
+  await receive();
+  mockState.ai = false;
+  await receive('Please have the office help me.');
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  await receive('Additional details for the office.');
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+});
+
+test('an undelivered alert does not throttle the next request', async () => {
+  mockState.ai = false;
+  triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0 } });
+  await receive();
+  await receive('Please help with this request.');
+  expect(triggerNotification).toHaveBeenCalledTimes(2);
+});
+
+test('ordinary location-line unknown texts ring the SMS bell', async () => {
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  expect(processMessage).not.toHaveBeenCalled();
+});
+
+test('a consumed START or a courtesy row does not consume the first alert window', async () => {
+  for (const message_type of ['opt_in', 'inbound']) {
+    const row = { direction: 'inbound', from_phone: sender, to_phone: aiLine,
+      message_type, created_at: new Date(Date.now() - 1000), twilio_sid: `SM-prior-${message_type}`,
+      metadata: JSON.stringify({ courtesyOnly: message_type === 'inbound' }) };
+    if (mockPg) await mockPg('sms_log').insert(row);
+    else mockState.sms.push(row);
+  }
+  mockState.ai = false;
+  await receive('Please quote pest control.');
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+});

@@ -141,6 +141,11 @@ operational extension runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
+unknown location-line senders ring the same SID-scoped SMS bell as known
+customers. The AI line skips that fallback only after a non-escalated reply
+is sent; no-answer outcomes remain eligible. The unknown-sender four-hour
+throttle counts only persisted successful bell/push receipts in SMS metadata.
+Reading an unlinked thread clears its SID-scoped bell too;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
 including replies that return early. Failure to persist that source returns
 503 with empty TwiML before either consumer runs; the owned SID claim is

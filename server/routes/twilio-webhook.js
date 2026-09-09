@@ -1074,62 +1074,6 @@ router.post('/sms', async (req, res) => {
         } catch { /* ignore */ }
       }
     }
-    // The assistant line answers its own unknown senders — but only when it
-    // actually will (auto-reply on, no scheduling/reschedule intent it hands
-    // to humans, not a reaction/closer — mirrors the AI branch's own gate).
-    // A text the assistant will NOT answer must still ring (codex #4210 r2).
-    const aiWillAnswer = isAiNumber && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly;
-
-    // Unknown senders (and a known customer whose bell above did not land)
-    // ring the SAME sms_reply bell + push. This used to be an owner SMS
-    // forward ("📩 New SMS") sent as internal_alert — TwilioService redirects
-    // owner-phone internal alerts into the internal_admin_alert trigger, which
-    // the admin bell policy denylists (bells are for customer communication,
-    // owner ruling 2026-08-28), so from 2026-08-06 every first text from an
-    // unknown number to a location line rang nobody (audit 2026-09-09: six
-    // real prospects in a month reached only the nightly digest). A stranger
-    // texting a Waves line IS customer communication; sms_reply is the
-    // allowlisted trigger for it. Domain/van tracking leads ring new_lead
-    // above instead.
-    // Per-sender rate limit for UNKNOWN senders: spam robotext threads from
-    // one number raised a separate owner alert per message (19 alerts from a
-    // single roof-repair thread, 2026-07). One alert per unknown sender per
-    // 4h window — the full thread is still in /admin/communications and
-    // sms_log. Known customers are unaffected. Fails open on query error.
-    //
-    // Only rows STRICTLY OLDER than this message's own sms_log row count:
-    // two near-simultaneous first texts must not each see the other and both
-    // suppress (leaving a new thread with no alert at all) — with a strict
-    // created_at ordering, at most the later one suppresses. An exact
-    // timestamp tie fails open to two alerts, the safe direction.
-    let repeatUnknownSender = false;
-    if (!customer && (Body || inboundMedia.length) && smsLogEntry?.created_at) {
-      try {
-        const prior = await db('sms_log')
-          .where({ direction: 'inbound', from_phone: From })
-          // Only a prior message that could itself have rung counts: a
-          // consumed START/HELP/STOP or a reaction never alerted, so it
-          // must not swallow the service request that follows it (codex r2).
-          .where(function alertable() {
-            this.whereNotIn('message_type', ['opt_out', 'opt_in', 'help_request', 'sms_reaction']).orWhereNull('message_type');
-          })
-          .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
-          .where('created_at', '<', smsLogEntry.created_at)
-          .whereNot('twilio_sid', MessageSid)
-          .first('id');
-        repeatUnknownSender = Boolean(prior);
-      } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
-    }
-
-    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !aiWillAnswer && !knownInboundNotified && !repeatUnknownSender && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-      try {
-        await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
-      } catch (e) {
-        if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
-        else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
-      }
-    }
-
     // Van wrap tracking — new lead flow
     if (numberConfig.type === 'tracking') {
       try {
@@ -1154,6 +1098,7 @@ router.post('/sms', async (req, res) => {
     // scheduling-intent inbound skips the auto-reply entirely and falls
     // through to Virginia's inbox.
     const legacyAiDraftsEnabled = isEnabled('legacyAiDrafts');
+    let aiAnswered = false;
 
     if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
       try {
@@ -1196,6 +1141,7 @@ router.post('/sms', async (req, res) => {
               conversationalContext: true,
               metadata: { fromNumber: To },
             });
+            aiAnswered = sendResult.sent === true;
             if (!sendResult.sent) {
               // PII rule: never log full phone in plaintext. Mask to last 4
               // digits — enough for operator debugging via audit log
@@ -1252,6 +1198,54 @@ router.post('/sms', async (req, res) => {
     } else if (courtesyOnly && aiAutoReplyOn) {
       logger.info('[sms-intent] courtesy-only closer; skipping auto-reply');
     }
+
+    // Unknown senders (and a known customer whose bell above did not land)
+    // ring the SAME sms_reply bell + push. This used to be an owner SMS
+    // forward ("📩 New SMS") sent as internal_alert — TwilioService redirects
+    // owner-phone internal alerts into the internal_admin_alert trigger, which
+    // the admin bell policy denylists (bells are for customer communication,
+    // owner ruling 2026-08-28), so from 2026-08-06 every first text from an
+    // unknown number to a location line rang nobody (audit 2026-09-09: six
+    // real prospects in a month reached only the nightly digest). A stranger
+    // texting a Waves line IS customer communication; sms_reply is the
+    // allowlisted trigger for it. Domain/van tracking leads ring new_lead
+    // above instead.
+    // Per-sender rate limit for UNKNOWN senders: spam robotext threads from
+    // one number raised a separate owner alert per message (19 alerts from a
+    // single roof-repair thread, 2026-07). One alert per unknown sender per
+    // 4h window — the full thread is still in /admin/communications and
+    // sms_log. Known customers are unaffected. Fails open on query error.
+    //
+    // Only rows STRICTLY OLDER than this message's own sms_log row count:
+    // two near-simultaneous first texts must not each see the other and both
+    // suppress (leaving a new thread with no alert at all) — with a strict
+    // created_at ordering, at most the later one suppresses. An exact
+    // timestamp tie fails open to two alerts, the safe direction.
+    let repeatUnknownSender = false;
+    if (!customer && (Body || inboundMedia.length) && smsLogEntry?.created_at) {
+      try {
+        const prior = await db('sms_log')
+          .where({ direction: 'inbound', from_phone: From })
+          // Only a prior delivered bell/push consumes the throttle window.
+          // Commands, courtesy replies and successful AI turns do not alert.
+          .whereRaw("metadata->>'sms_reply_alerted' = 'true'")
+          .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
+          .where('created_at', '<', smsLogEntry.created_at)
+          .whereNot('twilio_sid', MessageSid)
+          .first('id');
+        repeatUnknownSender = Boolean(prior);
+      } catch (e) { logger.warn('[twilio-webhook] repeat-sender check failed', { code: e.code || 'unknown' }); }
+    }
+
+    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !aiAnswered && !knownInboundNotified && !repeatUnknownSender && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+      try {
+        await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
+      } catch (e) {
+        if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
+        else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
+      }
+    }
+
 
     // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
     if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
@@ -1876,6 +1870,11 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
     threadId: customer?.id || null,
     twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
   }, { beforePush: unifiedStillUnread });
+  if (!customer && stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0)) {
+    await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_alerted: true })]),
+    }).catch((err) => logger.warn('[notifications] SMS alert receipt failed', { code: err.code || 'unknown' }));
+  }
   try {
     // Post-insert race: the thread was opened while the bell was being
     // written. Retire it by SID — that works for unlinked threads too.
