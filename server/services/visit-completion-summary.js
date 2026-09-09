@@ -123,25 +123,26 @@ async function deferSummarySms({ visit, customer, recipient, body, claim, nextAl
 }
 
 // A frozen bearer-link recipient must still be authorized when the queue runs.
-async function recheckDeferredSummarySms(meta, database = db) {
+async function recheckDeferredSummarySms(meta, database = db, { customer: heldCustomer = null } = {}) {
   const visit = await database('service_visits').where({ id: meta.visit_id, customer_id: meta.customer_id,
     summary_token_hash: meta.summary_token_hash }).whereNull('summary_token_revoked_at')
     .whereIn('status', ['closing', 'closed']).first('id');
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
-  const customer = await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
+  // The locked handoff passes the customer it holds (with its held account
+  // primary); the worker's earlier recheck resolves it fresh.
+  const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
     { db: database });
   const recipient = getServiceContactSmsRecipient(customer);
   if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
   const effect = await database('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
     claim_token: meta.visit_summary_claim_token }).first();
-  // A late provider-boundary quiet-hours block, or a provider refusal the
-  // scheduler is retrying (408 / 429 / 5xx: no message was created), proves
-  // no send occurred. Its durable scheduler stamp allows exactly that
-  // handoff to be retried; an ambiguous timeout carries no status and stays
-  // on office review.
-  const refusedAt = providerRefused({ providerHttpStatus: meta.provider_retry_http_status }) ? meta.provider_retry_at : null;
-  const provenUnsentAt = [meta.quiet_hours_hold_at, refusedAt].filter(Boolean)
-    .find((at) => new Date(at) >= new Date(effect?.claimed_at || 0));
+  // Only a late provider-boundary quiet-hours block proves no send occurred:
+  // its durable scheduler stamp allows exactly that handoff to be retried.
+  // Every provider failure after the handoff — a timeout, a 5xx, a 429 — is
+  // ambiguous (the provider may hold the text) and stays on office review,
+  // the same rule the tech line and the admin composer apply.
+  const provenUnsentAt = meta.quiet_hours_hold_at
+    && new Date(meta.quiet_hours_hold_at) >= new Date(effect?.claimed_at || 0) ? meta.quiet_hours_hold_at : null;
   if (effect?.status === 'unknown_delivery' && provenUnsentAt) {
     await database('visit_effects').where({ id: effect.id, status: 'unknown_delivery', claimed_at: effect.claimed_at,
       claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', updated_at: database.fn.now() });
@@ -150,39 +151,57 @@ async function recheckDeferredSummarySms(meta, database = db) {
   return { eligible: effect?.status === 'pending', reason: 'visit_summary_claim_unavailable' };
 }
 
-// Recipient authorization and the dispatch claim commit together while the
-// customer row is held, so a contact edit after recipient resolution cannot
-// hand the bearer link to the former destination. `authorized` re-resolves
-// the recipient from the locked row and says whether it still matches.
-async function claimDispatchForRecipient({ visitId, customerId, kind, token, authorized }) {
+// Recipient authorization, the dispatch claim and the provider request share
+// one transaction while the customer and preference rows are held, so a
+// contact or preference edit after recipient resolution waits for the
+// handoff to commit instead of handing the bearer link to the former
+// destination. `authorized` re-resolves the recipient from the locked rows;
+// `dispatch(trx)` is the sender's locked handoff and returns its verdict.
+// The dispatch mark commits on its own connection while those rows stay
+// held, so it is durable before the provider request (a process that dies
+// mid-request leaves an uncertain effect, never a reclaimable one). A
+// refusal by the sender's own rechecks before the request returns the mark
+// to its pre-dispatch state; a throw from the handoff is the provider
+// request failing and propagates with the mark in place.
+async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, authorized, dispatch }) {
+  const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
   return db.transaction(async (trx) => {
     await trx('customers').where({ id: customerId }).forShare().first('id');
     // FOR SHARE cannot lock an absent row. The canonical seed serializes
     // missing-row creation without inventing marketing consent or replacing
-    // an existing opt-out; hold the resulting row through the claim.
+    // an existing opt-out; hold the resulting row through the handoff.
     await createDefaultCustomerRows(trx, customerId);
     const prefs = await trx('notification_prefs').where({ customer_id: customerId }).forShare().first();
-    const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(), { db: trx });
-    if (!(await authorized(customer, prefs, trx))) return false;
-    return VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { database: trx });
+    // A secondary profile's blank contact fields fall back to the account
+    // primary: that row is held too, and an unreadable primary is a failed
+    // claim read, not a silently different recipient.
+    const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(),
+      { db: trx, forShare: true, rethrow: true });
+    if (!(await authorized(customer, prefs, trx))) return lost;
+    if (!(await VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: db }))) return lost;
+    const verdict = await dispatch(trx);
+    if (verdict?.ok === true) return verdict;
+    // Nothing reached the provider. If this write fails the effect stays
+    // uncertain and reaches office review, which is the safe side.
+    await db('visit_effects').where({ visit_id: visitId, effect_type: kind, claim_token: token, status: 'unknown_delivery' })
+      .update({ status: scheduled ? 'pending' : 'claimed', claimed_at: new Date(), updated_at: db.fn.now() })
+      .catch(() => {});
+    return verdict || lost;
   });
 }
 
-// The deferred replay's recheck (visit, recipient, claim state) and its
-// dispatch claim commit together the same way.
-async function beginDeferredSummarySms(meta) {
-  return db.transaction(async (trx) => {
-    await trx('customers').where({ id: meta.customer_id }).forShare().first('id');
-    // The sender's consent read ran before this callback. Materialize a
-    // missing row before locking so STOP/toggle upserts serialize too.
-    await createDefaultCustomerRows(trx, meta.customer_id);
-    const prefs = await trx('notification_prefs').where({ customer_id: meta.customer_id }).forShare().first();
-    if (prefs.sms_enabled === false || prefs.service_completed === false) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
-    if (!(await recheckDeferredSummarySms(meta, trx)).eligible) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
-    const owned = await VisitGroups.beginVisitNotificationDispatch(meta.visit_id, 'completion_sms',
-      meta.visit_summary_claim_token, { scheduled: true, database: trx });
-    return { ok: owned, code: 'VISIT_SUMMARY_CLAIM_LOST' };
-  });
+// The deferred replay's recheck (visit, recipient, claim state), its dispatch
+// claim and the provider request share the same held rows.
+async function beginDeferredSummarySms(meta, dispatch) {
+  return claimDispatchThroughHandoff({ visitId: meta.visit_id, customerId: meta.customer_id, kind: 'completion_sms',
+    token: meta.visit_summary_claim_token, scheduled: true, dispatch,
+    authorized: async (customer, prefs) => {
+      if (prefs.sms_enabled === false || prefs.service_completed === false) return false;
+      // The recheck may return a proven-unsent effect to pending; that write
+      // commits on the same connection the durable dispatch mark uses. The
+      // recipient is judged on the held customer row.
+      return (await recheckDeferredSummarySms(meta, db, { customer })).eligible;
+    } });
 }
 
 async function finalizeDeferredSummarySms(meta) {
@@ -196,13 +215,6 @@ async function terminalDeferredSummarySms(meta) {
   const result = await VisitGroups.finalizeVisitNotification(meta.visit_id, 'completion_sms',
     effect.status === 'unknown_delivery' ? 'unknown_delivery' : 'suppressed', new Date(), meta.visit_summary_claim_token);
   if (!result.ok) throw new Error('Visit summary terminal state could not be saved');
-}
-
-// 408 / 429 / 5xx from the provider: no message was created. Anything else
-// after a handoff (a timeout, an unclassified error) is ambiguous.
-function providerRefused(result) {
-  const status = Number(result?.providerHttpStatus);
-  return [408, 429].includes(status) || status >= 500;
 }
 
 async function sendSummarySms({ visit, member, customer, summaryUrl, requested }) {
@@ -226,28 +238,26 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
       // Visits tab without it — so the summary stays an SMS (its deferred
       // row already carries this type).
       metadata: { original_message_type: 'visit_summary' },
-      preDispatchCheck: async () => {
-        // A claim that cannot be read is not a lost claim: no provider
-        // handoff happened, so the requested SMS stays retryable.
-        try {
-          dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_sms',
-            token: claim.token, authorized: (current, currentPrefs) => currentPrefs.sms_enabled !== false
-              && currentPrefs.service_completed !== false
-              && getServiceContactSmsRecipient(current).phone === recipient.phone });
-        } catch { return { ok: false, code: 'VISIT_SUMMARY_CLAIM_UNAVAILABLE', retryable: true }; }
-        return { ok: dispatched, code: 'VISIT_SUMMARY_CLAIM_LOST' };
-      },
+      // The sender's locked handoff: a claim that cannot be read throws
+      // before any provider request, which the provider wrapper reports as
+      // a retryable block, so the requested SMS stays retryable.
+      withSmsHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
+        kind: 'completion_sms', token: claim.token,
+        authorized: (current, currentPrefs) => currentPrefs.sms_enabled !== false
+          && currentPrefs.service_completed !== false
+          && getServiceContactSmsRecipient(current).phone === recipient.phone,
+        dispatch: (trx) => { dispatched = true; return handoff(trx); } }),
     });
     if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
       dispatched = false; // The provider boundary can also prove it held before sending.
       await deferSummarySms({ visit, customer, recipient, body, claim, nextAllowedAt: result.nextAllowedAt });
       return;
     }
-    // Once handed to a non-idempotent provider, an ambiguous result stays
-    // unknown for office reconciliation. Never reclaim it after a timeout.
-    // A refusal the provider reported (408 / 429 / 5xx) created no message,
-    // so it is the retryable failure the recovery sweep exists for.
-    if (!result.sent && !result.blocked && dispatched && !providerRefused(result)) {
+    // Once handed to a non-idempotent provider, every failure is ambiguous
+    // (a timeout, a 5xx, a 429: the provider may hold the text) and stays
+    // unknown for office reconciliation. Never reclaim it. A refusal before
+    // the request is a block and keeps its own retry contract.
+    if (!result.sent && !result.blocked && dispatched) {
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'unknown_delivery', new Date(), claim.token);
       return;
     }
@@ -305,17 +315,15 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
           triggerEventId: `visit_summary:${visit.id}`,
           categories: ['service_visit_summary'], suppressionGroupKey: 'service_operational',
           suppressProviderErrorLog: true,
-          onQueued: async () => {
-            // A stale aggregate owner cannot hand off a later recipient after
-            // recovery has claimed the visit. A thrown callback is advisory in
-            // the library, so convert it to an explicit dispatch refusal.
-            try {
-              dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_email',
-                token: claim.token, authorized: (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
-                  .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase()) });
-              return dispatched;
-            } catch { return false; }
-          },
+          // A stale aggregate owner cannot hand off a later recipient after
+          // recovery has claimed the visit, and the recipient rows stay held
+          // through the provider request. A claim that cannot be read throws
+          // before dispatch, which the library records as a pre-provider abort.
+          withProviderHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
+            kind: 'completion_email', token: claim.token,
+            authorized: (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
+              .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase()),
+            dispatch: async () => { dispatched = true; await handoff(); return { ok: true }; } }),
         });
         if (result.sent) { sent = true; continue; }
         if (result.blocked) continue;
@@ -403,14 +411,34 @@ async function summaryRetryAuthorized(message, database = db) {
   const visit = await database('service_visits').where({ id: match[1] }).whereNull('summary_token_revoked_at')
     .whereIn('status', ['closing', 'closed']).first('id', 'customer_id');
   if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
+  const held = Boolean(database.isTransaction);
   const customer = await withAccountPrimaryContact(
-    await database('customers').where({ id: visit.customer_id }).first(), { db: database },
+    await database('customers').where({ id: visit.customer_id }).first(), { db: database, forShare: held, rethrow: held },
   );
   if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
   const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
   const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
   const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
   return current ? { ok: true } : { ok: false, reason: 'visit_summary_recipient_changed' };
+}
+
+// The retry rail's provider request runs while the customer and preference
+// rows are held, so the recipient the fence approved is the recipient the
+// provider receives. `dispatch()` performs the request.
+async function retrySummaryThroughHandoff(message, dispatch, database = db) {
+  const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
+  if (!match || message.template_key !== 'service.visit_summary') return { ok: false, reason: 'visit_summary_unavailable' };
+  return database.transaction(async (trx) => {
+    const visit = await trx('service_visits').where({ id: match[1] }).first('customer_id');
+    if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
+    await trx('customers').where({ id: visit.customer_id }).forShare().first('id');
+    await createDefaultCustomerRows(trx, visit.customer_id);
+    await trx('notification_prefs').where({ customer_id: visit.customer_id }).forShare().first('customer_id');
+    const fence = await summaryRetryAuthorized(message, trx);
+    if (!fence.ok) return fence;
+    await dispatch();
+    return { ok: true };
+  });
 }
 
 // The provider-retry rail can resend a blocked summary recipient later. When
@@ -486,4 +514,5 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
-  recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms };
+  recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
+  retrySummaryThroughHandoff };
