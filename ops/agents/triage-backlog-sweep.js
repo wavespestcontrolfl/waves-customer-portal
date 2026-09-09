@@ -1,8 +1,8 @@
-// Manual historical backlog drain; dry run by default. No scheduler calls this.
+// MUTATES — manual historical backlog drain; dry run by default. No scheduler calls this.
 // Dismisses retired flags, later-booked calls and aged cards under the audit's
 // coarse policy. Missing-unit cards are never swept; claimed cards stay open.
 // Historical booking proof is intentionally coarser than the live resolver's
-// filing-time snapshot proof. Execute only after reviewing the dry-run counts.
+// filing-time snapshot proof. Execute only after reviewing the dry-run changes.
 // Both execution and reversal serialize with admin/nightly triage writers:
 // sorted per-call advisory locks -> sibling card locks -> fresh classification
 // -> transitions and call aggregate in the same transaction. Evidence rows
@@ -13,12 +13,13 @@
 // ... --revert=triage-backlog-sweep-<run-tag> [--execute]
 const knex = require('knex');
 const { randomBytes } = require('crypto');
+const { parseArgs } = require('node:util');
 const { lockTriageCall } = require('../../server/utils/triage-locks');
 
 const RETIRED_FLAGS = ['low_extraction_confidence'];
 const OWNER_EQUIVALENT = ['owner', 'spouse_partner', 'unknown'];
 const NEVER_SWEEP = ['missing_unit_number'];
-const OWED_WORK = ['quote_promised', 'cancellation_request', 'after_hours_emergency', 'prior_complaint_unresolved', 'commercial_requires_quote', 'hoa_common_area_requires_approval', 'auto_booking_skipped_after_approval', 'outbound_booking_review', 'email_bounce_reverify'];
+const OWED_WORK = ['caller_not_authorized', 'quote_promised', 'cancellation_request', 'after_hours_emergency', 'prior_complaint_unresolved', 'commercial_requires_quote', 'hoa_common_area_requires_approval', 'auto_booking_skipped_after_approval', 'outbound_booking_review', 'email_bounce_reverify'];
 // Freeze the one-time audit scope; newly filed cards are never historical backlog.
 const AUDIT_CUTOFF = '2026-09-09T00:00:00-04:00';
 const RULES = ['retired_flag', 'booked_after', 'aged_advisory', 'aged_blocking'];
@@ -71,6 +72,16 @@ async function syncCalls(trx, rows) {
     .update({ review_status: trx.raw(aggregate), updated_at: trx.fn.now() });
 }
 
+async function plannedCallChanges(database, cards, to) {
+  if (!cards.length) return [];
+  const rows = await database('call_log').whereIn('id', [...new Set(cards.map(card => card.call_log_id))])
+    .select('id', 'review_status as from', database.raw(`CASE WHEN ? = 'open' OR EXISTS (
+      SELECT 1 FROM triage_items t WHERE t.call_log_id = call_log.id
+        AND t.status IN ('open', 'in_progress') AND NOT (t.id = ANY(?::uuid[])))
+      THEN 'open' ELSE 'dismissed' END AS "to"`, [to, cards.map(card => card.id)]));
+  return rows.filter(row => row.from !== row.to);
+}
+
 async function sweepBacklog(database, options = {}) {
   const { execute = false, tag = runTag() } = options;
   validateTag(tag);
@@ -78,7 +89,10 @@ async function sweepBacklog(database, options = {}) {
   const rows = await classify(database, ages);
   const candidates = rows.filter(row => row.rule);
   const plannedByRule = Object.fromEntries(RULES.map(rule => [rule, candidates.filter(row => row.rule === rule).length]));
-  const result = { tag, dryRun: !execute, cutoff: AUDIT_CUTOFF, scanned: rows.length, plannedByRule, applied: 0, callsSynced: 0 };
+  const plannedCards = candidates.map(row => ({ ...row, from: 'open', to: 'dismissed' }));
+  const plannedCalls = await plannedCallChanges(database, candidates, 'dismissed');
+  const result = { tag, dryRun: !execute, cutoff: AUDIT_CUTOFF, scanned: rows.length, plannedByRule,
+    plannedCards, plannedCalls, applied: 0, callsSynced: 0 };
   if (!execute || !candidates.length) return result;
   const notes = {
     retired_flag: 'historical flag retired by the 2026-09-08 call-agent audit.',
@@ -109,9 +123,14 @@ async function sweepBacklog(database, options = {}) {
 async function revertBacklog(database, tag, { execute = false } = {}) {
   validateTag(tag);
   const tagged = conn => conn('triage_items').where({ status: 'dismissed', resolution_source: 'auto' })
-    .whereNotNull('call_log_id').where('resolution_note', 'like', `${tag}:%`);
-  const candidates = await tagged(database).select('id', 'call_log_id');
-  const result = { tag, dryRun: !execute, wouldReopen: candidates.length, applied: 0, callsSynced: 0 };
+    .whereNotNull('call_log_id').where('resolution_note', 'like', `${tag}:%`)
+    .whereNotExists(conn('triage_items as active').select(conn.raw('1'))
+      .whereRaw('active.call_log_id = triage_items.call_log_id AND active.reason_code = triage_items.reason_code')
+      .whereIn('active.status', ['open', 'in_progress']));
+  const candidates = await tagged(database).select('id', 'call_log_id', 'reason_code');
+  const plannedCards = candidates.map(row => ({ ...row, from: 'dismissed', to: 'open', rule: 'revert_run_tag' }));
+  const plannedCalls = await plannedCallChanges(database, candidates, 'open');
+  const result = { tag, dryRun: !execute, wouldReopen: candidates.length, plannedCards, plannedCalls, applied: 0, callsSynced: 0 };
   if (!execute || !candidates.length) return result;
   await database.transaction(async trx => {
     await lockCallsAndCards(trx, candidates);
@@ -126,18 +145,28 @@ async function revertBacklog(database, tag, { execute = false } = {}) {
   return result;
 }
 
+function parseOptions(args) {
+  const { values } = parseArgs({ args, options: {
+    execute: { type: 'boolean', default: false }, revert: { type: 'string' },
+    'stale-days': { type: 'string' }, 'advisory-days': { type: 'string' },
+  } });
+  return { execute: values.execute, revert: values.revert === undefined ? null : validateTag(values.revert),
+    staleDays: ageDays(values['stale-days']), advisoryDays: ageDays(values['advisory-days']) };
+}
+
 async function main(args = process.argv.slice(2)) {
-  const connection = process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL;
-  if (!connection) throw new Error('Set DATABASE_URL to the intended database before running the dry run');
-  const value = flag => args.find(arg => arg.startsWith(`--${flag}=`))?.split('=').slice(1).join('=');
+  // Validate the entire command before connecting; malformed reversal must never select the forward sweep.
+  const options = parseOptions(args);
+  const connection = process.env.DATABASE_PUBLIC_URL
+    ? { connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } }
+    : process.env.DATABASE_URL;
+  if (!connection) throw new Error('Set DATABASE_PUBLIC_URL or DATABASE_URL to the intended database before running the dry run');
   const database = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
   try {
-    const execute = args.includes('--execute');
-    const result = value('revert') ? await revertBacklog(database, value('revert'), { execute })
-      : await sweepBacklog(database, { execute, staleDays: value('stale-days'), advisoryDays: value('advisory-days') });
-    console.log(`${execute ? 'EXECUTE' : 'DRY RUN'} ${JSON.stringify(result, null, 2)}`);
-    if (execute && !value('revert')) console.log(`Revert dry run: node ops/agents/triage-backlog-sweep.js --revert=${result.tag}`);
+    const result = options.revert ? await revertBacklog(database, options.revert, options) : await sweepBacklog(database, options);
+    console.log(`${options.execute ? 'EXECUTE' : 'DRY RUN'} ${JSON.stringify(result, null, 2)}`);
+    if (options.execute && !options.revert) console.log(`Revert dry run: node ops/agents/triage-backlog-sweep.js --revert=${result.tag}`);
   } finally { await database.destroy(); }
 }
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { sweepBacklog, revertBacklog, AUDIT_CUTOFF };
+module.exports = { sweepBacklog, revertBacklog, parseOptions, AUDIT_CUTOFF };

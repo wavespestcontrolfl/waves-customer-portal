@@ -2,7 +2,17 @@ const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { lockTriageCall } = require('../utils/triage-locks');
-const { sweepBacklog, revertBacklog, AUDIT_CUTOFF } = require('../../ops/agents/triage-backlog-sweep');
+const { sweepBacklog, revertBacklog, parseOptions, AUDIT_CUTOFF } = require('../../ops/agents/triage-backlog-sweep');
+
+describe('backlog command validation', () => {
+  test.each([['--execute', '--revert'], ['--execute', '--revert='], ['--execute', '--revert=invalid'], ['--execute', '--stale-days=oops'], ['--execute', '--unknown']])('rejects malformed command %j', (...args) => {
+    expect(() => parseOptions(args)).toThrow();
+  });
+  test('reversal requires a tag and defaults to dry run', () => {
+    expect(parseOptions(['--revert=triage-backlog-sweep-example'])).toMatchObject({ execute: false, revert: 'triage-backlog-sweep-example' });
+    expect(parseOptions(['--execute', '--revert', 'triage-backlog-sweep-example'])).toMatchObject({ execute: true, revert: 'triage-backlog-sweep-example' });
+  });
+});
 
 jest.setTimeout(60000);
 (SKIP ? describe.skip : describe)('historical backlog maintenance on PostgreSQL', () => {
@@ -16,6 +26,7 @@ jest.setTimeout(60000);
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
     for (const table of tables) await database.raw('CREATE TABLE ??.?? AS SELECT * FROM public.?? WITH NO DATA', [schema, table, table]);
+    await database.raw("CREATE UNIQUE INDEX triage_items_open_unique_idx ON ??.triage_items (call_log_id, reason_code) WHERE status IN ('open', 'in_progress')", [schema]);
     await database.raw("CREATE FUNCTION ??.reject_aggregate() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'synthetic aggregate failure'; END $$ LANGUAGE plpgsql", [schema]);
   });
   afterEach(async () => {
@@ -38,12 +49,17 @@ jest.setTimeout(60000);
 
   test('dry run reports eligible cards without changing cards or aggregates', async () => {
     const { card, call } = await fixture();
-    expect(await sweep()).toMatchObject({ dryRun: true, applied: 0, plannedByRule: { retired_flag: 1 } });
+    expect(await sweep()).toMatchObject({ dryRun: true, applied: 0, plannedByRule: { retired_flag: 1 },
+      plannedCards: [{ id: card.id, call_log_id: call.id, reason_code: card.reason_code, from: 'open', to: 'dismissed', rule: 'retired_flag' }],
+      plannedCalls: [{ id: call.id, from: 'open', to: 'dismissed' }],
+    });
     expect(await database('triage_items').where({ id: card.id }).first()).toMatchObject({ status: 'open', resolution_note: null });
     expect((await database('call_log').where({ id: call.id }).first()).review_status).toBe('open');
   });
   test.each([
     [{ reason: 'caller_not_authorized', relationship: 'tenant' }, false],
+    [{ reason: 'caller_not_authorized', relationship: 'tenant', booked: true }, false],
+    [{ reason: 'caller_not_authorized', relationship: 'spouse_partner', booked: true }, true],
     [{ reason: 'caller_not_authorized', relationship: 'spouse_partner' }, true],
     [{ reason: 'missing_unit_number', old: true, booked: true }, false],
     [{ status: 'in_progress', old: true }, false],
@@ -92,6 +108,7 @@ jest.setTimeout(60000);
     const { call, card } = await fixture();
     const sibling = { ...card, id: randomUUID(), reason_code: 'name_email_mismatch' };
     await database('triage_items').insert(sibling);
+    expect((await sweep()).plannedCalls).toEqual([]);
     const result = await whileCallLocked(call.id, () => sweep({ execute: true }), trx =>
       trx('triage_items').where({ id: sibling.id }).update({ status: 'in_progress' }));
     expect(result.applied).toBe(1);
@@ -100,7 +117,10 @@ jest.setTimeout(60000);
   test('revert is dry by default, idempotent, and cannot overwrite a later human resolution', async () => {
     const { call, card } = await fixture();
     await sweep({ execute: true });
-    expect((await revertBacklog(database, tag)).applied).toBe(0);
+    expect(await revertBacklog(database, tag)).toMatchObject({ applied: 0,
+      plannedCards: [{ id: card.id, call_log_id: call.id, reason_code: card.reason_code, from: 'dismissed', to: 'open', rule: 'revert_run_tag' }],
+      plannedCalls: [{ id: call.id, from: 'dismissed', to: 'open' }],
+    });
     const result = await whileCallLocked(call.id, () => revertBacklog(database, tag, { execute: true }), trx =>
       trx('triage_items').where({ id: card.id }).update({ status: 'resolved', resolution_source: 'human' }));
     expect(result.applied).toBe(0);
@@ -109,6 +129,21 @@ jest.setTimeout(60000);
     expect((await revertBacklog(database, tag, { execute: true })).applied).toBe(1);
     expect((await database('call_log').where({ id: second.call.id }).first()).review_status).toBe('open');
     expect((await revertBacklog(database, tag, { execute: true })).applied).toBe(0);
+  });
+  test.each(['open', 'in_progress'])('reversal skips a new %s recurrence under the call lock without aborting other calls', async status => {
+    const { call, card } = await fixture();
+    const second = await fixture();
+    await sweep({ execute: true });
+    const recurrence = { ...card, id: randomUUID(), status };
+    const result = await whileCallLocked(call.id, () => revertBacklog(database, tag, { execute: true }), async trx => {
+      await trx('triage_items').insert(recurrence);
+      await trx('call_log').where({ id: call.id }).update({ review_status: 'open' });
+    });
+    expect(result.applied).toBe(1);
+    expect((await database('triage_items').where({ id: card.id }).first()).status).toBe('dismissed');
+    expect((await database('triage_items').where({ id: recurrence.id }).first()).status).toBe(status);
+    expect((await database('triage_items').where({ id: second.card.id }).first()).status).toBe('open');
+    expect((await revertBacklog(database, tag)).plannedCards).toEqual([]);
   });
   test.each(['apply', 'revert'])('%s rolls back card transitions if aggregate synchronization fails', async operation => {
     const { card } = await fixture();
