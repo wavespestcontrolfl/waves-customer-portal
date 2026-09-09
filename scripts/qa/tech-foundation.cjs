@@ -55,6 +55,7 @@ async function main() {
         const state = { device, errors: [], consoleErrors: [], injectedFailures: [], photoRequests: [], unmatched: [], writes: [], geometry: [], passed: false };
         report.scenarios.push(state);
         const rows = structuredClone(services), photosByVisit = new Map(rows.map((service) => [service.id, []])), completed = new Map();
+        const marksByVisit = new Map(rows.map((service) => [service.id, {}]));
         let activeVisit = 'visit-a';
         let failPhoto = true, failCompletion = true, releasePhoto, releaseCompletion, marksEnabled = false, failPhotoList = false;
         const pendingPhoto = new Promise((resolve) => { releasePhoto = resolve; });
@@ -110,8 +111,12 @@ async function main() {
             return { response: { ok: true } };
           });
           routes.set(`GET ${photoPath}/photo-marks`, () => ({ response: {
-            supported: marksEnabled, kinds: [{ kind: 'foam_injection', label: 'Example treated point' }], defaultKind: 'foam_injection', marksByS3Key: {},
+            supported: marksEnabled, kinds: [{ kind: 'foam_injection', label: 'Example treated point' }], defaultKind: 'foam_injection', marksByS3Key: marksByVisit.get(service.id),
           } }));
+          routes.set(`PUT ${photoPath}/photo-marks`, (body) => {
+            marksByVisit.get(service.id)[body.s3Key] = structuredClone(body.marks);
+            return { response: { marks: body.marks } };
+          });
           routes.set(`GET ${photoPath}/photos`, () => failPhotoList
             ? { status: 503, response: { error: 'Example photo list unavailable.' } }
             : { response: { photos } });
@@ -129,8 +134,8 @@ async function main() {
           if (url.origin !== server.baseUrl || url.pathname.startsWith('/socket.io')) return route.abort();
           if (!url.pathname.startsWith('/api/')) return route.continue();
           const method = request.method(), endpoint = url.pathname;
-          const photoVisit = endpoint.match(/^\/api\/tech\/services\/([^/]+)\/photos$/)?.[1];
-          if (photoVisit) state.photoRequests.push({ method, visitId: photoVisit, expectedVisitId: activeVisit });
+          const photoVisit = endpoint.match(/^\/api\/tech\/services\/([^/]+)\/(?:photos|photo-marks)$/)?.[1];
+          if (photoVisit) state.photoRequests.push({ endpoint, method, visitId: photoVisit, expectedVisitId: activeVisit });
           const body = method === 'GET' ? null : request.headers()['content-type']?.includes('application/json') ? request.postDataJSON() : request.postData();
           if (method !== 'GET') state.writes.push({ endpoint, method, body });
           const handler = routes.get(`${method} ${endpoint}`);
@@ -147,7 +152,8 @@ async function main() {
           await waitForFonts(page);
           const file = path.join(output, `${device}-${name}.png`);
           await page.screenshot({ path: file });
-          report.screenshots.push(path.relative(root, file));
+          const relative = path.relative(root, file);
+          if (!report.screenshots.includes(relative)) report.screenshots.push(relative);
         }
         async function geometry(dialog, surface) {
           for (const [width, height] of [[390, 844], [700, 900], [820, 1180], [1024, 768], [1440, 1000], [844, 390]]) {
@@ -339,6 +345,24 @@ async function main() {
           await marks.waitFor({ state: 'detached' });
           assert.equal(await mark.evaluate((node) => node === document.activeElement), true);
           assert.equal(await photoDialog.count(), 1);
+          await mark.click();
+          await marks.getByRole('img', { name: 'Treated area', exact: true }).click();
+          await marks.getByText('1 mark', { exact: true }).waitFor();
+          await marks.getByRole('button', { name: 'Save marks', exact: true }).click();
+          await marks.waitFor({ state: 'detached' });
+          const markWrites = state.writes.filter((write) => write.endpoint.endsWith('/photo-marks'));
+          assert.equal(markWrites.length, 1);
+          assert.equal(markWrites[0].endpoint, '/api/tech/services/visit-a/photo-marks');
+          assert.equal(markWrites[0].method, 'PUT');
+          assert.equal(markWrites[0].body.s3Key, 'synthetic/after.jpg');
+          assert.equal(markWrites[0].body.marks.length, 1);
+          assert.equal(markWrites[0].body.marks[0].kind, 'foam_injection');
+          assert.ok(Math.abs(markWrites[0].body.marks[0].x - 0.5) < 0.01);
+          assert.ok(Math.abs(markWrites[0].body.marks[0].y - 0.5) < 0.01);
+          await mark.click();
+          await marks.getByText('1 mark', { exact: true }).waitFor();
+          await page.keyboard.press('Escape');
+          assert.deepEqual(marksByVisit.get('visit-b'), {}, 'The second visit must retain its separate empty marks');
           state.pendingCompletion = { width: pending.width, height: pending.height, duplicateSuppressed: true };
           const resourceError = 'Failed to load resource: the server responded with a status of 503 (Service Unavailable)';
           assert.deepEqual(state.consoleErrors.filter(({ text, url }) => text !== resourceError || !state.injectedFailures.includes(url)), []);
@@ -348,6 +372,7 @@ async function main() {
         }
         assert.deepEqual(state.errors, []);
         assert.deepEqual(state.unmatched, []);
+        assert.equal(report.screenshots.length, new Set(report.screenshots).size, 'Screenshot inventory must contain unique files');
         state.passed = true;
         console.log(`Tech workflow complete: ${device}`);
       } finally { await browser.close(); }
