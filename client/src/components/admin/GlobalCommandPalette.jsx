@@ -342,6 +342,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [dragY, setDragY] = useState(0);
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
+  const openerRef = useRef(null);
   const fileInputRef = useRef(null);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
@@ -364,15 +365,20 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
 
+  const rememberOpener = () => {
+    // Mode switches retain the trigger from before either dialog opened.
+    if (!open && !navigationOpen) openerRef.current = document.activeElement;
+  };
+
   useImperativeHandle(
     ref,
     () => ({
-      open: () => { setNavigationOpen(false); setOpen(true); },
-      openNavigation: () => { if (canFindPages) { setOpen(false); setNavigationOpen(true); } },
+      open: () => { rememberOpener(); setNavigationOpen(false); setOpen(true); },
+      openNavigation: () => { if (canFindPages) { rememberOpener(); setOpen(false); setNavigationOpen(true); } },
       close: () => { setNavigationOpen(false); setOpen(false); },
-      toggle: () => { setNavigationOpen(false); setOpen((v) => !v); },
+      toggle: () => { rememberOpener(); setNavigationOpen(false); setOpen((v) => !v); },
     }),
-    [canFindPages],
+    [canFindPages, open, navigationOpen],
   );
 
   // ⌘K / Ctrl+K listener
@@ -381,6 +387,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
+        rememberOpener();
         if (canFindPages) {
           setOpen(false);
           setNavigationOpen((prev) => !prev);
@@ -392,7 +399,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open, canFindPages]);
+  }, [open, canFindPages, navigationOpen]);
 
   // Focus input when opening + refresh recents
   useEffect(() => {
@@ -687,7 +694,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   };
 
   if (navigationOpen && canFindPages) return <AdminPageFinder onClose={() => setNavigationOpen(false)} onNavigate={onNavigate}
-    onAsk={() => { onNavigate?.(); setNavigationOpen(false); setOpen(true); }} />;
+    onAsk={() => { openerRef.current?.focus({ preventScroll: true }); onNavigate?.(); setNavigationOpen(false); setOpen(true); }} />;
   if (!open) return null;
 
   if (isMobile) {

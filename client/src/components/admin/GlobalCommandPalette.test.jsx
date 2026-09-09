@@ -106,16 +106,37 @@ describe('local page search', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  test('Ask Waves reopens the existing assistant without losing its unsent question', async () => {
+  test.each([false, true])('page finder hands its original opener to Ask Waves (mobile=%s)', async (mobile) => {
+    useIsMobile.mockReturnValue(mobile);
+    fixture();
+    const opener = screen.getByRole('button', { name: 'Open pages' });
+    opener.focus();
+    fireEvent.click(opener);
+    const ask = screen.getByRole('button', { name: 'Ask Waves' });
+    ask.focus();
+    await act(async () => fireEvent.click(ask));
+    expect(screen.getByPlaceholderText(/Ask anything/)).toBeVisible();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(opener).toHaveFocus();
+  });
+
+  test.each([false, true])('Ask Waves keeps its unsent question and original opener across modes (mobile=%s)', async (mobile) => {
+    useIsMobile.mockReturnValue(mobile);
     const view = fixture();
+    const opener = screen.getByRole('button', { name: 'Open pages' });
+    opener.focus();
     await act(async () => view.ref.current.open());
     fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: 'Unsent question' } });
     const callsBefore = fetch.mock.calls.length;
     act(() => view.ref.current.openNavigation());
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Recovery' } });
     expect(fetch).toHaveBeenCalledTimes(callsBefore);
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Ask Waves' })));
+    const ask = screen.getByRole('button', { name: 'Ask Waves' });
+    ask.focus();
+    await act(async () => fireEvent.click(ask));
     expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('Unsent question');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(opener).toHaveFocus();
   });
 
   test('the default-off flag preserves the assistant keyboard shortcut', async () => {

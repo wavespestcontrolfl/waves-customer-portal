@@ -40,6 +40,8 @@ same-page selections dismiss both search and an open mobile menu.
 
 Ask Waves opens the existing assistant and preserves its unsent question
 when switching between modes. It also closes the originating mobile menu.
+The palette retains the original focus target across mode switches, so
+closing the assistant returns to the control that opened page search.
 Closing the assistant returns focus to the persistent Open menu button when
 it was opened from that menu, directly or through page search.
 With the flag off, Cmd/Ctrl+K continues opening the assistant directly.

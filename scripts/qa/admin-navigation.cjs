@@ -117,10 +117,16 @@ async function main() {
     check('Search and pins make no assistant requests', assistantRequests() === requestsBeforeSearch);
     await desktop.keyboard.press('Escape');
     check('Search Escape restores its trigger', await desktop.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
+    await desktop.getByRole('button', { name: 'Search pages', exact: true }).click();
+    await finder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    await desktop.getByPlaceholder(/Ask anything/).waitFor();
+    await desktop.keyboard.press('Escape');
+    check('Desktop finder-to-assistant handoff restores the original search trigger', await desktop.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
     await desktop.reload();
     await desktop.getByRole('group', { name: 'Pinned pages' }).waitFor();
     check('Sidebar pins survive a reload', await desktop.getByRole('group', { name: 'Pinned pages' }).getByRole('link').count() === 3);
     await shot(desktop, 'desktop-pinned-sidebar-1440');
+    await desktop.getByRole('button', { name: 'Search pages', exact: true }).focus();
     await desktop.keyboard.press('Control+k');
     await finder.waitFor();
     await search.fill('no such page');
@@ -132,6 +138,7 @@ async function main() {
     await finder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
     check('Ask Waves keeps its unsent question across page search', await assistantInput.inputValue() === 'Unsent fixture question');
     await desktop.keyboard.press('Escape');
+    check('Repeated mode switches retain the original keyboard focus target', await desktop.getByRole('button', { name: 'Search pages', exact: true }).evaluate((el) => el === document.activeElement));
 
     for (const width of [700, 820, 1024, 1440]) {
       await desktop.setViewportSize({ width, height: 900 });
@@ -197,7 +204,13 @@ async function main() {
     await mobile.goto(`${server.baseUrl}/admin/more`);
     await mobile.getByRole('group', { name: 'Pinned pages' }).waitFor();
     check('Mobile Settings shares saved pinned pages', await mobile.getByRole('group', { name: 'Pinned pages' }).getByRole('link', { name: 'Inventory', exact: true }).isVisible());
-    await mobile.getByRole('button', { name: 'Search pages', exact: true }).first().click();
+    const mobileSearchTrigger = mobile.getByRole('button', { name: 'Search pages', exact: true }).first();
+    await mobileSearchTrigger.click();
+    await mobileFinder.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    await mobile.getByPlaceholder(/Ask anything/).waitFor();
+    await mobile.keyboard.press('Escape');
+    check('Mobile finder-to-assistant handoff restores the persistent search trigger', await mobileSearchTrigger.evaluate((el) => el === document.activeElement));
+    await mobileSearchTrigger.click();
     await mobileSearch.fill('Accounting');
     await mobile.evaluate(() => {
       Object.defineProperty(window.visualViewport, 'height', { configurable: true, value: 440 });
