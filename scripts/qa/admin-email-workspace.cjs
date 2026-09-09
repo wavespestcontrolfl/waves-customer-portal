@@ -216,6 +216,8 @@ async function main() {
           await page.getByText('Reply send was not confirmed. Your draft is still here.', { exact: true }).waitFor();
           assert.equal(await reply.inputValue(), 'Fixture reply with a clear recipient');
           await shot(page, `failed-reply-${width}`);
+          assert.equal(await send.isDisabled(), true, 'Unknown outcome must block another send');
+          await page.getByRole('button', { name: 'I checked Sent: it was not sent', exact: true }).click();
           state.fail.delete('/admin/email/send');
           state.sendHold = new Promise((resolve) => { state.releaseSend = resolve; });
           await send.click();
@@ -261,6 +263,18 @@ async function main() {
           await shot(page, `recovered-compose-${width}`);
           await geometry(page, `Compose ${width}`);
           if (width === 390) {
+            // Desktop engines expose zero env insets. Inject representative
+            // iPhone padding to verify the production panel's sizing rules.
+            const safeArea = await dialog.evaluate((node) => {
+              const original = [node.style.paddingTop, node.style.paddingBottom];
+              node.style.paddingTop = '59px'; node.style.paddingBottom = '34px';
+              const panel = node.getBoundingClientRect();
+              const footer = node.lastElementChild.getBoundingClientRect();
+              return { original, top: panel.top, bottom: panel.bottom, footerBottom: footer.bottom, viewport: innerHeight };
+            });
+            assert.ok(safeArea.top >= -1 && safeArea.bottom <= safeArea.viewport + 1 && safeArea.footerBottom <= safeArea.viewport - 33, 'Safe-area padding must keep the panel and footer inside the viewport');
+            await shot(page, 'compose-simulated-safe-area-390');
+            await dialog.evaluate((node, original) => { [node.style.paddingTop, node.style.paddingBottom] = original; }, safeArea.original);
             await page.setViewportSize({ width, height: 480 });
             await dialog.getByLabel('Message', { exact: false }).focus();
             await dialog.getByLabel('Message', { exact: false }).scrollIntoViewIfNeeded();

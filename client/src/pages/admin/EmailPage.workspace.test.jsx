@@ -44,7 +44,8 @@ beforeEach(() => {
     if (url.pathname.endsWith("/star")) return response({ is_starred: true });
     if (url.pathname.endsWith("/reclassify")) return response({ classification: { category: "customer_request" } });
     if (url.pathname.endsWith("/ai-draft")) return response({ reply_draft: "Fixture suggestion" });
-    if (/\/(send|archive|trash|block|blocked-a)$/.test(url.pathname)) return response({ success: true });
+    if (url.pathname.endsWith("/send")) return response({ success: true, messageId: "fixture-sent" });
+    if (/\/(archive|trash|block|blocked-a)$/.test(url.pathname)) return response({ success: true });
     if (url.pathname.includes("/message/")) return response(url.pathname.endsWith(a.id) ? a : b);
     if (url.pathname.endsWith("/customers")) return response({ customers: [] });
     throw new Error(`Unmatched fixture request ${options.method || "GET"} ${url.pathname}`);
@@ -234,6 +235,9 @@ describe("Email workspace feedback and request ownership", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
     await within(dialog).findByText("Email send was not confirmed. Your draft is still here.");
     expect(within(dialog).getByLabelText("Message *")).toHaveValue("Unconfirmed fixture email");
+    expect(within(dialog).getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+    expect(calls("/send")).toHaveLength(1);
+    fireEvent.click(within(dialog).getByRole("button", { name: "I checked Sent: it was not sent" }));
     overrides.delete("/api/admin/email/send");
     fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Email sent."));
@@ -319,12 +323,17 @@ describe("Email workspace feedback and request ownership", () => {
     fireEvent.click(send); await within(dialog).findByText(failure);
     fireEvent.change(message, { target: { value: "Revised draft" } });
     expect(screen.queryByText(failure)).not.toBeInTheDocument();
+    expect(send).toBeDisabled();
+    expect(calls("/send")).toHaveLength(1);
+    fireEvent.click(within(dialog).getByRole("button", { name: "I checked Sent: it was not sent" }));
     fireEvent.click(send); await within(dialog).findByText(failure);
     fireEvent.click(within(dialog).getByRole("button", { name: "Discard draft" }));
     expect(screen.queryByText(failure)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "New email" }));
     expect(screen.getByLabelText("Message *")).toHaveValue("");
     expect(screen.queryByText(failure)).not.toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "I checked Sent: it was not sent" })).toBeInTheDocument();
+    expect(calls("/send")).toHaveLength(2);
   });
 
 });

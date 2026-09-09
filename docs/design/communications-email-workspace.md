@@ -1,6 +1,6 @@
 # Communications Email workspace
 
-September 9, 2026. This lane applies the accepted workspace presentation to Email inside Communications and refines the inbox and conversation layout for desktop and phones. The release is divided into component, workspace, recovery and QA slices based on main revision `f818ab669`, including its email-body encoding fix.
+September 9, 2026. This lane applies the accepted workspace presentation to Email inside Communications and refines the inbox and conversation layout for desktop and phones. The release is divided into component, workspace, recovery and QA slices integrated with main revision `584447122`, including email-body encoding and persisted Gmail send-outcome safeguards.
 
 ## Existing contract captured before changes
 
@@ -23,7 +23,7 @@ Verification uses only the managed local frontend and synthetic intercepted APIs
 
 - Activity metrics and the digest remain above the inbox and expanded by default. Email row accessible names retain their sender, unread/draft status, category, time, subject and snippet.
 - Connection checks, inbox searches, blocked senders, linked messages and conversations expose loading and retryable failures separately from empty results. A failed refresh after returning to Email can be retried without losing the retained reply. HTTP-200 payload errors remain failures; failed activity/count reads show unavailable values.
-- Mail actions show inline outcomes and hold a pending-action lock. Rejected archive, trash, star, classification and blocking requests preserve the previous message, reply or entered address. Partial Gmail block warnings remain visible. Send cleanup requires the existing endpoint's success response; unconfirmed sends retain drafts. Opening, editing or discarding a compose draft clears its previous send feedback.
+- Mail actions show inline outcomes and hold a pending-action lock. Rejected archive, trash, star, classification and blocking requests preserve the previous message, reply or entered address. Partial Gmail block warnings remain visible. Send cleanup requires the existing endpoint's success response and Gmail message id. Unknown outcomes retain drafts and block another send until an explicit Sent-folder verdict; accepted outcomes remain protected if refresh or storage fails. Opening, editing or discarding a compose draft clears its transient feedback without releasing the persisted send guard.
 - A late read or send for an earlier email cannot supersede the selected conversation's request. Manual selection invalidates pending linked-message reads immediately, and mark-read failure feedback belongs to the selected message. Draft revisions protect edits made during pending sends and AI drafts; unusable AI responses report failure without replacing the draft.
 - Back to inbox returns to the original inbox history entry after row browsing, including a reload and browser Back/Forward. Direct-linked conversations replace their own entry when closed. The inbox count describes matching results even when an off-list linked message is pinned.
 - The composer remains mounted while hidden so pending Quick Links guide work survives. Its header action keeps a stable identity when its label changes from New email to Resume draft, allowing Escape to restore keyboard focus.
@@ -36,9 +36,9 @@ Verified with Node 20.20.2 on September 9, 2026:
 
 | Check | Result |
 | --- | --- |
-| Email draft/workspace/inbox, draft storage, body encoding, header and Quick Links Vitest suites | 97 tests passed, covering draft ownership, HTTP-200 API errors, partial Gmail block warnings, stale responses, compose feedback, channel-reactivation retries, duplicate-subject row identification and navigation history. |
-| `node scripts/qa/admin-email-workspace.cjs` | 23 scenarios passed; 37 screenshots; zero unmatched API requests and zero page errors. Chromium desktop/mobile/tablet widths and WebKit at 390px cover replies, compose recovery, Quick Links, focus return, retries, filters, attachments, sandboxed HTML, browser history, conversation scrolling, CSR exclusion, summary/list alignment with native browser styles and a UTC/Eastern date boundary. |
-| Screenshot inspection | Desktop at 1440px, mobile at 390px, WebKit, failed reply/partial data and contracted composer viewport reviewed. Visible controls meet the 44px target; buttons are at least 14px and inputs at least 16px. Physical iPhone notch/keyboard behavior was not tested. |
+| Email draft/workspace, draft storage, body encoding, header, Quick Links and Owed-tab Vitest suites | 116 tests passed, covering draft ownership, HTTP-200 API errors, partial Gmail block warnings, stale responses, compose feedback, channel-reactivation retries, duplicate-subject row identification and navigation history. |
+| `node scripts/qa/admin-email-workspace.cjs` | 23 scenarios passed; 38 screenshots; zero unmatched API requests and zero page errors. Chromium desktop/mobile/tablet widths and WebKit at 390px cover replies, compose recovery, Quick Links, focus return, retries, filters, attachments, sandboxed HTML, browser history, conversation scrolling, CSR exclusion, summary/list alignment with native browser styles and a UTC/Eastern date boundary. |
+| Screenshot inspection | Desktop at 1440px, mobile at 390px, WebKit, failed reply/partial data and contracted composer viewport reviewed. Visible controls meet the 44px target; buttons are at least 14px and inputs at least 16px. Injected 59px top/34px bottom safe-area padding keeps the composer panel and footer inside the viewport. Physical iPhone notch/keyboard behavior was not tested. |
 | `npm run build --workspace=client` | Passed. Portal-brand and IB coverage checks were also run directly. |
 | ESLint on the Email files and QA script | Passed without warnings. |
 | `npm run check:ib-coverage` | Passed with zero new/changed unmapped sites; existing unsupported/unverified capability rows remain recorded. |

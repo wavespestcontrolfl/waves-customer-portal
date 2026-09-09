@@ -28,7 +28,7 @@ const obligation = (quote, extra = {}) => ({
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
-const extracted = (obligations = [], facts = []) => ({ obligations, facts });
+const extracted = (obligations = [], facts = []) => ({ obligations, facts, additional_properties: [] });
 
 describe('SMS operational evidence and ownership', () => {
   test('keeps an inbound request before staff promises anything', () => {
@@ -228,7 +228,7 @@ describe('SMS operational evidence and ownership', () => {
   ])('unpunctuated and Unicode questions require review: %s', (quote) => {
     expect(groundExtraction(extracted([], [fact({ field: 'pet_details', quote, value: quote })]), {
       message: source(quote), properties,
-    })).toEqual({ obligations: [], facts: [], dropped: 1 });
+    })).toEqual({ obligations: [], facts: [], additional_properties: [], dropped: 1 });
   });
 
   test.each([
@@ -244,7 +244,7 @@ describe('SMS operational evidence and ownership', () => {
   ])('indirect questions cannot become durable access instructions: %s', (quote) => {
     expect(groundExtraction(extracted([], [fact({ field: 'access_notes', quote, value: quote })]), {
       message: source(quote), properties,
-    })).toEqual({ obligations: [], facts: [], dropped: 1 });
+    })).toEqual({ obligations: [], facts: [], additional_properties: [], dropped: 1 });
   });
 
   test.each([
@@ -254,7 +254,7 @@ describe('SMS operational evidence and ownership', () => {
   ])('explicit instructions and reported facts remain grounded: %s', (quote) => {
     const item = fact({ field: 'access_notes', quote, value: quote });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
-      .toEqual({ obligations: [], facts: [item], dropped: 0 });
+      .toEqual({ obligations: [], facts: [item], additional_properties: [], dropped: 0 });
   });
 
   test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A', 'same as last time', 'the usual',
@@ -262,7 +262,7 @@ describe('SMS operational evidence and ownership', () => {
     const quote = `Lockbox code is ${value}`;
     const item = fact({ field: 'lockbox_code', quote, value });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
-      .toEqual({ obligations: [], facts: [], dropped: 1 });
+      .toEqual({ obligations: [], facts: [], additional_properties: [], dropped: 1 });
     expect(factVerdict(item, { properties, senderIsPrimary: true })).toBe('code_uncertain');
   });
 
@@ -559,7 +559,7 @@ describe('SMS operational evidence and ownership', () => {
     const quote = `Lockbox code is ${value}`;
     const item = fact({ field: 'lockbox_code', quote, value });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
-      .toEqual({ obligations: [], facts: [], dropped: 1 });
+      .toEqual({ obligations: [], facts: [], additional_properties: [], dropped: 1 });
     expect(factVerdict(item, { properties, senderIsPrimary: true })).toBe('code_uncertain');
   });
 

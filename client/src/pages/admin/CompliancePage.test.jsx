@@ -129,3 +129,46 @@ describe('CompliancePage Staff authentication', () => {
     );
   });
 });
+
+// UI audit F0406: a failed dashboard load is an error with a retry, never a
+// perpetual "Loading dashboard…" and never a blank dashboard of dashes.
+describe('CompliancePage dashboard failure states', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('waves_admin_token', 'test-token');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('renders the error copy and a Retry control when the dashboard request returns 500', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes('/dashboard')) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderCompliance();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Couldn't load the dashboard — HTTP 500/);
+    expect(screen.queryByText('Loading dashboard…')).not.toBeInTheDocument();
+    const before = fetchMock.mock.calls.filter(([u]) => String(u).includes('/dashboard')).length;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => {
+      const after = fetchMock.mock.calls.filter(([u]) => String(u).includes('/dashboard')).length;
+      expect(after).toBe(before + 1);
+    });
+  });
+
+  it('renders the error copy when the dashboard request rejects (network)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/dashboard')) throw new Error('Failed to fetch');
+      return { ok: true, json: async () => ({}) };
+    }));
+    renderCompliance();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Failed to fetch/);
+    expect(screen.queryByText('Loading dashboard…')).not.toBeInTheDocument();
+  });
+});

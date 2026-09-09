@@ -1,6 +1,11 @@
 /** Canonical completion writes against a migrated, private nonproduction database. */
 jest.mock('../models/db', () => {
-  const db = (...args) => mockPg(...args);
+  const db = (table, ...args) => {
+    const query = mockPg(table, ...args);
+    // Isolate the notification recipient fixture from other seeded QA staff.
+    return table === 'technicians' && mockNotificationRecipientId
+      ? query.where({ id: mockNotificationRecipientId }) : query;
+  };
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
@@ -17,10 +22,20 @@ jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
     jest.requireActual('../services/stripe').assertNoInvoiceChargeReconciliationPending(...args),
 }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ suppressed: true })) }));
+jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async (_ids, _build, { beforeDispatch } = {}) => (
+  beforeDispatch && (await beforeDispatch()) === false ? { subscriptions: 1, sent: 0, superseded: true } : { sent: 1 })) }));
+jest.mock('../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })) }));
+jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => {}) }));
+jest.mock('../services/tree-shrub-assessment', () => ({
+  ...jest.requireActual('../services/tree-shrub-assessment'),
+  scoreAndStoreTreeShrubAssessment: jest.fn(async () => null),
+}));
+jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const { saveVisitCompletionPacket } = require('../services/visit-completion-packets');
+const { saveVisitCompletionPacket, runVisitCompletionPacketEffects, resumePendingVisitCompletions } = require('../services/visit-completion-packets');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const { etDateString } = require('../utils/datetime-et');
 const { stopBaseKey, dateOnly } = require('../services/visit-groups');
@@ -31,9 +46,11 @@ const { acquireScheduledInvoiceMintLock, mintScheduledServiceInvoiceWithDeposit 
 const { createVisitCompletionInvoice } = require('../services/visit-completion-invoice');
 const { collectVisitCompletionInvoice, assertVisitCompletionCharge } = require('../services/visit-completion-payment');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
+const originalPestRecap = process.env.PEST_RECAP;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
 let fixture;
+let mockNotificationRecipientId;
 jest.setTimeout(90000);
 
 function submission(overrides = {}) {
@@ -91,8 +108,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
   beforeEach(async () => {
+    mockNotificationRecipientId = null;
+    jest.restoreAllMocks();
     jest.clearAllMocks();
     chargeInvoiceWithSavedCard.mockReset();
+    require('../services/notification-triggers').triggerNotification.mockReset().mockResolvedValue({ suppressed: true });
     fixture = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), productId: randomUUID(),
       visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [] };
     const date = etDateString();
@@ -116,11 +136,15 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
   afterEach(async () => {
     if (!fixture) return;
+    jest.restoreAllMocks();
+    if (originalPestRecap === undefined) delete process.env.PEST_RECAP;
+    else process.env.PEST_RECAP = originalPestRecap;
     // Only the synthetic fixture's rows; the private database's seeded catalog
     // and migration data remain intact for later billing/UI verification.
     await mockPg('stripe_orphan_charges').where({ customer_id: fixture.customerId }).del();
     await mockPg('payment_plans').where({ customer_id: fixture.customerId }).del();
     await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
+    if (fixture.emailMessageId) await mockPg('email_messages').where({ id: fixture.emailMessageId }).del();
     if (fixture.estimateIds.length) {
       await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: null });
       await mockPg('estimate_deposits').whereIn('estimate_id', fixture.estimateIds).del();
@@ -130,9 +154,14 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
     await mockPg('turf_height_readings').where({ customer_id: fixture.customerId }).del();
     await mockPg('activity_log').where({ customer_id: fixture.customerId }).del();
+    await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds).del();
+    await mockPg('product_limits').where({ product_id: fixture.productId }).del();
     await mockPg('customers').where({ id: fixture.customerId }).del();
+    if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
     if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
     if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
+    await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
+    await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
     await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
@@ -156,6 +185,440 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('member recovery keeps forms, reports and operational records without collecting or delivering', async () => {
+    fixture.formTemplateId = randomUUID();
+    await mockPg('job_form_templates').insert({ id: fixture.formTemplateId,
+      service_type: 'Fixture General Pest Control', name: 'Fixture completion checklist',
+      sections: JSON.stringify([{ fields: [{ id: 'checked', required: true }] }]), is_active: true });
+    const input = submission();
+    for (const item of input.items) item.body.formResponses = { checked: true };
+    const saved = await saveVisitCompletionPacket(input);
+    expect(await mockPg('job_form_submissions').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    await Promise.all([runVisitCompletionPacketEffects(saved.body.packetId), runVisitCompletionPacketEffects(saved.body.packetId)]);
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+      status: 202, body: { state: 'member_effects_ready' },
+    });
+    const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => /^[a-f0-9]{32}$/.test(record.report_view_token))).toBe(true);
+    expect(await mockPg('activity_log').where({ customer_id: fixture.customerId, action: 'service_completed' })).toHaveLength(2);
+    expect((await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds))
+      .every((attempt) => attempt.status === 'succeeded')).toBe(true);
+    // Simulate losing the response after the canonical attempt succeeded.
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
+      scheduled_service_id: fixture.serviceIds[1] }).update({ status: 'processing' });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    expect(await mockPg('job_form_submissions').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    expect(await mockPg('activity_log').where({ customer_id: fixture.customerId, action: 'service_completed' })).toHaveLength(2);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(require('../services/customer-card').ensureCardForCompletion).not.toHaveBeenCalled();
+    expect(require('../services/referral-engine').creditReferralOnFirstService).not.toHaveBeenCalled();
+  });
+
+  test.each([true, false])('a visible report-token failure remains resumable with SMS requested=%s and no phone', async (sendSms) => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ phone: '' });
+    const input = submission();
+    for (const item of input.items) item.body.sendCompletionSms = sendSms;
+    const saved = await saveVisitCompletionPacket(input);
+    jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValueOnce(new Error('Synthetic token outage'));
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+      status: 202, body: { state: 'service_effects_pending', code: 'service_report_token_mint_failed' },
+    });
+    expect(await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
+      scheduled_service_id: fixture.serviceIds[0] }).first()).toMatchObject({ status: 'processing' });
+    expect(await mockPg('service_completion_attempts').where({ service_id: fixture.serviceIds[0] }).first())
+      .toMatchObject({ status: 'side_effects_pending' });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => /^[a-f0-9]{32}$/.test(record.report_view_token))).toBe(true);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an internal-only report does not block completion on token mint failure', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('service_records').where({ customer_id: fixture.customerId }).update({
+      structured_notes: mockPg.raw("structured_notes || ?::jsonb", [JSON.stringify({ typedReportDelivery: 'internal_only' })]),
+    });
+    jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValue(new Error('Synthetic token outage'));
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a newly rejected immutable photo caption creates one office exception and leaves the retry queue', async () => {
+    const input = submission();
+    // Packet photos must upload at save time (main #4011); the caption is
+    // what the deferred effects-phase screen rejects.
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    input.items[0].body.completionPhotos = [{ data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'fixture.png', caption: 'Fixture observation' }];
+    let saved;
+    try {
+      saved = await saveVisitCompletionPacket(input);
+    } finally {
+      config.s3.bucket = priorBucket;
+    }
+    const indicators = require('../services/service-report/activity-indicators');
+    const screen = indicators.findBannedCustomerCopy;
+    jest.spyOn(indicators, 'findBannedCustomerCopy').mockImplementation((value) =>
+      value === 'Fixture observation' ? ['synthetic_caption_rule'] : screen(value));
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+      status: 200, body: { state: 'office_required', code: 'photo_caption_banned_copy' },
+    });
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'failed' });
+    expect(await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
+      scheduled_service_id: fixture.serviceIds[0] }).first()).toMatchObject({ status: 'failed' });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('office_required');
+    await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).update({ updated_at: new Date(Date.now() - 120000) });
+    const attemptCount = (await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId })
+      .orderBy('scheduled_service_id')).map((item) => item.attempt_count);
+    await resumePendingVisitCompletions();
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId })
+      .orderBy('scheduled_service_id')).map((item) => item.attempt_count)).toEqual(attemptCount);
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review', job_id: fixture.serviceIds[0] })).toHaveLength(1);
+    expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(true);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('a packet whose members carry photo bytes still resumes through effects', async () => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const input = submission();
+    for (const item of input.items) item.body.completionPhotos = [{ data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'fixture.png', caption: 'Work area' }];
+    let saved;
+    try {
+      saved = await saveVisitCompletionPacket(input);
+    } finally {
+      config.s3.bucket = priorBucket;
+    }
+    // The saved form no longer holds bytes; the member attempt hash must match it.
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done')).toBe(true);
+    expect(await mockPg('service_photos').whereIn('service_record_id', saved.body.items.map((item) => item.serviceRecordId)))
+      .toHaveLength(2);
+    // The replay never re-uploads the byte-less form; the pre-commit counts stay frozen.
+    const records = await mockPg('service_records').whereIn('id', saved.body.items.map((item) => item.serviceRecordId));
+    expect(records.map((record) => record.structured_notes.completionPhotos)).toEqual([
+      expect.objectContaining({ uploaded: 1, failed: 0 }), expect.objectContaining({ uploaded: 1, failed: 0 }),
+    ]);
+  });
+
+  test('an interrupted first effects claim still writes its operational activity', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
+      scheduled_service_id: fixture.serviceIds[0] }).update({ attempt_count: 2 });
+    await mockPg('service_completion_attempts').where({ service_id: fixture.serviceIds[0] }).update({
+      status: 'side_effects_running', updated_at: new Date(Date.now() - 2 * require('../services/completion-attempts').STALE_SIDE_EFFECTS_MS),
+    });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('activity_log').where({ customer_id: fixture.customerId, action: 'service_completed' })).toHaveLength(2);
+    expect(require('../services/notification-triggers').triggerNotification).toHaveBeenCalledWith('job_complete',
+      expect.objectContaining({ serviceId: fixture.serviceIds[0], customerId: fixture.customerId }),
+      expect.objectContaining({ dedupeKey: expect.any(String) }));
+  });
+
+  test('a database failure reloading a claimed saved record remains resumable', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const recordId = saved.body.items.find((item) => item.serviceId === fixture.serviceIds[0]).serviceRecordId;
+    const execute = mockPg.client._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client, '_query').mockImplementation(function failRecordReload(connection, query) {
+      if (!interrupted && query.sql.startsWith('select * from "service_records" where "id" =')
+          && query.bindings.includes(recordId)) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic record reload outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('Synthetic record reload outage');
+    expect(interrupted).toBe(true);
+    expect(await mockPg('service_completion_attempts').where({ service_id: fixture.serviceIds[0] }).first())
+      .toMatchObject({ status: 'side_effects_pending' });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+  });
+
+  test('member recovery does not enqueue individually approvable pest recap sends', async () => {
+    process.env.PEST_RECAP = 'true';
+    const enqueue = jest.spyOn(require('../services/service-report/recap-pipeline'), 'enqueueRecap').mockResolvedValue({ queued: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await mockPg('service_records').where({ customer_id: fixture.customerId })).every((record) => record.service_line === 'pest')).toBe(true);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('backfilled packet recovery stays quiet when report tokens are unavailable', async () => {
+    const date = etDateString(new Date(Date.now() - 86400000));
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ scheduled_date: date,
+      stop_base_key: stopBaseKey({ customerId: fixture.customerId, scheduledDate: date }) });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ scheduled_date: date });
+    const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+    for (const item of input.items) item.body.backfill = true;
+    const saved = await saveVisitCompletionPacket(input);
+    jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValue(new Error('Synthetic token outage'));
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(require('../services/customer-card').ensureCardForCompletion).not.toHaveBeenCalled();
+    expect(require('../services/referral-engine').creditReferralOnFirstService).not.toHaveBeenCalled();
+  });
+
+  test.each([true, false])('interruption after an admin notification does not duplicate activity or push (bell=%s)', async (bell) => {
+    mockNotificationRecipientId = fixture.techId;
+    await mockPg('notification_preferences').insert({ admin_user_id: fixture.techId, trigger_key: 'job_complete',
+      bell_enabled: bell, push_enabled: true, sound_enabled: false });
+    jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(false);
+    require('../services/notification-triggers').triggerNotification.mockImplementation(
+      jest.requireActual('../services/notification-triggers').triggerNotification);
+    const saved = await saveVisitCompletionPacket(submission());
+    jest.spyOn(require('../services/completion-attempts'), 'markCompletionAttemptSucceeded')
+      .mockRejectedValueOnce(new Error('Synthetic interruption after notification'));
+    await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('Synthetic interruption');
+    const pushSends = async () => (await Promise.all(require('../services/push-notifications').sendToAdminUsers.mock.results
+      .map((call) => call.value))).map((result) => result.sent);
+    expect(await pushSends()).toEqual([1]);
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    // The interrupted member's push was already claimed: the provider is
+    // consulted again but refuses at the post-lookup claim, so nothing
+    // buzzes twice.
+    expect(await pushSends()).toEqual([1, 0, 1]);
+    expect(await mockPg('activity_log').where({ customer_id: fixture.customerId, action: 'service_completed' })).toHaveLength(2);
+    expect(await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds))
+      .toHaveLength(bell ? 2 : 0);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.notification_push_started_at)).toBe(true);
+  });
+
+  test('a profile cut over to a project flow after the records commit still resumes the saved members', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('service_completion_profiles').insert({ service_key: `fixture_${fixture.catalogId}`,
+      service_name_snapshot: 'Fixture General Pest Control', completion_mode: 'project_required',
+      project_type: 'fixture_project', active: true });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done')).toBe(true);
+    // A fresh single-service completion of a project-backed profile is still refused.
+    const [serviceId] = fixture.serviceIds;
+    await mockPg('service_completion_attempts').where({ service_id: serviceId }).del();
+    await mockPg('service_records').where({ scheduled_service_id: serviceId }).del();
+    await mockPg('scheduled_services').where({ id: serviceId }).update({ visit_id: null, status: 'on_site' });
+    expect((await completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
+      body: submission().items[0].body, actor: { techRole: 'technician', technicianId: fixture.techId } })).body.code)
+      .toBe('project_required_completion');
+  });
+
+  test.each([
+    ['a treatment whose profile cuts over to internal_only', false],
+    ['a consultation whose profile cuts back to a treatment', true],
+  ])('%s replays its effects from the frozen internal-only decision', async (_label, frozenInternalOnly) => {
+    const profile = { service_key: `fixture_${fixture.catalogId}`,
+      service_name_snapshot: 'Fixture General Pest Control', completion_mode: 'internal_only', active: true };
+    if (frozenInternalOnly) await mockPg('service_completion_profiles').insert(profile);
+    const saved = await saveVisitCompletionPacket(submission());
+    const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
+    expect(records).toHaveLength(2);
+    expect(records.every((record) => record.structured_notes.internalOnlyCompletion === frozenInternalOnly)).toBe(true);
+    if (frozenInternalOnly) await mockPg('service_completion_profiles').where({ service_key: profile.service_key }).del();
+    else await mockPg('service_completion_profiles').insert(profile);
+    const supplies = jest.spyOn(require('../services/supplies-consumption'), 'consumeCompletionSupplies').mockResolvedValue(undefined);
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(supplies).toHaveBeenCalledTimes(2);
+    expect(supplies.mock.calls.every(([, args]) => args.isInternalOnlyCompletion === frozenInternalOnly)).toBe(true);
+  });
+
+  test('a specialty lane cut over after the records commit does not re-judge the committed observations', async () => {
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'Bed Bug Treatment' });
+    await mockPg('services').where({ id: fixture.catalogId }).update({ service_key: 'bed_bug' });
+    const input = submission();
+    for (const item of input.items) item.body.structuredObservations = ['Initial inspection'];
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+    // The catalog key now resolves to no specialty lane: the same observation
+    // would be refused at intake, but these records are committed.
+    await mockPg('services').where({ id: fixture.catalogId }).update({ service_key: `fixture_${fixture.catalogId}` });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+  });
+
+  test('a member another runner finished first is accepted instead of failing the packet', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const completion = require('../services/complete-scheduled-service');
+    const real = completion.completeScheduledService;
+    let raced = false;
+    jest.spyOn(completion, 'completeScheduledService').mockImplementation(async (input, context) => {
+      if (!raced && context?.phase === 'effects') {
+        raced = true;
+        // The sweep read this item as processing; a Resume tap finished it first.
+        await mockPg('visit_completion_packet_items').where({ id: context.itemId })
+          .update({ status: 'done', completed_at: mockPg.fn.now() });
+      }
+      return real(input, context);
+    });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(raced).toBe(true);
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done')).toBe(true);
+  });
+
+  test('a Tree & Shrub member scores its assessment from the durable photos on replay', async () => {
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'Tree & Shrub Care' });
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const input = submission();
+    for (const item of input.items) {
+      item.body.completionPhotos = [
+        { data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'one.png', caption: 'Front bed' },
+        { data: 'data:image/png;base64,c2Vjb25k', name: 'two.png', caption: 'Palms' },
+      ];
+      item.body.treeShrubCompletion = { ordinanceZone: 'sarasota_venice', bedSqft: 2400, palmCount: 3, palmRootZoneSqft: 600,
+        plantInventory: 'Palms, ixora, hibiscus', pollinatorStatus: 'no_blooms_or_no_bees', targetPestOrDisease: 'Scale crawlers',
+        pestLifeStage: 'crawler', iracFracLogged: true, snapshotAppliedYtd: 2, fertilizerAppliedYtd: 'January palm fert',
+        customerNote: 'Beds treated and palms inspected.' };
+    }
+    const score = require('../services/tree-shrub-assessment').scoreAndStoreTreeShrubAssessment;
+    score.mockReset().mockResolvedValue({ id: randomUUID() });
+    const stored = jest.spyOn(require('../services/photos'), 'getPhotoBase64').mockResolvedValue({ data: 'Zml4dHVyZQ==', mimeType: 'image/png' });
+    let saved;
+    try {
+      saved = await saveVisitCompletionPacket(input);
+      expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+      expect(score).not.toHaveBeenCalled();
+      expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    } finally {
+      config.s3.bucket = priorBucket;
+    }
+    expect(score).toHaveBeenCalledTimes(2);
+    for (const [call] of score.mock.calls) {
+      expect(call.photos.map((photo) => photo.caption)).toEqual(['Front bed', 'Palms']);
+      expect(call.photos.every((photo) => photo.s3Key && !photo.data)).toBe(true);
+      expect(await call.loadImage(call.photos[0])).toEqual({ base64: 'Zml4dHVyZQ==', mimeType: 'image/png' });
+    }
+    expect(stored).toHaveBeenCalledWith(score.mock.calls[0][0].photos[0].s3Key);
+  });
+
+  test('a push subscription lookup outage keeps the member retryable and the push unclaimed', async () => {
+    mockNotificationRecipientId = fixture.techId;
+    await mockPg('notification_preferences').insert({ admin_user_id: fixture.techId, trigger_key: 'job_complete',
+      bell_enabled: false, push_enabled: true, sound_enabled: false });
+    await mockPg('push_subscriptions').insert({ admin_user_id: fixture.techId, role: 'technician', platform: 'web',
+      subscription_data: JSON.stringify({ endpoint: 'https://push.invalid/fixture', keys: {} }), staff_token_version: 1, active: true });
+    jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(false);
+    require('../services/notification-triggers').triggerNotification.mockImplementation(
+      jest.requireActual('../services/notification-triggers').triggerNotification);
+    require('../services/push-notifications').sendToAdminUsers.mockImplementation((...args) => (
+      jest.requireActual('../services/push-notifications').sendToAdminUsers(...args)));
+    const saved = await saveVisitCompletionPacket(submission());
+    const execute = mockPg.client._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client, '_query').mockImplementation(function failSubscriptionLookup(connection, query) {
+      if (!interrupted && query.sql.includes('from "push_subscriptions"')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic subscription lookup outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('remains pending');
+    expect(interrupted).toBe(true);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'processing' && !item.notification_push_started_at)).toBe(true);
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done' && item.notification_push_started_at)).toBe(true);
+  });
+
+  test('inspection-credit receipts and recovery recognize a non-anchor billed member', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoice = await mockPg('invoices').where({ customer_id: fixture.customerId }).first();
+    const member = fixture.serviceIds.find((id) => id !== invoice.scheduled_service_id);
+    const offerId = randomUUID();
+    const recordedAt = new Date(Date.now() - 11 * 60 * 1000);
+    await mockPg('inspection_credit_offers').insert({ id: offerId, customer_id: fixture.customerId,
+      source_scheduled_service_id: member,
+      source_service_record_id: saved.body.items.find((item) => item.serviceId === member).serviceRecordId,
+      amount: 75, status: 'offered', expires_at: new Date(Date.now() + 7 * 86400000),
+      created_at: recordedAt, updated_at: recordedAt });
+    const invoiceEmail = require('../services/invoice-email');
+    const inspection = require('../services/inspection-credit');
+    expect(await invoiceEmail.inspectionCreditMemoForInvoice(invoice)).toContain('$75.00 service credit');
+    const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: randomUUID() });
+    let observe;
+    try {
+      await new Promise((resolve) => {
+        observe = (_rows, query) => {
+          if (query.sql.includes('"status" not in') && query.sql.includes('from "invoices"')
+              && query.bindings.includes(member)) resolve();
+        };
+        mockPg.on('query-response', observe);
+        inspection.queueCreditReceiptResend({ scheduledServiceId: member, offerId, attempt: 1 });
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(notify).not.toHaveBeenCalled();
+    } finally { mockPg.removeListener('query-response', observe); }
+    await mockPg('invoices').where({ id: invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    let deliver;
+    const receipt = new Promise((resolve) => { deliver = resolve; });
+    const sendReceipt = jest.spyOn(invoiceEmail, 'sendReceiptEmail').mockImplementation(async (...args) => {
+      deliver(args);
+      return { ok: true };
+    });
+    inspection.queueCreditReceiptResend({ scheduledServiceId: member, offerId, attempt: 1 });
+    expect(await receipt).toEqual([invoice.id, { idempotencyKey: `inspection-credit-offer-${offerId}` }]);
+    fixture.emailMessageId = randomUUID();
+    await mockPg('email_messages').insert({ id: fixture.emailMessageId,
+      recipient_email_snapshot: `${fixture.customerId}@example.invalid`, recipient_id: fixture.customerId,
+      status: 'sent', trigger_event_id: `invoice_receipt:${invoice.id}`, sent_at: new Date() });
+    sendReceipt.mockClear();
+    const sweepReads = [];
+    const onResult = (rows, query) => {
+      if (query.sql.includes('"o"."source_scheduled_service_id" as "visit_id"')) sweepReads.push(rows);
+    };
+    mockPg.on('query-response', onResult);
+    try {
+      expect(await inspection.sweepInspectionCreditRedemptions()).not.toHaveProperty('error');
+      expect(sweepReads).toHaveLength(2);
+      expect(sweepReads.flat()).toEqual([]);
+      expect(sendReceipt).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+    } finally { mockPg.removeListener('query-response', onResult); }
+  });
+
+  test('MOA alerts are persisted once when report-token recovery reruns the member', async () => {
+    await mockPg('products_catalog').where({ id: fixture.productId }).update({ moa_group: 'fixture_moa' });
+    await mockPg('product_limits').insert({ product_id: fixture.productId, limit_type: 'moa_rotation_max',
+      limit_value: 0, severity: 'warning' });
+    const input = submission();
+    for (const item of input.items) item.body.products = [{ productId: fixture.productId, totalAmount: 1, amountUnit: 'oz',
+      applicationMethod: 'bait_placement', areaValue: 1000, areaUnit: 'sqft' }];
+    const saved = await saveVisitCompletionPacket(input);
+    jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValueOnce(new Error('Synthetic token outage'));
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('service_effects_pending');
+    expect(await mockPg('dispatch_alerts').where({ type: 'moa_violation', job_id: fixture.serviceIds[0] })).toHaveLength(1);
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('dispatch_alerts').where({ type: 'moa_violation' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(2);
+    expect(Number((await mockPg('products_catalog').where({ id: fixture.productId }).first()).inventory_on_hand)).toBe(8);
   });
 
   test.each(['per_application', 'monthly_membership', 'annual_prepay'])('%s recap-only records need no invoice or billing hold', async (billingMode) => {
@@ -311,13 +774,16 @@ postgres('visit completion packet records on PostgreSQL', () => {
       processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_visit',
       is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
     await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    let providerSubmissions = 0;
     chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, selectedMethod, options) => {
       expect(selectedMethod).toBe(methodId);
       expect(options).toMatchObject({ requireAutopayForCustomerId: fixture.customerId, refuseWhenDunningStopped: true });
       await mockPg.transaction(async (trx) => {
         const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        require('../services/invoice-helpers').assertInvoiceCollectible(invoice.status);
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first();
         await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        providerSubmissions += 1;
         await trx('invoices').where({ id: invoiceId }).update({ status: 'paid', stripe_payment_intent_id: 'pi_fixture_visit' });
       });
     });
@@ -325,7 +791,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
     await Promise.all([collectVisitCompletionInvoice(saved.body.packetId), collectVisitCompletionInvoice(saved.body.packetId)]);
     expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'paid' });
-    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    // Another collection's stop claim can refuse the first invocation before
+    // submission. A retry may enter the rail again, but money moves only once.
+    expect(providerSubmissions).toBe(1);
     await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds).update({ status: 'succeeded' });
     const status = await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg });
     expect(status.facts.invoice).toMatchObject({ state: 'done', invoiceId: saved.body.billing.invoiceId, status: 'paid' });
