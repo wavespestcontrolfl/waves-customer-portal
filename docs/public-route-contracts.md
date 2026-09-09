@@ -406,7 +406,11 @@ and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
 requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
 sweep flips never-sent drafts to 'expired' too, and those must never
 qualify) that is past expires_at or sweep-expired, not
-accepted/declined/archived. Concurrency: the 24h dedupe stamp and the
+accepted/declined/archived. Fixed-validity bids and groups containing a
+fixed-validity sibling that an extension would revive are ineligible before
+any claim: both the POST and the expired `/data` response use generic 404
+without the extension-offer bit. Admin extensions refuse the whole group
+before changing any expiry. Concurrency: the 24h dedupe stamp and the
 lifetime auto-grant burn live in DEDICATED estimates columns
 (`extension_requested_at` / `extension_auto_granted_at`, migration
 20260711000001 — never estimate_data, whose full-blob writers could erase

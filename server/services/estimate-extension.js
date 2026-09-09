@@ -133,10 +133,25 @@ async function extensionDeliverableUnderGate(database, estimate) {
   return (Array.isArray(revivable) ? revivable : []).every((sibling) => rowPassesGatedSendAuthority(sibling));
 }
 
+// A group is one quoted offer: never extend its ordinary rows while leaving
+// a fixed-date property behind. The public offer and POST use this same
+// preflight before claiming a grant; a failed sibling read also blocks it.
+async function fixedBidBlocksExtension(database, estimate) {
+  const { hasFixedBidValidity } = require('./proposal-bid');
+  if (hasFixedBidValidity(estimate)) return true;
+  if (!estimate?.estimate_group_id) return false;
+  try {
+    const siblings = await revivableSiblingsQuery(database, estimate).select('estimate_data');
+    return siblings.some(hasFixedBidValidity);
+  } catch { return true; }
+}
+
 async function extendEstimate({ estimate, days, silent = false, entryPoint, workflow, smsMetadata = {} }) {
   if (!estimate || !estimate.id) throw validationError('Estimate not found');
-  if (require('./proposal-bid').hasFixedBidValidity(estimate)) {
-    throw validationError('This bid has a fixed validity date. Contact the office to revise the proposal.');
+  if (await fixedBidBlocksExtension(db, estimate)) {
+    const err = validationError('This bid or a grouped property has a fixed validity date. Contact the office to revise the proposal.');
+    err.code = 'FIXED_BID_VALIDITY';
+    throw err;
   }
   // Engine-authoritative pricing gate (#3750, GH codex P1 r14 / uncapped
   // P0 r17 + r20): an extension revives the token — the price becomes
@@ -504,6 +519,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
 }
 
 module.exports = {
+  fixedBidBlocksExtension,
   extensionDeliverableUnderGate,
   extendEstimate,
   computeExtensionExpiry,

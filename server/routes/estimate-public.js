@@ -15817,7 +15817,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
-    if (!estimate || !isEstimateExtensionRequestEligible(estimate)) {
+    if (!estimate || !isEstimateExtensionRequestEligible(estimate)
+      || await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
@@ -15899,6 +15900,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
             ? { extension_requested_at: null, extension_auto_granted_at: null }
             : { extension_requested_at: null },
         ).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
+        if (err.code === 'FIXED_BID_VALIDITY') return res.status(404).json({ error: 'Estimate not found' });
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }
@@ -18094,6 +18096,7 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  if (require('../services/proposal-bid').hasFixedBidValidity(estimate)) return false;
   // plan_restart quotes never self-extend (codex GH #3671 r9 P1): the C4
   // ruling requires every restart price to be a CURRENT recompute — the
   // customer's path back is the Restart button, which re-prices; an
@@ -24943,7 +24946,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // real-but-ineligible tokens (drafts, archived, send_failed) from
       // unknown ones and break the generic-404 contract.
       if (featureGates.isEnabled('estimateExtensionRequest')
-        && isEstimateExtensionRequestEligible(estimate)) {
+        && isEstimateExtensionRequestEligible(estimate)
+        && !(await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
       }
       return res.status(404).json({ error: 'Estimate not found' });
