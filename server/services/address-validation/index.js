@@ -173,11 +173,11 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
     const data = await res.json();
     const county = await reverseGeocodeCounty(data.result?.geocode?.location, key);
     const out = deriveStatus(data.result, county);
-    // An in-area correction cannot authorize dispatch after changing the
-    // caller's explicit state. A hard area verdict also keeps street
-    // recovery from proposing another Florida premise after state loss.
-    if (statedState && [STATUSES.VALIDATED_ACCEPT, STATUSES.CORRECTED].includes(out.status)
-      && normalizeState(out.normalized?.state) !== statedState) {
+    // Explicit non-Florida geography stays outside the service area even
+    // when AV is incomplete. Recovery may receive a flat extraction that
+    // lost the state, so no recoverable verdict may authorize that retry.
+    const providerState = normalizeState(out.normalized?.state);
+    if (statedState && (statedState !== SERVICE_STATE || (providerState && providerState !== statedState))) {
       out.status = STATUSES.OUT_OF_SERVICE_AREA;
       out.inServiceArea = false;
     }

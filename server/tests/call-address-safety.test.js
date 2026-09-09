@@ -1,6 +1,7 @@
 const { canAutoRoute, statesNewAddress, dispatchesToOnFileAddress } = require('../services/call-triage-flags');
 const { buildAddressLines, validateAddress } = require('../services/address-validation');
 const { recoverStreetAddress } = require('../services/address-validation/recovery');
+const { parseRawAddress } = require('../utils/address-normalizer');
 
 const ANI = '+19415550100';
 const v2 = (over = {}) => ({
@@ -18,15 +19,17 @@ describe('stated geography takes precedence over a service-area hint', () => {
   const originalFetch = global.fetch;
   const originalEnabled = process.env.ADDRESS_VALIDATION_ENABLED;
   const originalKey = process.env.GOOGLE_ADDRESS_VALIDATION_API_KEY;
+  let providerResult;
   beforeEach(() => {
     process.env.ADDRESS_VALIDATION_ENABLED = 'true';
     process.env.GOOGLE_ADDRESS_VALIDATION_API_KEY = 'synthetic-test-key';
+    providerResult = {
+      verdict: { addressComplete: true, validationGranularity: 'PREMISE', hasReplacedComponents: true },
+      address: { addressComponents: [{ componentType: 'administrative_area_level_1', componentName: { text: 'FL' } }] },
+      geocode: { location: { latitude: 27, longitude: -82 } },
+    };
     global.fetch = jest.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ result: {
-        verdict: { addressComplete: true, validationGranularity: 'PREMISE', hasReplacedComponents: true },
-        address: { addressComponents: [{ componentType: 'administrative_area_level_1', componentName: { text: 'FL' } }] },
-        geocode: { location: { latitude: 27, longitude: -82 } },
-      } }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ result: providerResult }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ results: [{ address_components: [{ types: ['administrative_area_level_2'], long_name: 'Manatee County' }] }] }) });
   });
   afterEach(() => {
@@ -54,6 +57,45 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('FL');
     expect(av.status).toBe('corrected');
   });
+  test.each([
+    ['ambiguous', { addressComplete: false }, 'FL'],
+    ['missing component', { validationGranularity: 'ROUTE' }, 'FL'],
+    ['unconfirmed', { hasUnconfirmedComponents: true }, 'FL'],
+    ['missing provider state', { addressComplete: false }, null],
+    ['matching non-Florida state', { addressComplete: false }, 'SC'],
+  ])('explicit non-Florida geography cannot enter recovery after %s', async (_label, verdict, providerState) => {
+    Object.assign(providerResult.verdict, verdict);
+    providerResult.address.addressComponents = providerState
+      ? [{ componentType: 'administrative_area_level_1', componentName: { text: providerState } }] : [];
+    const sa = { street_line_1: '100 Example Street', city: 'Greenville', state: null, raw_text: '100 Example Street, Greenville, South Carolina' };
+    const av = await validateAddress({ addressLines: buildAddressLines(sa), administrativeArea: 'FL' });
+    expect(av).toMatchObject({ status: 'out_of_service_area', inServiceArea: false });
+    const deps = { autocomplete: jest.fn().mockResolvedValue([]), phonetic: jest.fn().mockResolvedValue([]), validate: jest.fn() };
+    expect((await recoverStreetAddress({ avStatus: av.status, extracted: { address_line1: '100 Example Street', city: 'Parrish', state: null }, deps })).attempted).toBe(false);
+    expect(deps.autocomplete).not.toHaveBeenCalled();
+    expect(canAutoRoute(v2({ property: { service_address: sa } }), { contactPhone: ANI, addressValidation: av }).allowed).toBe(false);
+  });
+  test.each(['123 Main St NE', '123 Main Ct'])('a bare street token is not an explicit state: %s', async street => {
+    const sa = { street_line_1: street, city: 'Bradenton', state: 'FL', raw_text: street };
+    expect(parseRawAddress(street)).toMatchObject({ line1: street, city: '', state: '' });
+    expect(buildAddressLines(sa)).toEqual([street, 'Bradenton FL']);
+    await validateAddress({ addressLines: [street], administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('FL');
+    expect(statesNewAddress(v2({ property: { service_address: sa } }), { hasAddress: true, addressLine1: street, addressCity: 'Bradenton' })).toBe(false);
+  });
+  test.each(['123 Main Street, Lincoln NE', '123 Main Street Lincoln NE'])('a state in a locality tail remains explicit: %s', async raw_text => {
+    const lines = buildAddressLines({ street_line_1: '123 Main Street', city: 'Lincoln', state: 'FL', raw_text });
+    expect(lines).toEqual(['123 Main Street', 'Lincoln NE']);
+    const av = await validateAddress({ addressLines: lines, administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('NE');
+    expect(av.status).toBe('out_of_service_area');
+  });
+  test('an incomplete Florida result without a provider state can still recover', async () => {
+    providerResult.verdict.addressComplete = false;
+    providerResult.address.addressComponents = [];
+    const av = await validateAddress({ addressLines: ['123 Main Street', 'Bradenton FL'] });
+    expect(av.status).toBe('ambiguous');
+  });
   test('the shared validator stays unpinned when no hint or state was supplied', async () => {
     await validateAddress({ addressLines: ['100 Example Street', 'Greenville'] });
     expect(JSON.parse(global.fetch.mock.calls[0][1].body).address).not.toHaveProperty('administrativeArea');
@@ -69,6 +111,22 @@ describe('stated geography takes precedence over a service-area hint', () => {
 
 describe('every stated address component preserves the saved property identity', () => {
   const saved = { hasAddress: true, addressLine1: '500 Sample Tower Blvd', addressCity: 'Sarasota', addressZip: '34240' };
+  test.each([
+    { street_line_1: saved.addressLine1 },
+    { raw_text: saved.addressLine1 },
+    { street_line_1: saved.addressLine1, city: saved.addressCity },
+  ])('a building restatement without the saved unit stays in review: %j', service_address => {
+    const knownCustomer = { ...saved, addressLine2: 'Apt 4B' };
+    const ex = v2({ property: { service_address }, triage_flags: ['address_unverified'] });
+    expect(statesNewAddress(ex, knownCustomer)).toBe(true);
+    expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer })).toBe(false);
+    expect(canAutoRoute(ex, { contactPhone: ANI, failOpen: true, knownCustomer,
+      addressValidation: { status: 'ambiguous', inServiceArea: true, granularity: 'PREMISE', missingComponents: ['subpremise'] } }).allowed).toBe(false);
+  });
+  test('a locality-only restatement still uses the complete saved address', () => {
+    const ex = v2({ property: { service_address: { city: saved.addressCity } } });
+    expect(statesNewAddress(ex, { ...saved, addressLine2: 'Apt 4B' })).toBe(false);
+  });
   test.each([
     [{ unit: 'Apt 45' }, { addressLine2: 'Bldg 4 Apt 5' }],
     ...['Bldg 9', 'Building 9', 'Floor 2', 'Lot 7', 'Space 3'].map(unit => [{ raw_text: `500 Sample Tower Blvd ${unit}` }, {}]),

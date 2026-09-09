@@ -1592,6 +1592,9 @@ function restatesOnFileAddress(sa, knownCustomer) {
   const tailAgrees = [!rawCity, rawCity === savedCity, cityIsUnit].some(Boolean);
   const streets = structured.map(part => part.street);
   if (raw && !rawIsLocality && !acknowledgment) streets.push(tailAgrees ? splitStreetLineUnit(parsed.line1).street : rawAddress);
+  // A building street alone cannot identify the saved apartment. City/ZIP
+  // only callers still use the complete on-file address at booking time.
+  if (savedUnit && streets.length && !units.length) return false;
   const expected = restatementStreetParts(onFile.street);
   const agree = streets.map(restatementStreetParts).every(part => part.name && [expected.name, expected.withoutSuffix].includes(part.name)
     && (!part.house || part.house === expected.house));
