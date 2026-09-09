@@ -498,6 +498,7 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
     reservationsCleared = await db('sms_log')
       .where({ direction: 'outbound', status: 'sending' })
       .whereRaw("metadata->>'manual_send_reservation' = 'true'")
+      .whereRaw("COALESCE(metadata->>'review_ask_reservation', 'false') != 'true'")
       .where('created_at', '<', cutoff)
       .del();
   } catch (err) {

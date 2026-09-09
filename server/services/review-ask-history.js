@@ -1,8 +1,9 @@
 const db = require('../models/db');
+const { publicPortalUrl } = require('../utils/portal-url');
 const { ASK_TOUCH_SQL } = require('./review-outreach-templates');
 
 const ASK_SPACING_MS = 72 * 3600000;
-const REVIEW_LINK_RE = /g\.page\/(?:r\/)?[^\s/]+\/review\b|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b|\/rate\/[A-Za-z0-9]/i;
+const REVIEW_LINK_RE = /g\.page\/(?:r\/)?[^\s/]+\/review\b|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b/i;
 const REVIEW_INTENT_RE = /\b(?:leave|write|post|submit|share|give|add|update|edit|(?:mind|consider|how\s+about)\s+(?:leaving|writing|posting|submitting|sharing|giving|adding|updating|editing))\s+(?:(?:us|me)\s+)?(?:(?:a|an|your|the)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+us\b|\bshare\s+your\s+experience\s+in\s+a\s+review\b/i;
 
 const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|greatly)\s+)?(?:appreciate|love)\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|google|yelp|facebook)\s+)*review\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|google|yelp|facebook)\s+)*review\s+(?:would|could)\s+(?:really\s+)?(?:mean|help|support)\b/i;
@@ -11,7 +12,19 @@ const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|grea
 // ("Thanks for your Google review") without a link/request do not.
 function looksLikeReviewAsk(body) {
   const text = String(body || '');
-  return REVIEW_LINK_RE.test(text) || REVIEW_INTENT_RE.test(text) || REVIEW_INVITATION_RE.test(text)
+  // A vendor's /rate/ page is not one of our review links. SMS URLs may
+  // have their scheme stripped by the provider normalizer.
+  const portalHosts = new Set(['portal.wavespestcontrol.com']);
+  try { portalHosts.add(new URL(publicPortalUrl()).hostname.toLowerCase()); } catch { /* invalid configuration */ }
+  const portalRate = (text.match(/(?:https?:\/\/)?[a-z0-9.-]+(?::\d+)?\/(?:api\/)?rate\/[A-Za-z0-9][^\s]*/gi) || [])
+    .some(link => {
+      try { return portalHosts.has(new URL(/^https?:/i.test(link) ? link : `https://${link}`).hostname.toLowerCase()); }
+      catch { return false; }
+    });
+  // Reviewing a document is different from reviewing the business.
+  const intentText = text.replace(/\breview\s+(?:of|on)\s+(?:(?:the|your|our|my|attached|updated)\s+)*(?:estimate|invoice|agreement|contract|report|document|proposal)\b/gi, 'document assessment');
+  return portalRate || REVIEW_LINK_RE.test(text) || REVIEW_INTENT_RE.test(intentText) || REVIEW_INVITATION_RE.test(intentText)
+    || /\b(?:could|can|may)\s+(?:i|we)\s+ask\s+(?:you\s+)?for\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|google|yelp|facebook)\s+)*review\b/i.test(intentText)
     || (/maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i.test(text)
       && /\b(?:share|leave|give)\s+(?:(?:us|me)\s+)?(?:(?:your|some)\s+)?feedback\b/i.test(text))
     || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+link\b/i.test(text));
@@ -49,22 +62,27 @@ async function lastManualAskAt(customerId, { since } = {}) {
     // Include correspondence just before the boundary so its timestamp
     // cannot instead be assigned to a manual ask just after the boundary.
     .where('created_at', '>=', new Date(sinceAt.getTime() - 90000))
-    .where(q => q.whereNotIn('status', ['scheduled', 'sending', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
-      // A finalize-only replay has already delivered; changing its queue
-      // status must not hide that ask while bookkeeping catches up.
+    .where(q => q.whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
+      // Finalize-only replay already delivered, even while bookkeeping retries.
       .orWhereRaw("metadata->>'finalize_only' = 'true'"))
     .orderBy('created_at', 'desc')
-    .select('message_body', 'created_at', 'metadata');
+    .select('message_body', 'created_at', 'status', 'metadata');
+  const metadata = row => {
+    try { return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {}; }
+    catch { return {}; }
+  };
+  // Pre-send evidence survives provider-log and settlement failures.
+  const reservations = outbound.filter(row => metadata(row).review_ask_reservation === true);
+  const reservedAt = reservations.reduce((latest, row) => {
+    const at = new Date(row.created_at);
+    return at >= sinceAt && (!latest || at > latest) ? at : latest;
+  }, null);
   const candidates = outbound.filter(row => {
-    if (looksLikeReviewAsk(row.message_body)) return true;
-    // Bundled completion asks can carry only a short link. Their persisted
-    // review linkage remains evidence before the review row is finalized.
-    try {
-      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
-      return !!(meta?.bundled_review_request_id || meta?.review_ask_delivered_at);
-    } catch { return false; }
+    const meta = metadata(row);
+    if (meta.review_ask_reservation === true || (row.status === 'sending' && !meta.finalize_only)) return false;
+    return looksLikeReviewAsk(row.message_body) || !!(meta.bundled_review_request_id || meta.review_ask_delivered_at);
   });
-  if (!candidates.length) return null;
+  if (!candidates.length) return reservedAt;
   const sends = await db('review_requests')
     .where({ customer_id: customerId })
     .whereNotNull('sms_sent_at')
@@ -90,7 +108,8 @@ async function lastManualAskAt(customerId, { since } = {}) {
   }
   const manual = candidates.find((row, index) => !matchedRows.has(index)
     && new Date(row.created_at) >= sinceAt);
-  return manual ? new Date(manual.created_at) : null;
+  const manualAt = manual ? new Date(manual.created_at) : null;
+  return reservedAt && (!manualAt || reservedAt > manualAt) ? reservedAt : manualAt;
 }
 
 module.exports = { ASK_SPACING_MS, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt };
