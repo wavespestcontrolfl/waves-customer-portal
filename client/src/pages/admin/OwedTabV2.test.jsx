@@ -13,7 +13,7 @@ const rows = () => [
   },
   {
     id: "c2", call_log_id: "22222222-2222-4333-8444-555555555555", party: "waves", kind: "callback", description: "Call the caller back (promised by the AI phone assistant)",
-    status: "open", source: "ai", human_state: null, due_at: "2026-09-09T13:00:00Z", overdue: false, call_started_at: "2026-09-02T14:00:00Z",
+    status: "open", source: "ai", human_state: null, due_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), overdue: false, call_started_at: "2026-09-02T14:00:00Z",
     customer_id: null, from_phone: "+15555550177", direction: "inbound",
     fulfillment: { kind: "outbound_call", strength: "association", basis: "completed_outbound_call_to_caller_within_14_days", matched_at: "2026-09-03T14:00:00Z" },
     extractor_version: "relay-v1",
