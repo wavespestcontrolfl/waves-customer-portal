@@ -80,6 +80,11 @@ jobs:
         env:
           RECEIPT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/receipt-sms-delivery-postgres.test.js
+      - name: Request App receipt transaction tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/request-app-receipts-postgres.test.js
       - name: Grouped closeout transaction tests
         working-directory: server
         env:

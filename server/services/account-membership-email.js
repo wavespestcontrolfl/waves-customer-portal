@@ -319,6 +319,8 @@ async function sendRequestReceived({
   idempotencyKey,
 } = {}) {
   if (!request?.id) return { ok: false, skipped: true, reason: 'missing_request' };
+  void require('./request-app-notifications').send({ customerId, request, received: true })
+    .catch((err) => logger.warn(`[request-app] received notification failed: ${err.message}`));
   const category = clean(request.category).replace(/_/g, ' ') || 'request';
   const submittedAt = request.created_at || request.createdAt || new Date();
   return sendTemplate({
@@ -555,6 +557,8 @@ async function sendRequestUpdated({
   if (CTA_REQUEST_SOURCES.includes(clean(request.source))) {
     return { ok: false, skipped: true, reason: 'cta_owner_follow_up' };
   }
+  void require('./request-app-notifications').send({ customerId, request })
+    .catch((err) => logger.warn(`[request-app] status notification failed: ${err.message}`));
   const status = statusLabel || clean(request.status) || 'updated';
   return sendTemplate({
     customerId,
