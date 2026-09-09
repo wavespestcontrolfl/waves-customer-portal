@@ -103,16 +103,23 @@ suite('saved-property operations against isolated Postgres', () => {
     expect(await db('customers').where({ id: emptyCustomer }).first('address_line1')).toEqual({ address_line1: '900 Example Grove' });
   }, 30000);
 
-  test('a rental or client-managed relationship is ineligible for primary even while occupancy is unknown', async () => {
+  test('a rental, family-home or client-managed relationship is ineligible for primary even while occupancy is unknown', async () => {
     const service = require('../services/customer-properties');
-    const customerId = crypto.randomUUID(), rentalId = crypto.randomUUID(), managedId = crypto.randomUUID();
+    const customerId = crypto.randomUUID(), rentalId = crypto.randomUUID(), managedId = crypto.randomUUID(), familyId = crypto.randomUUID();
     await db('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Relationshipfixture', phone: `+15553${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`, address_line1: '1000 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' });
     await db('customer_properties').insert([
       { id: rentalId, customer_id: customerId, ...address(1100), relationship: 'rental_owned', active: true, is_primary: false, address_key: service.addressKey(address(1100)) },
       { id: managedId, customer_id: customerId, ...address(1200), relationship: 'managed_for_client', active: true, is_primary: false, address_key: service.addressKey(address(1200)) },
+      { id: familyId, customer_id: customerId, ...address(1250), relationship: 'family_home', active: true, is_primary: false, address_key: service.addressKey(address(1250)) },
     ]);
-    for (const id of [rentalId, managedId]) {
+    for (const id of [rentalId, managedId, familyId]) {
       await expect(service.previewManualPropertyChange(customerId, 'primary', {}, id)).rejects.toMatchObject({ code: 'primary_role_unavailable' });
+      const { relationship } = await db('customer_properties').where({ id }).first('relationship');
+      await db('customer_properties').where({ id }).update({ relationship: 'own_home' });
+      const preview = await service.previewManualPropertyChange(customerId, 'primary', {}, id);
+      await db('customer_properties').where({ id }).update({ relationship });
+      await expect(service.changePrimaryProperty(customerId, id, { actorId: actor, expectedVersion: preview._version }))
+        .rejects.toMatchObject({ code: 'primary_role_unavailable' });
     }
     for (const row of await service.listProperties(customerId)) expect(row).toMatchObject({ primary_change_eligible: false, primary_change_unavailable: expect.stringContaining('relationship') });
     expect(await db('customers').where({ id: customerId }).first('address_line1')).toEqual({ address_line1: '1000 Example Grove' });
@@ -215,6 +222,43 @@ suite('saved-property operations against isolated Postgres', () => {
     expect((await db('customers').where('id', customerC).first()).city).toBe('');
     // A genuinely different street on the same customer still previews.
     expect((await api(`/api/admin/customers/${customerC}/properties`, address(710))).status).toBe(201);
+  }, 30000);
+
+  test.each(['Unit 4', null])('a primary change completes compatible partial settled addresses without replacing saved components or conflicting addresses (old unit: %s)', async (line2) => {
+    const service = require('../services/customer-properties');
+    const customerId = crypto.randomUUID();
+    await db('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Partialstampfixture',
+      phone: `+15556${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`,
+      address_line1: '2100 Example Court', address_line2: line2, city: 'Sarasota', state: 'FL', zip: '34201' });
+    await service.ensurePrimaryProperty(customerId);
+    const oldPrimary = await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first();
+    const target = await service.addManualProperty(customerId, { ...address(2200), address_line2: 'Unit 9', city: 'Bradenton', zip: '34212' }, { actorId: actor });
+    const compatible = [
+      { property_id: oldPrimary.id, service_address_line1: '2100 Example Ct', service_address_line2: line2 ? 'Apt 4' : '', lat: '0.000000', lng: '0.000000' },
+      { property_id: null, service_address_line1: '2100 Example Court', service_address_city: 'Sarasota', service_address_zip: '34201-1234' },
+    ].map(row => ({ id: crypto.randomUUID(), ...row }));
+    const conflicts = [
+      { service_address_line1: '2150 Other Court' },
+      { service_address_line1: '2100 Example Court Unit 5' },
+      { service_address_line1: '2100 Example Court', service_address_line2: 'Unit 5' },
+      { service_address_line1: '2100 Example Court', service_address_city: 'Bradenton' },
+      { service_address_line1: '2100 Example Court', service_address_state: 'GA' },
+      { service_address_line1: '2100 Example Court', service_address_zip: '34212' },
+      { service_address_city: 'Bradenton' },
+    ].map(row => ({ id: crypto.randomUUID(), property_id: oldPrimary.id, ...row }));
+    await db('scheduled_services').insert([...compatible, ...conflicts].map(row => ({ customer_id: customerId,
+      scheduled_date: '2026-08-01', service_type: 'General Pest Control', status: 'completed', ...row })));
+    const untouched = await db('scheduled_services').whereIn('id', conflicts.map(row => row.id)).orderBy('id');
+    const preview = await service.previewManualPropertyChange(customerId, 'primary', {}, target.propertyId);
+    await service.changePrimaryProperty(customerId, target.propertyId, { actorId: actor, expectedVersion: preview._version });
+    for (const row of compatible) {
+      expect(await db('scheduled_services').where({ id: row.id }).first()).toMatchObject({
+        service_address_line2: line2 || '', service_address_city: 'Sarasota', service_address_state: 'FL', service_address_zip: '34201',
+        ...row, property_id: oldPrimary.id,
+      });
+    }
+    expect(await db('scheduled_services').whereIn('id', conflicts.map(row => row.id)).orderBy('id')).toEqual(untouched);
+    expect(await db('customers').where({ id: customerId }).first('city', 'zip')).toEqual({ city: 'Bradenton', zip: '34212' });
   }, 30000);
 
 });
