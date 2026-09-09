@@ -52,7 +52,8 @@ const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', '
 // Owner decision 2026-09-08: fail closed rather than parse cohorts.
 // Up to two qualifiers may sit between the quantifier and the noun ("all active
 // customers", "each overdue customer"); a deictic one names one account.
-const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+){0,2} customers?|all of (?:these|those))\b/;
+// The noun takes every customer-reference synonym the resolver understands.
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+){0,2} (?:customer|account|client|profile|record)s?|all of (?:these|those))\b/;
 // An independently requested operation starts at "and/then <action>".
 const ACTION_CLAUSE_SPLIT = new RegExp(`\\b(?:and|then)\\s+(?:(?:also|then|please)\\s+)*(?=(?:${PERSON_ACTIONS}|revise|add|save|assign|draft|write|post|submit)\\b)`, 'i');
 const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
@@ -160,18 +161,32 @@ async function namedCustomers(prompt) {
   const accepted = singleLookup ? singles : fullNames;
   // Name evidence that only partly resolved — a customer accepted while some
   // person reference in the request matches nobody, as in "update Jhon Smith
-  // and text Alice Owner" — is never a target and no selection survives it. A
-  // token that modifies a non-person noun ("flea" in "flea treatment") is not a
-  // person reference, and a request that resolved nobody keeps the plain
+  // and text Alice Owner" — is never a target and no selection survives it.
+  // Each reference is the WHOLE name run after its selector ("alice missing"),
+  // and it resolves only against a customer whose full name it starts with,
+  // or, for a bare single name, whose first or last name it is. Sharing a
+  // first name with an accepted customer resolves nothing. A token that
+  // modifies a non-person noun ("flea" in "flea treatment") is not a person
+  // reference, and a request that resolved nobody keeps the plain
   // unresolved-name handling.
-  const acceptedTokens = new Set(accepted.flatMap(customer => normalizeName(`${customer.first_name || ''} ${customer.last_name || ''}`).split(' ')));
   const personReferences = clause => {
     const clauseWords = normalizeName(clause).split(' ');
-    return explicitSingleNames(clause).filter(token => !NON_PERSON_NAMES.has(clauseWords[clauseWords.indexOf(token) + 1] || ''));
+    return explicitSingleNames(clause).map(token => {
+      const start = clauseWords.indexOf(token);
+      const run = [token];
+      for (let i = start + 1; i < clauseWords.length && run.length < 5 && !NON_PERSON_NAMES.has(clauseWords[i]) && !AFTER_SINGLE_NAME.has(clauseWords[i]); i++) run.push(clauseWords[i]);
+      return run;
+    }).filter(run => run.length > 1 || !NON_PERSON_NAMES.has(clauseWords[clauseWords.indexOf(run[0]) + 1] || ''));
   };
+  const resolvesReference = run => accepted.some(customer => {
+    const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
+    if (run.length === 1) return run[0] === first || run[0] === last;
+    const full = `${first} ${last}`.trim().split(' ');
+    return full.length <= run.length && full.every((word, index) => word === run[index]);
+  });
   const partial = accepted.length > 0 && normalized.split(ACTION_CLAUSE_SPLIT).some(clause => {
     const references = personReferences(clause);
-    return references.length > 0 && !references.every(token => acceptedTokens.has(token));
+    return references.length > 0 && !references.every(resolvesReference);
   });
   // Distinct stated names: a selection may disambiguate duplicate rows of ONE
   // stated name, never choose between two different recipients.
@@ -288,12 +303,14 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   const cohort = setQuantified(prompt) || namedResult.multiple;
   let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete, cohort);
   if (selectedId) {
-    const selected = await customerById(selectedId);
-    // A selection never overrides current-request evidence: an explicit name
-    // that matched nothing, a capped lookup, or a set quantifier all refuse
-    // it. Duplicate-name ambiguity is the one case a selection resolves.
-    if (!selected || !namedResult.complete || cohort
-      || ((namesRequested(prompt) || named.length) && !named.some(c => c.id === selected.id))) {
+    // A selection is bound to this request's own fresh candidates: it is
+    // accepted only as one of the rows the request resolved to (duplicate-name
+    // disambiguation, the one flow that supplies a selection). A request that
+    // named nobody, matched nothing, hit the lookup cap, or asked for a set
+    // has no candidate to select, so no stale-selection grammar is
+    // load-bearing: an unrecognized phrasing can only over-refuse.
+    const selected = named.some(c => c.id === selectedId) && !cohort && namedResult.complete ? await customerById(selectedId) : null;
+    if (!selected) {
       return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch' };
     }
     const target = customerTarget(selected, 'operator_selection');

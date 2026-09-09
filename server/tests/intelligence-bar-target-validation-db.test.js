@@ -33,7 +33,7 @@ suite('IB target validation against isolated PostgreSQL', () => {
     expect(version).toContain('.123456');
     const requests = [
       { prompt: 'Update this customer', pageData: { customer_id: customerId } },
-      { prompt: 'Update the customer', pageData: {}, selectedTarget: { customer_id: customerId } },
+      { prompt: 'Update Synthetic Targetfixture', pageData: {}, selectedTarget: { customer_id: customerId } },
       { prompt: 'Send to Synthetic Targetfixture using this customer', pageData: {} },
       { prompt: 'Send a message to Targetfixture using this customer', pageData: {} },
     ];
@@ -158,6 +158,16 @@ suite('IB target validation against isolated PostgreSQL', () => {
     expect((await Context.resolve({ prompt: 'Schedule flea treatment for Synthetic Secondfixture', pageData: {} })).target.customer_id).toBe(second);
     // Same-clause compounds and two distinct resolved recipients never let a selection through.
     expect(await Context.resolve({ prompt: 'Update Alice Missing and also text Synthetic Secondfixture', pageData: {}, selectedTarget: { customer_id: second } })).toMatchObject({ code: 'context_mismatch' });
+    // A reference sharing only a first name with the accepted customer resolves nothing (r5 P1).
+    const sharedFirstName = 'Update Synthetic Missingfixture and also text Synthetic Secondfixture';
+    expect(await Context.resolve({ prompt: sharedFirstName, pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt: sharedFirstName, pageData: { customer_id: second } })).toMatchObject({ targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt: sharedFirstName, pageData: {}, selectedTarget: { customer_id: second } })).toMatchObject({ code: 'context_mismatch' });
+    // Account synonyms are sets, and a nameless request has no candidate to select (r5 P1).
+    for (const prompt of ['Update all accounts', 'Text every client', 'Update the customer']) {
+      expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
+    }
+    expect(await Context.resolve({ prompt: 'Update all accounts', pageData: { customer_id: customerId } })).toMatchObject({ targets: [], ambiguous: true });
     const twoRecipients = 'Forward the estimate to Synthetic Targetfixture and text Synthetic Secondfixture';
     expect(await Context.resolve({ prompt: twoRecipients, pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
     expect(await Context.resolve({ prompt: twoRecipients, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });

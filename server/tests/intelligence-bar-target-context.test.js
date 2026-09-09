@@ -50,7 +50,8 @@ test.each(selectors)('a matching full name after "%s" still resolves through fre
 
 test('viewed and selected targets retain the database text version without Date conversion', async () => {
   const viewed = await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: A } });
-  const selected = await Context.resolve({ prompt: 'Update the customer', pageData: {}, selectedTarget: { customer_id: A } });
+  lookupRows = [rows.customers[0]];
+  const selected = await Context.resolve({ prompt: 'Update Synthetic Person', pageData: {}, selectedTarget: { customer_id: A } });
   expect(viewed.target.version).toBe('2026-09-01 12:00:00.123456+00');
   expect(selected.target.version).toBe(viewed.target.version);
 });
@@ -116,8 +117,34 @@ test('partly resolved compound name evidence refuses a selection and is never a 
 
 test('field nouns after an action are not person names', async () => {
   for (const prompt of ['Update customer status', 'Update customer billing type', 'Set autopay on', 'Change the plan frequency', 'Update customer city', 'Set waveguard tier', "Let's update this customer", 'Update customer first name', "Update this account's status", 'Update this profile', 'Send message to this customer', 'Send receipt to this customer', 'Send text to this customer', 'Text the customer about the invoice', 'What did we say to the customer on 5551234567']) {
-    const task = await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } });
-    expect(task.target).toMatchObject({ customer_id: A, provenance: 'operator_selection' });
+    const task = await Context.resolve({ prompt, pageData: {} });
+    expect(task).toMatchObject({ candidates: [], ambiguous: false, namesRequested: false });
+    expect(Context.namesRequested(prompt)).toBe(false);
+  }
+});
+
+test('a selection is bound to the request\'s own fresh candidates', async () => {
+  // Nothing to select from: a request that names nobody refuses any selection.
+  for (const prompt of ['Update the customer', 'Update customer status', 'Update this customer']) {
+    expect(await Context.resolve({ prompt, pageData: { customer_id: A }, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  }
+  // Both r5 findings fail safely with and without a selection.
+  for (const prompt of ['Update all accounts', 'Text every client', 'Update all of the profiles', 'Remind each active account']) {
+    expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  }
+  const jones = { id: B, first_name: 'Alice', last_name: 'Jones' };
+  rows.customers = [rows.customers[0], jones];
+  lookupRows = [jones];
+  for (const prompt of ['Update Alice Missing and also text Alice Jones', 'Text Alice Jones and update Alice Missing', 'Update Alice Missing and text Alice']) {
+    expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: { customer_id: B } })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B } })).toMatchObject({ code: 'context_mismatch' });
+  }
+  // A whole reference that starts with the customer's full name, or a bare first name, still resolves.
+  for (const prompt of ['Text Alice Jones soon and update Alice Jones', 'Update Alice Jones and text Alice']) {
+    expect((await Context.resolve({ prompt, pageData: {} })).target).toMatchObject({ customer_id: B, provenance: 'current_request_lookup' });
+    expect((await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B } })).target).toMatchObject({ customer_id: B, provenance: 'operator_selection' });
   }
 });
 
