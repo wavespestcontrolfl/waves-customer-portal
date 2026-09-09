@@ -20,6 +20,7 @@ vi.mock('../utils/api', () => ({
     token: null,
     refreshToken: null,
     getMe: vi.fn(),
+    verifyCode: vi.fn(),
     getAuthProperties: vi.fn(async () => ({ properties: [] })),
     selectAuthProperty: vi.fn(),
     setTokens: vi.fn(function setTokens(t, r) { this.token = t; this.refreshToken = r; }),
@@ -213,6 +214,26 @@ describe('cross-tab saved-property switch', () => {
     api.getAuthProperties.mockResolvedValue(SAVED);
   });
 
+  it('logout clears the selection and scope; a new claim-less login whose list read fails does not resurrect the old house', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    api.getMe.mockResolvedValue({ id: 'cust-1' });
+    api.getAuthProperties.mockResolvedValue({ ...SAVED, selected: { key: 'cust-1:prop-b', customerId: 'cust-1', propertyId: 'prop-b' } });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
+
+    await act(async () => { authApi.logout(); });
+    expect(screen.getByTestId('selected').textContent).toBe('');
+    expect(screen.getByTestId('scope').textContent).toBe('profile');
+
+    // New login: a primary-scoped (claim-less) token; the list read fails.
+    api.verifyCode.mockResolvedValue({ token: tokenFor({ customerId: 'cust-1', sessionId: 'fam-2' }), refreshToken: 'ref-plain', properties: [] });
+    api.getAuthProperties.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => { await authApi.verifyCode('+19415550100', '123456'); });
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-1');
+    expect(screen.getByTestId('selected').textContent).toBe('');
+    api.getAuthProperties.mockResolvedValue(SAVED);
+  });
+
   it('a routine same-family rotation without a property change keeps the epoch', async () => {
     const tokA1 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 1 });
     const tokA2 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 2 });
@@ -234,8 +255,9 @@ describe('cross-tab saved-property switch', () => {
     api.getMe.mockResolvedValue({ id: 'cust-1' });
     api.getAuthProperties.mockResolvedValue(SAVED);
     await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
-    // Follow-up list read fails: the selection must still carry a key.
-    api.selectAuthProperty.mockResolvedValue({ token: 'tok-b', refreshToken: 'ref-b', properties: [], selected: { customerId: 'cust-1', propertyId: 'prop-b' } });
+    // Follow-up list read fails: the selection must still carry a key. The
+    // minted token carries the claim, as the real route's does.
+    api.selectAuthProperty.mockResolvedValue({ token: tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' }), refreshToken: 'ref-b', properties: [], selected: { customerId: 'cust-1', propertyId: 'prop-b' } });
     api.getAuthProperties.mockRejectedValueOnce(new Error('offline'));
     await act(async () => { await authApi.switchProperty({ customerId: 'cust-1', propertyId: 'prop-b' }); });
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');

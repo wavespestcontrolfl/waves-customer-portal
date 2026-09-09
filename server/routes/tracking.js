@@ -302,15 +302,23 @@ async function findCanonicalScheduledService(customerId, opts = {}) {
 // A secondary without a geocode yields NO pin rather than the primary's — the
 // same "never the wrong house" posture as the stamped-address branch below.
 // The visit's own stamped geocode still wins where that branch runs.
-function scopedLocationCustomer(customer, scope) {
+function scopedLocationCustomer(customer, scope, visit = null) {
   const property = scope && scope.enabled && scope.multi && scope.property && scope.property.is_primary !== true
     ? scope.property
     : null;
   if (!property) return customer;
+  // The visit's own stamped geocode is the most precise location for THIS
+  // stop (rental / secondary bookings geocode at booking) — it wins over
+  // the property row, and the property row over nothing. Without this, an
+  // en-route visit (computeStopsAhead null → the later stamped override
+  // never runs) at a property with no geocode would lose its live map.
+  const visitLat = finiteNumber(visit?.lat);
+  const visitLng = finiteNumber(visit?.lng);
+  const useVisit = visitLat != null && visitLng != null;
   return {
     ...customer,
-    latitude: property.latitude ?? null,
-    longitude: property.longitude ?? null,
+    latitude: useVisit ? visitLat : (property.latitude ?? null),
+    longitude: useVisit ? visitLng : (property.longitude ?? null),
     address_line1: property.address_line1 ?? customer?.address_line1 ?? null,
     address_line2: property.address_line2 ?? null,
     city: property.city ?? customer?.city ?? null,
@@ -392,9 +400,9 @@ router.get('/maps-key', (req, res) => {
 router.get('/active', async (req, res, next) => {
   try {
     const scope = await resolveSessionScope(req);
-    const locationCustomer = scopedLocationCustomer(req.customer, scope);
     const canonical = await findCanonicalScheduledService(req.customerId, { activeOnly: true, scope });
     if (canonical) {
+      const locationCustomer = scopedLocationCustomer(req.customer, scope, canonical);
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
       const formatted = formatScheduledTracker(canonical, tech, locationCustomer);
       await attachTechPhoto(formatted, tech);
@@ -467,9 +475,9 @@ router.get('/active', async (req, res, next) => {
 router.get('/today', async (req, res, next) => {
   try {
     const scope = await resolveSessionScope(req);
-    const locationCustomer = scopedLocationCustomer(req.customer, scope);
     const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true, scope });
     if (canonical) {
+      const locationCustomer = scopedLocationCustomer(req.customer, scope, canonical);
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
       const formatted = formatScheduledTracker(canonical, tech, locationCustomer);
       await attachTechPhoto(formatted, tech);

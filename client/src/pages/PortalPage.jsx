@@ -5276,7 +5276,12 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 <div style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Contacts</div>
                 <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>On-location contacts</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
-                  Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.
+                  {savedScope && properties.length > 1
+                    // One profile, several saved houses: contacts and texts are
+                    // stored per PROFILE, so a tenant added here hears about
+                    // every house — say so (codex #4207 r1c).
+                    ? 'Add anyone who should get appointment texts — a spouse, partner, tenant, or property manager. These contacts and settings apply to every property on this profile.'
+                    : 'Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.'}
                 </div>
               </>
             )}

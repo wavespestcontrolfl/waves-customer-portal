@@ -128,6 +128,9 @@ describe('canonical customer tracker query', () => {
     const secondary = { id: 'pb', is_primary: false, latitude: 27.5, longitude: -82.5, address_line1: '418 Oak Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
     expect(scoped(customer, { enabled: true, multi: true, property: secondary })).toMatchObject({ id: 'c1', latitude: 27.5, longitude: -82.5, address_line1: '418 Oak Ave', city: 'Bradenton', zip: '34205' });
     expect(scoped(customer, { enabled: true, multi: true, property: { ...secondary, latitude: null, longitude: null } })).toMatchObject({ latitude: null, longitude: null, address_line1: '418 Oak Ave' });
+    // The visit's own stamped geocode wins inside the scoped branch — even when the property row has none.
+    expect(scoped(customer, { enabled: true, multi: true, property: { ...secondary, latitude: null, longitude: null } }, { lat: 27.9, lng: -82.9 })).toMatchObject({ latitude: 27.9, longitude: -82.9, address_line1: '418 Oak Ave' });
+    expect(scoped(customer, { enabled: true, multi: true, property: secondary }, { lat: 'nope', lng: null })).toMatchObject({ latitude: 27.5, longitude: -82.5 });
     expect(scoped(customer, { enabled: true, multi: true, property: { ...secondary, is_primary: true } })).toBe(customer);
     expect(scoped(customer, { enabled: true, multi: false, property: secondary })).toBe(customer);
     expect(scoped(customer, { enabled: false, multi: false, property: null })).toBe(customer);

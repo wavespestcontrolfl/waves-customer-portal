@@ -133,6 +133,15 @@ export function AuthProvider({ children }) {
     setProperties(payload.properties);
     setSelectedProperty(payload.selected);
   };
+  // Session boundary (logout, a new login, another tab's sign-out or a
+  // different customer's token): the previous session's selection must never
+  // outlive it — a later failed list read would otherwise leave a stale house
+  // selected while the new token scopes reads elsewhere (codex #4207 r1c).
+  const resetPropertyScope = () => {
+    propertyScopeRef.current = 'profile';
+    setPropertyScope('profile');
+    setSelectedProperty(null);
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
@@ -205,6 +214,10 @@ export function AuthProvider({ children }) {
           setSelectedProperty((prev) => (prev && String(prev.propertyId) === claimed && String(prev.customerId) === String(data.id)
             ? prev
             : { key: `${data.id}:${claimed}`, customerId: data.id, propertyId: claimed }));
+        } else {
+          // No claim = the primary: a selection left over from an earlier
+          // session (or an earlier switch) must not survive the failed read.
+          setSelectedProperty(null);
         }
         // The active customer is still valid. Preserve any property list we
         // already have instead of collapsing a multi-property account to a
@@ -280,6 +293,7 @@ export function AuthProvider({ children }) {
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
+        resetPropertyScope();
         setPropertiesError(null);
         setError(null);
         setLoading(false);
@@ -325,6 +339,7 @@ export function AuthProvider({ children }) {
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
+        resetPropertyScope();
         setPropertiesError(null);
         setError(null);
         setLoading(true);
@@ -358,6 +373,7 @@ export function AuthProvider({ children }) {
       if (sessionEpochRef.current !== epoch) return false;
       setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
+      resetPropertyScope();
       setProperties(data.properties || []);
       setPropertiesError(null);
       await loadCustomer();
@@ -384,6 +400,7 @@ export function AuthProvider({ children }) {
     customerRef.current = null;
     setCustomer(null);
     setProperties([]);
+    resetPropertyScope();
     setPropertiesError(null);
     setError(null);
     setLoading(false);
