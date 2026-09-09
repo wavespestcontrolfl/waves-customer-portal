@@ -713,11 +713,14 @@ function normalizeRow(row) {
     if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } }
     return v;
   };
+  const cardsEnabled = require('./callback-cards').enabled();
   return {
     ...row,
     // Display the staffed deadline without turning it into an editable stated promise.
-    effective_due_at: row.due_at || (row.kind === 'callback' && row.party === 'waves'
-      && require('./callback-cards').enabled() ? row.callback_due_at : null) || null,
+    effective_due_at: row.due_at || (row.kind === 'callback' && row.party === 'waves' && cardsEnabled ? row.callback_due_at : null) || null,
+    // A snooze is card policy: with the gate off the server ignores it, so
+    // no reader sees a snooze the queue no longer honours.
+    ...(row.snoozed_until !== undefined ? { snoozed_until: cardsEnabled ? row.snoozed_until : null } : {}),
     evidence: parse(row.evidence) || [],
     fulfillment: parse(row.fulfillment),
     confidence: row.confidence == null ? null : Number(row.confidence),
