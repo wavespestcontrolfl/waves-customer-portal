@@ -1249,12 +1249,14 @@ router.post('/call', async (req, res, next) => {
     if (relatedCommitmentId) bridgeClaimId = await db.transaction(async (trx) => {
       if (!require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
-      // before call_log is inserted, keyed to THIS commitment: every card
-      // dials from the shared main line, so a line-wide key would let one
-      // ringing callback block every other customer's card.
+      // before call_log is inserted, keyed to the CUSTOMER being called
+      // (the linked customer, else the dialed number): every card dials
+      // from the shared main line, so a line-wide key would let one ringing
+      // callback block every other customer's card, while a per-commitment
+      // key would let two promises to one customer ring them twice at once.
       const claim = await trx.raw(`INSERT INTO sms_send_claims (claim_key) VALUES (?)
         ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
-        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${relatedCommitmentId}`]);
+        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${customer?.id || normalizePhone(to)}`]);
       if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
       // The live-call interlock is customer-specific: the linked customer,
       // or the dialed number when the source call never linked one.
@@ -1274,6 +1276,12 @@ router.post('/call', async (req, res, next) => {
         throw Object.assign(new Error('This callback changed. Refresh before calling.'), { status: 409 });
       }
       metadata.relatedCallId = promise.call_log_id;
+      // Starting the call is the office vouching for an AI callback: record
+      // the review through the ledger's confirm action so a later extraction
+      // that omits the promise cannot hide work staff already took on.
+      if (promise.human_state == null) {
+        await require('../services/call-commitments').applyHumanUpdate(trx, promise.id, { action: 'confirm', reviewedBy: req.technicianId });
+      }
       await trx('call_commitments').where({ id: promise.id }).update({ assigned_to: req.technicianId, updated_at: new Date() });
       await require('../services/audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: req.technicianId,
         action: 'callback_call_claimed', resource_type: 'call_commitment', resource_id: promise.id,

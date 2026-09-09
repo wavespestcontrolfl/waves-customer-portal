@@ -19,7 +19,7 @@ run('callback bridge on PostgreSQL', () => {
   const gates = require('../config/feature-gates').gates;
   const phone = '+15555550176', cell = '+15555550177';
   const from = `+1555555${randomInt(1000, 10000)}`;
-  const claimKey = (row) => `callback-card-bridge:${row.id}`;
+  const claimKey = () => `callback-card-bridge:${customerId}`;
   const callIds = [], commitmentIds = [];
   let conn, handler, customerId, staffId, originalGates, originalFrom;
 
@@ -53,7 +53,7 @@ run('callback bridge on PostgreSQL', () => {
     callIds.push(...await conn('call_log').where({ from_phone: from, direction: 'outbound' }).pluck('id'));
     await conn('call_commitments').whereIn('id', commitmentIds).del();
     await conn('call_log').whereIn('id', callIds).del();
-    await conn('sms_send_claims').whereIn('claim_key', commitmentIds.map((id) => `callback-card-bridge:${id}`)).del();
+    await conn('sms_send_claims').whereIn('claim_key', [claimKey(), `callback-card-bridge:${phone}`]).del();
     await conn('customers').where({ id: customerId }).del();
     await conn('technicians').where({ id: staffId }).del();
     callIds.length = commitmentIds.length = 0;
@@ -100,6 +100,26 @@ run('callback bridge on PostgreSQL', () => {
     expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 
+  test('two promises to one customer from different calls place one bridge at a time', async () => {
+    const [first, second] = [await seed(), await seed()];
+    const attempts = await Promise.all([invoke(first), invoke(second)]);
+    expect(attempts.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test('starting the call records the office review, so a later extraction cannot withdraw the callback', async () => {
+    const row = await seed();
+    expect((await invoke(row)).status).toBe(200);
+    const claimed = await conn('call_commitments').where({ id: row.id }).first();
+    expect(claimed.human_state).toBe('confirmed');
+    expect(claimed.reviewed_by).toBe(staffId);
+    const id = randomUUID(); commitmentIds.push(id);
+    await conn('call_commitments').insert({ id, call_log_id: row.call_log_id, commitment_key: 'waves:send_report',
+      party: 'waves', kind: 'send_report', description: 'Newer extraction', source: 'ai', last_seen_generation: 2 });
+    const live = await require('../services/call-commitments').listOpenCommitments(conn, { kind: 'callback', customerId });
+    expect(live.map((r) => r.id)).toContain(row.id);
+  });
+
   test('a ringing callback blocks only its own customer, and rings the acting administrator’s cell', async () => {
     const first = await seed();
     const otherCustomer = randomUUID(), otherPhone = '+15555550178';
@@ -116,6 +136,7 @@ run('callback bridge on PostgreSQL', () => {
     } finally {
       callIds.push(...await conn('call_log').where({ customer_id: otherCustomer }).pluck('id'));
       await conn('call_log').whereIn('id', callIds).del();
+      await conn('sms_send_claims').where({ claim_key: `callback-card-bridge:${otherCustomer}` }).del();
       await conn('customers').where({ id: otherCustomer }).del();
     }
   });
@@ -138,7 +159,7 @@ run('callback bridge on PostgreSQL', () => {
     const row = await seed();
     mockCreate.mockRejectedValueOnce(Object.assign(new Error('Synthetic provider failure'), { status: ambiguous ? 503 : 400, code: ambiguous ? 20500 : 21219 }));
     expect((await invoke(row)).status).not.toBe(200);
-    expect(await conn('sms_send_claims').where({ claim_key: claimKey(row) })).toHaveLength(ambiguous ? 1 : 0);
+    expect(await conn('sms_send_claims').where({ claim_key: claimKey() })).toHaveLength(ambiguous ? 1 : 0);
     const call = await conn('call_log').where({ from_phone: from, direction: 'outbound' }).first();
     expect(call.status).toBe(ambiguous ? 'initiated' : 'failed');
   });
