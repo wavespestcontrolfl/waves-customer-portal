@@ -142,6 +142,13 @@ describe('conservative historical repair evidence', () => {
       .toEqual({ skip: 'identityConflict' });
     expect(await run(fixture({ visit: { service_id: 'missing' } }))).toEqual({ skip: 'identityConflict' });
   });
+  test.each([
+    { service_key: 'pest_termite_bait_quarterly', name: 'Pest Control' },
+    { service_key: 'pest_general_quarterly', name: 'Pest Control + Termite Bait' },
+  ])('refuses a composite catalog identity behind a generic label: %j', async (row) => {
+    const f = fixture({ visit: { service_id: 'svc' }, services: [{ id: 'svc', ...row }] });
+    expect(await run(f)).toEqual({ skip: 'identityConflict' });
+  });
   test('accepts agreeing label, snapshot, and catalog identities', async () => {
     const same = { id: 'svc', service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service' };
     const f = fixture({ visit: { service_id: 'svc', service_key_snapshot: 'pest_general_quarterly' }, services: [same] });

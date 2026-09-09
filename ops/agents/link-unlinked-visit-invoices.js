@@ -106,7 +106,11 @@ async function visitIdentityConflict(conn, svc) {
     if (snapshot && catalog.service_key && snapshot !== String(catalog.service_key).trim()) return true;
     sources.push(catalog.service_key, catalog.name);
   }
-  return sources.filter(Boolean).some((source) => serviceKeyFor({ service_type: String(source).replace(/_/g, ' ') }) !== family);
+  // serviceKeyFor deliberately folds a composite catalog identity into its
+  // primary family, so a generic label over a bundled catalog row would pass
+  // the family comparison; refuse composite identities before comparing.
+  return sources.filter(Boolean).some((source) => isCompositeService(source)
+    || serviceKeyFor({ service_type: String(source).replace(/_/g, ' ') }) !== family);
 }
 
 // Candidate ownership is stricter than ambiguity: a bill attached to a
