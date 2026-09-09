@@ -10,6 +10,7 @@ jest.mock('../services/photos', () => ({
 
 const { ensureCustomerGeocoded } = require('../services/geocoder');
 const trackPublicRouter = require('../routes/track-public');
+const { isTrackTokenLive } = require('../services/track-token-expiry');
 
 function makeQuery({ firstResult = null, selectResult = [] } = {}) {
   const chain = {
@@ -57,14 +58,14 @@ describe('public track token expiry', () => {
   });
 
   test('keeps missing and future expirations live', () => {
-    expect(trackPublicRouter._test.isTrackTokenLive(null)).toBe(true);
-    expect(trackPublicRouter._test.isTrackTokenLive('2026-05-05T12:00:00.000Z')).toBe(true);
-    expect(trackPublicRouter._test.isTrackTokenLive('2026-05-05T12:01:00.000Z')).toBe(true);
+    expect(isTrackTokenLive(null)).toBe(true);
+    expect(isTrackTokenLive('2026-05-05T12:00:00.000Z')).toBe(true);
+    expect(isTrackTokenLive('2026-05-05T12:01:00.000Z')).toBe(true);
   });
 
   test('fails closed for expired or malformed expirations', () => {
-    expect(trackPublicRouter._test.isTrackTokenLive('2026-05-05T11:59:59.999Z')).toBe(false);
-    expect(trackPublicRouter._test.isTrackTokenLive('not-a-date')).toBe(false);
+    expect(isTrackTokenLive('2026-05-05T11:59:59.999Z')).toBe(false);
+    expect(isTrackTokenLive('not-a-date')).toBe(false);
   });
 
   test('only exposes fresh vehicle timestamps', () => {

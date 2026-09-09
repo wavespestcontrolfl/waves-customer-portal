@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticate } = require('../middleware/auth');
 const NotificationService = require('../services/notification-service');
+const { gateEnvValue } = require('../config/feature-gates');
 
 router.use(authenticate);
 
@@ -20,7 +21,8 @@ router.get('/', async (req, res, next) => {
 router.get('/unread-count', async (req, res, next) => {
   try {
     const count = await NotificationService.getCustomerUnreadCount(req.customerId);
-    res.json({ count });
+    res.set('Cache-Control', 'no-store');
+    res.json({ count, nativeBadgeEnabled: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES') });
   } catch (err) { next(err); }
 });
 

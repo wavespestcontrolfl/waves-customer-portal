@@ -52,7 +52,7 @@ describe('nativeLinks', () => {
     expect(customerAppUrl('evil.example/login', loc)).toBeNull();
   });
 
-  it('navigates only after validation and preserves query/hash', () => {
+  it.each(['/report/token?from=push#photos', '/?tab=billing&focus=payment-methods'])('validates and preserves notification destination %s', (destination) => {
     const assign = vi.fn();
     const navigationLocation = {
       ...loc,
@@ -62,8 +62,8 @@ describe('nativeLinks', () => {
       assign,
     };
 
-    expect(navigateToCustomerUrl('/report/token?from=push#photos', navigationLocation)).toBe(true);
-    expect(assign).toHaveBeenCalledWith('https://portal.wavespestcontrol.com/report/token?from=push#photos');
+    expect(navigateToCustomerUrl(destination, navigationLocation)).toBe(true);
+    expect(assign).toHaveBeenCalledWith(`https://portal.wavespestcontrol.com${destination}`);
 
     expect(navigateToCustomerUrl('https://evil.example/phish', navigationLocation)).toBe(false);
     expect(navigateToCustomerUrl('/admin', navigationLocation)).toBe(false);

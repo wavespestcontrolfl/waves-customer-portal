@@ -7,7 +7,48 @@ import {
   ADMIN_NAV_ITEMS,
   isAdminNavItemActive,
   isPathAdminOnly,
+  getAdminWorkspaceGroups,
+  getAdminWorkspaceSelection,
+  searchAdminWorkspacePages,
 } from "./adminNavigation";
+
+describe("grouped workspaces", () => {
+  it('finds renamed pages by old names and workspace terms without widening access', () => {
+    const admin = getAdminWorkspaceGroups('admin');
+    for (const [query, id] of [['Recovery', 'recovery'], ['Payers', 'payers'], ['Taxes', 'taxes'], ['Tool Health', 'toolHealth'], ['dispatch', 'schedule'], ['Reports', 'jobs']]) {
+      expect(searchAdminWorkspacePages(admin, query).map((item) => item.id)).toContain(id);
+    }
+    expect(searchAdminWorkspacePages(admin, 'accounting').map((item) => item.id)).toEqual(['banking', 'taxes']);
+    const tech = getAdminWorkspaceGroups('technician', { agent_estimate: true });
+    expect(searchAdminWorkspacePages(tech, 'Sales')).toEqual([]);
+    expect(searchAdminWorkspacePages(tech, 'Contracts')).toEqual([]);
+    expect(searchAdminWorkspacePages(admin, 'Agent estimate')).toEqual([]);
+  });
+  it("keeps every canonical destination exactly once, plus the existing Estimates subview", () => {
+    const groups = getAdminWorkspaceGroups('admin', { agent_estimate: true });
+    const ids = groups.flatMap(({ items }) => items.map(({ id }) => id));
+    expect(groups).toHaveLength(12);
+    expect(ids).toHaveLength(new Set(ids).size);
+    expect(new Set(ids)).toEqual(new Set([...Object.keys(ADMIN_NAV_ITEMS).filter((id) => id !== 'more'), 'estimates']));
+  });
+
+  it("applies leaf roles and gates even beneath accessible parents", () => {
+    expect(getAdminWorkspaceGroups(null)).toEqual([]);
+    const techIds = getAdminWorkspaceGroups('technician', { agent_estimate: true }).flatMap(({ items }) => items.map(({ id }) => id));
+    expect(new Set(techIds)).toEqual(new Set(Object.values(ADMIN_NAV_ITEMS).filter((item) => !item.adminOnly && item.id !== 'more').map(({ id }) => id)));
+    const adminIds = getAdminWorkspaceGroups('admin').flatMap(({ items }) => items.map(({ id }) => id));
+    expect(adminIds).not.toContain('agentEstimate');
+    expect(techIds).not.toEqual(expect.arrayContaining(['contracts', 'toolHealth', 'estimates']));
+  });
+
+  it("resolves actual rendered tabs, proposal links, and redirected Schedule", () => {
+    const location = { pathname: '/admin/pipeline', search: '' };
+    expect(getAdminWorkspaceSelection(location, { pathname: location.pathname, tab: 'estimates' })).toEqual({ groupId: 'sales', itemId: 'estimates' });
+    expect(getAdminWorkspaceSelection(location, { pathname: location.pathname, tab: 'new' })).toEqual({ groupId: 'sales', itemId: null });
+    expect(getAdminWorkspaceSelection({ pathname: '/admin/estimates/fixture/proposal' }).itemId).toBe('estimates');
+    expect(getAdminWorkspaceSelection({ pathname: '/admin/dispatch', search: '?tab=schedule' }).itemId).toBe('schedule');
+  });
+});
 
 function compactSections(sections) {
   return sections.map(({ section, items }) => ({

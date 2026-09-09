@@ -81,6 +81,51 @@ const QUOTE_HINT_RE = new RegExp(
   'i',
 );
 
+// Business-to-business pitches TO Waves. Lead-gen / marketing / software /
+// staffing robotexts to the location lines pass QUOTE_HINT_RE on words like
+// "service", "cost", "rate", "lawn" (18 senders, 41 texts in the 60 days to
+// 2026-09-09) and the classifier prompt had no vendor category, so a
+// confident "quote_request: true" would mint an owed-quote bell and a DEEP
+// composer run for a sales pitch.
+//
+// Marker CATEGORIES, same shape as call-spam-classifier's robocall script
+// signature: a STRONG marker is phrasing a homeowner never writes and is a
+// verdict alone; a WEAK marker is vendor-flavored but a prospect can write
+// it too ("no upfront cost?", "reply NO if you can't make it", "would you
+// like more details?"). Weak matches need two distinct categories,
+// including an outreach clue (an opt-out instruction or marketing offer):
+// customers can combine pricing and detail questions in a genuine ask.
+// Anything softer is left to the model, which is told vendors are not
+// quote requests.
+const SOLICITATION_MARKERS = [
+  { key: 'leads_pitch', strong: true, re: /\b(?:(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}(?:leads?|jobs?|customers?|estimates?)|(?:more|extra)\s+(?:\w+\s+){0,3}leads?)\b|\bleads?\s+for\s+(?:you|your)\b/i },
+  { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
+  { key: 'grow_business', strong: true, re: /\b(?:grow|scale|book(?:ing)?\s+more|fill)\s+(?:your\s+)?(?:business|schedule|calendar)\b/i },
+  { key: 'vendor_tool', strong: true, re: /\b(?:having|offer(?:ing)?|provid(?:e|ing)|try)\s+(?:an?\s+|our\s+)?ai\s+receptionist\b|\breview\s+system\b[^.!?]{0,80}\bfor\s+your\s+business\b/i },
+  // Matching homeowners to contractors is lead generation; connecting us
+  // with a property manager for access is ordinary quote coordination.
+  { key: 'connects_you', strong: true, re: /\bconnect(?:s|ing)?\s+(?:you\s+with\s+(?:local\s+)?homeowners?\s+(?:requesting|seeking)\s+(?:quotes?|estimates?)|local\s+homeowners\s+with\s+(?:local\s+)?(?:contractors?|professionals?))\b/i },
+  // A tenant's service request is not a pitch without recruitment copy.
+  { key: 'service_requested_by', strong: true, re: /\bservice\s+is\s+being\s+requested\s+by\b[\s\S]{0,160}\b(?:apply\s+(?:here|now|today)|\d+\s*min(?:ute)?s?\s+to\s+apply)\b/i },
+  // Capacity outreach needs a second weak category. A customer's request
+  // for more estimates is not itself a marker, even with a detail question.
+  { key: 'additional_work', strong: false, re: /\b(?:handle|open\s+to)\s+(?:\d+(?:\s*[-–]\s*\d+)?\s+)?(?:more|extra)\s+(?:\w+\s+){0,3}(?:jobs?|customers?|estimates?)\b/i },
+  // "$" is not a word character, so the boundary sits inside the
+  // alternation rather than in front of it (codex r2).
+  { key: 'no_upfront', strong: false, re: /(?:\bno|\bzero|\$0)\s+(?:upfront|up-front|set-?up|monthly)\s+(?:cost|costs|fee|fees)?|\bfree\s+(?:setup|set-up|trial)\b/i },
+  { key: 'reply_directive', strong: false, outreach: true, re: /\b(?:reply|say|text)\s+["']?(?:stop|no|byebye|end)["']?\s+(?:to\s+(?:opt[\s-]?out|stop|unsubscribe|be\s+removed)|if\s+you\s+(?:want|need)\s+(?:me|us)\s+to\s+stop)\b/i },
+  { key: 'marketing_offer', strong: false, outreach: true, re: /\bour\s+(?:\w+\s+){0,3}(?:marketing|lead[\s-]?gen(?:eration)?)\s+(?:package|service|platform|program)\b/i },
+  { key: 'more_details', strong: false, re: /\b(?:want|like)\s+(?:more\s+)?details\?/i },
+];
+
+/** Pure. A strong marker, or two weak categories including an outreach clue. */
+function isSolicitationPitch(text) {
+  const t = String(text || '');
+  if (!t.trim()) return false;
+  const hits = SOLICITATION_MARKERS.filter((m) => m.re.test(t));
+  return hits.some((m) => m.strong) || (hits.length >= 2 && hits.some((m) => m.outreach));
+}
+
 // Markers that the sender is REPLACING the previous ask rather than
 // continuing it. Deliberately narrow — an explicit correction word plus a
 // trigger body that itself names nothing out of scope; the grounded
@@ -126,12 +171,12 @@ Decide three things about the sender's message:
 - service_offered: does the request map to a service Waves offers? (true when it's unclear which service they mean)
 - relates_to_existing_job: is this coordinating, scheduling, or adding detail to a visit that is ALREADY BOOKED, or asking for work the customer's CURRENT services already cover — including a third party texting on a customer's behalf? Pricing for a NEW or ADDITIONAL service is a quote request even from an existing customer at a known address (quote_request true, relates_to_existing_job false) — e.g. a pest-control customer asking what a mosquito program costs.
 
-NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
+NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers, and any business-to-business pitch TO Waves (lead generation, marketing or ads, software, staffing/recruiting, another contractor offering Waves their services or a partnership).
 
 Message: ${JSON.stringify(text)}`
       : `An SMS arrived at Waves Pest Control (pest control + lawn care). Decide if the sender is asking for a QUOTE or PRICING for a service (new or additional service, "how much", "can you give me a price", describing a pest/lawn problem they want serviced).
 
-NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
+NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers, and any business-to-business pitch TO Waves (lead generation, marketing or ads, software, staffing/recruiting, another contractor offering Waves their services or a partnership).
 
 Message: ${JSON.stringify(text)}`;
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
@@ -366,6 +411,16 @@ async function startSmsThreadDraft({
         return result;
       }
     }
+    // A vendor pitch is never a quote request — on the primary path AND on
+    // the skipIntentGate resumes (lead-intake / clarify), with or without
+    // scope guards, before triage is loaded or a model call is spent.
+    // Terminal: a caller's legacy fallback must not draft it either
+    // (codex #4212 r1/r2).
+    if (isSolicitationPitch(triggerBody)) {
+      result.skipped = 'no_quote_intent_regex_solicitation';
+      result.terminal = true;
+      return result;
+    }
     // Grounding for the classifier (fail-open → ungrounded prompt); a
     // prechecked call reuses the pre-check's triage (may be null — that IS
     // the pre-check's fail-open outcome, reused as-is).
@@ -499,5 +554,5 @@ async function startSmsThreadDraft({
 module.exports = {
   smsThreadDraftsEnabled,
   startSmsThreadDraft,
-  _private: { threadQuoteSignal, smsOrigin, runThreadDraft, QUOTE_HINT_RE },
+  _private: { threadQuoteSignal, smsOrigin, runThreadDraft, QUOTE_HINT_RE, isSolicitationPitch },
 };

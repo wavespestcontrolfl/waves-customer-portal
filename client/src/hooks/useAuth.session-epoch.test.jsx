@@ -10,6 +10,10 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from './useAuth';
+import { clearNativeBadge } from '../native/nativeBadge';
+import { deactivateNativePushToken } from '../native/nativePush';
+
+vi.mock('../native/nativeBadge', () => ({ clearNativeBadge: vi.fn() }));
 
 vi.mock('../utils/api', () => ({
   default: {
@@ -83,6 +87,54 @@ afterEach(() => {
 });
 
 describe('session epoch guards', () => {
+  it.each(['launch', 'refresh'])('clears a confirmed cancelled account badge on %s', async phase => {
+    stubLocalStorage({ waves_token: 'fixture-token' });
+    api.getMe.mockResolvedValueOnce({ id: 'fixture-customer', cancelled: phase === 'launch' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    if (phase === 'refresh') {
+      expect(clearNativeBadge).not.toHaveBeenCalled();
+      api.getMe.mockResolvedValueOnce({ id: 'fixture-customer', cancelled: true });
+      await act(async () => { await authApi.refreshCustomer(); });
+    }
+    expect(clearNativeBadge).toHaveBeenCalledTimes(1);
+    expect(authApi.customer.cancelled).toBe(true);
+  });
+
+  it('clears the badge before waiting for native sign-out cleanup', async () => {
+    stubLocalStorage({ waves_token: 'fixture-token', waves_refresh_token: 'fixture-refresh' });
+    api.getMe.mockResolvedValueOnce({ id: 'fixture-customer' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    const release = deferred();
+    deactivateNativePushToken.mockReturnValueOnce(release.promise);
+    await act(async () => { authApi.logout(); });
+    expect(clearNativeBadge).toHaveBeenCalledTimes(1);
+    expect(api.clearTokens).not.toHaveBeenCalled();
+    await act(async () => { release.resolve(); });
+    expect(api.clearTokens).toHaveBeenCalledTimes(1);
+  });
+
+  it('publishes a new epoch immediately for a same-customer family adoption but not token rotation', async () => {
+    const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const tokenFor = (sessionId, suffix) => `${b64u({ alg: 'none' })}.${b64u({ customerId: 'cust-a', sessionId })}.${suffix}`;
+    const original = tokenFor('session-a', 'original');
+    stubLocalStorage({ waves_token: original });
+    api.getMe.mockResolvedValueOnce({ id: 'cust-a' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    const epoch = authApi.sessionEpoch;
+    api.getMe.mockImplementation(() => new Promise(() => {}));
+    await act(async () => {
+      localStorage.setItem('waves_token', tokenFor('session-a', 'rotated'));
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token' }));
+    });
+    expect(authApi.sessionEpoch).toBe(epoch);
+    await act(async () => {
+      localStorage.setItem('waves_token', tokenFor('session-b', 'new-login'));
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token' }));
+    });
+    expect(authApi.sessionEpoch).toBe(epoch + 1);
+    expect(authApi.customer.id).toBe('cust-a');
+  });
+
   it('discards a property-switch response that lands after Sign out', async () => {
     stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
     api.getMe.mockResolvedValueOnce({ id: 'cust-a' });
@@ -125,8 +177,9 @@ describe('session epoch guards', () => {
 
     // ...and the stalled property-A response finally lands. Last-response-
     // wins would repaint identity A while every request authenticates as B.
-    await act(async () => { slowMe.resolve({ id: 'cust-a' }); });
+    await act(async () => { slowMe.resolve({ id: 'cust-a', cancelled: true }); });
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
+    expect(clearNativeBadge).not.toHaveBeenCalled();
   });
 
   it('does NOT supersede an in-flight switch on a same-customer token rotation from another tab', async () => {

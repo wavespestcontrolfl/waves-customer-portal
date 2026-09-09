@@ -1409,13 +1409,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Recover interrupted SMS profile capture every five minutes.
+  // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
     try {
       await runSmsRecoveryTick();
     } catch {
-      logger.error('[sms-operations] profile capture did not complete');
+      logger.error('[sms-operations] intake did not complete');
+    }
+    try {
+      const { refreshSmsCommitments } = require('./sms-operational-actions');
+      const lockRes = await runExclusive('sms-commitment-fulfillment', () => refreshSmsCommitments());
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`SMS fulfillment tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('sms-commitment-fulfillment').catch(() => {});
+        await recordJobEnd('sms-commitment-fulfillment', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch {
+      logger.error('[sms-operations] commitment watcher did not complete');
     }
   }, { timezone: 'America/New_York' });
 
@@ -2678,6 +2692,40 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Call extraction replay eval failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY MONDAY 3:50AM ET — Voice relay conversation eval. Replays the
+  // synthetic-caller scenario fixture (server/fixtures/voice-relay-eval/)
+  // through the LIVE Sandy conversation loop and the pinned judge, in a CHILD
+  // PROCESS: each scenario sets the relay's gate env vars (context, booking,
+  // transfer, recovery) for its own run, and those must never touch the
+  // process that is answering real calls. The harness never closes a session
+  // (no call_log write, no capture floor) and refuses DB access while a
+  // scenario runs; the child emits one regression bell plus the existing
+  // ops digest/email on repeated failure. Judge telemetry uses its normal
+  // replay-labelled ledger lane. runExclusive: live model calls; don't double-spend on
+  // deploy-overlap ticks. Kill switch: GATE_VOICE_RELAY_EVAL=false.
+  // =========================================================================
+  cron.schedule('50 3 * * 1', async () => {
+    if (!isEnabled('voiceRelayEval')) return;
+    logger.info('Running: voice relay conversation eval');
+    try {
+      await runExclusive('voice-relay-eval', async () => {
+        const { runVoiceRelayEvalProcess, summaryLine } = require('./eval/voice-relay-replay');
+        const result = await runVoiceRelayEvalProcess();
+        logger.info(`Voice relay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} | ${summaryLine(result.summary || {})}`);
+      });
+    } catch (err) {
+      // The child could not send its own alert (crash / timeout / no JSON):
+      // page through the same inconclusive path, never a log line alone.
+      logger.error(`Voice relay eval failed: ${err.message}`);
+      try {
+        await require('./eval/voice-relay-replay').notifyEvalCrash(err);
+      } catch (notifyErr) {
+        logger.error(`Voice relay eval crash notification failed: ${notifyErr.message}`);
+      }
     }
   }, { timezone: 'America/New_York' });
 
@@ -6030,7 +6078,7 @@ function initScheduledJobs() {
       await runExclusive('billing-monthly', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processMonthlyBilling();
-        logger.info(`Monthly billing done: ${result.charged} charged, ${result.failed} failed, ${result.skipped} skipped`);
+        logger.info(`Monthly billing done: ${result.charged} charged, ${result.processing} processing, ${result.failed} failed, ${result.skipped} skipped`);
       });
     } catch (err) {
       logger.error(`Monthly billing failed: ${err.message}`);
@@ -6042,7 +6090,7 @@ function initScheduledJobs() {
       await runExclusive('billing-retries', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processPaymentRetries();
-        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded`);
+        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded, ${result.processing} processing`);
       });
     } catch (err) {
       logger.error(`Payment retry failed: ${err.message}`);

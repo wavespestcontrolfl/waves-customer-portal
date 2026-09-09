@@ -1603,6 +1603,17 @@ const ReviewService = {
 
     const reviewUrl = await buildReviewUrl(request, customer.id);
     const techName = request.tech_name || "Our team";
+    // Outreach-template renders (custom_body / template_key) resolve the tech
+    // exactly as sendOutreachTouch did on the first attempt (codex #4139 r1):
+    // first name only for {tech}, and {sender} = "<tech> with Waves" from the
+    // record, else the company — a quiet-hours retry must not re-sign a
+    // Day-0 ask as "Our team with Waves" or a full name past the segment
+    // budget. The canonical sms_templates path below keeps its own tech_name.
+    const outreachTechFirst = firstNameFrom(request.tech_name) || null;
+    const outreachVars = {
+      tech: outreachTechFirst || TECH_FALLBACK_SMS,
+      sender: outreachTechFirst ? `${outreachTechFirst} with Waves` : "Waves Pest Control",
+    };
 
     // Body source priority so a deferred/retried send keeps the operator's
     // approved copy instead of reverting:
@@ -1628,7 +1639,7 @@ const ReviewService = {
         request.custom_body,
         {
           first: firstNameFrom(contact.name) || customer.first_name || "",
-          tech: techName,
+          ...outreachVars,
           service_type: request.service_type || "service",
           review_url: customIsNoLink ? "" : reviewUrl,
         },
@@ -1639,7 +1650,7 @@ const ReviewService = {
         outreachTpl.body,
         {
           first: firstNameFrom(contact.name) || customer.first_name || "",
-          tech: techName,
+          ...outreachVars,
           service_type: request.service_type || "service",
           review_url: reviewUrl,
         },
@@ -3149,24 +3160,38 @@ const ReviewService = {
     // THAT for honest per-template attribution. An edited SMS body is persisted
     // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
+    let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
+    // Controlled Day-0 composition (owner decision 2026-09-07): a cadence's
+    // step-0 SMS ask is the day0_ask template rendered from verified fields —
+    // never the LLM drafter, and never a draft persisted by an earlier
+    // (deferred, never-submitted) attempt of this step: those drafts were
+    // grounded on call history and carried the stale "today". Plans persisted
+    // before the change still name friendly_ask at step 0; they get the same
+    // body. Operator-provided copy still wins; first_treatment_ask keeps its
+    // own template.
+    const day0Controlled = actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null
+      && !canonicalTemplate
+      && OUTREACH.isDay0ControlledAsk({ sequenceStep, channel: actualChannel, templateId });
     const smsTemplateId = canonicalTemplate
       ? null
-      : templateId || (customBody && customBody.trim() ? null : "friendly_ask");
+      : day0Controlled
+        ? OUTREACH.DAY0_ASK_TEMPLATE_KEY
+        : templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     let recordedTemplateKey = actualChannel === "email"
       ? "review_request_email"
       // Canonical asks record a NULL template_key (ASK_TOUCH_SQL's canonical
       // shape, matching create()-minted rows) — never 'custom'.
       : canonicalTemplate ? null : smsTemplateId || "custom";
-    let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
 
     // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): CADENCE SMS ask
     // touches only (sequenceId required — a CSR's one-off send keeps exactly
-    // the template they picked; Codex P1, r1). Operator-provided copy always
-    // wins; private no-link check-ins and email touches keep their templates.
+    // the template they picked; Codex P1, r1), and never the Day-0 touch
+    // (controlled composition above). Operator-provided copy always wins;
+    // private no-link check-ins and email touches keep their templates.
     // A null draft (gate off, no grounding, model down, failed verification,
     // or a recipient who isn't the account holder) falls through to the
     // template.
-    if (actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null) {
+    if (actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null && !day0Controlled) {
       // Identity guard (Codex P1, r1): the SMS goes to the RESOLVED service
       // contact. The account's call/SMS history only belongs to the account
       // holder — when the recipient is someone else (tenant, buyer, realtor),
@@ -3310,12 +3335,22 @@ const ReviewService = {
 
     const reviewUrl = await buildReviewUrl(request, customer.id);
 
+    // First name only (codex #3235 r2 P2): a full technician name blows the
+    // one-segment budget on the {tech}-bearing templates, and the customer
+    // knows the tech by first name anyway. A cadence touch signs with the
+    // technician the RECORD resolves to (technician_id recovered above) ahead
+    // of the name persisted on the sequence — that name is a cache written
+    // at enrollment, and pre-deployment enrollments could cache a newer
+    // visit's technician (codex #4139 r3). A manual send keeps the
+    // operator's techName.
+    const recordTechFirst = sequenceId != null && technicianId ? await technicianFirstName(technicianId) : null;
+    const techFirst = recordTechFirst || firstNameFrom(techName) || (await technicianFirstName(technicianId)) || null;
     const vars = {
       first: firstNameFrom(contact.name) || customer.first_name || "",
-      // First name only (codex #3235 r2 P2): a full technician name blows the
-      // one-segment budget on the {tech}-bearing templates, and the customer
-      // knows the tech by first name anyway.
-      tech: firstNameFrom(techName) || (await technicianFirstName(technicianId)) || TECH_FALLBACK_SMS,
+      tech: techFirst || TECH_FALLBACK_SMS,
+      // {sender} (day0_ask): the technician on the record, else the company —
+      // the "Your tech" SMS fallback must not become "Your tech with Waves".
+      sender: techFirst ? `${techFirst} with Waves` : "Waves Pest Control",
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };
@@ -3751,9 +3786,15 @@ const ReviewService = {
           tName = tName || sr?.tech_name || null;
           svcDate = svcDate || sr?.service_date || null;
         } else {
+          // scheduled_services has no tech_name column — the technician
+          // comes from the row the visit points at (codex #4139 r1: the
+          // bare read always resolved null, so a drawer send with no
+          // techName signed as the company).
           const lastSvc = await db("scheduled_services")
-            .where({ customer_id: cid, status: "completed" })
-            .orderBy("scheduled_date", "desc")
+            .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+            .where({ "scheduled_services.customer_id": cid, "scheduled_services.status": "completed" })
+            .orderBy("scheduled_services.scheduled_date", "desc")
+            .select("scheduled_services.service_type", "scheduled_services.scheduled_date", "technicians.name as tech_name")
             .first()
             .catch(() => null);
           svcType = svcType || lastSvc?.service_type || "pest control";
@@ -4068,18 +4109,30 @@ const ReviewService = {
       // technician row the visit points at (the old read always fell through
       // to a hardcoded owner name). When the caller names the visit
       // (scheduledServiceId — the record-less completion path), THAT row is
-      // the source; the customer-wide latest completed visit is only for an
-      // unscoped manual enrollment, so a same-day sibling or a later visit can
-      // never lend its technician to this ask.
-      const lastSvc = await db("scheduled_services")
-        .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
-        .where(scheduledServiceId
-          ? { "scheduled_services.id": scheduledServiceId }
-          : { "scheduled_services.customer_id": customerId, "scheduled_services.status": "completed" })
-        .orderBy("scheduled_services.scheduled_date", "desc")
-        .select("scheduled_services.service_type", "technicians.name as tech_name")
-        .first()
-        .catch(() => null);
+      // the source; a record-scoped enrollment (serviceRecordId, e.g. a paid
+      // invoice on an older visit) resolves through the record's own linked
+      // visit (codex #4139 r2); the customer-wide latest completed visit is
+      // only for an unscoped manual enrollment, so a same-day sibling or a
+      // later visit can never lend its technician to this ask.
+      let visitId = scheduledServiceId || null;
+      if (!visitId && serviceRecordId) {
+        const rec = await db("service_records")
+          .where({ id: serviceRecordId })
+          .first("scheduled_service_id")
+          .catch(() => null);
+        visitId = rec?.scheduled_service_id || null;
+      }
+      const lastSvc = visitId || !serviceRecordId
+        ? await db("scheduled_services")
+          .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+          .where(visitId
+            ? { "scheduled_services.id": visitId }
+            : { "scheduled_services.customer_id": customerId, "scheduled_services.status": "completed" })
+          .orderBy("scheduled_services.scheduled_date", "desc")
+          .select("scheduled_services.service_type", "technicians.name as tech_name")
+          .first()
+          .catch(() => null)
+        : null;
       svcType = svcType || lastSvc?.service_type || null;
       tName = tName || lastSvc?.tech_name || null;
     }
