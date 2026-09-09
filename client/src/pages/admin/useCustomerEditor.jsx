@@ -98,9 +98,9 @@ function CustomerEditor({ editForm, setEditForm, savingEdit, saveEdit, stages, o
     </div>
     {/* The existing recipient slots and server-side compaction remain authoritative. */}
     {[
-      { prefix: "serviceContact", title: "Service contact", hint: "Optional — overrides primary for reminders, review requests" },
-      { prefix: "serviceContact2", title: "Service contact 2" },
-      { prefix: "serviceContact3", title: "Service contact 3" },
+      { prefix: "serviceContact", title: "Service Contact", hint: "(optional — overrides primary for reminders, review requests)" },
+      { prefix: "serviceContact2", title: "Service Contact 2" },
+      { prefix: "serviceContact3", title: "Service Contact 3" },
     ].map((slot) => <fieldset key={slot.prefix} className="border-0 border-t border-solid border-zinc-200 p-0 pt-3 mb-3 min-w-0">
       <legend className="ui-label text-ink-secondary">{slot.title}</legend>
       {slot.hint && <p className="text-ui-caption text-ink-secondary mb-2">{slot.hint}</p>}
