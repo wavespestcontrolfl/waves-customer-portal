@@ -344,6 +344,9 @@ describe('_private.threadQuoteSignal', () => {
       'We provide exclusive housing for customers and need pest control.',
       'We manage several rentals and can fill your schedule; please quote pest control',
       'We provide housing; can you send pest control estimates for contractors staying here? Would you like more details?',
+      'We provide estimates for contractors and need pest control for our office. Would you like more details?',
+      'My company can offer estimates for local contractors. Can you quote termite treatment for our office? Want more details?',
+      'I provide lawn-care estimates for contractors; our office needs pest control. Want more details?',
       'Can you fill your calendar with our rental pest services? I can send more details?',
       'We are growing our business and need a quote for pest control.',
     ];
@@ -581,6 +584,18 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
   });
 
   test.each([
+    'We provide estimates for contractors and need pest control for our office. Would you like more details?',
+    'My company can offer estimates for local contractors. Can you quote termite treatment for our office? Want more details?',
+    'I provide lawn-care estimates for contractors; our office needs pest control. Want more details?',
+  ])('a business description remains eligible on active intake: %s', async (triggerBody) => {
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody, skipIntentGate: true });
+    expect(result.started).toBe(true);
+    await result.draftPromise;
+    expect(mockRunDraftPipeline).toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test.each([
     'We can bring you exclusive pest control leads daily with no upfront cost.',
     'We can send you more pest-control leads.',
     'We can provide you with more lawn leads.',
@@ -593,6 +608,8 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     'My company can offer unlimited pest jobs available.',
     'My team can provide unlimited estimates for contractors.',
     'We provide unlimited estimates for contractors.',
+    'We provide you with estimates for contractors. Want more details?',
+    'Our company could offer you pest-control estimates for local contractors. Reply STOP to opt out.',
     'We can provide unlimited estimates for contractors.',
     'I provide unlimited estimates for contractors.',
     'Our company could offer qualified pest jobs for local contractors.',

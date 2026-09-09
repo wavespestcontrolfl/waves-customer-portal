@@ -32,9 +32,9 @@ const SOLICITATION_MARKERS = [
   // Offering customers is vendor evidence; having customers or asking
   // whether they qualify for a discount is ordinary service context.
   { key: 'sender_customer_offer', strong: true, re: /\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:offer|provide)s?\s+(?:you\s+(?:with\s+)?)?(?:exclusive|qualified|unlimited)\s+(?:(?:pest(?:[\s-]+control)?|lawn(?:[\s-]+care)?|local|new)\s+)?customers?\b/i },
-  // Explicit sender-side offers to contractors are outreach; a customer
-  // asking whether WE offer estimates for their contractors is not.
-  { key: 'contractor_offer', strong: false, outreach: true, re: /\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer)s?\s+(?:you\s+(?:with\s+)?)?(?:(?:exclusive|qualified|unlimited)\s+)?(?:(?:pest[\s-]+control|lawn[\s-]+care|[\w-]+)\s+)?(?:jobs?|customers?|estimates?|leads?)\s+for\s+(?:local\s+)?contractors?\b/i },
+  // Contractor outreach needs premium supply or an offer directed to us.
+  // A sender describing their own business can still be asking for service.
+  { key: 'contractor_offer', strong: false, outreach: true, re: /\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer)s?\s+(?=you\b|(?:exclusive|qualified|unlimited)\s)(?:you\s+(?:with\s+)?)?(?:(?:exclusive|qualified|unlimited)\s+)?(?:(?:pest[\s-]+control|lawn[\s-]+care|[\w-]+)\s+)?(?:jobs?|customers?|estimates?|leads?)\s+for\s+(?:local\s+)?contractors?\b/i },
   // "$" is not a word character, so the boundary sits inside the
   // alternation rather than in front of it (codex r2).
   { key: 'no_upfront', strong: false, re: /(?:\bno|\bzero|\$0)\s+(?:upfront|up-front|set-?up|monthly)\s+(?:cost|costs|fee|fees)?|\bfree\s+(?:setup|set-up|trial)\b/i },
