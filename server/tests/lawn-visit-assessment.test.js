@@ -216,6 +216,15 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(visit.validateAssessmentJson({ json: { findings: 'x', severities: {}, scores: {} } }, 2)).toBe('malformed_assessment');
     expect(visit.validateAssessmentJson({ json: { findings: [], scores: {} } }, 2)).toBe('malformed_assessment');
     expect(visit.validateAssessmentJson({ json: null }, 2)).toBe('malformed_assessment');
+    // Nested containers are checked before the leg is accepted (Ajv, the
+    // schema's own nesting): a null / scalar finding, photo rating or score
+    // object fails the leg instead of throwing from normalization after the
+    // chain has settled. Scalar leaves stay lenient — the normalizers coerce them.
+    expect(visit.validateAssessmentJson({ json: answer({ findings: [null] }) }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: answer({ findings: ['thinning turf'] }) }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [null, ...answer().photo_quality] }) }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: answer({ scores: { ...answer().scores, turf_density: 72 } }) }, 2)).toBe('malformed_assessment');
+    expect(visit.validateAssessmentJson({ json: answer({ findings: [{ ...answer().findings[0], photo_refs: ['1'], severity: 'high' }] }) }, 2)).toBeNull();
     // Every photo needs a valid quality read: none, a missing photo, an out-of-range or invalid entry all fail.
     expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [] }) }, 2)).toBe('incomplete_photo_quality');
     expect(visit.validateAssessmentJson({ json: answer() }, 3)).toBe('incomplete_photo_quality'); // photo 3 unrated (7 is out of range)

@@ -31,6 +31,7 @@
  */
 
 const crypto = require('crypto');
+const Ajv = require('ajv');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
@@ -379,11 +380,28 @@ function zoneFromRefs(photoRefs, photoZones = []) {
   return zones.size === 1 ? [...zones][0] : 'unknown';
 }
 
+// RESPONSE_SCHEMA's containers only — every object and array of the answer,
+// nested as the schema nests them, with the scalar leaves, enums and required
+// keys dropped. Where the normalizers already coerce or drop a bad scalar,
+// they cannot survive a container that is not one: a finding of `null`
+// threw from normalizeFindings AFTER the chain had accepted the leg (Codex
+// #4149 r5), so the answer's shape is checked here, before the leg is
+// accepted, and a malformed one fails over like any other bad answer.
+function containerShape(schema) {
+  if (schema.type === 'object') {
+    return { type: 'object', properties: Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, containerShape(value)])) };
+  }
+  if (schema.type === 'array') return { type: 'array', items: containerShape(schema.items) };
+  return {};
+}
+const hasResponseShape = new Ajv().compile(containerShape(RESPONSE_SCHEMA));
+
 // Schema enforcement should guarantee the shape; the chain's validate hook is
 // the defensive read — a malformed answer fails the leg, so the fallback runs.
 function validateAssessmentJson(result, photoCount) {
   const json = result && result.json;
   if (!json || typeof json !== 'object' || Array.isArray(json)) return 'malformed_assessment';
+  if (!hasResponseShape(json)) return 'malformed_assessment';
   if (!Array.isArray(json.findings)) return 'malformed_assessment';
   if (!json.severities || typeof json.severities !== 'object') return 'malformed_assessment';
   if (!json.scores || typeof json.scores !== 'object') return 'malformed_assessment';
