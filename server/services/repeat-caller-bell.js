@@ -102,14 +102,23 @@ async function ringRepeatCallerIfNeeded(callSid) {
     }
     let stats = null;
     let delivered = false;
-    const stillUnbooked = async () => !await db('call_log').whereIn('id', plan.windowIds).whereRaw(BOOKED_SQL).first('id');
+    // A sibling call may start after the claim snapshot. Each delivery guard
+    // reads the caller's current window, including newly active/booked calls.
+    const stillQuiet = async () => !await db('call_log')
+      .where({ direction: 'inbound' })
+      .whereRaw(`${PHONE_KEY_SQL} = ?`, [key])
+      .modify(whereNotSandboxCall)
+      .modify(whereNotBlockedCall)
+      .where('created_at', '>', new Date(Date.now() - REPEAT_WINDOW_MS))
+      .where(q => q.whereRaw(BOOKED_SQL).orWhereRaw("COALESCE(status, '') <> ALL(?)", [[...TERMINAL_STATUSES]]))
+      .first('id');
     try {
       const customer = call.customer_id
         ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
         : null;
       const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
       const { triggerNotification } = require('./notification-triggers');
-      if (!await stillUnbooked()) { stats = { superseded: true }; return false; }
+      if (!await stillQuiet()) { stats = { superseded: true }; return false; }
       stats = await triggerNotification('repeat_caller', {
         customerId: call.customer_id || null,
         name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || null,
@@ -119,7 +128,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
         unanswered: plan.unanswered,
         callLogId: call.id,
         repeatCallerDeliveryId: String(plan.deliveryId),
-      }, { beforePush: stillUnbooked });
+      }, { beforePush: stillQuiet });
     } finally {
       // Settle only delivery or deliberate silence; release a failed attempt for retry.
       delivered = Boolean(stats && !stats.error
@@ -131,9 +140,9 @@ async function ringRepeatCallerIfNeeded(callSid) {
         if (!stats?.superseded) logger.warn(`[repeat-caller-bell] delivery did not happen for call ${String(callSid).slice(-6)} — lease released`);
       }
     }
-    // A booking can commit while preferences or badge counts are loading.
+    // A booking or new call can arrive while preferences or badge counts load.
     // Retire the persisted bell too, including when push is disabled.
-    if (stats?.bellWritten && !await stillUnbooked()) {
+    if (stats?.bellWritten && !await stillQuiet()) {
       await require('./notification-service').supersedeMissedCallAdmin({ callLogId: call.id, triggerKey: 'repeat_caller' });
     }
     return delivered;
