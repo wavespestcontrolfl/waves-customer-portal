@@ -1054,6 +1054,23 @@ describe('executeMerge', () => {
     expect(state.tagsDropped).toBe(1);
   });
 
+  it('retains immutable field credit ownership while merging ordinary account references', async () => {
+    const { trx, state } = buildTrx({
+      winner: { id: WINNER, phone: '+19995550003' }, loser: { id: LOSER, phone: '9995550003' },
+      fkRows: [
+        { table_name: 'field_credit_allocations', column_name: 'customer_id' },
+        { table_name: 'leads', column_name: 'customer_id' },
+      ],
+      updates: { field_credit_allocations: 1 },
+    });
+    db.transaction.mockImplementation(async fn => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.repointUpdates).not.toContain('field_credit_allocations');
+    expect(result.repointed['field_credit_allocations.customer_id']).toBeUndefined();
+    expect(state.repointUpdates).toContain('leads');
+    expect(state.retired).toBeTruthy();
+  });
+
   it('repoints customer-typed polymorphic recipients (notifications, email_messages)', async () => {
     const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' };
     const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' };

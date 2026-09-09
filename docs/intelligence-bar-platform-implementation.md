@@ -86,8 +86,8 @@ mocked provider response is not evidence of end-to-end capability.
 - The existing IB retention tick removes expired task recovery data after the
   30-day window, including while the platform gate is off. A live runner lease
   postpones deletion; separate actor-bound action receipts remain available for
-  reconciliation. The existing workspace `uuid` library handles browsers without
-  native `crypto.randomUUID`; both composers share the same identity helper.
+  reconciliation. The shared identity helper uses Web Crypto, including
+  `getRandomValues` for UUID v4 generation without native `crypto.randomUUID`.
 - Navigation and Clear invalidate late UI updates. Saved tasks remain recoverable;
   closing or clearing a chat does not cancel already-confirmed operations.
   The phone sheet uses existing visual viewport variables and puts History/New
@@ -96,15 +96,18 @@ mocked provider response is not evidence of end-to-end capability.
 ## Transport exceptions
 
 The census records every discovered request/export site, including Intelligence
-Bar transport itself. The ten changed/new query, task, and receipt sites are
+Bar transport itself. The five current query, task, and receipt sites are
 reviewed exceptions: a model must not receive a tool that invokes its own query
 route, chooses another session, or obtains/consumes confirmation credentials.
 These exceptions do not grant coverage to any customer, estimate, inventory,
 financial, communications, or other domain operation.
 
 `npm run check:ib-coverage` compares AST request fingerprints with the reviewed
-manifest. New or changed calls need a concrete tool + outcome evidence or an
-explicit exception for that exact fingerprint. The original `a2bb0bc49` census
+manifest. New or changed calls need a concrete tool + outcome evidence, a genuine
+capability exception, or a `reviewed_unmapped` acknowledgment for that exact
+request fingerprint. The acknowledgment uses the same review-metadata checks but
+remains in the unsupported/unverified count; formatting or UI retry work does
+not remove a domain capability from the backlog. The original `a2bb0bc49` census
 remains recorded. The task branch was updated to `e4de41345` before Phase 2;
 25 additional upstream sites and ten upstream fingerprint changes are separately
 marked with that source commit. Deleted upstream sites remain recorded, and no
@@ -129,6 +132,15 @@ The `bd735bc42` main integration adds the completion pricing source reader;
 its exact upstream fingerprint is recorded as unmapped. No scheduling parity is
 claimed by importing this already-merged portal action.
 
+The desktop query site's reviewed fingerprint was refreshed in place when the
+request identity became retained across a dropped response (the call now
+serializes the request once and reuses its key until the server answers).
+Same exception, same reason: transport is not a domain capability and no
+action gained coverage. Refreshed again when settle became identity-bound
+(the call spreads a captured identity instead of calling begin inline, so a
+stale response cannot clear a newer request key); same exception, same
+reason, no action gained coverage.
+
 The `f2e61b677` integration imports the upstream Pipeline estimate lifecycle,
 reviewed send dialog and customer SMS consolidation. Seventeen additional sites
 and one changed customer-search fingerprint were checked against that exact
@@ -136,11 +148,49 @@ source commit and remain **unmapped**. The prior fingerprint and retired sites
 remain recorded. This addresses CI's merged-main census drift without claiming
 support for those new portal actions.
 
-Current foundation census: 1,732 UI sites; ten transport exceptions; 1,722 domain
-sites still unsupported/unverified in the matrix. Registration of existing tools
+Current foundation census: 1,746 retained UI sites; seven current transport
+exceptions; 1,739 sites still unsupported/unverified in the matrix. Historical
+transport calls remain recorded after their frontend sites changed. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 
 ## Verification evidence
+
+The integrated runtime passes all 29 real PostgreSQL route scenarios in one
+run (84.38 seconds), including receipt preservation in the response after
+Continue. The bulk preview and execution use the same private approved cohort;
+persisted approval formats stay unchanged. Model-proposed alternate SMS names
+cannot replace a resolved customer before approval.
+
+The final parent-integrated server run passes all 262 tests across ten suites.
+The shared hook, shell, global bar, cards and session identity pass 43 client
+tests. These cover duplicate-name selection, confirmations, continuation,
+saved-task recovery, stale responses and unavailable status reads. The parent
+recovery/target suites independently pass 28 real PostgreSQL cases. These are
+scripted-model and isolated-database checks, not a live-model evaluation.
+
+The shared ProtocolPanel bar uses the same durable task card and task endpoints
+as the global bar. Navigation remounts it by appointment ID. Confirmed and
+cancelled receipts remain visible when the following status refresh fails;
+Clear removes the local transcript and leaves saved operations recoverable.
+Dedicated agent-estimate and technician contexts remain isolated.
+
+Repeated confirmations, an intervening model outage, and pre-model ambiguity
+selection retain the original or latest successfully appended thread cursor.
+An unseen concurrent conversation append is refused without changing its tail.
+Review drafting rejects a foreign customer review before model generation;
+review approval shows the review identity, hides its execution token, and
+refuses changed customer linkage before publishing.
+
+Desktop (1440) and mobile (390) Chrome screenshots verify the review identity
+card and cancel action, with no JS exceptions or horizontal overflow. The
+review reply remains unset in PostgreSQL after cancellation. Shared-shell browser
+checks at both widths also select between duplicate names, confirm a note,
+Continue, Clear, reload and recover the saved receipt. Independent database reads
+verify that only the selected fixture changed; no console errors, network
+failures or horizontal overflow occurred in that focused harness. Earlier runtime
+screenshots verify A-only note persistence and expired approvals without
+executable controls. Native iOS notches/keyboards, voice and live-provider
+delivery remain unverified. Earlier regression evidence is retained below.
 
 - Real Express route + bearer authentication + domain executor + isolated Railway
   development Postgres, scripted model and controlled Gmail: twenty-five tests pass in
@@ -216,8 +266,8 @@ has deliberately not been relabeled as verified application parity.
   passed with no JS errors or overflow. Artifacts: `.local/ib-uuid-*`. The latest
   client run passes 20 tests (17 bar, two identity, one hook); all six scheduler
   registration tests and the production build pass after current-main integration.
-  Client-only native CI initially failed to resolve the server-owned UUID package;
-  the client now declares the same existing UUID dependency for isolated installs.
+  Client-only native CI initially failed to resolve the server-owned UUID package.
+  The identity helper now uses Web Crypto directly, with no client UUID dependency.
 - Local preview: `http://127.0.0.1:5292/admin/customers` while the QA harness runs;
   this is not a deployed preview. The synthetic session is local-only.
 - Live-model/provider evaluation has not run. No provider credentials are loaded
@@ -251,3 +301,45 @@ foundation alone adds the catalog and drift check; runtime discovery, task
 targeting and recovery are introduced by its dependent PRs. Recorded browser
 and database evidence below was obtained against the integrated stack, not
 against the registry-only commit. See `intelligence-bar-foundation-review-split.md`.
+
+Customerless reservation protection: `unlinkedRecordIsReferenced` refuses an
+appointment without a customer owner when the task has customer targets. This
+keeps live estimate slot holds out of another customer's single/bulk move. The
+bulk-move customer join qualifies `scheduled_services.id` so the query reaches
+that target check. Own-customer and deliberately unscoped operations retain
+their existing rules.
+
+Evidence: two new unit regressions failed before the fix; the final scheduling,
+target, and write-gate suites pass 176 tests. Two isolated PostgreSQL cases pass,
+covering single/bulk proof validation and actual query → discovery → move
+proposal refusal. The route test asserts `target_clarification_required`, no
+approval row, and an unchanged hold. Focused DB runs exclude unrelated cases
+whose prior evidence remains recorded above.
+
+Read validation now runs for every platform read, including tasks with no
+resolved customer. A misspelled current name or model-selected unlinked call
+cannot expose an unrelated record. A phone at the start of an explicit
+conversation/history lookup may establish one fresh read target; ambiguous or
+substituted phones refuse, and that lookup never grants authority to write.
+
+The affected route/target PostgreSQL suites pass all 60 cases (36 route and
+24 target cases); the unchanged parent recovery suite passes 14. The route
+proof covers token and phone canonicalization for all three flexible estimate
+actions, then inserts a newer phone-matched estimate before confirmation and
+verifies the original estimate changes once while the newer row stays untouched.
+Server unit/contract checks pass 252 cases; four affected client suites pass
+38 cases. The production build, brand, domain and coverage checks pass. The
+controlled browser evidence above remains applicable to the unchanged UI.
+
+The latest parent integration includes the focused selection correction #4094
+and converted-lead email ownership checks. Route regressions now prove that a
+stale selected customer cannot replace an unmatched name, authorize an incomplete
+named cohort, or shrink a complete cohort. A duplicate normalized phone also
+refuses conversation access without granting write authority.
+
+Review status: #4019's unmatched-name finding is addressed by unconditional
+platform read validation and the route acceptance tests. The client UUID
+dependency is removed; the existing shared identity helper uses Web Crypto and
+retains its fallback for browsers without `crypto.randomUUID`. Fallback tests
+verify cryptographic randomness, UUID v4 formatting, distinct request keys,
+actor isolation and unavailable storage. Final-head remote review remains required.

@@ -30,6 +30,7 @@ const FIELD_GROUPS = {
   high: [
     'appointment_confirmed',
     'preferred_date_time',
+    'proposed_start_at',
     'agent_committed_booking',
     'is_spam',
     'is_voicemail',
@@ -383,7 +384,7 @@ function normalizeField(field, value) {
   // don't report a spurious high-severity delta on every pre-1.8.0 row
   // (codex P2). A genuine true↔false disagreement still surfaces.
   if (field === 'agent_committed_booking') return normalizeBool(value) === true;
-  if (field === 'preferred_date_time') return normalizeDateTime(value);
+  if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
   return normalizeString(value);
 }
 
