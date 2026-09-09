@@ -801,6 +801,10 @@ router.post('/assess', async (req, res, next) => {
       ? (i) => visitAssessment.photoFieldsFor(visitPhotos.zones[i])
       : (i) => ({ photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') });
     const photoRecords = [];
+    // The stored row per prompt position, with an explicit gap where an
+    // insert failed: the run's findings cite 1-based prompt positions, so its
+    // photo_ids must stay index-aligned rather than compact (Codex #4150 r10).
+    const photoRowsByIndex = photos.map(() => null);
     let bestPhotoId = null;
     let bestQuality = -1;
 
@@ -889,6 +893,7 @@ router.post('/assess', async (req, res, next) => {
         }).returning('*');
 
         photoRecords.push(photoRecord);
+        photoRowsByIndex[i] = photoRecord;
 
         // Best-photo selection considers quality-gated photos only.
         // A failed photo can never become is_best_photo regardless of
@@ -913,7 +918,7 @@ router.post('/assess', async (req, res, next) => {
     // bookkeeping: the ids are a convenience for the eval, not the provenance.
     if (visitRun) {
       try {
-        visitRun = (await visitAssessment.attachRunPhotos(visitRun.id, photoRecords.map((row) => row.id), db)) || visitRun;
+        visitRun = (await visitAssessment.attachRunPhotos(visitRun.id, photoRowsByIndex.map((row) => row?.id || null), db)) || visitRun;
       } catch (attachErr) {
         logger.error(`[lawn-assessment] visit run photo ids attach failed: ${attachErr.message}`);
       }
@@ -1157,8 +1162,11 @@ router.post('/confirm', async (req, res, next) => {
     };
     const { updated, reviewedVisitRun, alreadyConfirmed } = reviewedRun ? await db.transaction(writeConfirm) : await writeConfirm(db);
     if (alreadyConfirmed) {
-      const current = await db('lawn_assessments').where({ id: assessmentId }).first();
-      return res.json({ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment.responseForRun(visitRun) });
+      // The row AND the run as the completing confirm left them: the run this
+      // request loaded before waiting on the lock may predate that confirm's
+      // review (Codex #4150 r10).
+      const [current, confirmedRun] = await Promise.all([db('lawn_assessments').where({ id: assessmentId }).first(), visitAssessment.loadRun(assessmentId, db)]);
+      return res.json({ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment.responseForRun(confirmedRun || visitRun) });
     }
     if (protocolFieldChecksProvided) Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
 

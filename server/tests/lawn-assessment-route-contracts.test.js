@@ -121,7 +121,11 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/\? \(i\) => visitAssessment\.photoFieldsFor\(visitPhotos\.zones\[i\]\)/);
       // The run is written in the assessment's transaction — both or neither.
       expect(assess).toMatch(/db\.transaction\(async \(trx\) => \{[\s\S]{0,400}visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis, adjustedScores \}, trx\)/);
-      expect(assess).toMatch(/visitAssessment\.attachRunPhotos\(/);
+      // The run's photo ids stay aligned with the prompt positions its findings cite: a failed insert leaves a null gap.
+      expect(assess).toMatch(/const photoRowsByIndex = photos\.map\(\(\) => null\);/);
+      expect(assess).toMatch(/photoRecords\.push\(photoRecord\);\s*photoRowsByIndex\[i\] = photoRecord;/);
+      expect(assess).toMatch(/visitAssessment\.attachRunPhotos\(visitRun\.id, photoRowsByIndex\.map\(\(row\) => row\?\.id \|\| null\), db\)/);
+      expect(assess).not.toMatch(/attachRunPhotos\(visitRun\.id, photoRecords/);
       // Perception never sees the planned products under the gate.
       expect(assess).toMatch(/const track = visitAssessmentEnabled \? null : grassCtx\.trackKey;/);
       // The provider-miss early return is legacy-only: an unavailable run still stores the row.
@@ -190,7 +194,9 @@ describe('lawn assessment route contracts', () => {
       expect(write).toMatch(/if \(protocolFieldChecksProvided\) await persistProtocolFieldChecks\(\{ assessment: row, checks: protocolFieldChecks, trx \}\);\s*return \{ updated: row, reviewedVisitRun: run \};/);
       expect(confirm.match(/persistProtocolFieldChecks\(/g)).toHaveLength(1);
       expect(write.indexOf('reviewRun(')).toBeLessThan(write.indexOf('persistProtocolFieldChecks('));
-      expect(confirm).toMatch(/const \{ updated, reviewedVisitRun, alreadyConfirmed \} = reviewedRun \? await db\.transaction\(writeConfirm\) : await writeConfirm\(db\);\s*if \(alreadyConfirmed\) \{[\s\S]{0,300}return res\.json\(\{ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment\.responseForRun\(visitRun\) \}\);/);
+      // The already-confirmed response reads the row AND the run as the completing confirm left them — never the
+      // run this request loaded before it waited on the lock.
+      expect(confirm).toMatch(/const \{ updated, reviewedVisitRun, alreadyConfirmed \} = reviewedRun \? await db\.transaction\(writeConfirm\) : await writeConfirm\(db\);\s*if \(alreadyConfirmed\) \{[\s\S]{0,400}const \[current, confirmedRun\] = await Promise\.all\(\[db\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.first\(\), visitAssessment\.loadRun\(assessmentId, db\)\]\);\s*return res\.json\(\{ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment\.responseForRun\(confirmedRun \|\| visitRun\) \}\);/);
       expect(confirm).toMatch(/if \(protocolFieldChecksProvided\) Object\.assign\(updated, protocolFieldChecks, \{ protocol_field_checks: protocolFieldChecks \}\);/);
       // The response reads the run the transaction reviewed (or loaded under the lock), not the pre-lock snapshot.
       expect(confirm).toMatch(/visitAssessment\.responseForRun\(reviewedVisitRun \|\| currentRun\)/);

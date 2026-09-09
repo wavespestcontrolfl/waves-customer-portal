@@ -838,6 +838,7 @@ module.exports = {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
+  SUMMARY_CAUSE_RE,
   lowerConfidence,
   CONDITION_LABEL_VALUES,
   MINIMAL_SAFE_SUMMARY,
