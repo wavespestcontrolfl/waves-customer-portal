@@ -86,7 +86,7 @@ export default function OwedCommitmentsSummary({ customerId, source = "call" }) 
       {rows.map((row) => (
         <div key={row.id} className="border-t border-zinc-200 pt-2 text-14">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge className="!text-14" tone={row.overdue ? "alert" : "neutral"} dot>{row.overdue ? "Overdue" : row.due_at ? `Due ${fmtWhen(row.due_at)}` : "Open"}</Badge>
+            <Badge className="!text-14" tone={row.overdue ? "alert" : "neutral"} dot>{row.overdue ? "Overdue" : (row.effective_due_at || row.due_at) ? `Due ${fmtWhen((row.effective_due_at || row.due_at))}` : "Open"}</Badge>
             <Badge className="!text-14" tone={row.party === "waves" ? "strong" : "neutral"}>{row.party === "waves" ? "Waves" : "Customer"}</Badge>
             <span className="text-ink-primary min-w-0 break-words">{row.description}</span>
           </div>

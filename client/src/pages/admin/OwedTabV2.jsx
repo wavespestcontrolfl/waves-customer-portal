@@ -49,19 +49,21 @@ export function whoLabel(row) {
 }
 
 export function isOverdueNow(row, now = Date.now()) {
-  return Boolean(row.overdue) || (Boolean(row.due_at) && new Date(row.due_at).getTime() < now);
+  const due = row.effective_due_at || row.due_at;
+  return Boolean(row.overdue) || (Boolean(due) && new Date(due).getTime() < now);
 }
 
 export function dueLabel(row, now = Date.now()) {
+  const due = row.effective_due_at || row.due_at;
   // A human-recorded promise is open since it was RECORDED — the instant its
   // implicit deadline ages from — not since a call that may be weeks older.
   const openSince = row.source === "human" ? row.created_at : (row.call_started_at || row.created_at);
   // The server's overdue flag is a snapshot; a stated deadline that passed
   // while the tab stayed open is overdue NOW (Codex #3725 r19 P2).
-  if (isOverdueNow(row, now)) return { text: row.due_at ? `Overdue · was due ${fmtWhen(row.due_at)}` : `Overdue · open since ${fmtWhen(openSince, false)}`, tone: "alert" };
-  if (row.due_at) {
-    const soon = new Date(row.due_at).getTime() - now < 24 * 60 * 60 * 1000;
-    return { text: `Due ${fmtWhen(row.due_at)}`, tone: soon ? "strong" : "neutral" };
+  if (isOverdueNow(row, now)) return { text: due ? `Overdue · was due ${fmtWhen(due)}` : `Overdue · open since ${fmtWhen(openSince, false)}`, tone: "alert" };
+  if (due) {
+    const soon = new Date(due).getTime() - now < 24 * 60 * 60 * 1000;
+    return { text: `Due ${fmtWhen(due)}`, tone: soon ? "strong" : "neutral" };
   }
   return { text: "No due time", tone: "neutral" };
 }

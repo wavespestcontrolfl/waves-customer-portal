@@ -22,6 +22,8 @@ const rows = () => [
 
 let calls;
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-05T15:00:00Z"));
   calls = [];
   localStorage.setItem("waves_admin_token", "t");
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
@@ -32,6 +34,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   window.location.hash = "";
 });
@@ -124,6 +127,9 @@ describe("OwedTabV2", () => {
     expect(dueLabel({ overdue: false, due_at: "2026-09-05T20:00:00Z" }, now).tone).toBe("strong");
     // A stated deadline that passed after the page loaded is overdue now, whatever the snapshot said (codex #3725 r19 P2).
     expect(dueLabel({ overdue: false, due_at: "2026-09-05T14:00:00Z" }, now)).toMatchObject({ tone: "alert" });
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T20:00:00Z" }, now))
+      .toMatchObject({ text: expect.stringContaining("Due Sep 5"), tone: "strong" });
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T14:00:00Z" }, now).tone).toBe("alert");
     expect(dueLabel({ overdue: false, due_at: null }, now)).toEqual({ text: "No due time", tone: "neutral" });
     // A human-recorded promise is open since it was recorded, not since the (older) call.
     expect(dueLabel({ overdue: true, due_at: null, source: "human", created_at: "2026-09-01T15:00:00Z", call_started_at: "2026-07-01T15:00:00Z" }, now).text).toMatch(/open since Sep 1/);

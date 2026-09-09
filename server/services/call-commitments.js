@@ -709,6 +709,9 @@ function normalizeRow(row) {
   };
   return {
     ...row,
+    // Display the staffed deadline without turning it into an editable stated promise.
+    effective_due_at: row.due_at || (row.kind === 'callback' && row.party === 'waves'
+      && require('./callback-cards').enabled() ? row.callback_due_at : null) || null,
     evidence: parse(row.evidence) || [],
     fulfillment: parse(row.fulfillment),
     confidence: row.confidence == null ? null : Number(row.confidence),

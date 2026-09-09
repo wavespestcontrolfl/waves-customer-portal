@@ -96,7 +96,10 @@ async function loadCallbackCalls(cutoff = new Date()) {
   if (cardsEnabled) {
     cards = await db('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
       .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' })
-      .whereRaw(`NOT ${staleAiRowSql('cc')}`).select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
+      .whereRaw(`NOT ${staleAiRowSql('cc')}`)
+      .whereRaw('COALESCE(cc.due_at, cc.callback_due_at) <= NOW()')
+      .whereRaw('(cc.snoozed_until IS NULL OR cc.snoozed_until <= NOW())')
+      .select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
   }
   const { rows } = await db.raw(
     `

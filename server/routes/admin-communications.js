@@ -1232,7 +1232,7 @@ router.post('/call', async (req, res, next) => {
       if (!normalizedTo || !contactColumns.some((column) => normalizedTo === normalizePhone(customer[column]))) {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
       }
-    } else {
+    } else if (!relatedCommitmentId) {
       customer = await findSingleCustomerForPhone(to).catch((e) => {
         logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);
         return null;

@@ -133,6 +133,20 @@ describe("CallIntelligencePanel", () => {
     expect(calls.find((c) => c.method === "PATCH").body).toEqual({ action: "edit", description: "Send the caller an estimate", due_at: "2026-09-05T19:30:00.000Z" });
   });
 
+  it("shows the staffed deadline without pre-filling a stated deadline in the editor", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const view = intelligence();
+      view.commitments[0].kind = "callback";
+      view.commitments[0].effective_due_at = "2040-09-05T17:00:00.000Z";
+      return { ok: true, status: 200, json: async () => ({ intelligence: view, features: { commitments: true, admin: true } }) };
+    }));
+    render(<CallIntelligencePanel callId={CALL_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    expect(await screen.findByText(/due Sep 5.*1:00/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    expect(screen.getByLabelText("Edit due date").value).toBe("");
+  });
+
   it("renders an association-only match as 'possibly kept', never as kept", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url) => {
       const view = intelligence();

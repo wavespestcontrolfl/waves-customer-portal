@@ -123,7 +123,7 @@ function LeadOwedPromises({ leadId }) {
             <strong>{row.party === "waves" ? "Waves promised" : "Customer agreed"}:</strong> {row.description}
           </div>
           <div style={{ color: row.overdue ? C.red : C.muted, marginBottom: 6 }}>
-            {row.overdue ? "Overdue" : row.due_at ? `Due ${et(row.due_at)} ET` : "No due time"}
+            {row.overdue ? "Overdue" : (row.effective_due_at || row.due_at) ? `Due ${et((row.effective_due_at || row.due_at))} ET` : "No due time"}
             {" · call "}{et(row.call_started_at)} ET
           </div>
           {enabled && (

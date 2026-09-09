@@ -157,6 +157,11 @@ async function notifyDueCallbacks(conn, { now = new Date() } = {}) {
     const result = await refreshFulfillment(conn, id).catch(() => ({ failed: 1 }));
     if (!result.failed) verifiedCalls.add(id);
   }
+  await conn('notifications as n').where({ recipient_type: 'admin' }).whereNull('read_at')
+    .whereRaw("metadata->>'dedupeKey' LIKE 'callback-card:%'")
+    .whereNotExists(conn('call_commitments as cc').whereRaw("cc.id::text = n.metadata->>'commitment_id'")
+      .where('cc.status', 'open').whereRaw(`NOT ${staleAiRowSql('cc')}`))
+    .update({ read_at: now });
   const ids = candidates.filter((row) => verifiedCalls.has(row.call_log_id)).map((row) => row.id);
   if (!ids.length) {
     if (!candidates.length) await conn('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')

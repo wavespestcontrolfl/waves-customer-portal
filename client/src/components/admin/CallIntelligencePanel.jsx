@@ -76,7 +76,7 @@ function Row({ label, children }) {
 export function commitmentStatusTone(c) {
   if (c.status === "fulfilled") return "strong";
   if (c.status === "dismissed") return "neutral";
-  return c.due_at && new Date(c.due_at).getTime() < Date.now() ? "alert" : "neutral";
+  return (c.effective_due_at || c.due_at) && new Date(c.effective_due_at || c.due_at).getTime() < Date.now() ? "alert" : "neutral";
 }
 
 // `onCallChanged` fires after a correction that changes the CALL ROW itself
@@ -405,7 +405,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt,
                     ) : (
                       <div className="text-14 md:text-12 text-ink-primary">
                         {c.description}
-                        {c.due_at && <span className="text-ink-tertiary"> · due {fmtWhen(c.due_at)}{c.due_basis === "suggested" ? " (suggested)" : ""}</span>}
+                        {(c.effective_due_at || c.due_at) && <span className="text-ink-tertiary"> · due {fmtWhen(c.effective_due_at || c.due_at)}{c.due_basis === "suggested" ? " (suggested)" : ""}</span>}
                       </div>
                     )}
                     {c.status === "fulfilled" && c.fulfillment && (

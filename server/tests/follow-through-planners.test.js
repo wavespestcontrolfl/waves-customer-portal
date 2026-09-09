@@ -17,6 +17,14 @@ describe('callback rollout policy', () => {
       gates.callCommitments = commitmentGate;
       expect(require('../services/callback-cards').enabled()).toBe(cardGate && commitmentGate);
       const row = { kind: 'callback', party: 'waves', source: 'human', created_at: '2026-09-09T12:00:00Z' };
+      const { normalizeRow } = require('../services/call-commitments');
+      const callbackDue = '2026-09-09T20:00:00Z';
+      expect(normalizeRow({ ...row, due_at: null, callback_due_at: callbackDue })).toMatchObject({
+        due_at: null, effective_due_at: cardGate && commitmentGate ? callbackDue : null,
+      });
+      expect(normalizeRow({ ...row, due_at: '2026-09-10T20:00:00Z', callback_due_at: callbackDue }).effective_due_at)
+        .toBe('2026-09-10T20:00:00Z');
+      expect(normalizeRow({ ...row, party: 'customer', callback_due_at: callbackDue }).effective_due_at).toBeNull();
       const deadline = require('../services/call-commitments').implicitDueAt(row);
       expect(deadline?.toISOString() || null).toBe(cardGate && commitmentGate ? null : '2026-09-10T04:00:00.000Z');
     },
