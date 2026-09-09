@@ -40,8 +40,14 @@ const ENFORCE_CONFIDENCE = 0.85;
 // the Twilio handler awaits this before returning TwiML.
 const TIMEOUT_MS = 3500;
 
+// Bare carrier commands are handled by the webhook's own STOP/HELP/START
+// branches; screening them would spend a model call whose verdict those
+// branches discard, and delay their TwiML by up to the timeout.
+const CARRIER_COMMAND_RE = /^\s*(?:stop|stopall|unsubscribe|cancel|end|quit|start|unstop|yes|help|info)\s*[.!]?\s*$/i;
+
 // Explicit business-to-business phrasings. Deliberately narrow — anything
-// softer is the model's call. Shared with the estimator's quote-intent lane
+// softer is the model's call ("want more details?" is not here: a prospect
+// describing a termite problem writes it too). Shared with the estimator's quote-intent lane
 // (estimator-engine/sms-thread.js), which vetoes the same pitches before
 // spending a model call.
 const SOLICITATION_RE = new RegExp(
@@ -55,7 +61,6 @@ const SOLICITATION_RE = new RegExp(
     '\\bai\\s+receptionist\\b',
     '\\breview\\s+system\\b',
     '\\bconnect(?:s|ing)?\\s+(?:you|local\\s+homeowners)\\s+with\\b',
-    '\\b(?:want|like)\\s+(?:more\\s+)?details\\?',
     '\\bservice\\s+is\\s+being\\s+requested\\s+by\\b',
     '\\b(?:reply|say|text)\\s+"?(?:stop|no|byebye|end)"?\\s+(?:if|to)\\b',
   ].join('|'),
@@ -123,15 +128,18 @@ Message: ${JSON.stringify(text.slice(0, 600))}`,
 
 /**
  * The webhook entry. Returns null when the gate is off or the text is not
- * eligible (matched customer, reaction, no body); otherwise the verdict with
+ * eligible (a known sender — customer or service contact — a reaction, a
+ * bare carrier command, no body, or the AI assistant line, which answers
+ * its own unknown senders and must keep its own routing); otherwise the verdict with
  * `mode` and `enforced` (true only in enforce mode for a confident
  * solicitation). The caller writes the verdict onto the sms_log row and, when
  * enforced, lands the text read and skips the bell + estimator.
  */
-async function screenInboundSms({ body, hasCustomer, isReaction }) {
+async function screenInboundSms({ body, hasCustomer, isReaction, isAiLine = false }) {
   const mode = classifierMode();
   if (mode === 'off') return null;
-  if (hasCustomer || isReaction || !String(body || '').trim()) return null;
+  const text = String(body || '').trim();
+  if (hasCustomer || isReaction || isAiLine || !text || CARRIER_COMMAND_RE.test(text)) return null;
   const verdict = await classifySolicitation({ body });
   const confident = verdict.solicitation && verdict.confidence >= ENFORCE_CONFIDENCE;
   const enforced = mode === 'enforce' && confident;

@@ -9,9 +9,10 @@ const {
   screenInboundSms, classifySolicitation, classifierMode, SOLICITATION_RE, ENFORCE_CONFIDENCE,
 } = require('../services/sms-solicitation-classifier');
 
-const PITCH = 'Hey Waves Pest Control Lakewood Ranch, Maya here. Our Labor Day Deal for Home-Service leads gets you a free setup, no monthly cost, & we fund your ads. Want details?';
-const SOFT_PITCH = "Hi, this is JL from BOLT Systems. I wasn't able to reach anyone when I called earlier, so I thought I'd send you a quick message instead.";
-const HOMEOWNER = 'Hi - do you provide organic options to keeping the bugs under control in my yard. It’s a small front and side yard.';
+// Synthetic texts in the shape of the 2026-09 audit corpus (vocabulary only).
+const PITCH = 'Hey Waves, our holiday deal for home-service leads gets you a free setup, no monthly cost, and we fund your ads.';
+const SOFT_PITCH = "Hi, this is a rep from a software company. I wasn't able to reach anyone when I called earlier, so I thought I'd send a quick message instead.";
+const HOMEOWNER = 'Hi - do you provide organic options to keep the bugs under control in my yard? It is a small front and side yard.';
 
 beforeEach(() => { mockDispatch.mockReset(); delete process.env.GATE_SMS_SPAM_CLASSIFIER; });
 
@@ -25,10 +26,14 @@ describe('gate', () => {
     expect(await screenInboundSms({ body: PITCH, hasCustomer: false, isReaction: false })).toBeNull();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
-  test('a matched customer, a reaction, or an empty body is never screened', async () => {
+  test('a known sender, a reaction, the AI line, a bare carrier command, or an empty body is never screened', async () => {
     process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
     expect(await screenInboundSms({ body: PITCH, hasCustomer: true, isReaction: false })).toBeNull();
     expect(await screenInboundSms({ body: 'Liked "…"', hasCustomer: false, isReaction: true })).toBeNull();
+    expect(await screenInboundSms({ body: PITCH, hasCustomer: false, isReaction: false, isAiLine: true })).toBeNull();
+    for (const cmd of ['STOP', 'stop.', ' Start ', 'HELP', 'Yes', 'unsubscribe']) {
+      expect(await screenInboundSms({ body: cmd, hasCustomer: false, isReaction: false })).toBeNull();
+    }
     expect(await screenInboundSms({ body: '  ', hasCustomer: false, isReaction: false })).toBeNull();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
@@ -44,6 +49,7 @@ describe('regex layer', () => {
     expect(SOLICITATION_RE.test('Can you give me a free estimate on lawn treatment for my new house?')).toBe(false);
     expect(SOLICITATION_RE.test('How much do you charge for a monthly pest plan? No contract preferred.')).toBe(false);
     expect(SOLICITATION_RE.test(HOMEOWNER)).toBe(false);
+    expect(SOLICITATION_RE.test('I have termites at my new house. Would you like more details?')).toBe(false);
   });
 });
 

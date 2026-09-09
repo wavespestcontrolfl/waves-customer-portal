@@ -278,8 +278,15 @@ router.post('/sms', async (req, res) => {
     // "not spam" on any error or timeout.
     let solicitation = null;
     try {
-      solicitation = await require('../services/sms-solicitation-classifier')
-        .screenInboundSms({ body: Body, hasCustomer: Boolean(customer), isReaction: smsReaction });
+      const screen = require('../services/sms-solicitation-classifier');
+      if (screen.classifierMode() !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
+        // A spouse, tenant, or manager texting from a stored service-contact
+        // slot is a known sender even though findSingleCustomerByPhone only
+        // matches customers.phone — never screen them (codex #4214 P1).
+        // Relationship check only; nothing is linked.
+        const known = await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From).catch(() => null);
+        solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: Boolean(customer || known), isReaction: smsReaction, isAiLine: isAiNumber });
+      }
     } catch (e) { logger.warn(`[sms-solicitation] screen failed: ${e.message}`); }
     const solicitationEnforced = Boolean(solicitation?.enforced);
     const solicitationMeta = solicitation
@@ -1004,7 +1011,9 @@ router.post('/sms', async (req, res) => {
       metadata: JSON.stringify({ from: From, to: To, domain: numberConfig.domain }),
     });
 
-    if (Body && !smsReaction) {
+    // An enforced pitch must not become an Agent Review task either
+    // (the shadow agent emits needs_customer_lookup for every unknown sender).
+    if (Body && !smsReaction && !solicitationEnforced) {
       void require('../services/estimate-conversion-agent').processInboundSms({
         customer,
         from: From,
@@ -1075,7 +1084,7 @@ router.post('/sms', async (req, res) => {
     // the office bell above / owner forward below — the office never loses
     // sight of a tech line's thread. No auto-reply ever fires from a tech
     // line (owner ruling: automated texts stay on the location lines).
-    if (numberConfig.type === 'tech_line' && (Body || inboundMedia.length) && !smsReaction && !courtesyOnly) {
+    if (numberConfig.type === 'tech_line' && (Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !solicitationEnforced) {
       await require('../services/tech-line').notifyTechLineText({
         lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
       }).catch((e) => logger.warn(`[tech-line] text notify failed: ${e.message}`));

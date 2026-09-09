@@ -1226,9 +1226,10 @@ const gates = {
   // SMS solicitation classifier (services/sms-solicitation-classifier.js):
   // three-state, read at CALL time by the module — 'shadow' records
   // verdicts only, 'true' lands confident vendor pitches already-read.
-  // Registered here for logGateStatus / the gates listing; the module does
-  // not read this boolean.
-  smsSpamClassifier: process.env.GATE_SMS_SPAM_CLASSIFIER === 'true',
+  // Registered here for logGateStatus / the gates listing (true for BOTH
+  // active modes — shadow makes paid calls and writes verdicts); the module
+  // reads the three-state env value itself.
+  smsSpamClassifier: ['true', 'shadow'].includes(String(process.env.GATE_SMS_SPAM_CLASSIFIER || '').trim().toLowerCase()),
   // Profile-enrichment writer: gate codes/pets/notes from extraction into
   // property_preferences + customers.internal_notes (admin-edit-preserving).
   callProfileEnrichment: process.env.GATE_CALL_PROFILE_ENRICHMENT === 'true',
