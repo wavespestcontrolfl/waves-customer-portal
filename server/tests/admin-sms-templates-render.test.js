@@ -79,6 +79,24 @@ describe('admin SMS template renderer', () => {
     SmsTemplateVariants.selectVariant.mockResolvedValue(null);
   });
 
+  test('opts.templateBody renders the row snapshot the caller measured — no re-read, no variant', async () => {
+    // A flow that measured a body before acting (rain-out's pre-move
+    // segment cap) sends from the copy it measured, not from a row an
+    // admin edit could have grown in between.
+    SmsTemplateVariants.selectVariant.mockResolvedValue({ body: 'Variant hello {first_name}!{track_url}' });
+    const db = require('../models/db');
+    db.mockClear();
+    const vars = { first_name: 'Sam', track_url: ' https://portal.test/l/abc' };
+
+    const rendered = await smsTemplates.getTemplate('sample_template', vars, {}, { templateBody: 'Snapshot {first_name}.{track_url}' });
+    expect(rendered).toBe('Snapshot Sam. portal.test/l/abc');
+    expect(db).not.toHaveBeenCalled();
+    expect(SmsTemplateVariants.selectVariant).not.toHaveBeenCalled();
+    // Placeholder integrity still applies to the snapshot.
+    expect(await smsTemplates.getTemplate('sample_template', vars, {}, { templateBody: 'Snapshot {first_name} {unknown}' })).toBeNull();
+    SmsTemplateVariants.selectVariant.mockResolvedValue(null);
+  });
+
   test('opts.requiredVars rejects a body that lost a load-bearing placeholder', async () => {
     // The unresolved-check only rejects UNKNOWN placeholders — an admin
     // edit that DELETES one renders truthy with the promised content

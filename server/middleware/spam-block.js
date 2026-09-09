@@ -25,6 +25,21 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
 
+// Match the call log's mixed stored phone formats with toE164's full-country
+// identity. Recovery queries use this same key for block checks and grouping.
+const PHONE_DIGITS_SQL = "regexp_replace(COALESCE(call_log.from_phone, ''), '[^0-9]', '', 'g')";
+const PHONE_KEY_SQL = `(CASE WHEN LEFT(BTRIM(COALESCE(call_log.from_phone, '')), 1) = '+' THEN ${PHONE_DIGITS_SQL}`
+  + ` WHEN LENGTH(${PHONE_DIGITS_SQL}) >= 10 THEN '1' || RIGHT(${PHONE_DIGITS_SQL}, 10)`
+  + ` ELSE ${PHONE_DIGITS_SQL} END)`;
+
+// A rejected /voice call may still receive a /call-status fallback row.
+// Read existing block evidence without recording another blocked attempt.
+function whereNotBlockedCall(query) {
+  return query
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM blocked_numbers b WHERE b.number = '+' || ${PHONE_KEY_SQL})`)
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM blocked_call_attempts b WHERE b.number = '+' || ${PHONE_KEY_SQL} AND b.twilio_sid = call_log.twilio_call_sid AND b.channel = 'voice' AND b.block_type <> 'marchex_shadow')`);
+}
+
 const TWIML_HARD_BLOCK_VOICE =
   '<?xml version="1.0" encoding="UTF-8"?><Response><Reject reason="rejected"/></Response>';
 const TWIML_HANGUP_VOICE =
@@ -188,4 +203,4 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns, signals
   return { blocked: true, twiml, blockType: block.block_type };
 }
 
-module.exports = { checkInboundBlock };
+module.exports = { checkInboundBlock, whereNotBlockedCall, PHONE_KEY_SQL };

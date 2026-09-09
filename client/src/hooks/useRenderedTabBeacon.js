@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useContext, useEffect } from 'react';
 import { trackAdminPageView } from '../lib/adminUsage';
+import { AdminNavigationContext } from './useAdminNavigation';
 
 /**
  * Report the subview a page ACTUALLY rendered — fallbacks and role gates
@@ -15,6 +16,12 @@ import { trackAdminPageView } from '../lib/adminUsage';
  * link) still re-asserts the rendered leaf; the lib dedupes re-assertions.
  */
 export default function useRenderedTabBeacon(pathname, renderedTab, extraDeps = []) {
+  const publishView = useContext(AdminNavigationContext)?.publishView;
+  useEffect(() => {
+    if (renderedTab == null || !publishView) return;
+    return publishView(pathname, renderedTab);
+  }, [publishView, pathname, renderedTab, ...extraDeps]);
+
   useEffect(() => {
     // null/undefined = "not mine to report" — a hub deferring to the
     // embedded child that owns the deeper leaf (ServiceLibrary → protocol

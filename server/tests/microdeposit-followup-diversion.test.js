@@ -141,6 +141,7 @@ describe('invoice-followups micro-deposit diversion', () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415550101',
       body: 'sms body for bank_verification_incomplete',
+      metadata: expect.objectContaining({ original_message_type: 'bank_verification_incomplete' }),
     }));
     // Branded verification email replaces the generic "amount due" follow-up email,
     // keyed to this step so it re-nudges on the same cadence.
