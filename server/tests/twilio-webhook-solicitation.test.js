@@ -175,7 +175,8 @@ test('the disabled gate does no screening or relationship lookup', async () => {
   expect(knownCallerPhoneExists).not.toHaveBeenCalled();
 });
 
-test('the model cannot start until the unified inbox message is durably saved', async () => {
+test.each(['shadow', 'true'])('the %s model cannot start until the unified inbox message is durably saved', async (mode) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = mode;
   let finishSave;
   recordTouchpoint.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
   const delivery = receive('Our software team wants to discuss a partnership.');
@@ -190,7 +191,8 @@ test('the model cannot start until the unified inbox message is durably saved', 
   expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
 });
 
-test('failed unified persistence bypasses screening and retains ordinary SMS logging', async () => {
+test.each(['shadow', 'true'])('failed unified persistence bypasses %s screening and retains ordinary SMS logging', async (mode) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = mode;
   recordTouchpoint.mockResolvedValueOnce(null);
   await receive('Our software team wants to discuss a partnership.');
   expect(dispatchWithFallback).not.toHaveBeenCalled();
@@ -199,6 +201,19 @@ test('failed unified persistence bypasses screening and retains ordinary SMS log
   expect(row.message_body).toBe('Our software team wants to discuss a partnership.');
   expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+});
+
+test.each(['missing', 'error'])('failed verdict attachment (%s) leaves the message actionable', async (failure) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  if (failure === 'missing') updateByTwilioSid.mockResolvedValueOnce(null);
+  else updateByTwilioSid.mockRejectedValueOnce(new Error('metadata unavailable'));
+  await receive('We have exclusive pest leads for you.');
+  expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
+  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+  expect(row.is_read).not.toBe(true);
+  expect(JSON.parse(row.metadata).spam_verdict.enforced).toBe(false);
+  expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+  expect(sendSMS).toHaveBeenCalledTimes(1);
 });
 
 test.each([

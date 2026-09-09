@@ -350,26 +350,23 @@ router.post('/sms', async (req, res) => {
     // claim suppresses retries even if the process dies during a model call.
     // A failed unified write bypasses screening and keeps the legacy path.
     let solicitation = null;
+    let verdictMessage = null;
     try {
       const screen = require('../services/sms-solicitation-classifier');
       if (inboundTouchpoint?.message?.id && MessageSid && screen.classifierMode() !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
         const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
         solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
         if (solicitation) {
-          const recordedVerdict = await updateByTwilioSid(MessageSid, {
+          verdictMessage = await updateByTwilioSid(MessageSid, {
             ...(solicitation.enforced ? { is_read: true, read_at: new Date() } : {}),
             metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spam_verdict: solicitation })]),
             updated_at: new Date(),
           });
-          if (solicitation.enforced && !recordedVerdict?.id) solicitation = { ...solicitation, enforced: false };
         }
       }
-    } catch {
-      if (solicitation?.enforced) solicitation = { ...solicitation, enforced: false };
-      logger.warn('[sms-solicitation] screen failed; continuing normal handling');
-    }
-    const solicitationEnforced = Boolean(solicitation?.enforced);
-    const solicitationMeta = solicitation ? { spam_verdict: solicitation } : {};
+    } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
+    const solicitationEnforced = Boolean(solicitation?.enforced && verdictMessage?.id);
+    const solicitationMeta = solicitation ? { spam_verdict: { ...solicitation, enforced: solicitationEnforced } } : {};
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
     const optCommand = detectSmsOptCommand(Body, { ignoreReplyInstructions: solicitationEnforced });
