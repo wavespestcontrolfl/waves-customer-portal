@@ -264,6 +264,8 @@ describe('_private.threadQuoteSignal', () => {
       'Are you open to more booked jobs over the next 6 weeks? Reply "NO" if you need me to stop texting',
       // two WEAK markers together
       '$0 upfront cost for our pest marketing package. Want more details?',
+      '$0 upfront cost. Reply NO to opt out.',
+      'Our service has $0 upfront cost. Reply NO to opt out.',
     ];
     for (const body of pitches) {
       expect(_private.isSolicitationPitch(body)).toBe(true);
@@ -280,20 +282,50 @@ describe('_private.threadQuoteSignal', () => {
     expect(_private.isSolicitationPitch('I need pest control Tuesday; reply NO if you cannot make it.')).toBe(false);
     expect(_private.isSolicitationPitch('I have termites at my new house. Would you like more details?')).toBe(false);
     expect(_private.isSolicitationPitch('Is there a free trial of the mosquito program?')).toBe(false);
+    expect(_private.isSolicitationPitch('I have more jobs and need extra estimates for pest control.')).toBe(false);
+    expect(_private.isSolicitationPitch('I manage more customers who need pest control estimates.')).toBe(false);
+    expect(_private.isSolicitationPitch('Can you handle more lawn jobs or handle extra pest estimates?')).toBe(false);
   });
 
-  test('homeowner quote asks that share vendor vocabulary still reach the classifier', async () => {
+  test.each([
+    'We can provide more lawn leads.',
+    'We have extra qualified pest leads.',
+    'Our network offers exclusive lawn jobs.',
+    'We provide unlimited estimates for contractors.',
+  ])('explicit lead-generation wording stands alone: %s', (body) => {
+    expect(_private.isSolicitationPitch(body)).toBe(true);
+  });
+
+  test('homeowner quote asks that share vendor vocabulary still reach the classifier and draft pipeline', async () => {
     const asks = [
       'Do you have any availability for a one-time service? I need a rate for a rat problem.',
       'How much do you charge for a monthly pest plan? No contract preferred.',
       'Can you give me a free estimate on lawn treatment for my new house?',
       'We manage a rental and need pest control for a rat problem, please let me know your price or quote first.',
       'I have termites at my new house. Would you like more details?',
+      'Can I get termite service with no upfront cost?',
+      'Can I get more estimates for my other rentals?',
+      'Could you provide extra estimates for pest control at my other properties?',
+      'I need pest control for more jobs at my rentals. Can you quote them?',
+      'I have extra lawn jobs at my rentals. How much would you charge?',
+      'Can I get a quote for termite service? I can connect you with the property manager for access.',
+      'Pest control service is being requested by our tenant. Can you send an estimate?',
+      'I need more estimates for pest control at my other rentals. Would you like more details?',
+      'Your AI receptionist said you would send me a quote for termite treatment.',
+      'Can you handle more lawn jobs at my rentals? Would you like more details?',
+      'Can I get termite service with no upfront cost? Reply NO if you cannot do that.',
+      'I tried to request an estimate but the link leads to your home page.',
+      'Can you handle more pest jobs with no upfront cost?',
+      'Can I get termite service with no upfront cost? Would you like more details?',
     ];
     for (const body of asks) {
-      await _private.threadQuoteSignal(body);
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });
+      expect(result.started).toBe(true);
+      await result.draftPromise;
     }
     expect(mockDispatch).toHaveBeenCalledTimes(asks.length);
+    expect(mockNotify).toHaveBeenCalledTimes(asks.length);
+    expect(mockRunDraftPipeline).toHaveBeenCalledTimes(asks.length);
     for (const call of mockDispatch.mock.calls) {
       expect(call[1].text).toContain('business-to-business pitch TO Waves');
     }

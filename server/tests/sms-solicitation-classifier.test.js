@@ -40,6 +40,21 @@ describe('gate', () => {
 });
 
 describe('regex layer', () => {
+  test.each([
+    'Pest control service is being requested by the tenant; can you quote it?',
+    'Can I get more estimates for my other rentals?',
+    'Can you quote termite service? I can connect you with the property manager for access.',
+    'Your AI receptionist said you would send me a quote for termite treatment.',
+    'I tried to request an estimate but the link leads to your home page.',
+    'Can you handle more lawn jobs at my rentals? Would you like more details?',
+    'Can I get termite service with no upfront cost? Reply NO if you cannot do that.',
+  ])('a customer request reaches the model and remains actionable: %s', async (body) => {
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
+    expect(await screenInboundSms({ body, hasCustomer: false, isReaction: false }))
+      .toMatchObject({ solicitation: false, method: 'model', enforced: false });
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
   test('explicit vendor phrasing is a verdict without a model call', async () => {
     const v = await classifySolicitation({ body: PITCH });
     expect(v).toMatchObject({ solicitation: true, confidence: 1, method: 'regex' });
