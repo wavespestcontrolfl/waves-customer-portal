@@ -74,7 +74,7 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onQuickMove
       <div className="flex flex-wrap gap-2">
         <Button disabled={!!busy || !phone(r)} onClick={() => act(r.id, () => post('/admin/communications/call', {
           to: phone(r), customerId: r.customer_id || undefined, relatedCommitmentId: r.id, expected_at: r.updated_at,
-        }), 'Adam’s phone is ringing. Press 1 to connect.')}>Call</Button>
+        }), 'The staff phone is ringing. Press 1 to connect.')}>Call</Button>
         <Button secondary disabled={!!busy} onClick={() => act(r.id, () => post(`${API}/commitments/${r.id}/card-action`, { action: 'fulfill', expected_at: r.updated_at }))}>Done</Button>
         <Select aria-label={`Snooze callback for ${who(r)}`} value="" disabled={!!busy} onChange={(e) => {
           const snooze = e.target.value;

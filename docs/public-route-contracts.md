@@ -155,7 +155,10 @@ The `<Dial action>` is also added for callback cards when `GATE_CALLBACK_CARD`
 and `GATE_CALL_COMMITMENTS` are enabled. Both lanes use this one completion
 route. Signed terminal child-leg results with a valid duration and SID record
 the first `metadata.customer_leg` on an outbound row matching the call-log UUID,
-parent CallSid and validated commitment link. Retries cannot replace that
+parent CallSid and validated commitment link. If its parent SID backfill
+failed, the signed completion atomically adopts the missing SID on that
+server-linked outbound row. An existing different SID cannot be replaced.
+Retries cannot replace that
 evidence; a failed write returns 503 for provider retry. In-flight results
 remain accepted after gate rollback. This records evidence without closing a
 commitment; fulfillment requires a valid non-voicemail extraction as well. Query context is `callLogId`, `customerNumber`,

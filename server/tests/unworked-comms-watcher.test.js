@@ -41,6 +41,16 @@ const request = (over = {}) => ({
 });
 
 describe('composeUnworkedCommsDigest', () => {
+  test('card totals retain disposition-only callback details and their own overflow count', () => {
+    const out = composeUnworkedCommsDigest({ callbacks: [callback({ total_count: 2 }),
+      { id: 'ledger-summary', callback_card_summary: true, total_count: 4 }] });
+    expect(out.callbacks).toBe(6);
+    expect(out.text).toContain('4 open callback cards:');
+    expect(out.text).toContain('asked for a callback');
+    expect(out.text).toContain('…and 1 more not shown');
+    expect(out.html).not.toContain('…and 5 more not shown');
+  });
+
   test('a zero-delivery click-to-estimate mint never fulfills a send_estimate task (source contract, #3391)', () => {
     // Those mints stamp sent_at without delivering anything — they must not
     // clear a send obligation owed from a call.

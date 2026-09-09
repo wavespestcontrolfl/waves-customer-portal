@@ -37,7 +37,6 @@
 
 const crypto = require('crypto');
 const logger = require('./logger');
-const { gateEnvValue } = require('../config/feature-gates');
 const MODELS = require('../config/models');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -686,7 +685,7 @@ async function recordCallCommitments({
     const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration, recordingSid: call?.recording_sid || null });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;
-    if (!result.ownershipLost && gateEnvValue('GATE_CALLBACK_CARD')) {
+    if (!result.ownershipLost && require('./callback-cards').enabled()) {
       await require('./callback-cards').prepareCallbackCards(conn, { callId: call.id });
     }
     return summary;
@@ -1137,7 +1136,7 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
-      if (gateEnvValue('GATE_CALLBACK_CARD')) {
+      if (require('./callback-cards').enabled()) {
         if (!phone) return null;
         // A child-leg connection plus reviewed extraction of a real
         // conversation is proof. Ringing the staff phone, voicemail, and
@@ -1380,7 +1379,7 @@ function implicitDueAt(row) {
   const from = basis ? new Date(basis) : null;
   if (!from || Number.isNaN(from.getTime())) return null;
   if (row.kind === 'send_estimate') return new Date(from.getTime() + OVERDUE_IMPLICIT_ESTIMATE_HOURS * 60 * 60 * 1000);
-  if (row.kind === 'callback') return gateEnvValue('GATE_CALLBACK_CARD')
+  if (row.kind === 'callback') return require('./callback-cards').enabled()
     ? (row.callback_due_at ? new Date(row.callback_due_at) : null) : endOfETDay(from);
   return new Date(from.getTime() + OVERDUE_IMPLICIT_DAYS * 24 * 60 * 60 * 1000);
 }
@@ -1398,7 +1397,7 @@ function isOverdue(row, now = new Date()) {
 function effectiveDueSql(cc = 'cc', cl = 'cl') {
   const basis = `CASE WHEN ${cc}.source = 'human' THEN ${cc}.created_at ELSE ${cl}.created_at END`;
   const promptKinds = [...PROMPT_KINDS].map((k) => `'${k}'`).join(', ');
-  const callbackDue = gateEnvValue('GATE_CALLBACK_CARD') ? `${cc}.callback_due_at`
+  const callbackDue = require('./callback-cards').enabled() ? `${cc}.callback_due_at`
     : `(((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`;
   return `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
     + ` WHEN ${cc}.party <> 'waves' THEN NULL`

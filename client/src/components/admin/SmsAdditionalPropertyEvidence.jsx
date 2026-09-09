@@ -35,6 +35,7 @@ export default function SmsAdditionalPropertyEvidence({ item, busy, onApply, act
       </div>
     </div>)}
     {active && <>
+      {payload.sender_requires_review && <p>Confirm that the sender belongs to this customer in the customer profile before adding these properties.</p>}
       <label className="block font-medium">Service and billing responsibility
         <Select className="mt-1 !h-11 !text-14" value={responsibility} disabled={busy} onChange={(e) => setResponsibility(e.target.value)}>
           <option value="">Choose after reviewing the message</option>

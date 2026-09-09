@@ -1206,7 +1206,16 @@ router.post('/call', async (req, res, next) => {
     if (toLast10 && adminPhoneKeys.has(toLast10)) {
       return res.status(400).json({ error: 'to must be a customer phone, not the admin bridge phone' });
     }
-    attemptedTo = adminPhone;
+    let bridgePhone = adminPhone;
+    if (relatedCommitmentId && req.techRole !== 'admin') {
+      const staff = await db('technicians').where({ id: req.technicianId, employment_status: 'active' }).first('id', 'phone');
+      bridgePhone = require('../services/tech-line').usableCell(staff);
+      if (!bridgePhone) return res.status(409).json({ error: 'Your staff profile needs a cell number before calls can bridge to you' });
+    }
+    if (normalizePhone(to) === normalizePhone(bridgePhone)) {
+      return res.status(400).json({ error: 'to must be a customer phone, not your bridge phone' });
+    }
+    attemptedTo = bridgePhone;
 
     // Prefer the explicit customer picked in the UI. Phone-only lookup is
     // ambiguous when spouses/contacts share a number, so auto-link only when
@@ -1233,17 +1242,17 @@ router.post('/call', async (req, res, next) => {
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
 
-    // Step 1 (services/call-bridge.js — shared with the tech portal's
-    // "Call from my line"): call the admin first; on press-1, dial the
-    // customer with the main line as caller ID.
-    const originate = () => placeBridgeCall({
-      to, bridgePhone: adminPhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
-    });
-    const bridged = relatedCommitmentId ? await db.transaction(async (trx) => {
+    let bridgeClaimId = null;
+    if (relatedCommitmentId) bridgeClaimId = await db.transaction(async (trx) => {
       if (!require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
-      // The existing bridge interlock covers the one owner phone across
-      // cards, including ambiguous provider errors and simultaneous taps.
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['callback-card-bridge']);
+      // The tech-line bridge uses this durable claim to cover the gap before
+      // call_log is inserted. Commit it before the provider needs the pool.
+      const claim = await trx.raw(`INSERT INTO sms_send_claims (claim_key) VALUES (?)
+        ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${from}`]);
+      if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
+      const active = await require('../services/call-bridge').activeBridgeCall({ source, fromPhone: from, customerId: customer?.id }, trx);
+      if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
       const promise = await trx('call_commitments').where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' }).forUpdate().first();
       const original = promise?.call_log_id ? await trx('call_log').where({ id: promise.call_log_id }).first() : null;
       const target = original?.direction === 'outbound' ? original.to_phone : original?.from_phone;
@@ -1254,16 +1263,30 @@ router.post('/call', async (req, res, next) => {
       if (!req.body.expected_at || new Date(req.body.expected_at).getTime() !== new Date(promise.updated_at).getTime()) {
         throw Object.assign(new Error('This callback changed. Refresh before calling.'), { status: 409 });
       }
-      const active = await require('../services/call-bridge').activeBridgeCall({ source, fromPhone: from, customerId: customer?.id });
-      if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
       metadata.relatedCallId = promise.call_log_id;
-      const result = await originate();
       await trx('call_commitments').where({ id: promise.id }).update({ assigned_to: req.technicianId, updated_at: new Date() });
       await require('../services/audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: req.technicianId,
-        action: 'callback_called', resource_type: 'call_commitment', resource_id: promise.id,
-        metadata: { call_log_id: result.callLogId }, critical: true, trx });
-      return result;
-    }) : await originate();
+        action: 'callback_call_claimed', resource_type: 'call_commitment', resource_id: promise.id,
+        metadata: { claim_id: claim.rows[0].id }, critical: true, trx });
+      return claim.rows[0].id;
+    });
+    let bridged;
+    try {
+      if (relatedCommitmentId && !require('../services/callback-cards').enabled()) {
+        throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
+      }
+      bridged = await placeBridgeCall({
+        to, bridgePhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
+      });
+    } catch (err) {
+      // An ambiguous create can already be ringing. Its claim and initiated
+      // row survive, just as they do for calls from the technician's line.
+      if (bridgeClaimId && !err.bridgeAmbiguous) await db('sms_send_claims').where({ id: bridgeClaimId }).del();
+      throw err;
+    }
+    if (relatedCommitmentId) await require('../services/audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: req.technicianId,
+      action: 'callback_called', resource_type: 'call_commitment', resource_id: relatedCommitmentId,
+      metadata: { call_log_id: bridged.callLogId } });
 
     res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId });
   } catch (err) {
