@@ -197,7 +197,7 @@ describe('invoice follow-up email sidecar', () => {
       to: '+19415550101',
       body: 'invoice follow-up sms',
       entryPoint: 'invoice_followup_sequence',
-      metadata: { original_message_type: 'invoice_followup' },
+      metadata: { original_message_type: 'invoice_followup', notificationEventKey: 'invoice-followup:seq-1:d3_friendly' },
     }));
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       step_index: 1,
@@ -391,7 +391,7 @@ describe('invoice follow-up email sidecar', () => {
     }));
   });
 
-  test('r21: a held SMS leg whose enqueue FAILS holds the step at its current index for retry', async () => {
+  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'])('%s with a failed enqueue holds the current follow-up step for retry', async (code) => {
     // Email delivered, the text crossed the 20:00 ET cutoff, and the
     // scheduled-rail insert then failed — nothing durable owns the
     // pay-link SMS, so step_index must NOT advance (the email's per-step
@@ -399,7 +399,7 @@ describe('invoice follow-up email sidecar', () => {
     sendCustomerMessage.mockResolvedValueOnce({
       sent: false,
       blocked: true,
-      code: 'QUIET_HOURS_HOLD',
+      code,
       deferred: true,
       nextAllowedAt: '2026-05-27T12:00:00.000Z',
     });
