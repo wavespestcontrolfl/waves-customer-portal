@@ -8,8 +8,9 @@ for new data**.
 ## Phase 1 (this PR) — additive, gated, no rewiring
 
 - **`customer_properties` table** (migration `20260629000001`): one customer →
-  many properties, each with `occupancy_type` (owner_occupied / rental_investment
-  / commercial / seasonal / vacant / unknown), `is_primary` (partial-unique: one
+  many properties, each with `occupancy_type` (owner_occupied / family_occupied
+  / rental_investment / commercial / seasonal / vacant / unknown — `family_occupied`
+  is office-set only, the call extractor's enum does not include it), `is_primary` (partial-unique: one
   per customer), address + lat/lng, and mirrored property attributes. Backfills a
   PRIMARY property per existing customer from their address (defaults
   `owner_occupied`; the schema-drift-safe backfill only mirrors columns that
@@ -25,6 +26,12 @@ for new data**.
 - **Admin API** (`admin-customers.js`): `GET/POST/PATCH /:id/properties`
   (read lazily backfills a primary; POST adds a non-primary; PATCH edits
   occupancy/label). Read is open; writes require admin.
+- **Booking anchor** (`soleActivePropertyId`): a booking with no explicit
+  property resolves the customer's sole active property. A customer with NO
+  row yet (created since the migration through a quote / lead / webhook path
+  that never read the properties) gets the primary backfilled here too, so
+  the visit-group stamp has an anchor instead of NULL. An inactive-only
+  primary stays untouched. Historical gap: `ops/agents/primary-property-backfill.js`.
 
 Service: `server/services/customer-properties.js` (pure helpers `normStreet` /
 `normalizeOccupancy` / `isNewStreet` are unit-tested in
@@ -96,3 +103,30 @@ default.
 - Still deferred: per-property on-site contact / access notes, per-property
   pricing attributes (Phase 3), and the multi-property estimate group UI
   (reuses the existing multi-home discount — owner 2026-09-06).
+
+## 2026-09-08 — App property scope (PR 1 of 4: session claim + saved-property list)
+
+The customer app scoped everything by sibling PROFILE (#3971): the session
+points at one `customers` row and every read filters on `customer_id`. That
+misses every customer whose second house is a `customer_properties` row on the
+same profile (prod 2026-09-08: 23 such customers vs 6 profile-based accounts).
+
+Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
+
+- **Session claim.** Customer access and refresh tokens carry `propertyId`
+  (the selected `customer_properties.id`). `middleware/auth` honors it only
+  when the row is the signed-in customer's and active — anything else is "no
+  selection" (`req.propertyId = null`), never a 401. A same-profile refresh
+  forwards the claim; a profile switch drops it unless the switch names one.
+- **Unified list.** `GET /auth/properties?scope=saved` returns every active
+  saved property of every profile on the account (`services/account-properties`
+  `accountSavedProperties`): entry = `{ key, customerId, propertyId, label,
+  relationship, occupancyType, address, isPrimaryProfile, isPrimaryProperty }`
+  plus `selected`. The profile list stays the default, so shipped clients see
+  no change. `POST /auth/select-property` accepts the pair
+  `{ customerId, propertyId }`; a same-profile switch re-issues the tokens
+  with the new claim.
+- **Visit rule.** `resolveSessionScope(req)` + `scopeVisitsToProperty(qb, scope)`
+  (PR 2 wires them into the schedule routes): a property's visits are the
+  customer's visits stamped with it, plus unstamped visits when it is the
+  primary. Customers with 0–1 active properties get no property predicate.

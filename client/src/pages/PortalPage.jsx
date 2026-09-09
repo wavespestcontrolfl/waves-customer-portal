@@ -5,6 +5,8 @@ import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import api from '../utils/api';
+import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
+import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
 import { fmtMoney } from '../lib/money';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
@@ -2603,9 +2605,21 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   );
 }
 
+function SavedVisitDetails({ visits }) {
+  if (!visits.length) return <p style={{ fontSize: 16 }}>No saved visits are available.</p>;
+  return <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
+    {visits.map(visit => <li key={visit.id} style={{ marginBottom: 12 }}>
+      <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
+      <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
+      {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
+    </li>)}
+  </ul>;
+}
+
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const compact = useIsMobile(720);
-  const [nextService, setNextService] = useState(null);
+  const nextRead = usePortalRead('next-visit', () => api.getNextService());
+  const nextService = nextRead.data?.next || null;
   // The Add-to-Calendar button hides itself once the arrival window closes,
   // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
   // the deadline so the button disappears on its own (codex #3249 r4 P2).
@@ -2623,14 +2637,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     // the setTimeout ceiling the timer fires early, and without re-running
     // here it would never be rescheduled toward the real deadline (codex r5).
   }, [nextService, calendarWindowTick]);
-  const [nextServiceStatus, setNextServiceStatus] = useState('loading');
+  const nextServiceStatus = nextRead.error ? 'error' : nextRead.data ? 'ready' : 'loading';
   const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
-  const [lastService, setLastService] = useState(null);
-  const [lastServiceStatus, setLastServiceStatus] = useState('loading');
+  const lastRead = usePortalRead('latest-service', () => api.getServices({ limit: 1 }));
+  const lastService = lastRead.data?.services?.[0] || null;
+  const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
   const [pendingSatisfactionStatus, setPendingSatisfactionStatus] = useState('loading');
   const [referralStats, setReferralStats] = useState(null);
@@ -2692,15 +2707,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const annualPrepayLine = annualPrepayTermLine(annualPrepay);
 
   useEffect(() => {
-    api.getNextService()
-      .then(d => {
-        setNextService(d.next || null);
-        setNextServiceStatus('ready');
-      })
-      .catch(err => {
-        console.error(err);
-        setNextServiceStatus('error');
-      });
     api.getServiceStats()
       .then(d => {
         setStats(d);
@@ -2718,15 +2724,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       .catch(err => {
         console.error(err);
         setBalanceStatus('error');
-      });
-    api.getServices({ limit: 1 })
-      .then(d => {
-        setLastService(d.services?.[0] || null);
-        setLastServiceStatus('ready');
-      })
-      .catch(err => {
-        console.error(err);
-        setLastServiceStatus('error');
       });
     api.getPendingSatisfaction().then(d => {
       if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
@@ -2871,6 +2868,17 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     fontSize: 14,
     position: 'relative',
   };
+  if (nextRead.offline) {
+    return <>
+      <SavedPortalRead title="Saved next visit" titleAs="h1" read={nextRead}>
+        {nextService ? <SavedVisitDetails visits={[nextService]} /> : <p style={{ fontSize: 16 }}>{nextRead.data ? 'No upcoming visit was listed when last checked.' : 'Open Home while connected to load your next visit.'}</p>}
+      </SavedPortalRead>
+      <SavedPortalRead title="Saved completed visit" read={lastRead}>
+        {lastService ? <SavedVisitDetails visits={[lastService]} /> : <p style={{ fontSize: 16 }}>{lastRead.data ? 'No completed visit was listed when last checked.' : 'Open Home while connected to load your latest visit.'}</p>}
+      </SavedPortalRead>
+    </>;
+  }
+
   const balanceReady = balanceStatus === 'ready' && !!balance;
   const balancePending = balanceStatus === 'loading';
   const balanceError = balanceStatus === 'error';
@@ -3101,7 +3109,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
-        <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
+        {nextRead.saved ? (
+          <SavedPortalRead title="Saved next visit" read={nextRead}>
+            <SavedVisitDetails visits={nextService ? [nextService] : []} />
+          </SavedPortalRead>
+        ) : <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <div style={{ minWidth: 0 }}>
@@ -3134,7 +3146,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   setConfirmingVisit(true);
                   try {
                     await api.confirmAppointment(nextService.id);
-                    setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
+                    await nextRead.refresh();
                   } catch (err) {
                     console.error(err);
                     showCustomerAlert('Could not confirm this visit. Please try again.');
@@ -3196,7 +3208,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 : 'We could not load your schedule right now.'}
             </div>
           )}
-        </section>
+        </section>}
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
@@ -3241,7 +3253,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         </section>
       </div>
 
-      {lastServiceStatus === 'loading' ? (
+      {lastRead.saved ? (
+        <SavedPortalRead title="Saved completed visit" read={lastRead}>
+          <SavedVisitDetails visits={lastService ? [lastService] : []} />
+        </SavedPortalRead>
+      ) : lastServiceStatus === 'loading' ? (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <PortalInlineState
             icon="clipboard"
@@ -3430,8 +3446,8 @@ function ServicesTab() {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+  const historyRead = usePortalRead('service-history', () => api.getServices({ limit: 100 }));
+  const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState('All');
@@ -3441,6 +3457,7 @@ function ServicesTab() {
   // boundary-row dedupe, so the next page never re-requests a seen row.
   const [servicesOffset, setServicesOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  const moreSequence = useRef(0);
   const [lightbox, setLightbox] = useState(null);
   // Dialog contract for the photo lightbox: focus trap, Escape closes, AT
   // announces a modal — it was a click-only overlay keyboard users couldn't
@@ -3453,51 +3470,50 @@ function ServicesTab() {
   );
 
   const SERVICES_PAGE_SIZE = 100;
-  const loadServices = useCallback(() => {
-    setLoading(true);
-    setLoadError('');
-    api.getServices({ limit: SERVICES_PAGE_SIZE })
-      .then(d => {
-        setServices(d.services || []);
-        setServicesOffset((d.services || []).length);
-        setTotalServices(Number.isFinite(d.total) ? d.total : null);
-      })
-      .catch(err => {
-        console.error(err);
-        setLoadError(err?.message || 'Could not load service history.');
-      })
-      .finally(() => setLoading(false));
-  }, []);
+  useEffect(() => {
+    if (!historyRead.data) return;
+    const d = historyRead.data;
+    moreSequence.current += 1;
+    setLoadingMore(false);
+    setServices(d.services || []);
+    setServicesOffset(d.nextOffset ?? (d.services || []).length);
+    setTotalServices(Number.isFinite(d.total) ? d.total : null);
+    return () => { moreSequence.current += 1; };
+  }, [historyRead.data, historyRead.pending]);
 
   // The server caps each page at 100 rows — older visits stay reachable
   // through an explicit Load More instead of silently vanishing from history.
   const loadMoreServices = () => {
     if (loadingMore) return;
     setLoadingMore(true);
+    const attempt = ++moreSequence.current;
     api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
       .then(d => {
+        if (moreSequence.current !== attempt) return;
         // The offset runs against a live newest-first query — a visit
         // completed between pages shifts the boundary and re-sends the last
         // row of the previous page. Dedupe by id so it can't render twice,
         // but advance the cursor by rows RECEIVED so paging never stalls.
-        setServices(prev => {
-          const seen = new Set(prev.map(s => s.id));
-          return [...prev, ...(d.services || []).filter(s => !seen.has(s.id))];
+        historyRead.update(previous => {
+          const existing = previous.services || [];
+          const seen = new Set(existing.map(s => s.id));
+          return {
+            ...previous,
+            services: [...existing, ...(d.services || []).filter(s => !seen.has(s.id))],
+            nextOffset: servicesOffset + (d.services || []).length,
+            ...(Number.isFinite(d.total) ? { total: d.total } : {}),
+          };
         });
-        setServicesOffset(prev => prev + (d.services || []).length);
-        if (Number.isFinite(d.total)) setTotalServices(d.total);
       })
       .catch(err => {
+        if (moreSequence.current !== attempt) return;
         console.error(err);
         showCustomerAlert(err?.message || 'Could not load more visits. Please try again.');
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => { if (moreSequence.current === attempt) setLoadingMore(false); });
   };
   const hasMoreServices = totalServices != null && servicesOffset < totalServices;
 
-  useEffect(() => {
-    loadServices();
-  }, [loadServices]);
 
   // Latest-request-per-service: expand → collapse → re-expand can overlap two
   // getService calls, and a stale FAILURE resolving after a newer SUCCESS
@@ -3521,6 +3537,20 @@ function ServicesTab() {
     display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
 
+  // The stable key keeps an open iframe alive when the list enters saved mode.
+  const previewOverlay = preview && <DocumentPreviewOverlay key="report-preview"
+    preview={preview} onClose={closePreview}
+    onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />;
+
+  if (historyRead.saved || historyRead.offline) {
+    return <div>
+      <SavedPortalRead title="Saved completed visits" read={historyRead}>
+        <SavedVisitDetails visits={historyRead.data?.services || []} />
+      </SavedPortalRead>
+      {previewOverlay}
+    </div>;
+  }
+
   if (loading) {
     return (
       <PortalStatePanel
@@ -3541,7 +3571,7 @@ function ServicesTab() {
         title="Could not load service history"
         message={loadError}
         actionLabel="Try Again"
-        onAction={loadServices}
+        onAction={historyRead.refresh}
       />
     );
   }
@@ -3888,13 +3918,7 @@ function ServicesTab() {
         </div>
       )}
 
-      {preview && (
-        <DocumentPreviewOverlay
-          preview={preview}
-          onClose={closePreview}
-          onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')}
-        />
-      )}
+      {previewOverlay}
       {lightbox && (
         <div onClick={() => setLightbox(null)}
           style={{
@@ -3995,8 +4019,9 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
-const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel'];
-const APP_OPTION = { value: 'push', label: 'App first' };
+const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel'];
+const APP_OPTION = { value: 'push', label: 'App' };
+const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
 const APPOINTMENT_CHANNEL_KEYS = [
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
@@ -4073,7 +4098,7 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         {prefs.pushEnabled === false ? 'App pushes are off for your account. Your notification history stays available.'
           : connected ? 'Your account has a recently connected app.'
             : app.status?.registered ? 'Open the app to refresh its connection. After 72 hours, an allowed backup may be used.'
-              : 'A connected app is needed before choosing App first.'}
+              : 'A connected app is needed before choosing App.'}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
         {isNativeApp() && app.deviceState !== 'granted' && (
@@ -4083,15 +4108,15 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         )}
         <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
         <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
-          Use app for supported updates
+          Use App for supported updates
         </button>
       </div>
       <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        Choose App first for appointment updates, technician progress, service reports and receipts. If push is unavailable, we can use an allowed backup. Existing opt-outs stay in place.
+        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices, payment problems and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
       </p>
       <details style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Reminder texts and emailed receipts continue</summary>
-        Appointment reminders and important billing notices keep their existing text copies. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Email copies and other messages</summary>
+        Existing emailed receipt copies continue. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
       </details>
       <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         {prefs.smsEnabled === false ? 'Text backup is currently off. ' : 'Text backup remains subject to your text preferences. '}
@@ -4258,22 +4283,23 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
   // property-preference control writes through blocked routes, so those
   // sections are hidden rather than shown broken.
   const cancelledAccount = customer?.cancelled === true;
-  const [upcoming, setUpcoming] = useState([]);
+  const scheduleRead = usePortalRead('schedule', () => api.getSchedule(90));
+  const { loading, error: loadError } = scheduleRead;
+  const upcoming = scheduleRead.data?.upcoming || [];
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
   // a lane — absent, the CTA card below simply doesn't render.
-  const [reservice, setReservice] = useState(null);
+  const reservice = scheduleRead.data?.reservice || null;
   // Does this property have a plan at all (recurring series, upcoming rows,
   // monthly billing or a live prepay term — the schedule payload's
   // hasCancellableWork)? A property with none gets no "request a visit"
   // empty state (owner 2026-09-06: only recurring customers see it).
-  const [hasPlanWork, setHasPlanWork] = useState(true);
+  const hasPlanWork = scheduleRead.data?.hasCancellableWork !== false;
   const [prefs, setPrefs] = useState(null);
   const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
   const [prefsLocked, setPrefsLocked] = useState({});
@@ -4285,69 +4311,32 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
   // the "next visit at each property" chips. Independent of the schedule
   // load so a failure here never blanks the tab; null = still loading.
   const multiProperty = properties.length > 1;
-  // null = loading, [] / rows = loaded; a failed read is tracked separately
-  // so it renders as "unavailable + retry", never as "Checking…" forever or
-  // as "no visit scheduled" (pre-push codex P1).
-  const [accountNext, setAccountNext] = useState(null);
-  const [accountNextFailed, setAccountNextFailed] = useState(false);
-  const [accountNextAttempt, setAccountNextAttempt] = useState(0);
-  useEffect(() => {
-    if (!multiProperty) { setAccountNext(null); setAccountNextFailed(false); return undefined; }
-    let alive = true;
-    setAccountNext(null);
-    setAccountNextFailed(false);
-    api.getAccountUpcoming()
-      .then((res) => { if (alive) setAccountNext(Array.isArray(res?.properties) ? res.properties : []); })
-      .catch((err) => { console.error(err); if (alive) setAccountNextFailed(true); });
-    return () => { alive = false; };
-  }, [multiProperty, customer?.id, accountNextAttempt]);
+  const accountNextRead = usePortalRead(`account-next:${customer?.id}:${multiProperty}`, () => multiProperty
+    ? api.getAccountUpcoming().then(res => Array.isArray(res?.properties) ? res.properties : [])
+    : Promise.resolve(null));
+  // A summary awaiting revalidation must not look like a current appointment.
+  const accountNextFailed = Boolean(accountNextRead.error);
+  const accountNext = accountNextRead.pending || accountNextFailed ? null : accountNextRead.data;
   const nextById = multiProperty && accountNext
     ? Object.fromEntries(properties.map((p) => [p.id, accountNext.find((row) => row.id === p.id)?.next || null]))
     : null;
 
-  const loadSchedule = useCallback(() => {
-    setLoading(true);
-    setLoadError('');
-    // Notification preferences are presentation data — a transient failure
-    // there must not hide the customer's valid appointments (or the confirm
-    // and reschedule controls) behind a schedule error. Only /schedule
-    // itself can fail the load.
-    Promise.all([
-      api.getSchedule(90),
-      // C4: a cancelled account renders no notification settings, so the
-      // prefs reads are skipped entirely (their routes are not widened).
-      cancelledAccount
-        ? Promise.resolve({ data: null, failed: false })
-        : api.getNotificationPrefs()
-          .then(data => ({ data, failed: false }))
-          .catch(() => ({ data: null, failed: true })),
-      cancelledAccount
-        ? Promise.resolve({ data: null, failed: false })
-        : api.getPropertyNotificationPrefs()
-          .then(data => ({ data, failed: false }))
-          .catch(() => ({ data: null, failed: true })),
-    ]).then(([schedData, prefsResult, propertyPrefsData]) => {
-      setUpcoming(schedData.upcoming || []);
-      setReservice(schedData.reservice || null);
-      setHasPlanWork(schedData.hasCancellableWork !== false);
-      setPrefsError(prefsResult.failed);
-      if (prefsResult.data) setPrefs(prefsResult.data);
-      // A failed refresh must not keep rendering stale interactive settings
-      // from an earlier load — clear them so the failure panel shows.
-      else if (prefsResult.failed) setPrefs(null);
-      setPropertyPrefsError(propertyPrefsData.failed);
-      if (propertyPrefsData.data) {
-        setPropertyPrefs(propertyPrefsData.data.properties || []);
-      }
-    }).catch(err => {
-      console.error(err);
-      setLoadError(err?.message || 'Could not load your schedule.');
-    }).finally(() => setLoading(false));
-  }, [cancelledAccount]);
-
-  useEffect(() => {
-    loadSchedule();
-  }, [loadSchedule]);
+  // Refresh visit data independently: a return to the app must never replace
+  // unsaved service-contact edits or race an in-flight preference save.
+  const loadSchedulePreferences = useCallback(() => Promise.all([
+    cancelledAccount
+      ? Promise.resolve({ data: null, failed: false })
+      : api.getNotificationPrefs().then(data => ({ data, failed: false })).catch(() => ({ data: null, failed: true })),
+    cancelledAccount
+      ? Promise.resolve({ data: null, failed: false })
+      : api.getPropertyNotificationPrefs().then(data => ({ data, failed: false })).catch(() => ({ data: null, failed: true })),
+  ]).then(([prefsResult, propertyPrefsData]) => {
+    setPrefsError(prefsResult.failed);
+    setPrefs(prefsResult.data);
+    setPropertyPrefsError(propertyPrefsData.failed);
+    if (propertyPrefsData.data) setPropertyPrefs(propertyPrefsData.data.properties || []);
+  }), [cancelledAccount]);
+  useEffect(() => { void loadSchedulePreferences(); }, [loadSchedulePreferences]);
 
   const handleToggle = async (key) => {
     if (prefsLocked[key]) return;
@@ -4542,13 +4531,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
       await api.confirmAppointment(id);
       const ts = new Date();
       setConfirmTimestamps(prev => ({ ...prev, [id]: ts }));
-      setUpcoming(prev => prev.map(s => s.id === id ? { ...s, status: 'confirmed', customerConfirmed: true } : s));
+      await scheduleRead.refresh();
     } catch (err) {
       console.error(err);
       showCustomerAlert('Could not confirm this appointment. Refreshing latest status...');
       try {
-        const fresh = await api.getSchedule(90);
-        setUpcoming(fresh.upcoming || []);
+        await scheduleRead.refresh();
       } catch (e) { console.error(e); }
     } finally {
       setConfirmingIds(prev => ({ ...prev, [id]: false }));
@@ -4596,6 +4584,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
     fontSize: 14, minHeight: 44,
   };
 
+  if (scheduleRead.saved || scheduleRead.offline) {
+    return <SavedPortalRead title="Saved upcoming visits" read={scheduleRead}>
+      <SavedVisitDetails visits={scheduleRead.data?.upcoming || []} />
+    </SavedPortalRead>;
+  }
+
   if (loading) {
     return (
       <PortalStatePanel
@@ -4616,7 +4610,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
         title="Could not load your schedule"
         message={loadError}
         actionLabel="Try Again"
-        onAction={loadSchedule}
+        onAction={scheduleRead.refresh}
       />
     );
   }
@@ -4772,8 +4766,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               You'll hear from us
             </div>
             {[
-              { enabled: prefs?.serviceReminder72h !== false, icon: 'clock', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
-              { enabled: prefs?.serviceReminder24h !== false, icon: 'bell', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
+              { enabled: prefs?.serviceReminder72h !== false, icon: 'clock', label: `72-hour ${REMINDER_CHANNEL_LABELS[prefs?.serviceReminder72hChannel] || 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
+              { enabled: prefs?.serviceReminder24h !== false, icon: 'bell', label: `24-hour ${REMINDER_CHANNEL_LABELS[prefs?.serviceReminder24hChannel] || 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
               { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival - live GPS', done: false, active: s.isToday },
               { icon: 'document', label: 'Service complete report', time: 'Products used + tech notes delivered using your saved contact preferences', done: false },
             ].filter((step) => step.enabled !== false).map((step, i, steps) => (
@@ -4910,7 +4904,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 {accountNextFailed && (
                   <span role="alert" style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 14, color: muted }}>
                     Next visits couldn&rsquo;t be loaded.
-                    <button type="button" onClick={() => setAccountNextAttempt((n) => n + 1)} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 700, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
+                    <button type="button" onClick={accountNextRead.refresh} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 700, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
                   </span>
                 )}
               </div>
@@ -5050,7 +5044,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
           <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
           <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
             Your schedule is up to date, but notification preferences couldn&apos;t be loaded.
-            <button data-glass-accent="" type="button" onClick={loadSchedule} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
+            <button data-glass-accent="" type="button" onClick={loadSchedulePreferences} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
           </div>
         </section>
       )}
@@ -5216,7 +5210,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
         <section role="alert" data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Property contacts couldn&rsquo;t be loaded</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Your schedule is still available. Try again to manage notification recipients for each property.</div>
-          <button data-glass-accent="" type="button" onClick={loadSchedule} style={{ ...secondaryButton, marginTop: 10 }}>Try again</button>
+          <button data-glass-accent="" type="button" onClick={loadSchedulePreferences} style={{ ...secondaryButton, marginTop: 10 }}>Try again</button>
         </section>
       )}
 
@@ -5470,7 +5464,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
 // =========================================================================
 const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.';
 
-function BillingTab({ customer, refreshCustomer }) {
+function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
   // credits) and the tokenized Pay now hand-off; every management surface
@@ -5496,9 +5490,9 @@ function BillingTab({ customer, refreshCustomer }) {
       // /auth/me reload lands (out-of-order reloads would show the
       // opposite of the persisted preference).
       if (typeof refreshCustomer === 'function') await refreshCustomer();
-    } catch (err) {
+    } catch {
       setAutoApplyCredit(!next);
-      console.error('account-credit preference update failed', err);
+      showCustomerAlert('Could not save your credit preference. Please try again.');
     } finally {
       setAutoApplyCreditBusy(false);
     }
@@ -5512,6 +5506,10 @@ function BillingTab({ customer, refreshCustomer }) {
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
+  const [invoiceChannel, setInvoiceChannel] = useState('sms');
+  const [savedInvoiceChannel, setSavedInvoiceChannel] = useState('sms');
+  const [paymentIssueChannel, setPaymentIssueChannel] = useState('sms');
+  const [savedPaymentIssueChannel, setSavedPaymentIssueChannel] = useState('sms');
   const [appPreferencesAvailable, setAppPreferencesAvailable] = useState(false);
   const billingApp = useAppNotifications(appPreferencesAvailable, customer?.id);
   // Receipt texts have no on/off switch (owner 08-28), but a customer who
@@ -5525,6 +5523,11 @@ function BillingTab({ customer, refreshCustomer }) {
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const [billingPrefsLoadError, setBillingPrefsLoadError] = useState(false);
   const compact = useIsMobile(760);
+  useEffect(() => {
+    if (!loading && focusPaymentMethods) {
+      document.getElementById('billing-payment-methods')?.scrollIntoView?.({ block: 'start' });
+    }
+  }, [loading, focusPaymentMethods]);
 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
@@ -5639,6 +5642,10 @@ function BillingTab({ customer, refreshCustomer }) {
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
+          setInvoiceChannel(prefsData.invoiceChannel || 'sms');
+          setSavedInvoiceChannel(prefsData.invoiceChannel || 'sms');
+          setPaymentIssueChannel(prefsData.paymentIssueChannel || 'sms');
+          setSavedPaymentIssueChannel(prefsData.paymentIssueChannel || 'sms');
           setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
           setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
@@ -6297,9 +6304,21 @@ function BillingTab({ customer, refreshCustomer }) {
       // SMS-suppressing 'email' choice can't linger with no deliverable
       // email leg.
       billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
+      ...(appPreferencesAvailable && invoiceChannel !== savedInvoiceChannel ? { invoiceChannel } : {}),
+      ...(appPreferencesAvailable && paymentIssueChannel !== savedPaymentIssueChannel ? { paymentIssueChannel } : {}),
       paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
-      .then(() => {
+      .then((result) => {
+        if (appPreferencesAvailable && (
+          (invoiceChannel !== savedInvoiceChannel && result?.preferences?.invoiceChannel !== invoiceChannel)
+          || (paymentIssueChannel !== savedPaymentIssueChannel && result?.preferences?.paymentIssueChannel !== paymentIssueChannel)
+        )) {
+          setInvoiceChannel(result?.preferences?.invoiceChannel || savedInvoiceChannel);
+          setPaymentIssueChannel(result?.preferences?.paymentIssueChannel || savedPaymentIssueChannel);
+          throw new Error('Billing delivery preference was not saved');
+        }
+        setSavedInvoiceChannel(invoiceChannel);
+        setSavedPaymentIssueChannel(paymentIssueChannel);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was
@@ -7051,6 +7070,47 @@ function BillingTab({ customer, refreshCustomer }) {
           </div>
         )}
 
+        {appPreferencesAvailable && <div data-invoice-channel-row="" style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap',
+          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
+        }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Invoices</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>New invoices and payment reminders. App opens the invoice, with an allowed text backup. Email copies continue.</div>
+          </div>
+          <div style={{ display: 'flex', flex: compact ? '1 0 100%' : '0 0 auto', justifyContent: 'flex-end' }}>
+          <select
+            aria-label="Delivery method for invoices"
+            value={invoiceChannel}
+            onChange={(e) => setInvoiceChannel(e.target.value)}
+            style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, border: '1px solid #D8D0C0',
+              borderRadius: 8, padding: '7px 10px', minHeight: 44, background: '#fff', fontFamily: 'inherit' }}
+          >
+            <option value="sms">Text</option>
+            <option value="push" disabled={!billingApp.ready}>App</option>
+          </select>
+          </div>
+        </div>}
+
+        {appPreferencesAvailable && <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap',
+          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
+        }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Payment problems</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Auto Pay failures, payment retries and bank verification. App opens your payment methods, with an allowed text backup. Email copies continue.</div>
+          </div>
+          <div style={{ display: 'flex', flex: compact ? '1 0 100%' : '0 0 auto', justifyContent: 'flex-end' }}>
+            <select aria-label="Delivery method for payment problems" value={paymentIssueChannel}
+              onChange={(e) => setPaymentIssueChannel(e.target.value)}
+              style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, border: '1px solid #D8D0C0',
+                borderRadius: 8, padding: '7px 10px', minHeight: 44, background: '#fff', fontFamily: 'inherit' }}>
+              <option value="sms">Text</option>
+              <option value="push" disabled={!billingApp.ready}>App</option>
+            </select>
+          </div>
+        </div>}
+
         <div data-billing-reminder-row="" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           flexWrap: 'wrap',
@@ -7130,7 +7190,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 const channel = paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms';
                 const emailLeg = channel === 'email' || channel === 'both';
                 const textLeg = channel !== 'email' && !paymentSmsOff;
-                if (channel === 'push') return 'App first, with an allowed text backup. Existing emailed receipt copies continue.';
+                if (channel === 'push') return 'App, with an allowed text backup. Existing emailed receipt copies continue.';
                 if (textLeg && emailLeg) return 'Get a text and an email when your payment processes.';
                 if (emailLeg) return 'Get an email when your payment processes.';
                 if (textLeg) return 'Get a text when your payment processes.';
@@ -12829,18 +12889,15 @@ function TermiteBondCard({ bonds, compact, card, sectionTitle, primaryButton, se
 }
 
 function DocumentsTab({ customer, onSwitchTab }) {
-  const [termiteBonds, setTermiteBonds] = useState(null);
-  useEffect(() => {
-    api.getTermiteBond().then(d => {
-      setTermiteBonds(d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null);
-    }).catch(() => {});
-  }, []);
+  const termiteBondsRead = usePortalRead('termite-bonds', () => api.getTermiteBond()
+    .then(d => d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null));
+  const termiteBonds = termiteBondsRead.verified ? termiteBondsRead.data : null;
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
-  const [docs, setDocs] = useState({});
-  const [totalDocs, setTotalDocs] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+  const documentsRead = usePortalRead('documents', () => api.getDocuments());
+  const { loading, error: loadError } = documentsRead;
+  const docs = documentsRead.data?.documents || {};
+  const totalDocs = Number(documentsRead.data?.total || 0);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [notice, setNotice] = useState(null);
@@ -12884,22 +12941,6 @@ function DocumentsTab({ customer, onSwitchTab }) {
     fontSize: 14, minHeight: 44,
     letterSpacing: 0,
   };
-
-  const loadDocuments = useCallback(() => {
-    setLoading(true);
-    setLoadError('');
-    api.getDocuments()
-      .then(d => {
-        setDocs(d.documents || {});
-        setTotalDocs(Number(d.total || 0));
-      })
-      .catch(err => setLoadError(err?.message || 'Could not load documents.'))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    loadDocuments();
-  }, [loadDocuments]);
 
   const flash = (text, type = 'success') => {
     setNotice({ text, type });
@@ -13033,6 +13074,21 @@ function DocumentsTab({ customer, onSwitchTab }) {
     window.open(`mailto:?subject=${subject}&body=${body}`, '_self');
   };
 
+  const previewOverlay = preview && <DocumentPreviewOverlay key="report-preview"
+    preview={preview} onClose={closePreview}
+    onError={(err) => flash(err?.message || 'Could not save this document. Please try again.', 'error')} />;
+
+  if (documentsRead.saved || documentsRead.offline) {
+    return <div>
+      <SavedPortalRead title="Saved documents" titleAs="h1" read={documentsRead}>
+        {Object.values(docs).flat().length ? <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
+          {Object.values(docs).flat().map(doc => <li key={doc.id}>{doc.title || 'Document'}</li>)}
+        </ul> : <p style={{ fontSize: 16 }}>{documentsRead.data ? 'No documents were listed when last checked.' : 'Open Documents while connected to load your document list.'}</p>}
+      </SavedPortalRead>
+      {previewOverlay}
+    </div>;
+  }
+
   if (loading) {
     return (
       <PortalStatePanel
@@ -13055,7 +13111,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         title="Could not load documents"
         message={loadError}
         actionLabel="Try Again"
-        onAction={loadDocuments}
+        onAction={documentsRead.refresh}
       />
     );
   }
@@ -13396,13 +13452,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         </div>
       </section>
 
-      {preview && (
-        <DocumentPreviewOverlay
-          preview={preview}
-          onClose={closePreview}
-          onError={(err) => flash(err?.message || 'Could not save this document. Please try again.', 'error')}
-        />
-      )}
+      {previewOverlay}
     </div>
   );
 }
@@ -13786,9 +13836,38 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // =========================================================================
 // NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
+// Keyboard opening can resize AND pan the visual viewport on iOS.
+function useSheetViewport(open, dialogRef) {
+  const [viewport, setViewport] = useState(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!open || !vv) return undefined;
+    const update = () => setViewport({ height: Math.round(vv.height), top: Math.round(vv.offsetTop) });
+    update();
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+    };
+  }, [open]);
+  useEffect(() => {
+    if (!open || !viewport) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const focused = document.activeElement;
+      if (dialogRef.current?.contains(focused) && focused.matches('input, textarea')) {
+        focused.scrollIntoView({ block: 'nearest' });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open, viewport?.height, viewport?.top, dialogRef]);
+  return viewport;
+}
+
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
+  const viewport = useSheetViewport(open, dialogRef);
   const compact = useIsMobile(760);
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
@@ -14094,6 +14173,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   return (
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
+      ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
       background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
       backdropFilter: compact ? 'none' : 'blur(5px)',
       display: 'flex',
@@ -15179,18 +15259,8 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // The iOS keyboard doesn't resize the layout viewport — it pans it, which
-  // shoved the sheet (header and close button included) off the top of the
-  // screen while typing. Cap the sheet to the visual viewport instead.
-  const [viewportH, setViewportH] = useState(null);
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return undefined;
-    const update = () => setViewportH(Math.round(vv.height));
-    update();
-    vv.addEventListener('resize', update);
-    return () => vv.removeEventListener('resize', update);
-  }, []);
+  const viewport = useSheetViewport(true, dialogRef);
+  const viewportH = viewport?.height;
 
   // A question handed in from the Waves AI bar sends itself on open.
   useEffect(() => {
@@ -15233,6 +15303,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
   return (
     <div data-glass-scrim="" style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, top: 0, zIndex: 200,
+      ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
       background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)',
       display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
       padding: compact ? 0 : 24,
@@ -15403,12 +15474,14 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 }
 
 export default function PortalPage() {
-  const { customer, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
+  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
   const isMobileShell = useIsMobile(900);
   // C4: /auth/me reports `cancelled` for a churned account admitted under
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
   // cancelled banner, and hides every action that creates work.
   const cancelledAccount = customer?.cancelled === true;
+  // Rollback applies to this mounted session, including tab/property navigation.
+  const [refreshEnabled] = useState(() => new URLSearchParams(window.location.search).get('appRefresh') !== '0');
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
   // Returns [tabId, visitsSubTab, openRequest, planService]. Legacy
@@ -15700,6 +15773,7 @@ export default function PortalPage() {
 
   return (
     <PortalGlassContext.Provider value={true}>
+    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}>
     <div className="portal-root" style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an
@@ -15927,7 +16001,7 @@ export default function PortalPage() {
                     </div>
                   </div>
                 )}
-                <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
+                <div style={{ padding: 12, background: PORTAL_SHELL.surface, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
                   <div style={{
                     fontSize: 14,
                     color: PORTAL_SHELL.muted,
@@ -16192,7 +16266,8 @@ export default function PortalPage() {
             {headerNavItems.map(headerNavButton)}
           </nav>
         )}
-        {!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}
+        <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
+          onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
@@ -16202,7 +16277,7 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
@@ -16210,6 +16285,7 @@ export default function PortalPage() {
           onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
         />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
+        </PortalRefreshArea>
       </main>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}
@@ -16245,6 +16321,7 @@ export default function PortalPage() {
         customer={customer}
       />
     </div>
+    </PortalReadProvider>
     </PortalGlassContext.Provider>
   );
 }

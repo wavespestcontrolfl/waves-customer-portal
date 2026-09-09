@@ -1,5 +1,23 @@
 import React, { useEffect, useRef } from "react";
-import { Button, cn } from "../ui";
+import { Button, cn, useUiDensity } from "../ui";
+
+const PRESENTATIONS = {
+  framed: {
+    frame: "overflow-hidden rounded-md border-hairline border-zinc-200 bg-white",
+    heading: "flex flex-wrap items-center justify-between gap-2 px-3 py-2 md:gap-3 md:px-4 md:py-3",
+    divider: "border-b border-hairline border-zinc-200",
+    nav: "u-scroll-strip flex p-1 md:grid md:gap-1 md:overflow-visible md:p-2",
+    item: "inline-flex h-11 shrink-0 items-center gap-1.5 whitespace-nowrap px-3 border-0 border-b-2 border-solid bg-transparent text-12 font-medium uppercase leading-tight tracking-label u-focus-ring transition-colors md:h-9 md:min-w-0 md:shrink md:justify-center md:gap-2 md:whitespace-normal md:text-center md:rounded-sm md:border-hairline",
+    selected: "border-zinc-900 text-zinc-900 md:bg-zinc-900 md:text-white",
+    idle: "border-transparent text-ink-secondary hover:text-zinc-900 md:border-zinc-200 md:bg-white md:text-zinc-700 md:hover:bg-zinc-50",
+  },
+  workspace: {
+    frame: "ui-workspace-command",
+    heading: "ui-workspace-command-heading",
+    nav: "ui-workspace-nav",
+    item: "ui-workspace-nav-action u-focus-ring",
+  },
+};
 
 export default function AdminCommandHeader({
   title,
@@ -22,8 +40,11 @@ export default function AdminCommandHeader({
   className,
   headingLevel = 1,
   sticky = true,
+  variant = "framed",
 }) {
-  const resolvedActions = actions?.length ? actions : action ? [action] : [];
+  const density = useUiDensity();
+  const presentation = PRESENTATIONS[variant];
+  const resolvedActions = actions?.length ? actions : [action].filter(Boolean);
   const Heading = headingLevel === 2 ? "h2" : "h1";
   const hasSections = sections.length > 0;
   const hasSecondary = secondarySections.length > 0;
@@ -56,14 +77,8 @@ export default function AdminCommandHeader({
             // (shrink-0 + nowrap so the row overflows instead of wrapping
             // into the 2-column tile grid that ate ~60% of a phone screen).
             // md+: the boxed tile grid, unchanged.
-            "inline-flex h-11 shrink-0 items-center gap-1.5 whitespace-nowrap px-3",
-            "border-0 border-b-2 border-solid bg-transparent",
-            "text-12 font-medium uppercase leading-tight tracking-label u-focus-ring transition-colors",
-            "md:h-9 md:min-w-0 md:shrink md:justify-center md:gap-2 md:whitespace-normal md:text-center",
-            "md:rounded-sm md:border-hairline",
-            isActive
-              ? "border-zinc-900 text-zinc-900 md:bg-zinc-900 md:text-white"
-              : "border-transparent text-ink-secondary hover:text-zinc-900 md:border-zinc-200 md:bg-white md:text-zinc-700 md:hover:bg-zinc-50",
+            presentation.item,
+            isActive ? presentation.selected : presentation.idle,
             sectionClassName,
           )}
         >
@@ -91,11 +106,11 @@ export default function AdminCommandHeader({
         className,
       )}
     >
-      <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+      <div className={presentation.frame}>
         <div
           className={cn(
-            "flex flex-wrap items-center justify-between gap-2 px-3 py-2 md:gap-3 md:px-4 md:py-3",
-            hasSections && "border-b border-hairline border-zinc-200",
+            presentation.heading,
+            hasSections && presentation.divider,
           )}
         >
           <div className="flex min-w-0 items-center gap-2 md:gap-3">
@@ -112,7 +127,7 @@ export default function AdminCommandHeader({
             </Heading>
           </div>
           {resolvedActions.length > 0 && (
-            <div className="flex flex-wrap items-center justify-end gap-2">
+            <div className="ui-record-actions justify-end">
               {resolvedActions.map((item) => {
                 const ActionIcon = item.icon;
                 return (
@@ -121,7 +136,7 @@ export default function AdminCommandHeader({
                     size={item.size || "md"}
                     variant={item.variant || "primary"}
                     className={cn(
-                      "gap-2 px-3 text-12 font-medium uppercase tracking-label md:px-4",
+                      density === "legacy" && "gap-2 px-3 text-12 font-medium uppercase tracking-label md:px-4",
                       item.className,
                     )}
                     onClick={item.onClick}
@@ -145,7 +160,7 @@ export default function AdminCommandHeader({
             className={cn(
               // p-1 on mobile leaves room for the 2px focus ring inside the
               // strip's clip box (the outline sits 2px outside the button).
-              "u-scroll-strip flex p-1 md:grid md:gap-1 md:overflow-visible md:p-2",
+              presentation.nav,
               navGridClassName,
             )}
           >
@@ -157,7 +172,7 @@ export default function AdminCommandHeader({
             ref={secondaryNavRef}
             aria-label={secondaryAriaLabel || `${title} sub-section`}
             className={cn(
-              "u-scroll-strip flex p-1 md:grid md:gap-1 md:overflow-visible md:p-2",
+              presentation.nav,
               "border-t border-hairline border-zinc-200",
               secondaryNavGridClassName,
             )}

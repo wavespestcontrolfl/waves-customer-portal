@@ -160,7 +160,7 @@ async function getPhotoSelectColumns(knex = db) {
   return PHOTO_CHAIN_COLUMNS.filter((column) => column === 'id' || info[column]);
 }
 
-async function latestPhotoHash(knex, serviceRecordId) {
+async function latestPhotoChainEntry(knex, serviceRecordId) {
   const info = await knex('service_photos').columnInfo();
   if (!info.hash_sha256) return null;
   let query = knex('service_photos')
@@ -174,8 +174,8 @@ async function latestPhotoHash(knex, serviceRecordId) {
   const row = await query
     .orderBy('sort_order', 'desc')
     .orderBy('id', 'desc')
-    .first('hash_sha256');
-  return row?.hash_sha256 || null;
+    .first(['hash_sha256', 'captured_at', 'created_at'].filter(column => info[column]));
+  return row || null;
 }
 
 async function validatePhotoChain(serviceRecordId, knex = db) {
@@ -199,7 +199,7 @@ module.exports = {
   buildPhotoChainPayload,
   hashBuffer,
   hashPhotoChainPayload,
-  latestPhotoHash,
+  latestPhotoChainEntry,
   sortPhotoRowsForChain,
   stableStringify,
   validatePhotoChain,

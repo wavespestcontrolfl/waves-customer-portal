@@ -11,18 +11,19 @@ const canEditPricing = () => getAdminUser()?.role === "admin";
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
 
+// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 const D = {
-  bg: "#F1F5F9",
+  bg: "#F4F4F5",
   card: "#FFFFFF",
-  border: "#E2E8F0",
-  teal: "#0A7EC2",
-  green: "#16A34A",
-  amber: "#F0A500",
-  red: "#C0392B",
-  purple: "#7C3AED",
-  text: "#334155",
-  muted: "#64748B",
-  white: "#fff",
+  border: "#E4E4E7",
+  teal: "#18181B",
+  green: "#15803D",
+  amber: "#A16207",
+  red: "#991B1B",
+  purple: "#18181B",
+  text: "#27272A",
+  muted: "#71717A",
+  white: "#FFFFFF",
   input: "#FFFFFF",
 };
 
@@ -61,14 +62,16 @@ const TABS = [
 ];
 
 // Category pill color map for changelog entries
+// Explicit map so bug/leak keep their semantic red/amber while the rest
+// stay on the zinc ramp (the label carries the category).
 const CATEGORY_COLORS = {
-  bug: "#C0392B", // red
-  leak: "#F0A500", // amber
-  rule: "#0A7EC2", // blue
-  cost: "#16A34A", // green
-  architecture: "#7C3AED", // purple
-  documentation: "#64748B", // gray
-  infrastructure: "#0EA5E9", // teal
+  bug: "#991B1B", // red — a defect
+  leak: "#A16207", // amber — money leaking
+  rule: "#18181B",
+  cost: "#3F3F46",
+  architecture: "#18181B",
+  documentation: "#71717A",
+  infrastructure: "#3F3F46",
 };
 
 // ── Changelog Tab ──

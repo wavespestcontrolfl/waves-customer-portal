@@ -65,6 +65,10 @@ export default {
         bold: '700',
       },
       fontSize: {
+        'ui-body': ['var(--ui-body-size, 14px)', { lineHeight: 'var(--ui-copy-leading, 1.55)' }],
+        'ui-label': ['var(--ui-label-size, 14px)', { lineHeight: 'var(--ui-copy-leading, 1.55)' }],
+        'ui-caption': ['var(--ui-caption-size, 14px)', { lineHeight: 'var(--ui-copy-leading, 1.55)' }],
+        'ui-field': ['var(--ui-field-size, 16px)', { lineHeight: '1.5' }],
         '11': ['11px', { lineHeight: '1.4' }],
         '12': ['12px', { lineHeight: '1.4' }],
         '13': ['13px', { lineHeight: '1.5' }],
