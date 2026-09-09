@@ -114,6 +114,14 @@ describe('TechLayout staff-session verification', () => {
     expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
   });
 
+  it.each(['/TECH/DOCUMENTS', '/tech/documents/', '/TECH/DOCUMENTS/'])('keeps disabled documents unavailable at %s', async (path) => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', role: 'technician' })));
+    renderTech(path);
+    expect(await screen.findByText('Staff documents are unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText('Protected staff documents')).not.toBeInTheDocument();
+  });
+
   it('does not treat the retired adminToken storage key as a staff session', () => {
     localStorage.setItem('adminToken', 'legacy-untyped-token');
     const fetchMock = vi.fn();

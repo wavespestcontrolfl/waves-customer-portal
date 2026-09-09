@@ -226,9 +226,10 @@ export default function TechLayout() {
     );
   }
 
+  const pathname = location.pathname.toLowerCase().replace(/\/+$/, '') || '/tech';
   const isActive = (item) => {
-    if (item.exact) return location.pathname === item.path;
-    return location.pathname.startsWith(item.path);
+    if (item.exact) return pathname === item.path;
+    return pathname.startsWith(item.path);
   };
 
   return (
@@ -276,7 +277,7 @@ export default function TechLayout() {
           44px links) plus the home-indicator safe area on notched iPhones. */}
       <main style={{ flex: 1, padding: '16px', paddingBottom: 'calc(80px + env(safe-area-inset-bottom, 0px))', overflowY: 'auto' }}>
         <AddToHomeScreenHint />
-        {location.pathname === '/tech/documents' && !controlledDocumentsAvailable
+        {pathname === '/tech/documents' && !controlledDocumentsAvailable
           ? <p style={{ fontSize: 14, color: DARK.text }}>Staff documents are unavailable.</p>
           : <Outlet />}
       </main>
