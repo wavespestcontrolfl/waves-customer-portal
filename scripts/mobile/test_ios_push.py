@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -98,6 +99,42 @@ class IOSPushTests(unittest.TestCase):
         first = (self.project_file.read_bytes(), self.entitlement_file.read_bytes())
         configure(self.project_dir)
         self.assertEqual(first, (self.project_file.read_bytes(), self.entitlement_file.read_bytes()))
+
+    def badge_storyboard(self):
+        path = self.project_dir / "App/Base.lproj/Main.storyboard"
+        path.parent.mkdir(parents=True)
+        template = ROOT / "node_modules/@capacitor/cli/assets/ios-pods-template.tar.gz"
+        with tarfile.open(template) as archive:
+            member = next(item for item in archive.getmembers() if item.name.endswith("Base.lproj/Main.storyboard"))
+            path.write_bytes(archive.extractfile(member).read())
+        return path
+
+    def test_badge_bridge_is_compiled_registered_and_idempotent(self):
+        storyboard = self.badge_storyboard()
+        configure(self.project_dir, badge=True)
+        source = self.project_dir / "App/WavesBadgePlugin.swift"
+        self.assertEqual(source.read_bytes(), (ROOT / "client/resources/WavesBadgePlugin.swift").read_bytes())
+        controller = ET.parse(storyboard).find(".//viewController")
+        self.assertEqual(controller.get("customClass"), "WavesBridgeViewController")
+        self.assertEqual(controller.get("customModule"), "App")
+        objects = self.project()["objects"]
+        refs = [key for key, value in objects.items() if value.get("path") == "WavesBadgePlugin.swift"]
+        self.assertEqual(len(refs), 1)
+        target = next(value for value in objects.values() if value.get("isa") == "PBXNativeTarget")
+        phase = next(objects[key] for key in target["buildPhases"] if objects[key]["isa"] == "PBXSourcesBuildPhase")
+        self.assertEqual(sum(objects[key].get("fileRef") == refs[0] for key in phase["files"]), 1)
+        first = [path.read_bytes() for path in (self.project_file, storyboard, source)]
+        configure(self.project_dir, badge=True)
+        self.assertEqual(first, [path.read_bytes() for path in (self.project_file, storyboard, source)])
+
+    def test_badge_setup_never_replaces_an_unrelated_custom_controller(self):
+        storyboard = self.badge_storyboard()
+        storyboard.write_text(storyboard.read_text().replace("CAPBridgeViewController", "ExistingCustomController"))
+        before = (self.project_file.read_bytes(), storyboard.read_bytes())
+        with self.assertRaisesRegex(ValueError, "existing custom bridge"):
+            configure(self.project_dir, badge=True)
+        self.assertEqual(before, (self.project_file.read_bytes(), storyboard.read_bytes()))
+        self.assertFalse((self.project_dir / "App/WavesBadgePlugin.swift").exists())
 
     def test_device_specific_signing_override_also_gets_push(self):
         project = self.project()
