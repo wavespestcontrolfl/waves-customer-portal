@@ -1231,7 +1231,7 @@ function InfoRow({
 // ═══════════════════════════════════════════════════════════════════
 // RECORD MAINTENANCE FORM
 // ═══════════════════════════════════════════════════════════════════
-function MaintenanceForm({
+export function MaintenanceForm({
   equipmentId,
   schedules,
   onDone,
@@ -1262,8 +1262,8 @@ function MaintenanceForm({
   });
   const [saving, setSaving] = useState(false);
   useEffect(() => {
-    onPendingChange(saving);
-    return () => onPendingChange(false);
+    onPendingChange?.(saving);
+    return () => onPendingChange?.(false);
   }, [saving, onPendingChange]);
   const set = (k, v) => setForm(p => ({
     ...p,
@@ -1307,7 +1307,7 @@ function MaintenanceForm({
         });
         onDone();
       } catch (e) {
-        setActionError(e.message || "Request failed");
+        setActionError(`Save failed: ${e.message || "Request failed"}`);
       }
       setSaving(false);
     } finally {
@@ -1490,7 +1490,7 @@ function MaintenanceForm({
 // ═══════════════════════════════════════════════════════════════════
 // LOG MILEAGE FORM
 // ═══════════════════════════════════════════════════════════════════
-function MileageForm({
+export function MileageForm({
   vehicleId,
   currentMiles,
   onDone,
@@ -1514,8 +1514,8 @@ function MileageForm({
   });
   const [saving, setSaving] = useState(false);
   useEffect(() => {
-    onPendingChange(saving);
-    return () => onPendingChange(false);
+    onPendingChange?.(saving);
+    return () => onPendingChange?.(false);
   }, [saving, onPendingChange]);
   const set = (k, v) => setForm(p => ({
     ...p,
@@ -1548,7 +1548,7 @@ function MileageForm({
         });
         onDone();
       } catch (e) {
-        setActionError(e.message || "Request failed");
+        setActionError(`Save failed: ${e.message || "Request failed"}`);
       }
       setSaving(false);
     } finally {

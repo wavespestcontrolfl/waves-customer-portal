@@ -199,4 +199,15 @@ describe('policy table hygiene', () => {
     expect(fallback.title).toBe('Waves Pest Control');
     expect(fallback.link).toBe('/');
   });
+
+  // Completion/report pushes open Documents (customer-wide) like the lifecycle
+  // "Service completed" bell — never Visits, which is property-scoped and
+  // fails closed for a house retired since the visit (uncapped codex r1z P1).
+  it('completion and report pushes deep-link to Documents, not Visits', () => {
+    for (const type of ['service_complete', 'service_complete_with_invoice', 'service_report_v1']) {
+      const p = _test.pushPresentation(type);
+      expect(p.link).toBe('/?tab=documents');
+      expect(p.title).toBe('Your service report is ready');
+    }
+  });
 });

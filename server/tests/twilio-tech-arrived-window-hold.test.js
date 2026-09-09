@@ -117,3 +117,17 @@ test("plain transient provider failure stays a retryable miss (guard released)",
   expect(res.success).toBe(false);
   expect(res.suppressed).toBeUndefined();
 });
+
+// The visit id rides to the push sink so an App-delivered arrival push
+// deep-links to the visit's house (GitHub codex #4207 r11 P1).
+test("the scheduled service id is forwarded as appointmentId on every arrival send", async () => {
+  getAppointmentContacts.mockReturnValue([{ phone: customer.phone, name: "Pat Q", role: "primary" }]);
+  sendCustomerMessage.mockResolvedValue({ sent: true, success: true });
+
+  await TwilioService.sendTechArrived("cust-1", "Adam", { scheduledServiceId: "svc-9" });
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ purpose: "tech_arrived", appointmentId: "svc-9" }));
+
+  sendCustomerMessage.mockClear();
+  await TwilioService.sendTechArrived("cust-1", "Adam");
+  expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty("appointmentId");
+});

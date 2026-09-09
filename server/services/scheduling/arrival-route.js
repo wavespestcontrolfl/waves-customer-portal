@@ -11,7 +11,7 @@ const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration } = require('../route-reorder-window-fit');
 
 const COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
@@ -40,13 +40,6 @@ function hasCoords(stop) {
   return stop?.lat != null && stop?.lng != null
     && Number.isFinite(Number(stop.lat)) && Number.isFinite(Number(stop.lng))
     && Number(stop.lat) !== 0 && Number(stop.lng) !== 0;
-}
-
-function workDuration(stop) {
-  const start = minuteOfDay(stop.window_start);
-  const end = minuteOfDay(stop.window_end);
-  const span = start != null && end != null ? Math.max(0, end - start) : 0;
-  return Math.max(span, Number(stop.estimated_duration_minutes) || 0) || 60;
 }
 
 async function loadArrivalRouteContext({
@@ -101,7 +94,7 @@ function routeDriveMinutes(stops, origin) {
 }
 
 /** Pure evaluation shared by the hint, live conflict check, and save probe. */
-function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60 }) {
+function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60, departureMin, returnByMin }) {
   if (!context) return unverified(null, 'this date');
   const { date, rows, now, grouped, activeTarget } = context;
   const target = {
@@ -115,7 +108,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   let origin = RouteOptimizer.HQ;
   // Staff may promise an early on-the-hour arrival; depart early enough
   // to model that route instead of imposing the public finder's 8 AM floor.
-  let startMin = Math.min(8 * 60, ...[target, ...own].map(row => effectiveWindowRange(row)?.startMin ?? Infinity));
+  let startMin = departureMin ?? Math.min(8 * 60, ...[target, ...own].map(row => effectiveWindowRange(row)?.startMin ?? Infinity));
   const today = date === etDateString(now);
   if (today) {
     // An in-progress stop needs live remaining-work/travel truth. Never sell
@@ -139,6 +132,9 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     warning: `The route on ${date} cannot keep every promised arrival window with the planned service and driving times. Review the stop order or choose another window.`,
   };
   if (!simulation) return fail;
+  if (Number.isFinite(returnByMin) && simulation.returnAtMin > returnByMin) {
+    return { ...fail, reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` };
+  }
   // Keep the tech-blind occupancy guard: unassigned visits, other-tech work,
   // and live holds have NOT been proven movable by this route simulation.
   const fixed = rows.filter(row => row.technician_id !== target.technician_id || row.reservation_expires_at != null);
@@ -158,9 +154,27 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     detourMinutes: Math.max(0, simulation.travelMin - baselineDrive),
     driveMinutes: simulation.travelMin,
     waitingMinutes: simulation.waitingMin,
+    returnMinuteBeforeBreaks: simulation.returnAtMin,
     arrivalDelayMinutes: arrival.arrivalMin - minuteOfDay(windowStart),
     arrivals: simulation.arrivals.map(row => ({ id: row.id, arrival: hhmm(row.arrivalMin), departure: hhmm(row.departureMin) })),
   };
+}
+
+/** One on-the-hour enumeration for the staff finder and read-only gap
+ * measurements. Both evaluate the order the existing save would produce. */
+function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin, latestServiceEndMin = 20 * 60, ...limits }) {
+  const placements = [];
+  const rejections = {};
+  let evaluated = 0;
+  for (let start = Math.ceil(earliestStartMin / 60) * 60; start + durationMinutes <= latestServiceEndMin; start += 60) {
+    evaluated++;
+    const windowStart = hhmm(start);
+    const windowEnd = hhmm(start + durationMinutes);
+    const fit = evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, ...limits });
+    if (fit.feasible) placements.push({ windowStart, windowEnd, fit });
+    else rejections[fit.reason] = (rejections[fit.reason] || 0) + 1;
+  }
+  return { placements, evaluated, rejections };
 }
 
 async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, ...options }) {
@@ -170,4 +184,5 @@ async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, 
 
 module.exports = {
   arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
+  enumerateArrivalPlacements,
 };
