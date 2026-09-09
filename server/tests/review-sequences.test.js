@@ -969,7 +969,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock(fixture('seq-3d5', { lastAskAgoMs: 20 * 3600000 }), {
         // The runner's own last-ask lookup: review_requests, delivered asks,
         // bounded by delivery time (the cap-stats read has no such bound).
-        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(sms_sent_at, sent_at, followup_delivered_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
+        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(sms_sent_at, sent_at, followup_delivered_at, followup_reserved_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
       });
       db.mockImplementation(mock);
 
@@ -4681,6 +4681,7 @@ describe('legacy follow-up delivery spacing', () => {
       customer_id: customer.id, direction: 'outbound', status: 'sent', message_body: 'Please leave a review.', created_at: manualAt,
     }] : [] }, { onUpdate, throwSelectWhen });
     db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-legacy' });
     mockRenderSmsTemplate.mockResolvedValue('Please leave a Google review: https://g.page/r/example/review');
     return { mock, request };
   }
@@ -4729,7 +4730,7 @@ describe('legacy follow-up delivery spacing', () => {
     const { request } = setup({ onUpdate: (table, patch) => {
       if (table === 'review_requests' && patch.followup_delivered_at) stampedUnderLock = global.__reviewLockHeld.has('review-send:legacy-lock');
     } });
-    if (throws) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true } }));
+    if (throws) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true, providerMessageId: 'SM-legacy' } }));
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
     expect(stampedUnderLock).toBe(true);
     expect(request.followup_delivered_at).toBeInstanceOf(Date);
@@ -4747,6 +4748,10 @@ describe('legacy follow-up delivery spacing', () => {
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, unrecordedDeliveries: 1 });
     expect(request.followup_sent).toBe(true);
     expect(request.followup_delivered_at).toBeUndefined();
+    expect(request.followup_reserved_at).toBeInstanceOf(Date);
+    const other = jest.fn();
+    expect(await require('../services/review-ask-dispatch').dispatchReviewAsk(request.customer_id, other)).toMatchObject({ code: 'REVIEW_ASK_SPACING' });
+    expect(other).not.toHaveBeenCalled();
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
@@ -4758,6 +4763,7 @@ describe('legacy follow-up delivery spacing', () => {
     else mockSendCustomerMessage.mockResolvedValueOnce(outcome);
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
     expect(request.followup_sent).toBe(false);
+    expect(request.followup_reserved_at).toBeNull();
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
   });
 
@@ -4766,7 +4772,7 @@ describe('legacy follow-up delivery spacing', () => {
     let entered, finish;
     const started = new Promise(resolve => { entered = resolve; });
     const wait = new Promise(resolve => { finish = resolve; });
-    mockSendCustomerMessage.mockImplementationOnce(async () => { entered(); await wait; return { sent: true }; });
+    mockSendCustomerMessage.mockImplementationOnce(async () => { entered(); await wait; return { sent: true, providerMessageId: 'SM-legacy' }; });
     const first = ReviewService.processFollowups();
     try {
       await started;
@@ -4774,6 +4780,15 @@ describe('legacy follow-up delivery spacing', () => {
       expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     } finally { finish(); }
     expect(await first).toMatchObject({ sent: 1 });
+  });
+
+  test.each(['gate-blocked', 'template-disabled', 'owner-silence'])('suppressed follow-up releases spacing without delivery: %s', async providerMessageId => {
+    const { request } = setup();
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, suppressed: 1 });
+    expect(request.followup_reserved_at).toBeNull();
+    expect(request.followup_delivered_at).toBeUndefined();
+    expect(await require('../services/review-ask-history').lastDeliveredAskAt(request.customer_id)).toEqual(request.sms_sent_at);
   });
 
   test('suppression is not a delivered ask timestamp', async () => {

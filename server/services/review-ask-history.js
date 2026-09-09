@@ -33,18 +33,20 @@ function looksLikeReviewAsk(body) {
 function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
   const q = db('review_requests')
     .where({ customer_id: customerId })
-    .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL OR followup_delivered_at IS NOT NULL)')
+    .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL OR followup_delivered_at IS NOT NULL OR followup_reserved_at IS NOT NULL)')
     .whereRaw(ASK_TOUCH_SQL)
-    .select('id', 'sequence_id', 'template_key', 'sms_sent_at', 'sent_at', 'followup_delivered_at');
-  if (since) q.whereRaw('GREATEST(sms_sent_at, sent_at, followup_delivered_at) > ?', [since]);
+    .select('id', 'sequence_id', 'template_key', 'sms_sent_at', 'sent_at', 'followup_delivered_at', 'followup_reserved_at');
+  if (since) q.whereRaw('GREATEST(sms_sent_at, sent_at, followup_delivered_at, followup_reserved_at) > ?', [since]);
   if (excludeRequestId) q.where('id', '!=', excludeRequestId);
   return q;
 }
 
+// An unresolved follow-up reservation conservatively holds spacing until its
+// real outcome is recorded; it does not populate the delivery timestamp.
 // A retried email leg can be later than the SMS of the same request.
 function latestDeliveredAt(rows) {
   return rows.reduce((latest, row) => {
-    const at = Math.max(...[row.sms_sent_at, row.sent_at, row.followup_delivered_at].map(value => value ? new Date(value).getTime() : 0));
+    const at = Math.max(...[row.sms_sent_at, row.sent_at, row.followup_delivered_at, row.followup_reserved_at].map(value => value ? new Date(value).getTime() : 0));
     return Number.isFinite(at) && at > (latest?.getTime() || 0) ? new Date(at) : latest;
   }, null);
 }

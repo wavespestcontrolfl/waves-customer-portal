@@ -3141,6 +3141,7 @@ const ReviewService = {
           const reserved = await db("review_requests").where({ id: request.id, followup_sent: false }).update({
             followup_sent: true,
             followup_sent_at: new Date(),
+            followup_reserved_at: new Date(),
           });
           if (!reserved) return;
           let result;
@@ -3163,24 +3164,24 @@ const ReviewService = {
             if (typeof err?.providerOutcome?.sent !== 'boolean') throw err;
             result = err.providerOutcome;
           }
-          if (!result.sent) {
+          if (!require('./sms-auto-send').isRealProviderSend(result)) {
             logger.warn(
               `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
             );
             if (
-              result.blocked &&
+              result.sent === true || (result.blocked &&
               result.code !== "CONSENT_LOOKUP_FAILED" &&
               !result.retryable &&
-              !result.deferred
+              !result.deferred)
             ) {
               await db("review_requests").where({ id: request.id }).update({
                 followup_sent: true,
-                followup_sent_at: new Date(),
+                followup_sent_at: new Date(), followup_reserved_at: null,
               });
               suppressed++;
             } else {
               await db("review_requests").where({ id: request.id }).update({
-                followup_sent: false, followup_sent_at: null,
+                followup_sent: false, followup_sent_at: null, followup_reserved_at: null,
               });
             }
             return;
@@ -3191,6 +3192,7 @@ const ReviewService = {
             followup_sent: true,
             followup_sent_at: deliveredAt,
             followup_delivered_at: deliveredAt,
+            followup_reserved_at: null,
           }), `follow-up delivery stamp (requestId=${request.id})`);
           sentThisRun.add(request.customer_id);
           if (stamped) sent++;

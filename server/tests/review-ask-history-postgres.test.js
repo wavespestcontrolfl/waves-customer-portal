@@ -65,6 +65,16 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.deliveredAskRows(customerId, { since: deliveredAt })).toEqual([]);
   });
 
+  test('an unresolved follow-up reservation holds spacing without claiming delivery', async () => {
+    const row = await request({ sms_sent_at: at });
+    const reservedAt = new Date(at.getTime() + 80 * 3600000);
+    await trx('review_requests').where({ id: row.id }).update({ followup_reserved_at: reservedAt });
+    expect(await history.lastDeliveredAskAt(customerId, { since: at })).toEqual(reservedAt);
+    expect((await trx('review_requests').where({ id: row.id }).first()).followup_delivered_at).toBeNull();
+    await trx('review_requests').where({ id: row.id }).update({ followup_reserved_at: null });
+    expect(await history.lastDeliveredAskAt(customerId)).toEqual(at);
+  });
+
   test('retry eligibility excludes held rows before the batch limit and admits expired holds', async () => {
     const held = await request({ followup_sent: false, followup_next_attempt_at: new Date(at.getTime() + 60000) });
     const due = await request({ followup_sent: false, followup_next_attempt_at: null });
