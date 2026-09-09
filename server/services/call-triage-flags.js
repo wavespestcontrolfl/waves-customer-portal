@@ -1573,7 +1573,6 @@ function restatesOnFileAddress(sa, knownCustomer) {
   const onFileZip = zip5Of(knownCustomer.addressZip);
   const onFileKey = streetCompareKey(onFileStreet);
   const onFileHouse = streetHouseNum(onFileStreet);
-  const onFileNameTokens = streetNameOnly(onFileStreet).split(' ').filter(Boolean);
   const onFileUnit = String(knownCustomer.addressLine2 || '').trim();
 
   const street = [sa.street_line_1, sa.line1, sa.street].map((v) => String(v || '').trim()).find(Boolean) || '';
@@ -1586,36 +1585,41 @@ function restatesOnFileAddress(sa, knownCustomer) {
   // Every stated locality component must agree with the file.
   if (city && (!onFileCity || city !== onFileCity)) return false;
   if (zip && (!onFileZip || zip !== onFileZip)) return false;
-  // A unit we cannot compare is new information (condo tower, second unit).
-  if (unit && !onFileUnit) return false;
-  if (unit && unitKey(unit) !== unitKey(onFileUnit)) return false;
   // A unit spoken inside the raw text is compared the same way, BEFORE the
   // structured street can answer (codex r2 P1, r3 P1): the extractor often
   // fills street_line_1 and leaves "... Apt 5B" only in raw_text, and that
   // is a new door against an on-file Apt 4B. A unit the file cannot compare
   // is new information.
   const rawUnit = (String(raw).toLowerCase().match(/(?:\b(?:apt|apartment|unit|ste|suite)\.?|#)\s*([a-z0-9]+(?:-[a-z0-9]+)?)/) || [])[1] || '';
-  if (rawUnit && !onFileUnit) return false;
-  if (rawUnit && unitKey(rawUnit) !== unitKey(onFileUnit)) return false;
+  if ([unit, rawUnit].filter(Boolean).some(value => !onFileUnit || unitKey(value) !== unitKey(onFileUnit))) return false;
 
-  // Raw text is judged BEFORE the structured street can answer (codex r3
-  // P1, r5 P1): the extractor may fill street_line_1 with the on-file
-  // street while the caller's actual words name another one. Raw text that
-  // names a street — a digit, or a suffix word after a name-like word ("Oak
-  // Avenue" does, "same place" / "on the road" do not) — restates the file
-  // only when every word of the on-file street name appears as a whole
-  // token (codex r3 P1: a substring test let an on-file "W Lake Dr" accept
-  // any raw street containing a "w") AND, when it carries a house number,
-  // that number is the on-file one. A remark with no street words ("I'm in
-  // Parrish") is judged on the locality components below.
+  // Raw street evidence must agree before a structured restatement can
+  // authorize the on-file address. Compare the complete ordered name:
+  // "Sample Palm Grove" must not match "Sample Palm" by token inclusion.
   if (raw) {
     const rawList = String(raw).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
-    const rawTokens = new Set(rawList);
     const namesAStreet = /\d/.test(raw)
       || rawList.some((t, i) => i > 0 && STREET_SUFFIX_WORDS.has(t) && !STREET_PHRASE_STOPWORDS.has(rawList[i - 1]));
     if (namesAStreet) {
-      const nameAgrees = onFileNameTokens.length > 0 && onFileNameTokens.every((t) => rawTokens.has(t));
-      const houseAgrees = !/\d{2,}/.test(raw) || (!!onFileHouse && rawTokens.has(onFileHouse));
+      const { parseRawAddress, splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
+      // A trailing restatement aside is prose, not a locality component.
+      const parsed = parseRawAddress(raw.replace(/,\s*same (?:as (?:before|always)|place|address)\.?$/i, ''));
+      const rawCity = cityKey(parsed.city);
+      const cityIsUnit = rawUnit && unitKey(parsed.city) === unitKey(onFileUnit);
+      if (parsed.zip && zip5Of(parsed.zip) !== onFileZip) return false;
+      // An unrecognized tail may be part of the street ("Drive North"),
+      // so keep it in the comparison instead of discarding it as a city.
+      const rawStreet = rawCity && rawCity !== onFileCity && !cityIsUnit
+        ? raw : splitStreetLineUnit(parsed.line1).street;
+      const [rawName, onFileName] = [rawStreet, onFileStreet].map(line => {
+        const tokens = String(line).toLowerCase().replace(/^\d+\s*/, '').split(/\s+/);
+        // Only a terminal suffix is optional; suffix-shaped words inside
+        // the name still distinguish "Palm Street Drive" from "Palm Drive".
+        if (STREET_SUFFIX_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
+        return normalizeStreetLine(tokens.join(' ')).toLowerCase();
+      });
+      const nameAgrees = !!onFileName && rawName === onFileName;
+      const houseAgrees = !/\d{2,}/.test(raw) || (!!onFileHouse && streetHouseNum(rawStreet) === onFileHouse);
       if (!nameAgrees || !houseAgrees) return false;
       // A numbered raw address that agrees on both is the on-file street,
       // whatever the parser managed to split out of it.

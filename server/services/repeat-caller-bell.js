@@ -30,6 +30,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { toE164, isLikelyE164 } = require('../utils/phone');
+const { isSentinelPhone } = require('./external-phone');
 const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
 
 const REPEAT_THRESHOLD = 3;
@@ -40,15 +41,18 @@ const LEASE_MS = 10 * 60 * 1000;
 // Grace before the sweep judges a window: the same 5 minutes the post-call
 // timer waits (recording + voicemail callbacks land first).
 const SWEEP_GRACE_MS = 5 * 60 * 1000;
-// Full-number key in SQL: every digit, with a bare ten-digit domestic number
-// promoted to its NANP form so mixed stored formats compare equal.
-const PHONE_KEY_SQL = "(CASE WHEN LENGTH(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g')) = 10"
-  + " THEN '1' || regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g')"
-  + " ELSE regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g') END)";
+const TERMINAL_STATUSES = new Set(['completed', 'no-answer', 'busy', 'canceled', 'failed']);
+// Mirror toE164: an explicit '+' preserves the country code, including
+// ten-digit international numbers; bare domestic formats use the last ten.
+const PHONE_DIGITS_SQL = "regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g')";
+const PHONE_KEY_SQL = `(CASE WHEN LEFT(BTRIM(COALESCE(from_phone, '')), 1) = '+' THEN ${PHONE_DIGITS_SQL}`
+  + ` WHEN LENGTH(${PHONE_DIGITS_SQL}) >= 10 THEN '1' || RIGHT(${PHONE_DIGITS_SQL}, 10)`
+  + ` ELSE ${PHONE_DIGITS_SQL} END)`;
 const CLAIM_FREE_SQL = "(COALESCE(metadata->>'repeat_caller_claim', '') = '' OR (metadata->>'repeat_caller_claim')::timestamptz < ?)";
 
 /** Full-number identity, or null for withheld / non-phone caller IDs. */
 function callerKey(fromPhone) {
+  if (isSentinelPhone(fromPhone)) return null;
   const e164 = toE164(fromPhone);
   return isLikelyE164(e164) ? String(e164).replace(/\D/g, '') : null;
 }
@@ -60,6 +64,9 @@ function repeatCallerPlan(calls, now = Date.now()) {
     return Number.isFinite(t) && now - t <= REPEAT_WINDOW_MS;
   });
   if (recent.length < REPEAT_THRESHOLD) return null;
+  const newest = recent[0];
+  if (!TERMINAL_STATUSES.has(newest.status)
+    || !(new Date(newest.updated_at || newest.created_at).getTime() <= now - SWEEP_GRACE_MS)) return null;
   if (recent.some((c) => c.repeat_caller_alerted_at)) return null;
   // A live lease means another worker is delivering right now; a stale one
   // is a dead worker's and may be reclaimed.
@@ -94,7 +101,8 @@ async function ringRepeatCallerIfNeeded(callSid) {
         .modify((qb) => whereNotSandboxCall(qb))
         .where('created_at', '>', new Date(Date.now() - REPEAT_WINDOW_MS))
         .orderBy('created_at', 'desc')
-        .select('id', 'created_at', 'answered_by', 'customer_id',
+        .orderBy('id', 'desc')
+        .select('id', 'created_at', 'updated_at', 'status', 'answered_by', 'customer_id',
           trx.raw("(metadata->>'repeat_caller_alerted_at') as repeat_caller_alerted_at"),
           trx.raw("(metadata->>'repeat_caller_claim') as repeat_caller_claim"),
           // Live or completed bookings only (the triage resolver's set): a
@@ -187,8 +195,11 @@ async function sweepRepeatCallers({ limit = 50 } = {}) {
     .havingRaw('COUNT(*) >= ?', [REPEAT_THRESHOLD])
     .havingRaw("BOOL_AND(COALESCE(metadata->>'repeat_caller_alerted_at', '') = '')")
     .havingRaw(`BOOL_AND(${CLAIM_FREE_SQL})`, [new Date(Date.now() - LEASE_MS)])
-    .havingRaw('MAX(created_at) < ?', [new Date(Date.now() - SWEEP_GRACE_MS)])
-    .select(db.raw('(array_agg(twilio_call_sid ORDER BY created_at DESC))[1] AS newest_sid'))
+    // Filter on the newest row AFTER grouping: filtering terminal rows
+    // before grouping would hide an active call and resurrect its predecessor.
+    .havingRaw('(array_agg(status ORDER BY created_at DESC, id DESC))[1] = ANY(?)', [[...TERMINAL_STATUSES]])
+    .havingRaw('(array_agg(COALESCE(updated_at, created_at) ORDER BY created_at DESC, id DESC))[1] < ?', [new Date(Date.now() - SWEEP_GRACE_MS)])
+    .select(db.raw('(array_agg(twilio_call_sid ORDER BY created_at DESC, id DESC))[1] AS newest_sid'))
     .limit(limit);
   let rang = 0;
   for (const w of windows) {

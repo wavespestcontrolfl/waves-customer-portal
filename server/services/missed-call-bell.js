@@ -13,6 +13,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isSentinelPhone } = require('./external-phone');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // A row with NO answered_by (the Studio-flow status_callback fallback in
@@ -42,7 +43,7 @@ function outcomeUnanswered(row) {
 function unknownCallerAllowed(row, opts) {
   if (!opts?.unknownCallers) return false;
   // Withheld caller ID ("anonymous") is not a number anyone can call back.
-  if (String(row.from_phone || '').replace(/\D/g, '').length < 10) return false;
+  if (isSentinelPhone(row.from_phone) || String(row.from_phone || '').replace(/\D/g, '').length < 10) return false;
   if (String(row.source || '') === 'voice_relay_sandbox') return false;
   const meta = parseMeta(row.metadata);
   try {
@@ -176,29 +177,46 @@ const TERMINAL_STATUSES = ['completed', 'no-answer', 'busy', 'canceled', 'failed
 async function sweepMissedCalls({ limit = 50 } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   const unknownCallers = isEnabled('missedCallUnknownCallers');
-  const rows = await db('call_log')
-    .where({ direction: 'inbound' })
-    .modify((q) => {
-      if (!unknownCallers) q.whereNotNull('customer_id');
-      else q.whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'");
-    })
-    .whereIn('status', TERMINAL_STATUSES)
-    .whereNull('recording_sid')
-    .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
-    .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
-    // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
-    .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
-    .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-    // Grace runs from the TERMINAL update, not call creation: the no-answer
-    // status lands before the caller records up to 120s of voicemail and
-    // the recording callback persists it (codex r6).
-    .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(Date.now() - VOICEMAIL_GRACE_MS)])
-    .orderBy('created_at', 'asc')
-    .limit(limit)
-    .select('twilio_call_sid');
+  const now = Date.now();
   let rung = 0;
-  for (const r of rows) {
-    if (await ringMissedCallIfUnanswered(r.twilio_call_sid)) rung += 1;
+  let offered = 0;
+  let cursor = null;
+  // Page past permanently ineligible rows using the same eligibility rule
+  // as delivery, so spam/withheld IDs cannot monopolize the oldest batch.
+  while (offered < limit) {
+    const rows = await db('call_log')
+      .where({ direction: 'inbound' })
+      .modify((q) => {
+        if (!unknownCallers) q.whereNotNull('customer_id');
+        else q.whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'");
+      })
+      .whereIn('status', TERMINAL_STATUSES)
+      .whereNull('recording_sid')
+      .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
+      .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
+      // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
+      .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
+      .where('created_at', '>', new Date(now - 24 * 60 * 60 * 1000))
+      // Grace runs from the TERMINAL update, not call creation: the no-answer
+      // status lands before the caller records up to 120s of voicemail and
+      // the recording callback persists it (codex r6).
+      .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(now - VOICEMAIL_GRACE_MS)])
+      .modify(q => {
+        if (cursor) q.whereRaw('(created_at, id) > (?, ?)', [cursor.sweep_created_at, cursor.id]);
+      })
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc')
+      .limit(limit)
+      // A text cursor preserves PostgreSQL microseconds across tied dates.
+      .select('*', db.raw('created_at::text AS sweep_created_at'));
+    for (const r of rows) {
+      if (!r.twilio_call_sid || !missedCallEligible(r, now, { unknownCallers })) continue;
+      offered += 1;
+      if (await ringMissedCallIfUnanswered(r.twilio_call_sid)) rung += 1;
+      if (offered === limit) return rung;
+    }
+    if (rows.length < limit) break;
+    cursor = rows[rows.length - 1];
   }
   return rung;
 }

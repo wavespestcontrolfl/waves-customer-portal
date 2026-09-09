@@ -127,16 +127,16 @@ describe('finding 5/6 — repeat callers and spoken-name variants', () => {
 
   test('repeat-caller plan: three calls in the window ring once, a booking or a prior ring silences', () => {
     const now = Date.parse('2026-09-06T18:00:00Z');
-    const at = (minsAgo, extra = {}) => ({ created_at: new Date(now - minsAgo * 60000).toISOString(), answered_by: 'voicemail', ...extra });
-    expect(repeatCallerPlan([at(1), at(30)], now)).toBeNull();
-    const plan = repeatCallerPlan([at(1), at(30), at(90, { answered_by: 'human' })], now);
+    const at = (minsAgo, extra = {}) => ({ created_at: new Date(now - minsAgo * 60000).toISOString(), status: 'completed', answered_by: 'voicemail', ...extra });
+    expect(repeatCallerPlan([at(6), at(30)], now)).toBeNull();
+    const plan = repeatCallerPlan([at(6), at(30), at(90, { answered_by: 'human' })], now);
     expect(plan).toEqual(expect.objectContaining({ count: REPEAT_THRESHOLD, unanswered: 2 }));
-    expect(repeatCallerPlan([at(1), at(30), at(200)], now)).toBeNull(); // third call outside 3h
-    expect(repeatCallerPlan([at(1), at(30, { repeat_caller_alerted_at: '2026-09-06T17:30:00Z' }), at(90)], now)).toBeNull();
-    expect(repeatCallerPlan([at(1), at(30, { booked: true }), at(90)], now)).toBeNull();
+    expect(repeatCallerPlan([at(6), at(30), at(200)], now)).toBeNull(); // third call outside 3h
+    expect(repeatCallerPlan([at(6), at(30, { repeat_caller_alerted_at: '2026-09-06T17:30:00Z' }), at(90)], now)).toBeNull();
+    expect(repeatCallerPlan([at(6), at(30, { booked: true }), at(90)], now)).toBeNull();
     // codex r3: a live lease is another worker delivering; a stale one is a dead worker's and is reclaimable
-    expect(repeatCallerPlan([at(1), at(30, { repeat_caller_claim: new Date(now - 60000).toISOString() }), at(90)], now)).toBeNull();
-    expect(repeatCallerPlan([at(1), at(30, { repeat_caller_claim: new Date(now - LEASE_MS - 1000).toISOString() }), at(90)], now)).not.toBeNull();
+    expect(repeatCallerPlan([at(6), at(30, { repeat_caller_claim: new Date(now - 60000).toISOString() }), at(90)], now)).toBeNull();
+    expect(repeatCallerPlan([at(6), at(30, { repeat_caller_claim: new Date(now - LEASE_MS - 1000).toISOString() }), at(90)], now)).not.toBeNull();
   });
 
   test('repeat-caller identity is the full E.164 number, not a ten-digit suffix (r3 P2)', () => {
@@ -272,6 +272,44 @@ describe('codex round 1', () => {
     expect(statesNewAddress(both('1236 Sample Palm Drive'), palm)).toBe(true);
     expect(statesNewAddress(both('1234 sample palm drive, same as always'), palm)).toBe(false);
     expect(statesNewAddress(both('yes, same place'), palm)).toBe(false);
+  });
+
+  test.each([
+    '1234 Sample Palm Grove Circle',
+    '1234 Grove Sample Palm Circle',
+    '1234 Palm Sample Drive',
+    '1234 Sample Palm Drive North',
+    '1234 Sample Palm Street Drive',
+  ])('the complete raw street name must agree before reusing the on-file address: %s', (raw_text) => {
+    const palm = { hasAddress: true, addressLine1: '1234 Sample Palm Dr', addressCity: 'Parrish', addressZip: '34219' };
+    for (const street_line_1 of [undefined, '1234 Sample Palm Drive']) {
+      const ex = v2({ property: { service_address: { raw_text, street_line_1 } }, triage_flags: ['address_unverified'] });
+      expect(statesNewAddress(ex, palm)).toBe(true);
+      expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: palm })).toBe(false);
+      expect(canAutoRoute(ex, {
+        contactPhone: ANI, failOpen: true, knownCustomer: palm,
+        addressValidation: { status: 'missing_component', inServiceArea: true },
+      }).allowed).toBe(false);
+    }
+  });
+
+  test('a complete raw address still accepts matching locality and unit components', () => {
+    const condo = { hasAddress: true, addressLine1: '500 Sample Tower Blvd', addressLine2: 'Apt 4B', addressCity: 'Sarasota', addressZip: '34240' };
+    const ex = v2({ property: { service_address: { raw_text: '500 Sample Tower Boulevard Apt 4B Sarasota FL 34240' } } });
+    expect(statesNewAddress(ex, condo)).toBe(false);
+  });
+
+  test('a trailing street direction must agree and must not be discarded as a locality', () => {
+    const north = { hasAddress: true, addressLine1: '1234 Sample Palm Dr North', addressCity: 'Parrish', addressZip: '34219' };
+    const stated = raw_text => v2({ property: { service_address: { raw_text } } });
+    expect(statesNewAddress(stated('1234 Sample Palm Drive North'), north)).toBe(false);
+    expect(statesNewAddress(stated('1234 Sample Palm Drive South'), north)).toBe(true);
+    expect(statesNewAddress(stated('1234 Sample Palm Drive North, Sarasota'), north)).toBe(true);
+  });
+
+  test.each(['restricted', '+7378742833', '7378742833', '+17378742833', '+86282452253'])('withheld caller %s cannot ring either bell', (from_phone) => {
+    expect(callerKey(from_phone)).toBeNull();
+    expect(missedCallEligible({ direction: 'inbound', customer_id: null, from_phone, answered_by: 'missed' }, Date.now(), { unknownCallers: true })).toBe(false);
   });
 
   test('the shadow bridge applies the same relationship rule as routing (P2)', () => {
