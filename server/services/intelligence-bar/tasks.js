@@ -135,14 +135,22 @@ async function list(actorId, sessionId) {
   // The latest twenty plus every task still open for the operator, judged by
   // the same receipt-derived state the client shows: a settled approval
   // beyond the cap drops out while an older interruption stays reachable.
-  const tasks = await scoped().where(query => query.whereIn('id', latest).orWhereNotIn('state', ['responded', 'canceled', 'failed']))
-    .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at');
+  // A raw failed task with no unresolved receipts is resumable (a pre-model
+  // failure such as an unavailable integration), so failed rows stay in the
+  // query and the receipt-derived filter below decides.
+  const tasks = await scoped().where(query => query.whereIn('id', latest).orWhereNotIn('state', ['responded', 'canceled']))
+    .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at',
+      db.raw("(request->>'had_images')::boolean AS had_images"), db.raw("COALESCE(jsonb_array_length(checkpoint), 0) AS checkpoint_length"));
   if (!tasks.length) return tasks;
   const actions = await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id));
   const recent = new Set(latest);
-  return tasks.map(task => ({ ...task, state: exposedTaskState(task,
-    actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt)) }))
-    .filter(task => recent.has(task.id) || OPEN_STATES.has(task.state));
+  return tasks.map(task => {
+    const receipts = actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt);
+    const resumableFailure = task.state === 'failed' && !continuationError({ ...task, request: { had_images: task.had_images === true },
+      checkpoint: task.checkpoint_length ? [true] : [] }, receipts);
+    return { ...task, state: exposedTaskState(task, receipts), resumableFailure };
+  }).filter(task => recent.has(task.id) || OPEN_STATES.has(task.state) || task.resumableFailure)
+    .map(({ resumableFailure, had_images, checkpoint_length, ...task }) => task);
 }
 
 // Run from the existing IB retention sweep even while the platform gate is off.

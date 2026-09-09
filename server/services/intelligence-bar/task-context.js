@@ -267,7 +267,8 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     const selected = await customerById(selectedTarget.customer_id);
     if (!selected || ((namesRequested(prompt) || named.length || !namedResult.complete) && !named.some(c => c.id === selected.id))
       || (selection.ambiguous && /\b(?:both|these customers|all of these)\b/i.test(targetClause(prompt)))) {
-      return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch' };
+      // selectable: a fresh customer choice re-resolves this request.
+      return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch', selectable: true };
     }
     const target = customerTarget(selected, 'operator_selection');
     if (selection.targets.length < 2) selection = { target, targets: [target], ambiguous: false };
@@ -298,6 +299,9 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     requestedRecords[kind] = Object.hasOwn(requestedRecords, kind) ? ids.filter(id => id === requestedRecords[kind]) : ids;
   }
   return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
+    // An explicitly named customer that did not resolve keeps the request
+    // target-specific: broad customer-row readers stay refused until it does.
+    namesRequested: namesRequested(prompt),
     reviewReference: reviewReference?.toLowerCase() || null,
     bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
@@ -435,7 +439,7 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_outreach_candidates', 'get_unresponded_reviews', 'search_reviews',
   'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
-  'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging',
+  'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging', 'get_blocked_senders',
 ]);
 
 const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
@@ -443,7 +447,7 @@ const EMAIL_KEYED_READERS = new Set(['check_email_suppression']);
 
 async function prepareReadInput(params, context, { toolName, schema }) {
   const input = { ...params };
-  if (context.targets?.length && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
+  if ((context.targets?.length || context.namesRequested) && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
     return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
   }
   // Phone-keyed readers without a customer selector: the phone must belong to

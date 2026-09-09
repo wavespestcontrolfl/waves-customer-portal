@@ -228,6 +228,17 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(broad.body.taskTarget).toBeFalsy();
     const listed = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'threads').content;
     expect(JSON.parse(listed).code).toBeUndefined();
+    // An explicitly named customer that did not resolve keeps the request target-specific.
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'unanswered messages threads' }, 'discover'))
+      .mockResolvedValueOnce(tools('get_unanswered_threads', { hours_back: 24 }, 'threads'))
+      .mockResolvedValueOnce(answer('Select the customer first.'));
+    const misspelled = await api('/query', request('Show unanswered messages for Jhon Smyth', { context: 'communications', pageData: { route: '/admin/communications' } }));
+    expect(misspelled.status).toBe(200);
+    expect(misspelled.body.taskTarget).toBeFalsy();
+    const refusedAgain = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'threads').content;
+    expect(JSON.parse(refusedAgain)).toMatchObject({ code: 'customer_scope_required' });
+    expect(JSON.stringify(mockModel.mock.calls)).not.toContain('Foreign private unanswered message');
   }, 30000);
 
   test('a later-round corrected retry answers the earlier clarification for the same operation', async () => {
@@ -321,11 +332,17 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const IbTasks = require('../services/intelligence-bar/tasks');
     const session = crypto.randomUUID();
     const ids = [];
-    for (let index = 0; index < 24; index += 1) {
+    for (let index = 0; index < 26; index += 1) {
       const { task } = await IbTasks.begin({ actorId: actor, sessionId: session, requestKey: crypto.randomUUID(),
         request: { prompt: `Synthetic saved request ${index}` }, pageContext: {} });
       ids.push(task.id);
     }
+    // Two older failures: a raw pre-model failure (resumable) and a failed
+    // approval whose receipt is unresolved (not resumable).
+    await db('ib_tasks').where('id', ids[4]).update({ state: 'failed', created_at: new Date(Date.now() - 160000) });
+    await db('ib_tasks').where('id', ids[5]).update({ state: 'failed', created_at: new Date(Date.now() - 150000) });
+    await db('ib_pending_actions').insert({ tool_name: 'update_customer', params: '{}', params_hash: 'synthetic-failed', requested_by: actor,
+      status: 'failed', expires_at: new Date(Date.now() + 3600000), task_id: ids[5], step_key: 'synthetic-failed' });
     // Four older tasks beyond the latest twenty: still awaiting a choice, answered,
     // approval settled by cancellation, and awaiting an approval that was never proposed.
     await db('ib_tasks').where('id', ids[0]).update({ state: 'needs_information', created_at: new Date(Date.now() - 140000) });
@@ -340,7 +357,9 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(listedIds).toContain(ids[3]);
     expect(listedIds).not.toContain(ids[1]);
     expect(listedIds).not.toContain(ids[2]);
-    expect(listed.body.tasks).toHaveLength(22);
+    expect(listedIds).toContain(ids[4]);
+    expect(listedIds).not.toContain(ids[5]);
+    expect(listed.body.tasks).toHaveLength(23);
     expect(listed.body.tasks.find(task => task.id === ids[0]).state).toBe('needs_information');
   }, 30000);
 
@@ -946,7 +965,9 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(named.body.pendingActions).toHaveLength(1);
     mockModel.mockClear();
     const dependent = await api('/query', request('Read this customer', { pageData }));
-    expect(dependent.body.taskState).toBe('needs_information');
+    // A stale page record has no customer to choose: answered and closed, not parked (r16).
+    expect(dependent.body).toMatchObject({ taskState: 'responded', candidates: [], pendingActions: [] });
+    expect(dependent.body.response).toContain('unavailable');
     expect(mockModel).not.toHaveBeenCalled();
   }, 30000);
 

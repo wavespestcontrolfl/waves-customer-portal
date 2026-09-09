@@ -91,7 +91,7 @@ const MAX_TOOL_ROUNDS = 8;
 // Model arguments that only pick WHICH task customer an operation targets.
 // They are excluded from an operation's clarification identity so a retry
 // with the corrected target answers the original clarification.
-const CLARIFICATION_TARGET_FIELDS = new Set(['customer_id', 'customer_name', 'phone']);
+const CLARIFICATION_TARGET_FIELDS = new Set(['customer_id', 'customer_name', 'phone', 'email']);
 const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 const AGENT_ESTIMATE_FEATURE_KEY = 'agent_estimate';
 const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
@@ -2216,11 +2216,17 @@ async function runQuery(req, res, next) {
         .json(await IbTasks.snapshot(activeTask, getAdminActorId(req)));
       taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target });
       if (taskContext.error || taskContext.ambiguous) {
+        // A customer choice is the only clarification the task card can
+        // supply. A hard resolution error (stale or mismatched page record)
+        // has nothing to select, so it is answered and closed rather than
+        // parked in Saved requests as an unusable needs_information task; a
+        // rejected selection stays open because a fresh choice re-resolves it.
+        const taskState = taskContext.error && !taskContext.selectable ? 'responded' : 'needs_information';
         const payload = { response: taskContext.error || (taskContext.ambiguous
           ? 'More than one customer matches. Select the customer for this request.'
           : 'I could not match the named customer. Select the intended customer before changing a record.'),
-        ...priorThread, taskId: activeTask.id, taskState: 'needs_information', candidates: taskContext.candidates || [], pendingActions: [] };
-        await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'needs_information', target: taskContext, response: payload });
+        ...priorThread, taskId: activeTask.id, taskState, candidates: taskContext.candidates || [], pendingActions: [] };
+        await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: taskState, target: taskContext, response: payload });
         const savedTask = await IbTasks.get(activeTask.id, getAdminActorId(req), activeTask.session_id);
         return res.json(await IbTasks.snapshot(savedTask, getAdminActorId(req)));
       }
