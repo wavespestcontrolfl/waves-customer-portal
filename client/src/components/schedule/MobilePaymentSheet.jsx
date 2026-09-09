@@ -26,6 +26,7 @@
 //   is idempotent on the (invoiceId, amount, method, externalRef) tuple
 //   so a network retry doesn't double-record.
 
+import { createPortal } from 'react-dom';
 import { X, ChevronRight } from 'lucide-react';
 import { useState } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
@@ -122,12 +123,12 @@ export default function MobilePaymentSheet({
     }]),
   ];
 
-  return (
+  return createPortal(
     <>
       <div className={`fixed inset-0 z-[110] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
         {/* Header */}
         <div
-          className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
+          className="box-border sticky top-0 z-[1] shrink-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
           style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
         >
           <button
@@ -281,6 +282,7 @@ export default function MobilePaymentSheet({
           }}
         />
       )}
-    </>
+    </>,
+    document.body,
   );
 }

@@ -1,4 +1,7 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
+import useIsMobile from '../../hooks/useIsMobile';
+import useModalFocus from '../../hooks/useModalFocus';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '/api';
@@ -6,6 +9,8 @@ const API = import.meta.env.VITE_API_URL || '/api';
 const SERVICE_TYPES = ['Pest', 'Lawn', 'Termite', 'Mosquito', 'Tree & Shrub', 'Other'];
 
 export default function FieldLeadModal({ service, onClose, onSubmit }) {
+  const isMobile = useIsMobile();
+  const dialogRef = useModalFocus(true, onClose);
   const [serviceType, setServiceType] = useState('');
   const [notes, setNotes] = useState('');
   const [urgency, setUrgency] = useState('normal');
@@ -42,22 +47,26 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
     setSubmitting(false);
   };
 
-  return (
-    <div style={{
-      position: 'fixed', inset: 0, zIndex: 9999,
+  return createPortal(
+    <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Flag Opportunity" style={{
+      position: 'fixed', inset: 0, zIndex: 9999, fontFamily: 'Inter, system-ui, sans-serif',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: 'rgba(0,0,0,0.5)',
     }} onClick={onClose}>
       <div
         onClick={e => e.stopPropagation()}
         style={{
-          background: '#fff', borderRadius: 16, width: '90%', maxWidth: 420,
-          padding: 24, boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          background: '#fff', borderRadius: isMobile ? 0 : 16, width: isMobile ? '100%' : '90%', maxWidth: isMobile ? 'none' : 420,
+          height: isMobile ? '100%' : undefined, maxHeight: '100%', boxSizing: 'border-box',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          paddingTop: 'env(safe-area-inset-top, 0px)', paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+          paddingLeft: 'env(safe-area-inset-left, 0px)', paddingRight: 'env(safe-area-inset-right, 0px)',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0, padding: '16px 24px' }}>
           <h3 style={{ margin: 0, fontSize: 18, color: '#1e293b' }}>Flag Opportunity</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: '#94a3b8' }}>&times;</button>
+          <button aria-label="Close" onClick={onClose} style={{ minWidth: 44, minHeight: 44, background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: '#94a3b8' }}>&times;</button>
         </div>
 
         {success ? (
@@ -67,6 +76,7 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
           </div>
         ) : (
           <>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 24px' }}>
             {/* Customer info */}
             <div style={{ background: '#f1f5f9', borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: '#1e293b' }}>{customerName}</div>
@@ -114,6 +124,8 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
 
             {error && <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
+            </div>
+            <div style={{ flexShrink: 0, padding: '14px 24px 24px' }}>
             <button
               onClick={handleSubmit} disabled={submitting}
               style={{
@@ -124,9 +136,11 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
             >
               {submitting ? 'Submitting...' : 'Submit Lead'}
             </button>
+            </div>
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

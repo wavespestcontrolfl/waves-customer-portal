@@ -14,6 +14,9 @@
 // (adminFetch on admin; a bearer-token wrapper on tech). It must resolve
 // to parsed JSON and throw on non-2xx — matching adminFetch's contract.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import useIsMobile from '../hooks/useIsMobile';
+import useModalFocus from '../hooks/useModalFocus';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
 
@@ -89,6 +92,8 @@ export default function ServiceRecapModal({
   onClose,
   onCompleted,
 }) {
+  const isMobile = useIsMobile();
+  const dialogRef = useModalFocus(true, onClose);
   const P = PALETTES[theme] || PALETTES.dark;
   const serviceId = service?.id;
   const base = `/admin/dispatch/${serviceId}/pest-recap`;
@@ -370,8 +375,11 @@ export default function ServiceRecapModal({
 
   const timeline = (ctx?.timeline || []).filter((t) => t.to_status !== 'pending');
 
-  return (
+  return createPortal(
     <div
+      ref={dialogRef}
+      tabIndex={-1}
+      aria-label="Service Recap"
       role="dialog"
       aria-modal="true"
       onClick={onClose}
@@ -384,14 +392,17 @@ export default function ServiceRecapModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%', maxWidth: 520, maxHeight: '92vh', overflowY: 'auto',
-          background: P.bg, borderTopLeftRadius: 18, borderTopRightRadius: 18,
+          width: '100%', maxWidth: isMobile ? 'none' : 520, height: isMobile ? '100%' : undefined, maxHeight: isMobile ? '100%' : '92vh',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden', boxSizing: 'border-box',
+          paddingTop: 'env(safe-area-inset-top, 0px)', paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+          paddingLeft: 'env(safe-area-inset-left, 0px)', paddingRight: 'env(safe-area-inset-right, 0px)',
+          background: P.bg, borderTopLeftRadius: isMobile ? 0 : 18, borderTopRightRadius: isMobile ? 0 : 18,
           border: `1px solid ${P.border}`, boxShadow: '0 -8px 40px rgba(0,0,0,0.35)',
         }}
       >
         {/* Header */}
         <div style={{
-          position: 'sticky', top: 0, zIndex: 1, background: P.bg,
+          flexShrink: 0, background: P.bg,
           padding: '16px 18px 12px', borderBottom: `1px solid ${P.border}`,
           display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
         }}>
@@ -410,7 +421,7 @@ export default function ServiceRecapModal({
             aria-label="Close"
             style={{
               border: 'none', background: 'transparent', color: P.muted,
-              fontSize: 24, lineHeight: 1, cursor: 'pointer', padding: 4,
+              fontSize: 24, lineHeight: 1, cursor: 'pointer', padding: 4, minWidth: 44, minHeight: 44,
             }}
           >×</button>
         </div>
@@ -420,7 +431,8 @@ export default function ServiceRecapModal({
         ) : loadError ? (
           <div style={{ padding: 24, color: P.red, fontSize: 14 }}>{loadError}</div>
         ) : (
-          <div style={{ padding: '14px 18px calc(18px + env(safe-area-inset-bottom, 0px))' }}>
+          <>
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 18px 18px' }}>
             {/* Timeline */}
             {timeline.length > 0 && (
               <div style={{
@@ -603,8 +615,9 @@ export default function ServiceRecapModal({
               <div style={{ color: P.red, fontSize: 13, marginTop: 10 }}>{error}</div>
             )}
 
+          </div>
             {/* Footer */}
-            <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
+            <div style={{ display: 'flex', flexShrink: 0, gap: 10, padding: '12px 18px 18px', borderTop: `1px solid ${P.border}` }}>
               <button
                 type="button"
                 onClick={onClose}
@@ -635,9 +648,10 @@ export default function ServiceRecapModal({
                     : 'Complete Service'}
               </button>
             </div>
-          </div>
+          </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
