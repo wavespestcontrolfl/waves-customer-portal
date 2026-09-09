@@ -23,7 +23,7 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
     const nextAt = new Date(lastAt + history.ASK_SPACING_MS);
     if (lastAt && nextAt.getTime() > Date.now()) {
       return { sent: false, blocked: true, code: 'REVIEW_ASK_SPACING', nextAllowedAt: nextAt.toISOString(),
-        reason: `This customer recently received a review request. The next ask can be sent after ${formatETDate(nextAt)} at ${formatETTime(nextAt)} Eastern.`, httpStatus: 409 };
+        reason: `A recent or unresolved review request is still inside the 72-hour window. The next ask can be sent after ${formatETDate(nextAt)} at ${formatETTime(nextAt)} Eastern.`, httpStatus: 409 };
     }
     return dispatch();
   }, { recordHealth: false, waitForSlot: false });
