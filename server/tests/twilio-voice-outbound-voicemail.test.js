@@ -31,6 +31,10 @@ jest.mock('../services/outbound-voicemail-sms', () => {
     sendOutboundVoicemailText: jest.fn(async () => ({ sent: true, providerMessageId: 'SM_sent' })),
   };
 });
+jest.mock('../services/outbound-call-reason', () => ({
+  REASONS: jest.requireActual('../services/outbound-call-reason').REASONS,
+  resolveOutboundCallReason: jest.fn(async () => ({ reason: 'generic', evidence: {} })),
+}));
 jest.mock('twilio', () => {
   const actual = jest.requireActual('twilio');
   const update = jest.fn(async () => ({}));
@@ -47,6 +51,7 @@ const logger = require('../services/logger');
 const twilio = require('twilio');
 const { isEnabled } = require('../config/feature-gates');
 const { precheck, sendOutboundVoicemailText } = require('../services/outbound-voicemail-sms');
+const { resolveOutboundCallReason } = require('../services/outbound-call-reason');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 
 const { AMD_MACHINE_DETECTED_KEY, outboundVoicemailTextDialOptions } = voiceRouter._test;
@@ -95,7 +100,8 @@ beforeEach(() => {
   delete process.env.SERVER_DOMAIN;
   isEnabled.mockImplementation(() => false);
   precheck.mockImplementation(async () => ({ ok: true, phone: CUSTOMER }));
-  sendOutboundVoicemailText.mockImplementation(async () => ({ sent: true, providerMessageId: 'SM_sent' }));
+  sendOutboundVoicemailText.mockImplementation(async () => ({ sent: true, providerMessageId: 'SM_sent', templateKey: 'outbound_voicemail_missed_you' }));
+  resolveOutboundCallReason.mockImplementation(async () => ({ reason: 'generic', evidence: {} }));
   installDb();
 });
 
@@ -232,8 +238,30 @@ describe('POST /outbound-amd', () => {
       callLogId: CALL_LOG_ID,
       callSid: 'CA_child',
       callerId: MAIN_LINE,
+      reason: 'generic',
     });
-    expect(patches[2]).toEqual({ voicemail_text: { outcome: 'sent', provider_sid: 'SM_sent' } });
+    expect(patches[2]).toEqual({ voicemail_text: { outcome: 'sent', provider_sid: 'SM_sent', reason: 'generic', template_key: 'outbound_voicemail_missed_you', evidence: {} } });
+  });
+
+  test('the resolved reason rides into the send and onto the call_log stamp', async () => {
+    const row = { id: CALL_LOG_ID, customer_id: 'cust-9', source: 'admin-callback', metadata: { relatedCallId: 'in-1' }, created_at: new Date('2026-09-08T15:00:00Z') };
+    installDb({ call_log: row, customers: { id: 'cust-9', first_name: 'Maria' } });
+    resolveOutboundCallReason.mockResolvedValueOnce({ reason: 'returning_call', evidence: { related_call_id: 'in-1' } });
+    sendOutboundVoicemailText.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM_2', templateKey: 'outbound_voicemail_returning_call' });
+    await amd()(req('machine_start'), mockRes());
+    // The resolver sees the call_log row (source + metadata + created_at) and the DIALED number from the query.
+    expect(resolveOutboundCallReason).toHaveBeenCalledWith({ call: row, phone: CUSTOMER });
+    expect(sendOutboundVoicemailText).toHaveBeenCalledWith(expect.objectContaining({ reason: 'returning_call' }));
+    expect(metadataPatches()[2]).toEqual({ voicemail_text: { outcome: 'sent', provider_sid: 'SM_2', reason: 'returning_call', template_key: 'outbound_voicemail_returning_call', evidence: { related_call_id: 'in-1' } } });
+  });
+
+  test('auto-bridge row: the text goes to the DIALED number from the query, never call_log.to_phone (the admin cell)', async () => {
+    installDb({ call_log: { id: CALL_LOG_ID, customer_id: 'cust-9', source: 'lead-webhook-auto-bridge', to_phone: '+19415993489', metadata: {}, created_at: new Date() }, customers: { id: 'cust-9', first_name: 'Sam' } });
+    resolveOutboundCallReason.mockResolvedValueOnce({ reason: 'quote_request', evidence: { source: 'lead-webhook-auto-bridge' } });
+    await amd()(req('machine_start'), mockRes());
+    const arg = sendOutboundVoicemailText.mock.calls[0][0];
+    expect(arg.phone).toBe(CUSTOMER);
+    expect(arg.reason).toBe('quote_request');
   });
 
   test('no linked customer → texts the dialed number with no name and no customerId', async () => {
@@ -258,7 +286,7 @@ describe('POST /outbound-amd', () => {
     installDb({ call_log: { id: CALL_LOG_ID, customer_id: null, to_phone: CUSTOMER } });
     sendOutboundVoicemailText.mockResolvedValueOnce({ sent: false, skipped: 'policy_block', code: 'SUPPRESSED_STOP' });
     await amd()(req('machine_start'), mockRes());
-    expect(metadataPatches()[2]).toEqual({ voicemail_text: { outcome: 'skipped', reason: 'policy_block', code: 'SUPPRESSED_STOP' } });
+    expect(metadataPatches()[2]).toEqual({ voicemail_text: { outcome: 'skipped', reason: 'policy_block', code: 'SUPPRESSED_STOP', call_reason: 'generic' } });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('text did not send (policy_block:SUPPRESSED_STOP)'));
   });
 

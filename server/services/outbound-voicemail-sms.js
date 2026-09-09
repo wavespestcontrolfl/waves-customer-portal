@@ -24,8 +24,12 @@
  *   4. The sendCustomerMessage policy pipeline: suppression (STOP),
  *      consent (transactional — we called about their own service), emoji
  *      fail-closed, line-type, audit log.
- *   5. Template kill switch — outbound_voicemail_missed_you is admin-
- *      editable and is_active-toggleable like every automated template.
+ *   5. Reason → template (services/outbound-call-reason.js decides WHY we
+ *      called: quote request / returning your call / saw your text /
+ *      generic). Each template is admin-editable and is_active-toggleable;
+ *      a disabled reason template falls back to the generic one, and a
+ *      disabled generic template is the lane's kill switch.
+ *   6. Never to a staff phone (the bridge's admin leg).
  *
  * precheck() runs 1–3 and is called BEFORE the webhook hangs up the customer
  * leg: if the text cannot go, nothing changes for the admin on the call.
@@ -40,9 +44,33 @@ const { isWithinSendWindowET } = require('./messaging/send-window');
 const { isRealProviderSend } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
+const { REASONS } = require('./outbound-call-reason');
+
+// One message_type for the whole lane (dedupe + sms_log history), one
+// template per reason the resolver can honestly name. A deactivated reason
+// template falls back to the generic one; a deactivated generic template is
+// the lane's kill switch.
 const MESSAGE_TYPE = 'outbound_voicemail_missed_you';
+const GENERIC_TEMPLATE_KEY = 'outbound_voicemail_missed_you';
+const REASON_TEMPLATE_KEYS = Object.freeze({
+  [REASONS.QUOTE_REQUEST]: 'outbound_voicemail_quote_request',
+  [REASONS.RETURNING_CALL]: 'outbound_voicemail_returning_call',
+  [REASONS.SAW_TEXT]: 'outbound_voicemail_saw_text',
+  [REASONS.GENERIC]: GENERIC_TEMPLATE_KEY,
+});
 const GATE = 'outboundVoicemailSms';
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// The press-1 bridge dials the ADMIN first; on the auto-bridge rows
+// call_log.to_phone is the admin cell. This lane must never text staff.
+function adminPhoneLast10Set() {
+  const raw = [process.env.ADAM_PHONE || '+19415993489', '9415993489'];
+  return new Set(raw.map((p) => String(p).replace(/\D/g, '').slice(-10)).filter((d) => d.length === 10));
+}
+function isAdminPhone(phone) {
+  const d = String(phone || '').replace(/\D/g, '').slice(-10);
+  return d.length === 10 && adminPhoneLast10Set().has(d);
+}
 
 // Twilio AnsweredBy values that mean "a machine picked up". With
 // machineDetection="Enable" the callback carries machine_start; the
@@ -92,6 +120,7 @@ async function precheck({ phone: rawPhone, now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { ok: false, skipped: 'gate_off' };
   const phone = normalizePhoneE164(rawPhone);
   if (!phone) return { ok: false, skipped: 'missing_input' };
+  if (isAdminPhone(phone)) return { ok: false, skipped: 'admin_phone' };
   if (!isWithinSendWindowET(now)) return { ok: false, skipped: 'quiet_hours' };
 
   // Fail closed on a probe failure: a double text is worse than a missed one.
@@ -109,6 +138,18 @@ async function precheck({ phone: rawPhone, now = new Date() } = {}) {
   return { ok: true, phone };
 }
 
+async function renderForReason(reason, vars, context) {
+  const key = REASON_TEMPLATE_KEYS[reason] || GENERIC_TEMPLATE_KEY;
+  let body = await renderSmsTemplate(key, vars, context);
+  let templateKey = key;
+  if (!body && key !== GENERIC_TEMPLATE_KEY) {
+    // Reason template missing/disabled → the generic copy is always true.
+    body = await renderSmsTemplate(GENERIC_TEMPLATE_KEY, vars, context);
+    templateKey = GENERIC_TEMPLATE_KEY;
+  }
+  return { body, templateKey };
+}
+
 /**
  * Send the missed-you text. Callers are expected to have run precheck()
  * first; it is re-run here so a direct call is still safe.
@@ -120,8 +161,9 @@ async function precheck({ phone: rawPhone, now = new Date() } = {}) {
  * @param {string}  [p.callLogId]
  * @param {string}  [p.callSid]    the customer-leg CallSid (audit trail)
  * @param {string}  [p.callerId]   the number the customer saw ring
+ * @param {string}  [p.reason]     a REASONS value from outbound-call-reason.js (default generic)
  */
-async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, firstName = '', callLogId = null, callSid = null, callerId = null } = {}) {
+async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, firstName = '', callLogId = null, callSid = null, callerId = null, reason = REASONS.GENERIC } = {}) {
   const pre = await precheck({ phone: rawPhone });
   if (!pre.ok) {
     logger.info(`[outbound-voicemail-sms] Skipped (${pre.skipped}) for ${maskPhone(rawPhone)}`);
@@ -129,7 +171,7 @@ async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, f
   }
   const phone = pre.phone;
 
-  const body = await renderSmsTemplate(MESSAGE_TYPE, {
+  const { body, templateKey } = await renderForReason(reason, {
     first_name: capitalizeName(firstName) || 'there',
     callback_clause: callbackClause(callerId),
     // Opt-out footer only for numbers we have NO customer record for — a
@@ -142,8 +184,8 @@ async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, f
     entity_id: customerId || callLogId || null,
   });
   if (!body) {
-    logger.info(`[outbound-voicemail-sms] Template ${MESSAGE_TYPE} missing/disabled — text skipped for ${maskPhone(phone)}`);
-    return { sent: false, skipped: 'template_disabled' };
+    logger.info(`[outbound-voicemail-sms] Template ${GENERIC_TEMPLATE_KEY} missing/disabled — text skipped for ${maskPhone(phone)}`);
+    return { sent: false, skipped: 'template_disabled', reason };
   }
 
   // Reply from the line the customer just saw ring (matches the body's
@@ -169,13 +211,15 @@ async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, f
       original_message_type: MESSAGE_TYPE,
       call_sid: callSid || null,
       call_log_id: callLogId || null,
+      call_reason: reason,
+      template_key: templateKey,
       ...(fromNumber ? { fromNumber } : {}),
     },
   });
 
   if (result.sent && isRealProviderSend(result)) {
-    logger.info(`[outbound-voicemail-sms] Missed-you text sent to ${maskPhone(phone)} (call_log ${callLogId || 'n/a'})`);
-    return { sent: true, providerMessageId: result.providerMessageId };
+    logger.info(`[outbound-voicemail-sms] Missed-you text (${reason}) sent to ${maskPhone(phone)} (call_log ${callLogId || 'n/a'})`);
+    return { sent: true, providerMessageId: result.providerMessageId, reason, templateKey };
   }
   if (result.sent) {
     // Upstream suppression sentinel — no text actually left the system.
@@ -192,10 +236,13 @@ async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, f
 
 module.exports = {
   MESSAGE_TYPE,
+  GENERIC_TEMPLATE_KEY,
+  REASON_TEMPLATE_KEYS,
   GATE,
   DEDUPE_WINDOW_MS,
   isVoicemailAnsweredBy,
+  isAdminPhone,
   precheck,
   sendOutboundVoicemailText,
-  _private: { callbackClause, normalizePhoneE164, capitalizeName },
+  _private: { callbackClause, normalizePhoneE164, capitalizeName, renderForReason },
 };

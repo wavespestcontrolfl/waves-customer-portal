@@ -72,6 +72,7 @@ const {
   sendOutboundVoicemailText,
   GATE: OUTBOUND_VOICEMAIL_SMS_GATE,
 } = require('../services/outbound-voicemail-sms');
+const { resolveOutboundCallReason } = require('../services/outbound-call-reason');
 
 function maskPhone(value) {
   const digits = phoneDigits(value);
@@ -3289,24 +3290,29 @@ router.post('/outbound-amd', async (req, res) => {
     let row = null;
     let customer = null;
     if (callLogId && callLogId !== 'undefined') {
-      row = await db('call_log').where({ id: callLogId }).first('id', 'customer_id', 'to_phone').catch(() => null);
+      row = await db('call_log').where({ id: callLogId }).first('id', 'customer_id', 'source', 'metadata', 'created_at').catch(() => null);
       if (row?.customer_id) {
         customer = await db('customers').where({ id: row.customer_id }).first('id', 'first_name').catch(() => null);
       }
     }
+    // The customer number always comes from the TwiML query (the originator
+    // set it) — never from call_log.to_phone, which on the auto-bridge rows
+    // is the admin cell.
+    const why = await resolveOutboundCallReason({ call: row || {}, phone: customerNumber });
 
     const result = await sendOutboundVoicemailText({
-      phone: customerNumber || row?.to_phone || null,
+      phone: customerNumber,
       customerId: customer?.id || row?.customer_id || null,
       firstName: customer?.first_name || '',
       callLogId: row?.id || null,
       callSid: CallSid || null,
       callerId: callerIdNumber,
+      reason: why.reason,
     });
     await patchCallLogMetadata(callLogId, {
       voicemail_text: result.sent
-        ? { outcome: 'sent', provider_sid: result.providerMessageId || null }
-        : { outcome: 'skipped', reason: result.skipped || 'unknown', code: result.code || null },
+        ? { outcome: 'sent', provider_sid: result.providerMessageId || null, reason: why.reason, template_key: result.templateKey || null, evidence: why.evidence }
+        : { outcome: 'skipped', reason: result.skipped || 'unknown', code: result.code || null, call_reason: why.reason },
     });
     if (!result.sent) {
       logger.warn(`[outbound-amd] Customer leg hung up on voicemail but text did not send (${result.skipped}${result.code ? `:${result.code}` : ''}) for call_log ${callLogId || 'n/a'}`);

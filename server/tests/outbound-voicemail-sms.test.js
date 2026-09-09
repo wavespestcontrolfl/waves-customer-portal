@@ -25,6 +25,9 @@ jest.mock('../config/twilio-numbers', () => ({
   findByNumber: jest.fn((n) => (n === '+19412975749' || n === '+18005550100' ? { id: 'main' } : null)),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/outbound-call-reason', () => ({
+  REASONS: { QUOTE_REQUEST: 'quote_request', RETURNING_CALL: 'returning_call', SAW_TEXT: 'saw_text', GENERIC: 'generic' },
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -32,8 +35,11 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const {
   MESSAGE_TYPE,
+  GENERIC_TEMPLATE_KEY,
+  REASON_TEMPLATE_KEYS,
   GATE,
   isVoicemailAnsweredBy,
+  isAdminPhone,
   precheck,
   sendOutboundVoicemailText,
   _private,
@@ -98,6 +104,20 @@ describe('precheck — decided before the customer leg is hung up', () => {
     expect(smsLogFirst).not.toHaveBeenCalled();
   });
 
+  test('the admin bridge phone is never a recipient', async () => {
+    const saved = process.env.ADAM_PHONE;
+    process.env.ADAM_PHONE = '+19415551234';
+    try {
+      expect(isAdminPhone('(941) 555-1234')).toBe(true);
+      expect(isAdminPhone('+19415993489')).toBe(true); // hard-coded fallback
+      expect(isAdminPhone(PHONE)).toBe(false);
+      await expect(precheck({ phone: '9415551234' })).resolves.toEqual({ ok: false, skipped: 'admin_phone' });
+      expect(smsLogFirst).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.ADAM_PHONE; else process.env.ADAM_PHONE = saved;
+    }
+  });
+
   test('outside 8am–8pm ET skips before the dedupe probe', async () => {
     await expect(precheck({ phone: PHONE, now: OUT_OF_WINDOW })).resolves.toEqual({ ok: false, skipped: 'quiet_hours' });
     expect(smsLogFirst).not.toHaveBeenCalled();
@@ -134,7 +154,7 @@ describe('sendOutboundVoicemailText', () => {
 
   test('template missing/disabled is the kill switch — nothing sends', async () => {
     renderSmsTemplate.mockResolvedValueOnce(null);
-    await expect(sendOutboundVoicemailText({ phone: PHONE, customerId: 'c1' })).resolves.toEqual({ sent: false, skipped: 'template_disabled' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE, customerId: 'c1' })).resolves.toEqual({ sent: false, skipped: 'template_disabled', reason: 'generic' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
@@ -147,9 +167,9 @@ describe('sendOutboundVoicemailText', () => {
       callSid: 'CA_child',
       callerId: MAIN_LINE,
     });
-    expect(result).toEqual({ sent: true, providerMessageId: 'SM_real_sid' });
+    expect(result).toEqual({ sent: true, providerMessageId: 'SM_real_sid', reason: 'generic', templateKey: GENERIC_TEMPLATE_KEY });
 
-    expect(renderSmsTemplate).toHaveBeenCalledWith(MESSAGE_TYPE, {
+    expect(renderSmsTemplate).toHaveBeenCalledWith(GENERIC_TEMPLATE_KEY, {
       first_name: 'Maria',
       callback_clause: ' at (941) 297-5749',
       optout_clause: '',
@@ -170,10 +190,46 @@ describe('sendOutboundVoicemailText', () => {
         original_message_type: MESSAGE_TYPE,
         call_sid: 'CA_child',
         call_log_id: 'cl-1',
+        call_reason: 'generic',
+        template_key: GENERIC_TEMPLATE_KEY,
         fromNumber: MAIN_LINE,
       },
     });
     expect(input.body).toBe('Hi Maria, sorry we missed you at (941) 297-5749.');
+  });
+
+  test('a known reason renders its own template and stamps it on the send metadata', async () => {
+    const result = await sendOutboundVoicemailText({ phone: PHONE, customerId: 'cust-1', reason: 'returning_call' });
+    expect(result).toEqual({ sent: true, providerMessageId: 'SM_real_sid', reason: 'returning_call', templateKey: 'outbound_voicemail_returning_call' });
+    expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+    expect(renderSmsTemplate.mock.calls[0][0]).toBe('outbound_voicemail_returning_call');
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ call_reason: 'returning_call', template_key: 'outbound_voicemail_returning_call' });
+    // The dedupe key stays the lane-wide message_type regardless of reason.
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.original_message_type).toBe(MESSAGE_TYPE);
+  });
+
+  test('every reason maps to a template key; unknown reasons render the generic one', async () => {
+    expect(REASON_TEMPLATE_KEYS).toEqual({
+      quote_request: 'outbound_voicemail_quote_request',
+      returning_call: 'outbound_voicemail_returning_call',
+      saw_text: 'outbound_voicemail_saw_text',
+      generic: GENERIC_TEMPLATE_KEY,
+    });
+    await sendOutboundVoicemailText({ phone: PHONE, reason: 'not_a_reason' });
+    expect(renderSmsTemplate.mock.calls[0][0]).toBe(GENERIC_TEMPLATE_KEY);
+  });
+
+  test('a disabled reason template falls back to the generic template', async () => {
+    renderSmsTemplate.mockResolvedValueOnce(null); // reason template off
+    const result = await sendOutboundVoicemailText({ phone: PHONE, reason: 'saw_text' });
+    expect(renderSmsTemplate.mock.calls.map((c) => c[0])).toEqual(['outbound_voicemail_saw_text', GENERIC_TEMPLATE_KEY]);
+    expect(result).toMatchObject({ sent: true, reason: 'saw_text', templateKey: GENERIC_TEMPLATE_KEY });
+  });
+
+  test('a disabled generic template is the kill switch even for a known reason', async () => {
+    renderSmsTemplate.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    await expect(sendOutboundVoicemailText({ phone: PHONE, reason: 'quote_request' })).resolves.toEqual({ sent: false, skipped: 'template_disabled', reason: 'quote_request' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('no customer record: lead audience, unverified trust, STOP footer, no customerId', async () => {
