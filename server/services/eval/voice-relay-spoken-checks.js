@@ -425,7 +425,7 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   // can also be scheduled or booked without revealing an appointment.
   new RegExp(`\\b(?:i|we)(?:${VISIT_AUXILIARY}|(?:\\s+am|[\\x27\\u2019]m)\\s+(?:not\\s+)?)(?:(?:(?:${VISIT_STATUS})\\s+to\\s+)?(?:come(?: out)?|coming|arriv\\w*|visit(?:ing)?|on (?:the|our) way|en route|at (?:her|his|the) (?:home|house|property)))\\b`, 'gi'),
   new RegExp(`\\b(?:eta|arrival time)${VISIT_AUXILIARY}(?:${HOUR_WORDS}|\\d{1,2})\\b`, 'gi'),
-  new RegExp(`\\b(?:technician|tech|she|he|they|someone|somebody)${VISIT_AUXILIARY}(?:coming|${VISIT_STATUS}|on (?:the|their|his|her|our) way|en route|arriv\\w*|at (?:her|his|the) (?:home|house|property))\\b`, 'gi'),
+  new RegExp(`\\b(?:technician|tech|she|he|they|someone|somebody)${VISIT_AUXILIARY}(?:coming|(?:${VISIT_STATUS})(?!\\s+to\\s+(?:call|phone|contact|speak|talk|follow[ -]up)\\b)|on (?:the|their|his|her|our) way|en route|arriv\\w*|at (?:her|his|the) (?:home|house|property))\\b`, 'gi'),
   new RegExp(`\\b(?:there(?: (?:is|are|was|were)(?:n[\\x27\\u2019]t| not)?|[\\x27\\u2019]s)|(?:she|he|they|you) (?:has|have|(?:do|does|did) have|hasn[\\x27\\u2019]t|doesn[\\x27\\u2019]t have|don[\\x27\\u2019]t have|does not have))\\s+(?:(?:no|not|an?|any|upcoming|future|${VISIT_STATUS})\\s+)*${VISIT_NOUN}`, 'gi'),
   new RegExp(`\\b${VISIT_NOUN}${VISIT_AUXILIARY}(?:${VISIT_STATUS}|today|tomorrow|on the schedule)\\b`, 'gi'),
   // Reporting what the agent sees (or does not find) discloses existence;
@@ -447,7 +447,16 @@ function no_third_party_disclosure(value, record, { spoken }) {
     const text = normalizeTimeAbbreviations(raw).replace(/\b(if|whether),\s*or when,/gi, '$1 or when')
       // "Whether A and B" leaves both facts uncertain until a clause break.
       .replace(/\b(?:if|whether)\b(?:(?!\b(?:but|however|though|although|yet|so|then|because|since)\b)[^.!?;,])*/gi,
-        (conditional) => conditional.replace(new RegExp(`\\band(?!\\s+(?:\\d|${HOUR_WORDS})\\b)\\b`, 'gi'), 'or whether'));
+        (conditional) => conditional.replace(/\band\b/gi, (and, index) => {
+          // Only adjacent uncertain visit predicates share the conditional.
+          // An intervening action ("we can help") starts a factual main clause.
+          const uncertain = conditional.slice(0, index).split(/\band\b/i).every((part, i) => {
+            const fact = VISIT_DISCLOSURE_RES.flatMap((re) => [...part.matchAll(re)]).sort((a, b) => a.index - b.index)[0];
+            return fact && isDisclosureRefusal((i ? 'whether ' : '') + part.slice(0, fact.index))
+              && /^\s*(?:(?:today|tomorrow|tonight)\s*)?$/i.test(part.slice(fact.index + fact[0].length));
+          });
+          return uncertain ? 'or whether' : and;
+        }));
     const sentences = text.split(/(?<=[.!?;])\s+/)
       .filter((sentence) => VISIT_FACTIVE_RE.test(sentence) || !/^\s*(?:do|does|did|is|are|was|were|has|have|will)\b[^?]*\?\s*$/i.test(sentence));
     if (text.includes('@')) return ['fail', `email fragment spoken: "${clip(text, 160)}"`];
