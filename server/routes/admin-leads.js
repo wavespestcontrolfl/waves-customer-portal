@@ -1457,7 +1457,17 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // customer is already known, take the comms advisory lock FIRST — the
       // merge-undo holds it as its first lock and later repoints the lead, so
       // a lead row lock taken before it could deadlock.
-      if (customerId) await lockCustomerComms(trx, customerId);
+      if (customerId) {
+        await lockCustomerComms(trx, customerId);
+        // Customer 360 and lead tools lock customer before lead. This row
+        // may be promoted below, so acquire its write lock in that order.
+        existingCustomer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forNoKeyUpdate().first();
+        if (!existingCustomer) {
+          const gone = new Error("This lead's customer changed while booking — reload the lead and try again.");
+          Object.assign(gone, { statusCode: 409, isOperational: true, code: 'LEAD_OWNER_CHANGED' });
+          throw gone;
+        }
+      }
 
       // Row-lock the lead so two concurrent converts (double-submit / retry —
       // the client guard is per-tab) serialize here. The second one sees the
@@ -1502,7 +1512,13 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         // non-blocking variant and fail CLOSED if an undo holds it.
         const fenced = await tryLockCustomerComms(trx, lockedLead.customer_id);
         if (!fenced) throw alreadyConverted("This lead's customer is being merged/undone right now — reload the lead and try again.");
-        existingCustomer = await trx('customers').where({ id: lockedLead.customer_id }).whereNull('deleted_at').first();
+        try {
+          // Already holding the lead: never wait on the earlier customer rung.
+          existingCustomer = await trx('customers').where({ id: lockedLead.customer_id }).whereNull('deleted_at').forNoKeyUpdate().noWait().first();
+        } catch (err) {
+          if (err.code !== '55P03') throw err;
+          throw alreadyConverted("This lead's customer is being edited — reload the lead and try again.");
+        }
         if (existingCustomer) customerId = existingCustomer.id;
       }
       needsCustomer = !customerId;

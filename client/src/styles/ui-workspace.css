@@ -32,7 +32,13 @@
 }
 .ui-choice-label { min-height: var(--ui-action-target, 0px); }
 [data-ui-density="touch"] { --ui-action-target: 48px; }
-.ui-field { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 6px; min-width: 0; }
+.ui-field {
+  --ui-label-size: 14px;
+  --ui-caption-size: 14px;
+  --ui-label-case: none;
+  --ui-label-tracking: 0;
+  display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 6px; min-width: 0;
+}
 .ui-control { box-sizing: border-box; }
 [data-ui-text-action] { min-height: var(--ui-action-target, 0px); min-width: var(--ui-action-target, 0px); }
 .ui-control-comfortable { --ui-control-height: 44px; }
@@ -79,7 +85,7 @@
 @media (max-width: 767px) { .ui-record-title { font-size: 23px; } }
 .ui-action-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 14px; line-height: 1.55; }
 .ui-table { font-size: var(--ui-body-size, 14px); }
-.ui-table-heading { height: 48px; padding: 8px 12px; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.ui-table-heading { box-sizing: border-box; height: 48px; padding: 8px 12px; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; }
 .ui-table-cell { padding: 20px 12px; vertical-align: top; line-height: 1.6; overflow-wrap: anywhere; }
 [data-ui-density="compact"] .ui-table-cell { padding-top: 12px; padding-bottom: 12px; }
 .ui-tab-navigation { display: flex; min-width: 0; width: 100%; }
@@ -90,7 +96,6 @@
 .ui-tab-arrow.ui-control { --ui-control-height: 54px; padding: 0; min-width: 44px; width: 44px; height: auto; min-height: 54px; flex-shrink: 0; border-radius: 0; }
 .ui-tab-arrow:first-child { border-right: 1px solid #e4e4e7; }
 .ui-tab-arrow:last-child { border-left: 1px solid #e4e4e7; }
-.ui-tab-arrow + .ui-tab-strip .ui-section-list { padding-left: 12px; padding-right: 12px; }
 .ui-tab { height: 44px; padding: 0 4px; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; }
 @media (max-width: 767px) { .ui-section-list { gap: 23px; padding: 0 17px; } }
 .ui-workspace-command { border: 0; background: transparent; }
