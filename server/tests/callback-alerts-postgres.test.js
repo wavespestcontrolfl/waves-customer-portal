@@ -121,6 +121,26 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect(active).toHaveLength(1); expect(active[0].id).toBe(first.id);
   });
 
+  test('a failed fulfillment scan preserves the full prior backlog', async () => {
+    for (let i = 0; i < 6; i += 1) await seed();
+    await runSweep(); const [first] = await unread();
+    jest.spyOn(ledger, 'refreshFulfillment').mockResolvedValueOnce({ failed: 1 });
+    await seed();
+    expect(await runSweep()).toEqual({ alerted: 0 });
+    const active = await unread();
+    expect(active).toHaveLength(1); expect(active[0]).toEqual(first);
+  });
+
+  test('real customer conversation evidence closes a callback and retires its reminder', async () => {
+    const row = await seed(); await runSweep();
+    await trx('call_log').insert({ customer_id: customerId, direction: 'outbound', to_phone: '+15555550176',
+      status: 'completed', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      metadata: { relatedCommitmentId: row.id, customer_leg: { status: 'completed', duration_seconds: 90 } } });
+    await runSweep();
+    expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
+    expect(await unread()).toHaveLength(0);
+  });
+
   test('the gate disables the sweep without creating or acknowledging reminders', async () => {
     await seed(); await runSweep(); process.env.GATE_CALLBACK_CARD = 'false';
     expect(await runSweep()).toEqual({ alerted: 0 }); expect(await unread()).toHaveLength(1);

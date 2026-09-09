@@ -171,6 +171,9 @@ async function notifyDueCallbacks(conn, { now = new Date() } = {}) {
     const result = await refreshFulfillment(conn, id).catch(() => ({ failed: 1 }));
     if (!result.failed) verifiedCalls.add(id);
   }
+  // A partial proof scan must not replace the backlog with an incomplete count.
+  // Preserve the current reminders and retry the whole scan on the next tick.
+  if (candidates.some((row) => !verifiedCalls.has(row.call_log_id))) return { alerted: 0 };
   await conn('notifications as n').where({ recipient_type: 'admin' }).whereNull('read_at')
     .whereRaw("metadata->>'dedupeKey' LIKE 'callback-card:%'")
     .whereNotExists(conn('call_commitments as cc').whereRaw("cc.id::text = n.metadata->>'commitment_id'")
