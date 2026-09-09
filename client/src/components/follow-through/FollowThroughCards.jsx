@@ -4,6 +4,7 @@ import { TIMEZONE, etDateString, formatETDateOnly } from '../../lib/timezone';
 
 const API = '/admin/call-recordings';
 const post = (path, body) => adminFetch(path, { method: 'POST', body: JSON.stringify(body) });
+const patch = (path, body) => adminFetch(path, { method: 'PATCH', body: JSON.stringify(body) });
 const when = (value) => value ? new Date(value).toLocaleString('en-US', {
   timeZone: TIMEZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
 }) : 'Time needs review';
@@ -75,10 +76,10 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onQuickMove
         <Button disabled={!!busy || !phone(r)} onClick={() => act(r.id, () => post('/admin/communications/call', {
           to: phone(r), customerId: r.customer_id || undefined, relatedCommitmentId: r.id, expected_at: r.updated_at,
         }), 'The staff phone is ringing. Press 1 to connect.')}>Call</Button>
-        <Button secondary disabled={!!busy} onClick={() => act(r.id, () => post(`${API}/commitments/${r.id}/card-action`, { action: 'fulfill', expected_at: r.updated_at }))}>Done</Button>
+        <Button secondary disabled={!!busy} onClick={() => act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'fulfill', expected_at: r.updated_at }))}>Done</Button>
         <Select aria-label={`Snooze callback for ${who(r)}`} value="" disabled={!!busy} onChange={(e) => {
           const snooze = e.target.value;
-          if (snooze) act(r.id, () => post(`${API}/commitments/${r.id}/card-action`, { action: 'snooze', snooze, expected_at: r.updated_at }));
+          if (snooze) act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'snooze', snooze, expected_at: r.updated_at }));
         }}><option value="">Snooze…</option><option value="two_hours">2 hours</option><option value="tomorrow">Next working morning</option></Select>
       </div>
       <Link href={`/admin/communications#tab=calls&call=${r.call_log_id}`}>Open call</Link>
