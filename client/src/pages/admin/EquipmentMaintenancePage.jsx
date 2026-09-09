@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { BarChart3, Truck } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { etDateString } from "../../lib/timezone";
+import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -666,7 +666,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                 {overdue ? "OVERDUE: " : "Next: "}
                 {nm.task_name}
                 {nm.next_due_at && (
-                  <span>({new Date(nm.next_due_at).toLocaleDateString()})</span>
+                  <span>({formatETDateOnly(nm.next_due_at)})</span>
                 )}
               </div>
             )}
@@ -718,9 +718,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
               label="Purchase Date"
               value={
                 detail.equipment.purchase_date
-                  ? new Date(
-                      detail.equipment.purchase_date,
-                    ).toLocaleDateString()
+                  ? formatETDateOnly(detail.equipment.purchase_date)
                   : null
               }
             />{" "}
@@ -736,7 +734,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
               label="Warranty"
               value={
                 detail.equipment.warranty_expiration
-                  ? `Expires ${new Date(detail.equipment.warranty_expiration).toLocaleDateString()}`
+                  ? `Expires ${formatETDateOnly(detail.equipment.warranty_expiration)}`
                   : null
               }
             />{" "}
@@ -857,7 +855,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                         >
                           {s.is_overdue && "OVERDUE "}
                           {s.next_due_at
-                            ? new Date(s.next_due_at).toLocaleDateString()
+                            ? formatETDateOnly(s.next_due_at)
                             : ""}
                           {s.next_due_miles
                             ? ` / ${fmtN(s.next_due_miles)} mi`
@@ -1031,7 +1029,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                       >
                         {" "}
                         <td style={{ padding: "6px 8px", color: D.text }}>
-                          {new Date(r.performed_at).toLocaleDateString()}
+                          {formatETDate(r.performed_at)}
                         </td>{" "}
                         <td style={{ padding: "6px 8px", color: D.text }}>
                           {r.task_name}
@@ -1335,7 +1333,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                       >
                         {" "}
                         <td style={{ padding: "4px 6px", color: D.text }}>
-                          {new Date(l.log_date).toLocaleDateString()}
+                          {formatETDateOnly(l.log_date)}
                         </td>{" "}
                         <td
                           style={{
@@ -2658,7 +2656,7 @@ function AnalyticsTab({
                         </span>
                       )}
                       {s.next_due_at
-                        ? new Date(s.next_due_at).toLocaleDateString()
+                        ? formatETDateOnly(s.next_due_at)
                         : "--"}
                     </td>{" "}
                     <td style={{ padding: "8px" }}>
