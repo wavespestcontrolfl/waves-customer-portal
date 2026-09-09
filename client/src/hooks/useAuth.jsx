@@ -182,6 +182,53 @@ export function AuthProvider({ children }) {
     };
   }, []);
 
+  // The list could not be read: scope the session from what /auth/me
+  // resolved instead. Split from loadCustomer so the load and this
+  // reconciliation stay separately readable (GitHub codex r13 P2). Refs and
+  // setters only — stable.
+  const adoptScopeFromMe = useCallback((data) => {
+    // A saved-property session scopes every read to the selection the
+    // SERVER RESOLVED even when the list cannot be read (codex #4207 r1 /
+    // r1e / r1w): take it from /auth/me's `propertyScope` — the honored
+    // claim, else the fallback the server chose (a lone secondary after
+    // the primary was retired), else `closed` — never the raw token
+    // claim. The entry details arrive with the next refresh.
+    const claimed = data?.propertyScope?.propertyId ? String(data.propertyScope.propertyId) : null;
+    if (data?.propertyScope && data.propertyScope.enabled === false) {
+      // The server is NOT scoping this session (gate off, cancelled): the
+      // saved-property labels must go with it, even though the list could
+      // not be re-read — composite entries would otherwise dress
+      // customer-wide reads as one house. The next successful list read
+      // (profile shape) restores the switcher.
+      resetPropertyScope();
+      if (propertiesRef.current.some((p) => p.key)) setProperties([]);
+    } else if (data?.propertyScope?.closed === true && data?.id) {
+      // Every saved property of this profile retired — the server resolved
+      // NO house (uncapped codex r1w P1): the session is scoped to nothing
+      // selectable. Saved scope with a null-key selection, which the page
+      // reads as "property unavailable" (no address, the profile-scoped
+      // My Property notice, no ticket) — never the retired primary's
+      // screens. A successful list read lands the same shape.
+      propertyScopeRef.current = 'saved';
+      setPropertyScope('saved');
+      setSelectedProperty({ key: null, customerId: data.id, propertyId: null, closed: true });
+    } else if (claimed && data?.id) {
+      setSelectedProperty((prev) => (prev && String(prev.propertyId) === claimed && String(prev.customerId) === String(data.id)
+        ? prev
+        : { key: `${data.id}:${claimed}`, customerId: data.id, propertyId: claimed }));
+    } else {
+      // No claim = this profile's PRIMARY. Resolve it from the entries
+      // already held (a profile-only switch keeps the unified list, and
+      // customer.id matches no composite key), else leave the selection
+      // unavailable — never a leftover house from an earlier session.
+      const mine = (propertiesRef.current || []).filter((p) => String(p.customerId || p.id) === String(data?.id));
+      const primaryEntry = mine.find((p) => p.isPrimaryProperty) || (mine.length === 1 ? mine[0] : null);
+      setSelectedProperty(primaryEntry && primaryEntry.propertyId !== undefined
+        ? { key: primaryEntry.id, customerId: primaryEntry.customerId, propertyId: primaryEntry.propertyId }
+        : null);
+    }
+  }, []);
+
   const loadCustomer = useCallback(async (attempt) => {
     // `refreshCustomer` gets used as an event handler, so `attempt` may be
     // anything — only our own retry chain passes a number.
@@ -220,51 +267,12 @@ export function AuthProvider({ children }) {
         // A newer list read is in flight or has landed: it owns the
         // selection and the error state; this stale failure changes nothing.
         if (propertyReadSeqRef.current === propertyReadSeq) {
-        // A saved-property session scopes every read to the selection the
-        // SERVER RESOLVED even when the list cannot be read (codex #4207 r1 /
-        // r1e / r1w): take it from /auth/me's `propertyScope` — the honored
-        // claim, else the fallback the server chose (a lone secondary after
-        // the primary was retired), else `closed` — never the raw token
-        // claim. The entry details arrive with the next refresh.
-        const claimed = data?.propertyScope?.propertyId ? String(data.propertyScope.propertyId) : null;
-        if (data?.propertyScope && data.propertyScope.enabled === false) {
-          // The server is NOT scoping this session (gate off, cancelled): the
-          // saved-property labels must go with it, even though the list could
-          // not be re-read — composite entries would otherwise dress
-          // customer-wide reads as one house. The next successful list read
-          // (profile shape) restores the switcher.
-          resetPropertyScope();
-          if (propertiesRef.current.some((p) => p.key)) setProperties([]);
-        } else if (data?.propertyScope?.closed === true && data?.id) {
-          // Every saved property of this profile retired — the server resolved
-          // NO house (uncapped codex r1w P1): the session is scoped to nothing
-          // selectable. Saved scope with a null-key selection, which the page
-          // reads as "property unavailable" (no address, the profile-scoped
-          // My Property notice, no ticket) — never the retired primary's
-          // screens. A successful list read lands the same shape.
-          propertyScopeRef.current = 'saved';
-          setPropertyScope('saved');
-          setSelectedProperty({ key: null, customerId: data.id, propertyId: null, closed: true });
-        } else if (claimed && data?.id) {
-          setSelectedProperty((prev) => (prev && String(prev.propertyId) === claimed && String(prev.customerId) === String(data.id)
-            ? prev
-            : { key: `${data.id}:${claimed}`, customerId: data.id, propertyId: claimed }));
-        } else {
-          // No claim = this profile's PRIMARY. Resolve it from the entries
-          // already held (a profile-only switch keeps the unified list, and
-          // customer.id matches no composite key), else leave the selection
-          // unavailable — never a leftover house from an earlier session.
-          const mine = (propertiesRef.current || []).filter((p) => String(p.customerId || p.id) === String(data?.id));
-          const primaryEntry = mine.find((p) => p.isPrimaryProperty) || (mine.length === 1 ? mine[0] : null);
-          setSelectedProperty(primaryEntry && primaryEntry.propertyId !== undefined
-            ? { key: primaryEntry.id, customerId: primaryEntry.customerId, propertyId: primaryEntry.propertyId }
-            : null);
-        }
-        // The active customer is still valid. Preserve any property list we
-        // already have instead of collapsing a multi-property account to a
-        // single property, and surface a retry in the account menu.
-        console.error('Failed to load service properties:', propertyErr);
-        setPropertiesError('Other service properties are temporarily unavailable.');
+          adoptScopeFromMe(data);
+          // The active customer is still valid. Preserve any property list we
+          // already have instead of collapsing a multi-property account to a
+          // single property, and surface a retry in the account menu.
+          console.error('Failed to load service properties:', propertyErr);
+          setPropertiesError('Other service properties are temporarily unavailable.');
         }
       }
       setError(null);

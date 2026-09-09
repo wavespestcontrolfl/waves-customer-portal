@@ -89,4 +89,34 @@ describe('ReportIssueOverlay mount safety', () => {
     expect(await screen.findByText('Refreshing your property selection…')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /submit request/i })).toBeDisabled();
   });
+  // The "your next visit is …" advisory follows the house: a next visit
+  // echoed under another house than the overlay names is not offered as the
+  // stop to wait for (GitHub codex #4207 r13 P2).
+  const soon = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const pickPestIssue = async () => {
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.click(screen.getByRole('button', { name: /pest issue/i }));
+    await screen.findByText('Priority');
+  };
+  it('offers the next visit as the stop to wait for when its echo matches the shown house', async () => {
+    echo.value = { enabled: true, propertyId: 'pb', closed: false };
+    const api = (await import('../utils/api')).default;
+    api.getNextService.mockResolvedValueOnce({ next: { id: 'v1', date: soon }, propertyScope: { enabled: true, propertyId: 'pb', closed: false } });
+    render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope />);
+    await screen.findByRole('button', { name: /submit request/i });
+    await waitFor(() => expect(api.getNextService).toHaveBeenCalled());
+    await pickPestIssue();
+    expect(await screen.findByText('Upcoming visit')).toBeInTheDocument();
+  });
+  it('withholds the next-visit advisory when the echo names another house', async () => {
+    echo.value = { enabled: true, propertyId: 'pb', closed: false };
+    const api = (await import('../utils/api')).default;
+    api.getNextService.mockResolvedValueOnce({ next: { id: 'v1', date: soon }, propertyScope: { enabled: true, propertyId: 'pa', closed: false } });
+    render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave" currentEntry={secondary} savedScope />);
+    await screen.findByRole('button', { name: /submit request/i });
+    await waitFor(() => expect(api.getNextService).toHaveBeenCalled());
+    await pickPestIssue();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.queryByText('Upcoming visit')).not.toBeInTheDocument();
+  });
 });

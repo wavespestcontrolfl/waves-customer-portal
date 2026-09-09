@@ -435,57 +435,80 @@ function RoutesErrorBoundary({ children }) {
   return <PageErrorBoundary key={location.pathname} customerGlass={customerGlass}>{children}</PageErrorBoundary>;
 }
 
-function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty, refreshProperties, selectedProperty = null } = useAuth();
-  const location = useLocation();
-  const targetProperty = new URLSearchParams(location.search).get('notificationProperty');
-  // Saved-property destination (GATE_APP_PROPERTY_SCOPE): a push that knows
-  // the visit's house names it too. The full selection is compared — same
-  // profile but a different saved property still switches. A profile-only
-  // link (every push minted before the notifications PR of the lane) keeps
-  // today's rule: switch only when the PROFILE differs.
-  const targetPropertyHint = new URLSearchParams(location.search).get('notificationPropertyId');
+// A profile-only link (every push minted before the composers carry the
+// property) means that profile's PRIMARY — the house unstamped visits belong
+// to — so a non-primary selection on the same profile still switches back
+// rather than keeping an arbitrary house whose scoped reads would hide the
+// notified visit. While the primary entry is not known yet (list still
+// loading, or failed) the link stays pending — mounting the portal would open
+// the notification under the wrong house (codex #4207 r2); the guard's
+// propertiesError check fails it closed.
+function profileOnlyTarget({ propertyScopedDestination, sameProfile, primaryEntry, selectedId }) {
+  if (!propertyScopedDestination || !sameProfile || !selectedId) return { fallbackPropertyId: null, primaryUnknown: false };
+  if (!primaryEntry) return { fallbackPropertyId: null, primaryUnknown: true };
+  const primaryId = String(primaryEntry.propertyId);
+  return { fallbackPropertyId: selectedId !== primaryId ? primaryId : null, primaryUnknown: false };
+}
+
+// Tabs whose reads are customer-wide: a push to them requires only the right
+// profile — neither the profile's primary (uncapped codex r1r P1) nor the
+// house a completion or receipt push names (uncapped codex r1v P1): a retired
+// house must not turn a report or an invoice into "Property unavailable" when
+// the tab itself opens. Home, Visits and My Property follow the selection.
+const CUSTOMER_WIDE_TABS = ['billing', 'refer', 'documents', 'plan', 'learn'];
+
+// Where a notification deep link wants the portal to be, judged against the
+// session's current selection and property list. Pure: everything the route
+// guard decides is derived here so the guard itself stays a small effect.
+//
+// Saved-property destination (GATE_APP_PROPERTY_SCOPE): a push that knows
+// the visit's house names it too (`notificationPropertyId`). The full
+// selection is compared — same profile but a different saved property still
+// switches. A profile-only link keeps today's rule: switch only when the
+// PROFILE differs (see profileOnlyTarget).
+export function resolveNotificationTarget({ search, customer, properties, selectedProperty }) {
+  const params = new URLSearchParams(search);
+  const targetProperty = params.get('notificationProperty');
   // The hint means something only against a SAVED-property list. A
   // PROFILE-shaped list (gate off, or rolled back after the push was
   // minted) has no houses to match, so the hint degrades to a profile-only
   // link — today's routing — instead of "Property unavailable" (uncapped
   // codex r1t P1). An EMPTY list (still loading, or failed) keeps the hint:
-  // the pending / fail-closed paths below own that case.
+  // the pending / fail-closed paths of the guard own that case.
   // Saved entries carry a propertyId (null for a row-less profile) and a key;
   // profile entries carry neither.
   const listIsProfileShaped = properties.length > 0
     && !properties.some((property) => property.key || Object.prototype.hasOwnProperty.call(property, 'propertyId'));
-  // Only PROPERTY-scoped destinations (Home, Visits, My Property — the tabs
-  // whose reads follow the saved-property selection) care which house.
-  // Billing, Refer, Documents, Plan and Learn are customer-wide, so a push
-  // to them requires only the right profile — neither the profile's primary
-  // (uncapped codex r1r P1) nor the house a completion or receipt push
-  // names (uncapped codex r1v P1): a retired house must not turn a report
-  // or an invoice into "Property unavailable" when the tab itself opens.
-  const destinationTab = new URLSearchParams(location.search).get('tab') || 'dashboard';
-  const propertyScopedDestination = !['billing', 'refer', 'documents', 'plan', 'learn'].includes(destinationTab);
-  const targetPropertyId = listIsProfileShaped || !propertyScopedDestination ? null : targetPropertyHint;
+  const propertyScopedDestination = !CUSTOMER_WIDE_TABS.includes(params.get('tab') || 'dashboard');
+  const targetPropertyId = listIsProfileShaped || !propertyScopedDestination ? null : params.get('notificationPropertyId');
   const profileDiffers = !!targetProperty && String(customer?.id) !== targetProperty;
-  // A saved property named by the link wins. A profile-only link (every push
-  // minted before the composers carry the property) means that profile's
-  // PRIMARY — the house unstamped visits belong to — so a non-primary
-  // selection on the same profile still switches back rather than keeping
-  // an arbitrary house whose scoped reads would hide the notified visit.
+  const sameProfile = !!targetProperty && !profileDiffers;
   const currentProfileEntries = properties.filter((property) => String(property.customerId || property.id) === String(customer?.id));
   const primaryEntry = currentProfileEntries.find((property) => property.isPrimaryProperty) || null;
-  const resolvedTargetPropertyId = targetPropertyId
-    || (propertyScopedDestination && !profileDiffers && primaryEntry && selectedProperty?.propertyId && String(selectedProperty.propertyId) !== String(primaryEntry.propertyId)
-      ? String(primaryEntry.propertyId)
-      : null);
-  const savedDiffers = !!targetProperty && !!resolvedTargetPropertyId && !profileDiffers
-    && String(selectedProperty?.propertyId || '') !== resolvedTargetPropertyId;
-  // A profile-only link under a NON-primary selection whose primary entry is
-  // not known yet (list still loading, or failed) stays pending — mounting
-  // the portal would open the notification under the wrong house (codex
-  // #4207 r2). The propertiesError guard below fails it closed.
-  const primaryUnknown = propertyScopedDestination && !!targetProperty && !targetPropertyId && !profileDiffers
-    && !!selectedProperty?.propertyId && !primaryEntry;
-  const targetPending = isAuthenticated && (profileDiffers || savedDiffers || primaryUnknown);
+  const selectedId = selectedProperty?.propertyId ? String(selectedProperty.propertyId) : '';
+  // A saved property named by the link wins over the profile-only rule.
+  const profileOnly = targetPropertyId
+    ? { fallbackPropertyId: null, primaryUnknown: false }
+    : profileOnlyTarget({ propertyScopedDestination, sameProfile, primaryEntry, selectedId });
+  const resolvedTargetPropertyId = targetPropertyId || profileOnly.fallbackPropertyId;
+  const savedDiffers = sameProfile && !!resolvedTargetPropertyId && selectedId !== resolvedTargetPropertyId;
+  return {
+    targetProperty,
+    resolvedTargetPropertyId,
+    propertyScopedDestination,
+    currentProfileEntries,
+    primaryUnknown: profileOnly.primaryUnknown,
+    pending: profileDiffers || savedDiffers || profileOnly.primaryUnknown,
+  };
+}
+
+function ProtectedRoute({ children }) {
+  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty, refreshProperties, selectedProperty = null } = useAuth();
+  const location = useLocation();
+  const { targetProperty, resolvedTargetPropertyId, propertyScopedDestination, currentProfileEntries, primaryUnknown, pending } = resolveNotificationTarget({
+    search: location.search, customer, properties, selectedProperty,
+  });
+  const targetPending = isAuthenticated && pending;
   const switchingTarget = useRef(null);
   const [targetError, setTargetError] = useState(null);
   // A target the in-memory list does not carry is re-read ONCE before it is

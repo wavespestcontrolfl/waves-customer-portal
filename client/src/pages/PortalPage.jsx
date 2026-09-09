@@ -14143,7 +14143,12 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       // this house's (the callback-eligibility copy would be wrong).
       if (!stale && d.services?.length && !scopeEchoMismatch(d.propertyScope, currentEntry, savedScope, selectionNamed)) setLastService(d.services[0]);
     }).catch(() => {});
-    api.getNextService().then(d => { if (!stale) setNextService(d.next || null); }).catch(() => {});
+    // The "defer until your visit on …" advisory follows the house too: a
+    // next visit echoed under another house than this overlay names is not
+    // this house's (GitHub codex r13 P2).
+    api.getNextService().then(d => {
+      if (!stale && !scopeEchoMismatch(d.propertyScope, currentEntry, savedScope, selectionNamed)) setNextService(d.next || null);
+    }).catch(() => {});
     // Fail-closed on every path: reset BEFORE the fetch and null on failure,
     // so a reopen after the streamline kill switch (or an eligibility change)
     // can never keep serving a stale handoff off the previous payload — a
