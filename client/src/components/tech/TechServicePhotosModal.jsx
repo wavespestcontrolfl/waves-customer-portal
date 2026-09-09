@@ -45,6 +45,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const [caption, setCaption] = useState('');
   const [uploading, setUploading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [statusMsg, setStatusMsg] = useState('');
   const [pendingPhoto, setPendingPhoto] = useState(null);
   const uploadInFlight = useRef(false);
@@ -71,7 +72,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     setLoading(true);
-    setErrorMsg('');
+    setLoadError('');
     try {
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
@@ -84,7 +85,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       const data = await res.json();
       if (sequence === loadSequence.current) setPhotos(data.photos || []);
     } catch (err) {
-      if (sequence === loadSequence.current) setErrorMsg(err.message || 'Failed to load photos');
+      if (sequence === loadSequence.current) setLoadError(err.message || 'Failed to load photos');
     }
     if (sequence === loadSequence.current) setLoading(false);
   }, [serviceId]);
@@ -290,12 +291,17 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
           margin: '0 0 8px', fontSize: 12, color: DARK.muted, fontWeight: 700,
           textTransform: 'uppercase', letterSpacing: 1,
         }}>
-          Attached ({photos.length})
+          Attached{!loading && !loadError ? ` (${photos.length})` : ''}
         </h3>
         {loading ? (
           <p style={{ color: DARK.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>
             Loading…
           </p>
+        ) : loadError ? (
+          <div>
+            <p role="alert" style={{ color: DARK.red, fontSize: 14 }}>{loadError}</p>
+            <button type="button" onClick={load} style={{ minHeight: 48, fontSize: 14, color: DARK.text, background: DARK.card, border: `1px solid ${DARK.border}`, borderRadius: 6, padding: '8px 12px' }}>Retry photos</button>
+          </div>
         ) : photos.length === 0 ? (
           <p style={{ color: DARK.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>
             No photos yet.
