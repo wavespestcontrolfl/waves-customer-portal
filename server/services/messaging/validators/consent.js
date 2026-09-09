@@ -336,7 +336,7 @@ async function loadContactState(input, dbh = db) {
     // inbound on the customer's new number must not authorize the stale,
     // possibly reassigned destination (Codex P2 on 2396f5557).
     const custPhone = state.customer?.phone;
-    const sameNumber = custPhone && input.to && toE164(custPhone) === toE164(input.to);
+    const sameNumber = input.to && toE164(custPhone) === toE164(input.to);
     const phones = [...new Set(
       [input.to, ...(sameNumber ? [custPhone] : [])]
         .flatMap((p) => [p, toE164(p)])
