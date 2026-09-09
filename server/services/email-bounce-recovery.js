@@ -466,20 +466,48 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     return { ok: true, messageRowId: message.id, reused: true };
   }
   try {
-    const result = await sendgrid.sendOne({
-      to: correctedEmail,
-      fromEmail: message.from_email_snapshot,
-      fromName: message.from_name_snapshot,
-      replyTo: message.reply_to_snapshot,
-      subject: message.subject_snapshot,
-      html: bouncedMessage.html_snapshot || undefined,
-      text: bouncedMessage.text_snapshot || undefined,
-      categories,
-      asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
-      // So a fast delivery/bounce webhook can resolve this row even before
-      // provider_message_id is committed below.
-      customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
-    });
+    let result;
+    const dispatchToProvider = async () => {
+      result = await sendgrid.sendOne({
+        to: correctedEmail,
+        fromEmail: message.from_email_snapshot,
+        fromName: message.from_name_snapshot,
+        replyTo: message.reply_to_snapshot,
+        subject: message.subject_snapshot,
+        html: bouncedMessage.html_snapshot || undefined,
+        text: bouncedMessage.text_snapshot || undefined,
+        categories,
+        asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
+        // So a fast delivery/bounce webhook can resolve this row even before
+        // provider_message_id is committed below.
+        customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
+      });
+    };
+    if (bouncedMessage.template_key === 'service.visit_summary') {
+      // Domain correction changes the destination, not the customer's consent
+      // or the authority of the original visit link. The original recipient
+      // is re-authorized on held rows and the request runs while they are
+      // held; a recheck that cannot be read fails closed through the catch.
+      let dispatchStarted = false;
+      let fence;
+      try {
+        fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, async () => {
+          dispatchStarted = true;
+          await dispatchToProvider();
+        });
+      } catch (err) {
+        if (!result) throw err;
+        logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
+      }
+      if (!result) {
+        const reason = fence?.reason || 'visit_summary_unavailable';
+        await db('email_messages').where({ id: message.id, status: 'queued' })
+          .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
+        return { ok: false, suppressed: true, reason };
+      }
+    } else {
+      await dispatchToProvider();
+    }
     // Always record the provider id + send time. These are safe regardless of
     // any concurrent webhook.
     await db('email_messages').where({ id: message.id }).update({
@@ -649,6 +677,15 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       bouncedMessage,
       correctedEmail: candidate.corrected,
     });
+    if (sendResult.suppressed) {
+      await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+        status: 'recipient_unauthorized',
+        updated_at: new Date(),
+        metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
+      });
+      logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} suppressed: ${sendResult.reason}`);
+      return { skipped: sendResult.reason };
+    }
     if (!sendResult.ok) {
       await db('email_bounce_recoveries').where({ id: recoveryId }).update({
         status: 'send_failed',
