@@ -314,8 +314,13 @@ const DECISION_LABELS = {
   immediate: "First touch sending now",
   opener_in_flight: "Series final parked until the opener's send settles",
   follow_up_scheduled: "Follow-up scheduled",
+  // The runner's 3-day-rule hold and its fail-closed re-check (owner ruling
+  // 2026-09-07); a private check-in that kept its day never carries these.
+  spacing: "Held for the 3-day rule — next ask at last ask + 72 h",
+  spacing_lookup_unavailable: "Re-checking the last ask (3-day rule)",
   send_window: "Held for the 8 AM–8 PM send window",
   provider_retry: "Provider retry",
+  customer_lock_held: "Waiting for another review send to finish",
   send_error_retry: "Send error — retrying",
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
   cap_stats_unavailable: "Re-checking the ask cap",
