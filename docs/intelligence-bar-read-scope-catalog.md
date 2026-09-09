@@ -26,7 +26,7 @@ Read tools (`kind: read`):
 | `broad` | lists other customers' identifiable rows and takes no selector, or returns provider/operations text that can echo customer identifiers (alert bodies, error text, log lines, targeting predicates, trip traces, call quotes keyed by call id) | refused whenever the request is customer-specific (resolved target, unresolved name, or a phone/email literal) |
 | `actor_wide` | the operator's own conversation history, quoting any customer | refused whenever the request is customer-specific |
 | `phone_keyed` / `email_keyed` | keyed by a contact | the key must belong to a task customer (`target_clarification_required`); refused when the named customer did not resolve |
-| `address_keyed` | keyed by a street address (`lookup_property`) | the address must start with one of the task customers' saved street lines (customer or service property), so a substituted address cannot expose or price another property; refused when the named customer did not resolve; open outside a customer-scoped task, where new leads have no saved address yet |
+| `address_keyed` | keyed by a street address (`lookup_property`) | the address must be one of the task customers' ACTIVE saved properties (customer address or service property), compared as a full address by the estimator's canonical comparer (same street, exact unit, no conflicting city or ZIP), and the reader receives the saved property's full address rather than the supplied text, so a substituted, partial or same-street-different-city address cannot expose or price another property; refused when the named customer did not resolve; open outside a customer-scoped task, where new leads have no saved address yet |
 
 Write tools (`kind: internal_write` or `external_action`):
 
@@ -43,16 +43,24 @@ with `scope_unclassified` by `prepareReadInput` and `validateRecordTarget`
 never joins `ActionRegistry.actions` (so it is also `capability_unimplemented`
 to the model).
 
-Every tool in `server/services/intelligence-bar/pii-tools.js` (the route's
-PII list: inputs or results carry customer identifiers) has a scope other than
-`none`; the registry test asserts it.
+The route's PII set (`server/services/intelligence-bar/pii-tools.js`, used
+to redact query telemetry and log only field names) is DERIVED from this
+catalog: every tool whose scope is not `none` is a PII tool. The file also
+keeps a reviewed list explaining why particular tools carry identifiers; the
+registry test asserts each reviewed name has a non-`none` scope and that the
+derived set equals the non-`none` tools exactly, so a reader that returns
+customer identities is covered by its class rather than by a hand-kept
+inventory (round 3 found `get_ar_aging`, `get_outstanding_balances`,
+`get_top_revenue_customers` and `get_open_commitments` missing from the
+old list).
 
 ## Where the rules are asserted
 
 - `server/tests/intelligence-bar-action-registry.test.js` freezes the
   membership of every non-`none` class (`SCOPE_SNAPSHOT`), asserts every policy
   entry has a valid scope, asserts a reader whose schema takes `customer_id` or
-  `customer_name` is `record` or `scoped`, asserts no PII-list tool is `none`,
+  `customer_name` is `record` or `scoped`, asserts the PII set is exactly the
+  non-`none` tools and every reviewed PII name is non-`none`,
   and proves a missing or invalid scope (or kind) keeps a tool out of the
   registry.
 - `server/tests/intelligence-bar-target-context.test.js` runs one
@@ -86,11 +94,24 @@ PII list: inputs or results carry customer identifiers) has a scope other than
 
 ## Deferred
 
-- `find_available_slots` is `record` (its `customer_id` is a destination, and
-  a selector-free call already fails closed for an unresolved name), but the
-  slots it returns name the neighbouring stops' customers
-  (`find-time.js` `insertion.after_name` / `before`). Redacting those names, or
-  moving the tool to `broad`, is a policy decision this catalog does not make.
+- `find_available_slots` is `record`: inside a customer-scoped task the
+  destination is pinned to the task customer (supplied `lat`/`lng` are
+  dropped so the reader resolves the customer's own coordinates, and a
+  supplied `address` must be one of the customer's active saved properties
+  and is replaced by that saved address). Outside a customer-scoped task the
+  slots it returns still name the neighbouring stops' customers
+  (`find-time.js` `insertion.after_name` / `before`) around whatever location
+  the operator asked about. Redacting those names, or moving the tool to
+  `broad`, is a policy decision this catalog does not make.
+- `find_schedule_gaps` is `record`: with `candidate_service_id` it loads that
+  appointment's customer preferences, plan holds and location, so the
+  candidate is validated as an appointment reference that must belong to a
+  task customer. Without a candidate it reads no customer rows, so a
+  date-only call stays open for a resolved or unnamed task and, like every
+  record reader, fails closed for an unresolved name.
+- `get_truck_status` is `broad`: the live last position of a truck during
+  service hours is a customer's property, so it is refused inside a
+  customer-scoped task like `get_truck_trips`.
 - `assign_technician`, `move_stops_to_day`, `bulk_update_customers` and
   `bulk_update_leads` act on many customers at once but carry record ids that
   `validateRecordTarget` checks per customer, so they stay `record` rather than

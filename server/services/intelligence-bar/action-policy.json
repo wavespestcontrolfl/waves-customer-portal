@@ -293,7 +293,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "record"
   },
   "find_similar_estimates": {
     "module": "estimate-tools.js",
@@ -1125,7 +1125,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_truck_trips": {
     "module": "bouncie-ops-tools.js",

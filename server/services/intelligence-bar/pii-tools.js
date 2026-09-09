@@ -1,10 +1,18 @@
 /**
  * Tools whose inputs or results carry customer PII (names, phones, emails,
- * addresses, message bodies, or provider text that can echo them). The route
- * logs only field names for these and marks requests that used them; the
- * scope catalog test asserts none of them is scope `none`.
+ * addresses, coordinates, message bodies, or provider text that can echo
+ * them). The route logs only field names for these and marks requests that
+ * used them so query telemetry is redacted.
+ *
+ * Membership is derived from the scope catalog: EVERY tool whose declared
+ * scope is not `none` is a PII tool, because a non-`none` scope means the
+ * tool reaches customer-identifying rows (a hand-kept inventory missed
+ * readers such as get_ar_aging and get_open_commitments, which return names
+ * and phone numbers). The reviewed names below document WHY specific tools
+ * carry PII; the registry test asserts each of them has a non-`none` scope,
+ * so a reclassification to `none` cannot silently drop one from redaction.
  */
-const PII_TOOL_NAMES = new Set([
+const REVIEWED_PII_TOOL_NAMES = new Set([
   'query_customers',
   'get_customer_detail',
   'get_schedule_view',
@@ -110,4 +118,10 @@ const PII_TOOL_NAMES = new Set([
   'get_growthbook_experiments',
 ]);
 
-module.exports = { PII_TOOL_NAMES };
+const { READ_SCOPES, WRITE_SCOPES, toolsWithScope } = require('./scope-policy');
+const PII_TOOL_NAMES = new Set([
+  ...REVIEWED_PII_TOOL_NAMES,
+  ...[...new Set([...READ_SCOPES, ...WRITE_SCOPES])].filter(scope => scope !== 'none').flatMap(scope => toolsWithScope(scope)),
+]);
+
+module.exports = { PII_TOOL_NAMES, REVIEWED_PII_TOOL_NAMES };

@@ -200,7 +200,7 @@ const SCOPE_SNAPSHOT = {
     'get_ar_aging', 'get_blocked_senders', 'get_churn_analysis', 'get_csr_overview', 'get_day_summary', 'get_email_suppressions',
     'get_inbox_summary', 'get_my_route', 'get_outreach_candidates', 'get_outstanding_balances', 'get_payer_ar_aging',
     'get_payout_details', 'get_recent_completions', 'get_revenue_breakdown', 'get_stock_movements', 'get_stripe_payment_intents',
-    'get_today_briefing', 'get_top_revenue_customers', 'get_twilio_failed_messages', 'get_unanswered_threads',
+    'get_today_briefing', 'get_top_revenue_customers', 'get_truck_status', 'get_twilio_failed_messages', 'get_unanswered_threads',
     'get_unresponded_reviews', 'get_zone_density', 'list_call_partners', 'list_open_closeouts', 'search_reviews',
     // Provider and operations text that can echo customer identifiers (the
     // route's PII list): alert bodies, error text, log lines, targeting
@@ -216,8 +216,8 @@ const SCOPE_SNAPSHOT = {
   route_wide: ['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments'],
   record: [
     // reads: a customer or record selector confines the rows to one customer
-    'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'get_call_log',
-    'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_open_commitments', 'get_service_history',
+    'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
+    'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_open_commitments', 'get_service_history',
     'get_stop_details', 'query_revenue', 'search_messages',
     // writes: specific customer records proven by validateRecordTarget
     // block_sender carries no record id; validateSenderBlock binds it to the task customer's own address.
@@ -290,7 +290,7 @@ test('every record reader carries a selector the task-context guards recognize',
   // only through customer_id, and admits an unresolved-name call only through
   // hasOwnSelector; a record reader without one of these params would hand a
   // raw model-supplied selector to its executor.
-  const selectorKeys = ['customer_id', 'customer_name', 'phone', 'service_id', 'customer_ids', 'service_ids', 'lead_ids',
+  const selectorKeys = ['customer_id', 'customer_name', 'phone', 'service_id', 'candidate_service_id', 'customer_ids', 'service_ids', 'lead_ids',
     'customer_id', 'property_id', 'appointment_id', 'estimate_id', 'invoice_id', 'product_id', 'lead_id', 'email_id', 'call_id', 'review_id',
     'customerId', 'propertyId', 'appointmentId', 'estimateId', 'invoiceId', 'productId', 'leadId', 'emailId', 'callId', 'reviewId'];
   for (const action of registry.actions.values()) {
@@ -300,12 +300,23 @@ test('every record reader carries a selector the task-context guards recognize',
   }
 });
 
-test('a PII-bearing tool is never scope none, and only reviewed kinds have scopes', () => {
-  const { PII_TOOL_NAMES } = require('../services/intelligence-bar/pii-tools');
+test('every tool with a non-none scope is a PII tool, every reviewed PII tool is non-none, and only reviewed kinds have scopes', () => {
+  const { PII_TOOL_NAMES, REVIEWED_PII_TOOL_NAMES } = require('../services/intelligence-bar/pii-tools');
   const { scopeOf, scopesFor, validScope } = require('../services/intelligence-bar/scope-policy');
-  for (const name of PII_TOOL_NAMES) {
+  const policy = require('../services/intelligence-bar/action-policy.json');
+  for (const name of REVIEWED_PII_TOOL_NAMES) {
     expect({ name, scope: scopeOf(name) }).toEqual({ name, scope: expect.stringMatching(/^(record|scoped|broad|actor_wide|phone_keyed|email_keyed|address_keyed|route_wide)$/) });
+    expect(PII_TOOL_NAMES.has(name)).toBe(true);
   }
+  // The route redacts telemetry for the derived set, so a reader that returns
+  // customer identities is covered by its scope class, not by a hand-kept list.
+  for (const name of Object.keys(policy)) {
+    expect({ name, pii: PII_TOOL_NAMES.has(name) }).toEqual({ name, pii: policy[name].scope !== 'none' });
+  }
+  for (const name of ['get_ar_aging', 'get_outstanding_balances', 'get_top_revenue_customers', 'get_open_commitments', 'get_truck_status', 'find_schedule_gaps']) {
+    expect(PII_TOOL_NAMES.has(name)).toBe(true);
+  }
+  expect(PII_TOOL_NAMES.has('get_kpi_snapshot')).toBe(false);
   for (const kind of [undefined, '', 'write', 'READ', 'internal-write']) {
     expect(scopesFor(kind)).toEqual([]);
     expect(validScope({ kind, scope: 'none' })).toBe(false);

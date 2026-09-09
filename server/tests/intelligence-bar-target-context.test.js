@@ -16,15 +16,16 @@ beforeEach(() => {
     customers: [{ id: A, first_name: 'Synthetic', last_name: 'Person', version: '2026-09-01 12:00:00.123456+00' }, { id: B }],
   };
   db.mockReset().mockImplementation(table => {
-    let id, ids, ownerIds, nameMatch = false, threadProjection = false;
-    const q = { where: (key, value) => { id = typeof key === 'object' ? key.id : value; return q; },
+    let id, ids, ownerIds, activeOnly = false, nameMatch = false, threadProjection = false;
+    const q = { where: (key, value) => { if (key === 'active') activeOnly = value === true; else id = typeof key === 'object' ? key.id : value; return q; },
       first: async () => rows[table]?.find(row => row.id === id),
       whereRaw: () => { nameMatch = true; return q; }, whereNull: () => q,
       whereIn: (key, values) => { if (key === 'id') ids = values; else if (key === 'customer_id') ownerIds = values; return q; }, limit: () => q,
       distinct: () => { threadProjection = true; return q; },
       select: () => q, then: resolve => {
-        const selected = ids ? (rows[table] || []).filter(row => ids.includes(row.id))
+        const matched = ids ? (rows[table] || []).filter(row => ids.includes(row.id))
           : ownerIds ? (rows[table] || []).filter(row => ownerIds.includes(row.customer_id)) : nameMatch ? rows[table] || [] : lookupRows;
+        const selected = activeOnly ? matched.filter(row => row.active === true) : matched;
         return Promise.resolve(threadProjection ? [...new Set(selected.map(row => row.gmail_thread_id || row.id))].map(thread_key => ({ thread_key })) : selected).then(resolve);
       } };
     return q;
@@ -637,7 +638,7 @@ test('scoped customer-row readers fail closed for an explicitly named customer w
     expect(await Context.prepareReadInput(params, { ...context(), namesRequested: true }, { toolName, schema })).toEqual({ input: params });
   }
   // A reader that touches no customer rows (scope none) keeps its own target checks.
-  expect(await Context.prepareReadInput({ date: '2026-09-09' }, unresolved, { toolName: 'find_schedule_gaps', schema })).toEqual({ input: { date: '2026-09-09' } });
+  expect(await Context.prepareReadInput({ date: '2026-09-09' }, unresolved, { toolName: 'get_todays_activity', schema })).toEqual({ input: { date: '2026-09-09' } });
   // A reader the catalog does not know fails closed everywhere, resolved or not.
   expect(await Context.prepareReadInput({ date: '2026-09-09' }, unresolved, { toolName: 'get_zone_capacity', schema })).toMatchObject({ code: 'scope_unclassified' });
   expect(await Context.prepareReadInput({ date: '2026-09-09' }, context(), { toolName: 'get_zone_capacity', schema })).toMatchObject({ code: 'scope_unclassified' });
@@ -818,6 +819,11 @@ test('write scope classes are enforced for resolved and unresolved customers and
   expect(scopeOf('optimize_all_routes')).toBe('route_wide');
   expect((await Context.validateRecordTarget({ date: '2026-09-09' }, context(), { toolName: 'optimize_all_routes' })).code).toBe('customer_scope_required');
   expect((await Context.validateRecordTarget({ date: '2026-09-09' }, unresolved, { toolName: 'optimize_all_routes' })).code).toBe('customer_scope_required');
+  // A phone or email literal that resolved nobody keeps the task customer-specific, like the read guards.
+  for (const toolName of ['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments']) {
+    expect((await Context.validateRecordTarget({ date: '2026-09-09' }, { targets: [], contactRequested: true }, { toolName })).code).toBe('customer_scope_required');
+    expect((await Context.validateRecordTarget({ date: '2026-09-09' }, { targets: [], contactRequested: true }, { toolName, forApproval: true })).code).toBe('customer_scope_required');
+  }
   expect(await Context.validateRecordTarget({ date: '2026-09-09' }, { targets: [] }, { toolName: 'optimize_all_routes' })).toBeNull();
   expect(scopeOf('update_customer')).toBe('record');
   expect(await Context.validateRecordTarget({ customer_id: A, updates: {} }, context(), { toolName: 'update_customer' })).toBeNull();
@@ -859,18 +865,68 @@ test('compute_estimate binds its lead to the task customer', async () => {
   expect((await Context.prepareReadInput({ services: ['pest'] }, unresolved, { toolName: 'compute_estimate', schema })).code).toBe('customer_scope_required');
 });
 
-test('address-keyed readers take only a task customer\'s own saved address', async () => {
-  rows.customers[0].address_line1 = '1234 Main St.';
-  rows.customer_properties.push({ id: '30000000-0000-4000-8000-000000000002', customer_id: A, address_line1: '99 Beach Rd', active: true });
+test('address-keyed readers take only a task customer\'s own active saved address and receive the saved full address', async () => {
+  Object.assign(rows.customers[0], { address_line1: '1234 Main St.', city: 'Bradenton', state: 'FL', zip: '34203' });
+  rows.customer_properties.push(
+    { id: '30000000-0000-4000-8000-000000000002', customer_id: A, address_line1: '99 Beach Rd', address_line2: 'Apt 4', city: 'Venice', state: 'FL', zip: '34285', active: true },
+    { id: '30000000-0000-4000-8000-000000000003', customer_id: A, address_line1: '7 Old Rd', city: 'Venice', state: 'FL', zip: '34285', active: false },
+  );
   const schema = { properties: { address: { type: 'string' } } };
   const read = (address, ctx) => Context.prepareReadInput({ address }, ctx, { toolName: 'lookup_property', schema });
-  expect(await read('1234 Main St, Bradenton FL 34203', context())).toEqual({ input: { address: '1234 Main St, Bradenton FL 34203' } });
-  expect(await read('99 BEACH RD, Venice FL', context())).toEqual({ input: { address: '99 BEACH RD, Venice FL' } });
-  expect((await read('1234 Main Street, Bradenton FL', context())).code).toBe('target_clarification_required');
+  const main = '1234 Main St., Bradenton, FL 34203';
+  const beach = '99 Beach Rd, Apt 4, Venice, FL 34285';
+  // Matching addresses are rewritten to the saved full address (canonical street forms, bare street line, ZIP-only tail).
+  expect(await read('1234 Main St, Bradenton FL 34203', context())).toEqual({ input: { address: main } });
+  expect(await read('1234 Main Street, Bradenton FL', context())).toEqual({ input: { address: main } });
+  expect(await read('1234 Main St', context())).toEqual({ input: { address: main } });
+  expect(await read('1234 Main St 34203', context())).toEqual({ input: { address: main } });
+  expect(await read('99 BEACH RD APT 4, Venice FL', context())).toEqual({ input: { address: beach } });
+  // A different city or ZIP on the same street line is a different parcel.
+  expect((await read('1234 Main St, Tampa FL', context())).code).toBe('target_clarification_required');
+  expect((await read('1234 Main St, Bradenton FL 34205', context())).code).toBe('target_clarification_required');
+  // The unit must match exactly: the building or another unit is not this property.
+  expect((await read('99 Beach Rd, Venice FL', context())).code).toBe('target_clarification_required');
+  expect((await read('99 Beach Rd Apt 5, Venice FL', context())).code).toBe('target_clarification_required');
+  // An inactive property, a different house number, another customer's property and an empty address are refused.
+  expect((await read('7 Old Rd, Venice FL', context())).code).toBe('target_clarification_required');
   expect((await read('12345 Main St', context())).code).toBe('target_clarification_required');
+  expect((await read('1234 Main St, Bradenton FL', context(B))).code).toBe('target_clarification_required');
   expect((await read('', context())).code).toBe('target_clarification_required');
   expect((await read('1234 Main St', { targets: [], namesRequested: true, page: { ids: {} } })).code).toBe('customer_scope_required');
   expect((await read('1234 Main St', { targets: [], contactRequested: true, page: { ids: {} } })).code).toBe('customer_scope_required');
   // Outside a customer-scoped task the lookup is open (new leads have no saved address yet).
   expect(await read('500 Anywhere Ave', { targets: [], page: { ids: {} } })).toEqual({ input: { address: '500 Anywhere Ave' } });
+});
+
+test('the slot finder inside a customer-scoped task is pinned to the task customer\'s own location', async () => {
+  Object.assign(rows.customers[0], { address_line1: '1234 Main St', city: 'Bradenton', state: 'FL', zip: '34203' });
+  const schema = { properties: { customer_id: { type: 'string' }, address: { type: 'string' }, lat: { type: 'number' }, lng: { type: 'number' }, date_from: { type: 'string' } } };
+  const read = (params, ctx) => Context.prepareReadInput(params, ctx, { toolName: 'find_available_slots', schema });
+  // Supplied coordinates are dropped and the destination becomes the task customer.
+  expect(await read({ lat: 27.1, lng: -82.4, date_from: '2026-09-10' }, context())).toEqual({ input: { customer_id: A, date_from: '2026-09-10' } });
+  expect(await read({ customer_id: A, lat: 27.1, lng: -82.4 }, context())).toEqual({ input: { customer_id: A } });
+  // A supplied address must be one of the customer's saved properties and is replaced by the saved full address.
+  expect(await read({ address: '1234 Main Street, Bradenton' }, context())).toEqual({ input: { customer_id: A, address: '1234 Main St, Bradenton, FL 34203' } });
+  expect((await read({ address: '500 Anywhere Ave, Tampa FL' }, context())).code).toBe('target_clarification_required');
+  expect((await read({ address: '1234 Main St, Tampa FL' }, context())).code).toBe('target_clarification_required');
+  // Another customer's id is still a relationship failure, and an unresolved name still fails closed.
+  expect((await read({ customer_id: B, lat: 27.1, lng: -82.4 }, context())).code).toBe('target_clarification_required');
+  expect((await read({ lat: 27.1, lng: -82.4 }, { targets: [], namesRequested: true, page: { ids: {} } })).code).toBe('customer_scope_required');
+  // Outside a customer-scoped task the destination is whatever the operator asked about.
+  expect(await read({ lat: 27.1, lng: -82.4 }, { targets: [], page: { ids: {} } })).toEqual({ input: { lat: 27.1, lng: -82.4 } });
+});
+
+test('the gap reader\'s candidate appointment is an appointment reference bound to the task customer', async () => {
+  const appointment = '40000000-0000-4000-8000-000000000031';
+  rows.scheduled_services = [{ id: appointment, customer_id: B }];
+  const schema = { properties: { date: { type: 'string' }, candidate_service_id: { type: 'string' } } };
+  const read = (params, ctx) => Context.prepareReadInput(params, ctx, { toolName: 'find_schedule_gaps', schema });
+  expect(await read({ date: '2026-09-09', candidate_service_id: appointment }, context(B))).toEqual({ input: { date: '2026-09-09', candidate_service_id: appointment } });
+  expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, context(A))).code).toBe('target_clarification_required');
+  expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, { targets: [], page: { ids: {} } })).code).toBe('target_clarification_required');
+  expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, { targets: [], namesRequested: true, page: { ids: {} } })).code).toBe('target_clarification_required');
+  // Without a candidate the reader reads no customer rows: open for a resolved or unnamed task, closed for an unresolved name.
+  expect(await read({ date: '2026-09-09' }, context(A))).toEqual({ input: { date: '2026-09-09' } });
+  expect(await read({ date: '2026-09-09' }, { targets: [], page: { ids: {} } })).toEqual({ input: { date: '2026-09-09' } });
+  expect((await read({ date: '2026-09-09' }, { targets: [], namesRequested: true, page: { ids: {} } })).code).toBe('customer_scope_required');
 });

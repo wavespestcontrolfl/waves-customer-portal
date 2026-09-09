@@ -135,7 +135,9 @@ Separately from the contract gate, every tool must **declare its data
 This is enforced by the action registry at load time (an unscoped tool is
 unreachable) and by the jest suite
 `server/tests/intelligence-bar-action-registry.test.js`, not by
-`test:contracts`. A tool on the PII list (`pii-tools.js`) is never `none`.
+`test:contracts`. The route's PII set (`pii-tools.js`) is derived from the
+catalog (every non-`none` tool), so classifying a reader is what gets its
+telemetry redacted; the reviewed names in that file are never `none`.
 Classify from what the executor returns, not its description; see
 `docs/intelligence-bar-read-scope-catalog.md`. Any class other than `none`
 must also be added to `SCOPE_SNAPSHOT` in that jest suite.

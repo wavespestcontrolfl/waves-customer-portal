@@ -505,10 +505,30 @@ function bulkLeadSelection(toolName, records, params) {
 // registry, so no caller can reach an unclassified reader or writer.
 const { validScope, UNCLASSIFIED } = require('./scope-policy');
 
-// Street-line comparison for address-keyed readers: case, punctuation and
-// spacing are ignored; a supplied full address may continue past the saved
-// street line (city, state, ZIP) but must start with it.
-const normalizeAddress = value => String(value || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+// Address-bound readers (lookup_property, and find_available_slots inside a
+// customer-scoped task) take a model-supplied address. It must be one of the
+// task customers' ACTIVE saved properties (the customer address or a service
+// property), compared as a full address with the estimator's canonical
+// comparer: same street and exact unit, and no conflicting city or ZIP. The
+// reader then receives the saved property's own full address, never the
+// supplied text, so "123 Main St, Tampa" cannot ride a customer saved at
+// "123 Main St, Bradenton" and a bare street line cannot resolve a
+// different parcel on a repeated street name.
+async function bindSavedAddress(supplied, targets) {
+  const { sameStreetAddress } = require('../estimator-engine/address-compare');
+  const { formatAddress } = require('../../utils/address-normalizer');
+  const ids = targets.map(target => target.customer_id);
+  const [customers, properties] = await Promise.all([
+    db('customers').whereIn('id', ids).whereNull('deleted_at').select('address_line1', 'city', 'state', 'zip'),
+    db('customer_properties').whereIn('customer_id', ids).where('active', true).select('address_line1', 'address_line2', 'city', 'state', 'zip'),
+  ]);
+  const saved = [...customers, ...properties]
+    .filter(row => String(row.address_line1 || '').trim())
+    .map(row => formatAddress({ line1: row.address_line1, line2: row.address_line2, city: row.city, state: row.state, zip: row.zip }));
+  const text = String(supplied || '').trim();
+  if (!text) return null;
+  return saved.find(address => sameStreetAddress(text, address, { requireExactUnit: true })) || null;
+}
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   // A refused cohort or unresolved name stops here too; explicit record IDs
@@ -525,7 +545,7 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // recheck. An explicitly named customer who did not resolve keeps the task
   // customer-scoped (as for the broad readers), so a misspelling never widens
   // a request to a whole date or technician.
-  if ((context.targets?.length || context.namesRequested) && scope === 'route_wide') {
+  if ((context.targets?.length || context.namesRequested || context.contactRequested) && scope === 'route_wide') {
     return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
   }
   if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
@@ -533,6 +553,9 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   }
   const references = { ...params };
   if (['get_closeout_status', 'get_stop_details'].includes(toolName) && params.service_id) references.appointment_id = params.service_id;
+  // The gap reader loads the candidate appointment's customer preferences,
+  // plan holds and location, so the candidate is an appointment reference.
+  if (toolName === 'find_schedule_gaps' && params.candidate_service_id) references.appointment_id = params.candidate_service_id;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
   const resolved = await readReferences(references);
   if (resolved.error) return resolved;
@@ -587,9 +610,9 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
 // The read scope classes are defined once, in scope-policy.js; the guards
 // below enforce them. A customer selector or a record identifier is checked
 // against the task's authority further down, so only a selector-free call is
-// broad. `service_id` is the closeout readers' appointment identifier (mapped
-// in validateRecordTarget).
-const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone || params.service_id)
+// broad. `service_id` is the closeout readers' appointment identifier and
+// `candidate_service_id` the gap reader's (both mapped in validateRecordTarget).
+const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone || params.service_id || params.candidate_service_id)
   || Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
 
 async function prepareReadInput(params, context, { toolName, schema }) {
@@ -642,19 +665,28 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     }
   }
   // Address-keyed readers take a model-supplied street address. Inside a
-  // customer-scoped task it must be one of the task customers' own saved
-  // addresses (customer or service property), so a substituted address
-  // cannot expose or price another property.
+  // customer-scoped task it must be one of the task customers' own active
+  // saved addresses (customer or service property), and the reader receives
+  // that saved address, so a substituted or partial address cannot expose or
+  // price another property.
   if (context.targets?.length && scope === 'address_keyed') {
-    const supplied = normalizeAddress(params.address);
-    const ids = context.targets.map(target => target.customer_id);
-    const [customers, properties] = await Promise.all([
-      db('customers').whereIn('id', ids).whereNull('deleted_at').select('address_line1'),
-      db('customer_properties').whereIn('customer_id', ids).select('address_line1'),
-    ]);
-    const saved = [...customers, ...properties].map(row => normalizeAddress(row.address_line1)).filter(Boolean);
-    if (!supplied || !saved.some(line => supplied === line || supplied.startsWith(`${line} `))) {
-      return { error: 'Use the task customer\'s own saved address for this property lookup', code: 'target_clarification_required' };
+    const bound = await bindSavedAddress(params.address, context.targets);
+    if (!bound) return { error: 'Use the task customer\'s own saved address for this property lookup', code: 'target_clarification_required' };
+    input.address = bound;
+  }
+  // The slot finder's destination is a location, not a record. Inside a
+  // customer-scoped task the destination is the task customer: supplied
+  // coordinates are dropped (the reader resolves the customer's own), and a
+  // supplied address must be one of the customer's active saved properties.
+  // Otherwise the returned neighbouring stops would describe whatever
+  // location the model chose.
+  if (context.targets?.length && toolName === 'find_available_slots') {
+    delete input.lat;
+    delete input.lng;
+    if (params.address !== undefined) {
+      const bound = await bindSavedAddress(params.address, context.targets);
+      if (!bound) return { error: 'Use the task customer\'s own saved address as the slot-search destination', code: 'target_clarification_required' };
+      input.address = bound;
     }
   }
   let readContext = context;
