@@ -146,17 +146,19 @@ async function runInner({ now = new Date() } = {}) {
     const result = { skipped: false, scanned: rows.length, overdue: overdue.length, alerted: 0, unverified };
     // Both schedules use the existing identities. A gate change changes the
     // callback deadline policy, never the owner of persisted reminder rows.
-    await trx('notifications as n').where({ recipient_type: 'admin' }).whereNull('read_at')
+    await trx('notifications as n').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeVersion' IS DISTINCT FROM 'retired'")
       .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
       .whereNotExists(trx('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
         .whereRaw("cc.id::text = n.metadata->>'commitment_id'").where({ 'cc.status': 'open', 'cc.party': 'waves' })
         .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`)
         .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} < ?`, [now])
         .modify((q) => { if (require('./callback-cards').enabled()) q.whereRaw("(cc.kind <> 'callback' OR cc.snoozed_until IS NULL OR cc.snoozed_until <= ?)", [now]); }))
-      .update({ read_at: now });
+      .update({ read_at: now, metadata: trx.raw("metadata || '{\"dedupeVersion\":\"retired\"}'::jsonb") });
     if (!overdue.length) {
-      await noticeRows().whereNull('read_at').whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
-        .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
+      await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
+        .whereRaw("metadata->>'dedupeVersion' IS DISTINCT FROM 'empty'")
+        .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true,\"dedupeVersion\":\"empty\"}'::jsonb") });
       return result;
     }
     const openSince = (r) => r.source === 'human' ? r.created_at : (r.call_started_at || r.created_at);

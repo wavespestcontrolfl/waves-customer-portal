@@ -240,6 +240,20 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect((await unread()).map((row) => row.metadata.commitment_id)).toEqual([changed.id]);
   });
 
+  test.each([[1, false], [1, true], [6, false], [6, true]])('an empty gate transition restores %i reminders after rollback (read: %s)', async (count, read) => {
+    for (let i = 0; i < count; i += 1) await seed({ callback_due_at: future });
+    process.env.GATE_CALLBACK_CARD = 'false';
+    await runSweep(); const [first] = await unread();
+    if (read) await unread().update({ read_at: now });
+    process.env.GATE_CALLBACK_CARD = 'true';
+    await runSweep(); expect(await unread()).toHaveLength(0);
+    process.env.GATE_CALLBACK_CARD = 'false';
+    await runSweep();
+    const active = await unread();
+    expect(active).toHaveLength(1); expect(active[0].id).toBe(first.id);
+    if (count > 5) expect(active[0].metadata.retired).toBe(false);
+  });
+
   test('gate rollback keeps one shared reminder for the same callback', async () => {
     await seed(); await runSweep(); process.env.GATE_CALLBACK_CARD = 'false';
     await runSweep(); expect(await unread()).toHaveLength(1);
