@@ -17,6 +17,7 @@ jest.mock('../services/property-lookup/ai-property-lookup', () => ({
   lookupPropertyFromAITrio: jest.fn(),
 }));
 jest.mock('../services/new-recurring-welcome-sms', () => ({
+  queueOneTimeWelcomeEmail: jest.fn(async () => ({ queued: false, reason: 'gate_off' })),
   sendNewRecurringWelcome: jest.fn(async () => ({ sent: false, queued: true })),
   isNewRecurringSignupCandidate: jest.fn(async () => false),
 }));
@@ -46,6 +47,7 @@ jest.mock('../services/automation-runner', () => ({
 const db = require('../models/db');
 const {
   sendNewRecurringWelcome,
+  queueOneTimeWelcomeEmail,
   isNewRecurringSignupCandidate,
 } = require('../services/new-recurring-welcome-sms');
 const AppointmentTagger = require('../services/appointment-tagger');
@@ -138,4 +140,23 @@ describe('appointment tagger welcome gate', () => {
     expect(isNewRecurringSignupCandidate).not.toHaveBeenCalled();
     expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
   });
+});
+
+
+test('one-time booking uses the email-only coordinator and never the SMS welcome', async () => {
+  jest.clearAllMocks();
+  serviceRow = serviceFixture({ is_recurring: false, waveguard_tier: null, email: 'fixture@example.invalid' });
+  db.mockImplementation(() => scheduledServicesChain());
+  await AppointmentTagger.onServiceScheduled('svc-anchor');
+  expect(queueOneTimeWelcomeEmail).toHaveBeenCalledWith(serviceRow);
+  expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
+});
+
+test('replayed one-time preparation with suppressWelcome never queues education', async () => {
+  jest.clearAllMocks();
+  serviceRow = serviceFixture({ is_recurring: false });
+  db.mockImplementation(() => scheduledServicesChain());
+  await AppointmentTagger.onServiceScheduled('svc-anchor', { suppressWelcome: true });
+  expect(queueOneTimeWelcomeEmail).not.toHaveBeenCalled();
+  expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
 });

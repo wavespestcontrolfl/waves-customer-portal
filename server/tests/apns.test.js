@@ -55,6 +55,15 @@ describe('buildApnsPayload', () => {
 });
 
 describe('classifyApnsResponse', () => {
+  test.each([[429, 'TooManyRequests', 60000], [429, 'TooManyProviderTokenUpdates', 1200000],
+    [500, 'InternalServerError', 900000], [503, 'Shutdown', 900000], [400, 'IdleTimeout', 60000]])(
+    'temporary %s/%s retains the provider delay', (status, reason, retryAfterMs) => {
+      expect(classifyApnsResponse(status, reason)).toMatchObject({ ok: false, expired: false, retryable: true, retryAfterMs });
+    });
+  test.each([[400, 'BadDeviceToken'], [400, 'DeviceTokenNotForTopic'], [403, 'Forbidden'],
+    [410, 'Unregistered'], [413, 'PayloadTooLarge']])('permanent %s/%s is not retried', (status, reason) => {
+    expect(classifyApnsResponse(status, reason).retryable).not.toBe(true);
+  });
   test('200 → ok', () => {
     expect(classifyApnsResponse(200, null)).toEqual({ ok: true });
   });

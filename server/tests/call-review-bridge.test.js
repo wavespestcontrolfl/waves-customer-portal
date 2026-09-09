@@ -271,6 +271,7 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
       addressValidation: { status: 'validated_accept', normalized: NORMALIZED },
       extracted: { address_line1: '7620 Charleston Ln', first_name: 'Elaine', last_name: 'Gall', lead_quality: 'hot' },
       v2TriageFlags: ['caller_not_authorized', 'no_sms_consent_captured'],
+      callerRelationship: 'other',
     });
     expect(out.needsConfirmation).toEqual(['caller_not_authorized']);
   });
@@ -287,6 +288,7 @@ describe('deriveCallReviewBridge (address/identity shadow bridge)', () => {
       addressValidation: { status: 'confirm_needed' },
       extracted: { address_line1: '7620 Charleston St', city: 'Sarasota', first_name: 'Elaine', last_name: '', lead_quality: 'hot' },
       v2TriageFlags: ['caller_not_authorized'],
+      callerRelationship: 'other',
     });
     expect(out.normalizedAddress).toBeNull();
     expect(out.needsConfirmation).toEqual(

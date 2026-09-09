@@ -93,6 +93,11 @@ const PUSH_ROUTING_POLICY = {
 // tap (deep link beats a pasted URL: the notification IS the link).
 const BILLING_UPDATE = { title: 'Billing update', link: '/?tab=billing', category: 'billing' };
 const PAYMENT_ISSUE = { title: 'Payment issue', link: '/?tab=billing', category: 'billing' };
+const PAYMENT_ISSUE_TYPES = new Set([
+  'payment_failure', 'payment_failed', 'autopay_charge_failed',
+  'autopay_retry_failed', 'autopay_retry_final_failed', 'ach_retry_notice',
+  'ach_card_fallback', 'ach_suspended', 'bank_verification_incomplete', 'bank_verification_failed',
+]);
 const APPOINTMENT_UPDATE_TYPES = [
   'appointment_confirmation', 'appointment_rescheduled', 'reschedule_series_confirmation',
   'appointment_cancelled', 'appointment_series_cancelled', 'appointment_no_show',
@@ -128,8 +133,14 @@ const PRESENTATION = {
 };
 
 function pushPresentation(messageType) {
+  // Completion/report pushes land on Documents (customer-wide), matching the
+  // "Service completed" lifecycle bell in admin-schedule. Under the
+  // saved-property scope the sink forwards the visit's house as a hint;
+  // Documents is not a property-scoped destination, so a report for a house
+  // retired since the visit still opens (uncapped codex r1z P1) — a Visits
+  // link would have failed closed as "Property unavailable".
   if (messageType.startsWith('service_complete') || messageType.startsWith('service_report_v1')) {
-    return { title: 'Your service report is ready', link: '/?tab=visits', category: 'service' };
+    return { title: 'Your service report is ready', link: '/?tab=documents', category: 'service' };
   }
   return PRESENTATION[messageType] || { title: 'Waves Pest Control', link: '/', category: 'service' };
 }
@@ -180,14 +191,23 @@ async function hasFreshPushDevice(customerId, knex = db) {
 // senders consult (appointment-reminders.js, twilio.js en-route,
 // scheduler.js receipts). Every type in PUSH_ROUTING_POLICY must map here
 // (test-enforced) so a customer channel choice always wins.
+// An explicit App choice also lets reminders replace their automatic
+// companion text, while the default PUSH_ROUTING_POLICY stays unchanged.
 const APP_FIRST_TYPES = new Set([
+  'service_request_received', 'service_request_updated',
+  ...PAYMENT_ISSUE_TYPES,
+  'invoice', 'payment_link', 'invoice_followup',
   ...APPOINTMENT_UPDATE_TYPES, 'tech_en_route',
+  'reminder_72h', 'appointment_reminder',
   'tech_arrived', 'service_complete', 'service_complete_with_invoice',
   'service_complete_paid_receipt', 'service_complete_annual_prepay', 'service_complete_prepaid',
   'service_report_v1', 'service_report_v1_with_invoice', 'receipt', 'deposit_receipt',
 ]);
 
 const PREF_CHANNEL_COLUMN = {
+  invoice: 'invoice_channel',
+  payment_link: 'invoice_channel',
+  invoice_followup: 'invoice_channel',
   ...Object.fromEntries(APPOINTMENT_UPDATE_TYPES.map((type) => [type, 'appointment_confirmation_channel'])),
   tech_arrived: 'tech_arrived_channel',
   ...Object.fromEntries([...APP_FIRST_TYPES].filter((type) => type.startsWith('service_')).map((type) => [type, 'service_complete_channel'])),
@@ -197,20 +217,13 @@ const PREF_CHANNEL_COLUMN = {
   appointment_reminder: 'service_reminder_24h_channel',
   reminder_72h: 'service_reminder_72h_channel',
   billing_reminder: 'billing_channel',
-  payment_failure: 'billing_channel',
-  payment_failed: 'billing_channel',
   late_payment: 'billing_channel',
   payment_expiry: 'billing_channel',
   autopay: 'billing_channel',
   autopay_pre_charge: 'billing_channel',
-  autopay_charge_failed: 'billing_channel',
-  autopay_retry_failed: 'billing_channel',
-  autopay_retry_final_failed: 'billing_channel',
-  ach_retry_notice: 'billing_channel',
-  ach_card_fallback: 'billing_channel',
-  ach_suspended: 'billing_channel',
-  bank_verification_incomplete: 'billing_channel',
-  bank_verification_failed: 'billing_channel',
+  ...Object.fromEntries([...PAYMENT_ISSUE_TYPES].map((type) => [type, 'payment_issue_channel'])),
+  service_request_received: 'request_channel',
+  service_request_updated: 'request_channel',
 };
 
 // Channel columns that live on the account PRIMARY profile (see
@@ -251,14 +264,14 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db, { req
     .first('phone', 'account_id')
     .catch(() => null);
   if (!customer || normalizeDigits(customer.phone) !== toDigits) return false;
-  const preference = await readChannelPreference(customerId, messageType, knex, customer).catch(() => null);
+  const preference = await readChannelPreference(customerId, messageType, knex, customer, { pushEligibility: true }).catch(() => null);
   if (preference === null || preference === 'email' || preference === 'both') return false;
   return !requireExplicit || preference === 'push';
 }
 
 // Appointment channels follow the primary profile; receipt channels follow
 // the charged profile. Both routed notices and lifecycle bells use this read.
-async function readChannelPreference(customerId, messageType, knex = db, customer = null) {
+async function readChannelPreference(customerId, messageType, knex = db, customer = null, { pushEligibility = false } = {}) {
   const col = PREF_CHANNEL_COLUMN[messageType];
   if (!col) return 'sms';
   customer ||= await knex('customers').where({ id: customerId }).first('account_id');
@@ -267,8 +280,12 @@ async function readChannelPreference(customerId, messageType, knex = db, custome
   const ownerId = PRIMARY_SCOPED_COLUMNS.has(col)
     ? await resolvePrimaryProfileId({ customerId, accountId: customer.account_id }, knex, { onError: 'throw' })
     : customerId;
-  const prefs = await knex('notification_prefs').where({ customer_id: ownerId }).first(col);
-  return String(prefs?.[col] || 'sms').toLowerCase();
+  const columns = col === 'payment_issue_channel' ? [col, 'billing_channel'] : [col];
+  const prefs = await knex('notification_prefs').where({ customer_id: ownerId }).first(...columns);
+  // A new explicit Text choice vetoes companion push; null retains legacy behavior.
+  if (pushEligibility && col === 'payment_issue_channel' && prefs?.[col] === 'sms') return null;
+  // Preserve legacy Email/Both vetoes for companion push until explicitly edited.
+  return String(prefs?.[col] || (col === 'payment_issue_channel' && prefs?.billing_channel) || 'sms').toLowerCase();
 }
 
 // A lifecycle bell must not bypass the guarded App first delivery attempt.
@@ -302,7 +319,7 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt } = {}) {
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, appointmentId = null } = {}) {
   const { title, link, category } = pushPresentation(messageType);
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
@@ -311,6 +328,9 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     url: link,
     category,
     tag: `push-routed:${messageType}`,
+    // The visit this message is about — the push sink resolves its saved
+    // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
+    ...(appointmentId ? { appointmentId } : {}),
   }, { shouldContinue, minUpdatedAt });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
 }
@@ -341,12 +361,14 @@ function windowGuardFrom(preSendCheck) {
 // NotificationService.create (not notifyCustomer) on purpose: the message
 // already passed the SMS pipeline's consent checks, and notifyCustomer
 // would fire its own second push.
-async function recordBell(customerId, messageType, body, dedupeKey) {
+async function recordBell(customerId, messageType, body, dedupeKey, appointmentId = null) {
   try {
     const { title, link, category } = pushPresentation(messageType);
     const NotificationService = require('../notification-service');
     const notif = await NotificationService.notifyCustomer(customerId, category, title, body, {
       link, dedupeKey, push: false,
+      // The visit this bell is about — the stored link names its house.
+      ...(appointmentId ? { appointmentId } : {}),
     });
     return notif && notif.id ? String(notif.id) : null;
   } catch (err) {
@@ -363,16 +385,50 @@ async function recordBell(customerId, messageType, body, dedupeKey) {
  * Twilio entirely. Any failure returns { delivered: false } and the SMS
  * proceeds untouched.
  */
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification }) {
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly }))) return { delivered: false, reason: 'preference_changed' };
     const fresh = await hasFreshPushDevice(customerId);
     let appNotification = null;
     if (explicitPushOnly) {
-      const { title, link, category } = pushPresentation(messageType);
+      let presentation = pushPresentation(messageType);
+      if (PAYMENT_ISSUE_TYPES.has(messageType)) {
+        presentation = { ...presentation, link: '/?tab=billing&focus=payment-methods' };
+      }
+      if (PREF_CHANNEL_COLUMN[messageType] === 'request_channel') {
+        try {
+          const request = requestNotification && await require('../request-app-notifications')
+            .loadEligibleRequest(customerId, requestNotification.id, requestNotification.status, requestNotification.version);
+          if (!request) return { delivered: false, blocked: true, reason: 'request_unavailable' };
+          presentation = { title: messageType === 'service_request_received' ? 'Request received' : 'Request update',
+            link: `/?tab=dashboard&requestId=${encodeURIComponent(request.id)}&requestEvent=${encodeURIComponent(notificationEventKey)}`, category: 'service' };
+        } catch {
+          return { delivered: false, retryable: true, reason: 'request_lookup_failed' };
+        }
+      }
+      if (PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel') {
+        let invoice;
+        try {
+          invoice = invoiceId && await db('invoices')
+            .where({ id: invoiceId, customer_id: customerId }).whereNull('payer_id').whereNull('payer_statement_id')
+            .first('token', 'status', 'scheduled_service_id');
+          if (!invoice?.token || !require('../invoice-helpers').isInvoiceCollectibleStatus(invoice.status)) {
+            return { delivered: false, blocked: true, reason: 'invoice_unavailable' };
+          }
+          const payer = await require('../payer').resolveForInvoice({
+            customerId, scheduledServiceId: invoice.scheduled_service_id, throwOnError: true,
+          });
+          if (payer.payerId) return { delivered: false, blocked: true, reason: 'invoice_payer_billed' };
+        } catch {
+          return { delivered: false, retryable: true, reason: 'invoice_lookup_failed' };
+        }
+        presentation = { title: messageType === 'invoice_followup' ? 'Invoice reminder' : 'Your invoice is ready',
+          link: `/pay/${encodeURIComponent(invoice.token)}`, category: 'billing' };
+      }
+      const { title, link, category } = presentation;
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
-        link, dedupeKey: notificationEventKey, awaitPush: true,
+        link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
       if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, reason: 'push_in_flight' };
@@ -386,8 +442,16 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       : await sendPush(customerId, messageType, body, {
         shouldContinue: windowGuardFrom(preSendCheck),
         minUpdatedAt: heartbeatCutoff(),
+        appointmentId,
       });
     if (!delivered) {
+      // These App notices have durable replay owners. Other App-first
+      // families retain their existing fallback policy.
+      if (explicitPushOnly && appNotification?.push?.retryable
+        && ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType])) {
+        return { delivered: false, retryable: true, reason: 'native_provider_retryable',
+          retryAfterMs: appNotification.push.retryAfterMs || 60000 };
+      }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
       return { delivered: false };
     }
@@ -465,7 +529,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         }
       }
     }
-    const notificationId = appNotification?.id ? String(appNotification.id) : await recordBell(customerId, messageType, body, notificationEventKey);
+    const notificationId = appNotification?.id ? String(appNotification.id) : await recordBell(customerId, messageType, body, notificationEventKey, appointmentId);
     const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
     if (proofRowId && notificationId) {
       await db('sms_log')
@@ -481,6 +545,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         })
         .catch(() => {});
     }
+    // Request lifecycle notices already have their bell history and email
+    // copies. They must not create a new SMS conversation.
+    if (PREF_CHANNEL_COLUMN[messageType] === 'request_channel') return { delivered: true, sid, notificationId };
+
     // Same unified-history writer the SMS path uses, threaded into the
     // customer's SMS conversation so staff surfaces show the message inline.
     require('../conversations')
@@ -512,7 +580,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
  * accepted the SMS — best-effort, never throws into the send path, and a
  * pipeline retry of a FAILED SMS can never reach it.
  */
-async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck }) {
+async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
     if (!(await hasFreshPushDevice(customerId))) return;
@@ -527,8 +595,9 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
     const { delivered } = await sendPush(customerId, messageType, body, {
       shouldContinue: windowGuardFrom(preSendCheck),
       minUpdatedAt: heartbeatCutoff(),
+      appointmentId,
     });
-    if (delivered) await recordBell(customerId, messageType, body);
+    if (delivered) await recordBell(customerId, messageType, body, undefined, appointmentId);
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
   }

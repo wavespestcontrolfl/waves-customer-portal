@@ -535,6 +535,20 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.deleted).toBe(true);
   });
 
+  it.each([
+    ['sms', 'push', 'push'], ['push', 'sms', null],
+    ['both', 'push', 'push'], ['push', 'email', 'email'], ['email', 'push', null],
+    [null, 'push', 'push'], ['push', null, null],
+  ])('notification_prefs: payment problems merge %s + %s preserves the least-SMS choice', async (winner, loser, expected) => {
+    const { trx, state } = stubTrx({
+      winnerRow: { customer_id: 'W', payment_issue_channel: winner },
+      loserRow: { customer_id: 'L', payment_issue_channel: loser },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated?.payment_issue_channel ?? null).toBe(expected);
+    expect(state.deleted).toBe(true);
+  });
+
   it('property_preferences: empty jsonb defaults ([]/{}) count as empty; real details copy stringified', async () => {
     const { trx, state } = stubTrx({
       winnerRow: { id: 'p1', customer_id: 'W', special_features: [], pets_structured: {}, watering_days: null, created_at: 'x', updated_at: 'x' },
@@ -1038,6 +1052,23 @@ describe('executeMerge', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
     expect(result.repointed['customer_tags.customer_id']).toMatch(/moved 1, dropped 1/);
     expect(state.tagsDropped).toBe(1);
+  });
+
+  it('retains immutable field credit ownership while merging ordinary account references', async () => {
+    const { trx, state } = buildTrx({
+      winner: { id: WINNER, phone: '+19995550003' }, loser: { id: LOSER, phone: '9995550003' },
+      fkRows: [
+        { table_name: 'field_credit_allocations', column_name: 'customer_id' },
+        { table_name: 'leads', column_name: 'customer_id' },
+      ],
+      updates: { field_credit_allocations: 1 },
+    });
+    db.transaction.mockImplementation(async fn => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.repointUpdates).not.toContain('field_credit_allocations');
+    expect(result.repointed['field_credit_allocations.customer_id']).toBeUndefined();
+    expect(state.repointUpdates).toContain('leads');
+    expect(state.retired).toBeTruthy();
   });
 
   it('repoints customer-typed polymorphic recipients (notifications, email_messages)', async () => {

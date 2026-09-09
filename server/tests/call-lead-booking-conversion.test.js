@@ -46,6 +46,7 @@ function makeInner({
       whereNull: jest.fn(() => b),
       orWhere: jest.fn(() => b),
       whereNotIn: jest.fn(() => b),
+      forNoKeyUpdate: jest.fn(() => b),
       first: jest.fn(async () => {
         if (failOn === 'first') throw new Error('boom');
         if (table === 'leads') return convertible;
@@ -87,6 +88,24 @@ const ARGS = {
 beforeEach(() => jest.clearAllMocks());
 
 describe('convertCallLeadOnPhoneBooking', () => {
+  test('an assessment booking row: claims the lead, keeps it open, never promotes the customer (an assessment is not a win)', async () => {
+    const inner = makeInner({ convertible: { id: 'lead-1', status: 'new' } });
+    const trx = makeTrx(inner);
+
+    const converted = await convertCallLeadOnPhoneBooking(trx, { ...ARGS, booking: { id: 'svc-1', service_type: 'Waves Assessment', service_id: null } });
+
+    expect(converted).toBe(false);
+    const leadUpdate = inner._writes.updates.find((w) => w.table === 'leads');
+    expect(leadUpdate.payload).toMatchObject({ customer_id: 'cust-1' });
+    expect(leadUpdate.payload).not.toHaveProperty('status');
+    expect(leadUpdate.payload).not.toHaveProperty('converted_at');
+    expect(inner._writes.updates.find((w) => w.table === 'customers')).toBeUndefined();
+    const activity = inner._writes.inserts.find((w) => w.table === 'lead_activities');
+    expect(activity.payload).toMatchObject({ activity_type: 'appointment_booked' });
+    expect(JSON.parse(activity.payload.metadata)).toMatchObject({ triggerSource: 'appointment_booked_assessment' });
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('kept open (assessment booked)'));
+  });
+
   test('converts an open lead: won + converted_at + is_qualified + activity row, in the nested txn', async () => {
     const inner = makeInner();
     const trx = makeTrx(inner);
@@ -95,6 +114,8 @@ describe('convertCallLeadOnPhoneBooking', () => {
 
     expect(converted).toBe(true);
     expect(trx.transaction).toHaveBeenCalledTimes(1); // savepoint, not the outer txn raw
+    expect(inner._chains[0]._table).toBe('customers');
+    expect(inner._chains[0].forNoKeyUpdate).toHaveBeenCalled();
     const update = inner._writes.updates.find((w) => w.table === 'leads');
     expect(update.payload).toMatchObject({
       status: 'won',
@@ -135,7 +156,7 @@ describe('convertCallLeadOnPhoneBooking', () => {
     expect(inner._writes.updates).toHaveLength(0);
     expect(inner._writes.inserts).toHaveLength(0);
     // The open-status filter is the idempotency/duplicate guard.
-    const b = inner.mock.results[0].value;
+    const b = inner._chains.find(chain => chain._table === 'leads');
     expect(b.whereNotIn).toHaveBeenCalledWith('status', ['won', 'duplicate']);
   });
 
