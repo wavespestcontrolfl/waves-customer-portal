@@ -262,7 +262,12 @@ const SMS_LOG_PAGE_SIZE = 500;
 // ── V2 helpers ────────────────────────────────────────────────
 
 function smsThreadKey(phone) {
-  return String(phone || "").replace(/\D/g, "").slice(-10) || "unknown";
+  const value = String(phone || "").trim();
+  const digits = value.replace(/\D/g, "");
+  if (!digits) return "unknown";
+  return /^1\d{10}$/.test(digits) || (!value.startsWith("+") && digits.length === 10)
+    ? digits.slice(-10)
+    : `+${digits}`;
 }
 
 // Canonical presence check for tracked customer bearer links: operators edit
@@ -865,22 +870,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // keyed like threads (last 10 digits); any other country code keeps its
   // full digits so a foreign block can never hide a NANP thread sharing
   // its suffix (the server enforces the same split).
-  const [blocked, setBlocked] = useState(() => ({ nanp: new Set(), full: new Set() }));
+  const [blocked, setBlocked] = useState(() => new Set());
   const blockedFromNumbers = (numbers) => {
-    const next = { nanp: new Set(), full: new Set() };
-    numbers.forEach((n) => {
-      const digits = String(n || "").replace(/\D/g, "");
-      if (!digits) return;
-      if (/^1\d{10}$/.test(digits) || digits.length === 10) next.nanp.add(digits.slice(-10));
-      else next.full.add(digits);
-    });
-    return next;
-  };
-  const isBlockedContact = (phone) => {
-    const digits = String(phone || "").replace(/\D/g, "");
-    if (!digits) return false;
-    if (/^1\d{10}$/.test(digits) || digits.length === 10) return blocked.nanp.has(digits.slice(-10));
-    return blocked.full.has(digits);
+    return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
   };
   // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState("all");
@@ -2141,8 +2133,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     threadList.sort(
       (a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp),
     );
-    return blocked.nanp.size || blocked.full.size
-      ? threadList.filter((t) => !isBlockedContact(t.contactPhone))
+    return blocked.size
+      ? threadList.filter((t) => !blocked.has(smsThreadKey(t.contactPhone)))
       : threadList;
   }, [messages, blocked]);
 
@@ -2252,7 +2244,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       await markMessagesRead(thread);
       setBlocked((prev) => {
         const add = blockedFromNumbers([number]);
-        return { nanp: new Set([...prev.nanp, ...add.nanp]), full: new Set([...prev.full, ...add.full]) };
+        return new Set([...prev, ...add]);
       });
       setSmsView("threads");
       setActiveThread(null);

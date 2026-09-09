@@ -460,7 +460,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
       -- swallow an unanswered HQ thread from the same phone.
       SELECT DISTINCT ON (peer, endpoint) peer, endpoint, message_body, metadata, created_at
       FROM (
-        SELECT message_body, metadata, created_at,
+        SELECT message_body, metadata, created_at, from_phone,
                RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer,
                REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g') AS peer_full,
                RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) AS endpoint
@@ -485,6 +485,8 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         AND NOT EXISTS (
           SELECT 1 FROM blocked_numbers b
           WHERE (REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g') ~ '^1[0-9]{10}$'
+                 AND inbound.peer_full ~ '^1{0,1}[0-9]{10}$'
+                 AND (inbound.from_phone NOT LIKE '+%' OR inbound.from_phone LIKE '+1%')
                  AND RIGHT(REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g'), 10) = inbound.peer)
              OR REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g') = inbound.peer_full
         )

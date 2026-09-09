@@ -84,6 +84,17 @@ postgres('unread SMS inbox count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms()).toEqual({ conversations: 2, messages: 2 });
   });
 
+  test.each([
+    ['+12079460958', '+442079460958'],
+    ['+442079460958', '+12079460958'],
+  ])('blocking %s preserves the unrelated %s sender', async (blocked, ordinary) => {
+    await seed({ phone: blocked });
+    await seed({ phone: ordinary });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 2, messages: 2 });
+    await mockPg('blocked_numbers').insert({ id: randomUUID(), number: blocked });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+  });
+
   test('one remaining unread conversation keeps the shared phone thread counted', async () => {
     const first = await seed();
     const second = await seed({ ours: '+19415550191' });

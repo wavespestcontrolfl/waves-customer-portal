@@ -3055,7 +3055,8 @@ router.post('/blocked-numbers', async (req, res, next) => {
     const openLead = await db('leads')
       .whereIn('status', OPEN_LEAD_STATUSES)
       .whereNull('converted_at')
-      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [number.replace(/\D/g, '').slice(-10)])
+      .whereNull('deleted_at')
+      .whereIn(db.raw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')"), phoneMatchDigits(number))
       .first('id', 'first_name', 'last_name');
     if (openLead) {
       return res.status(409).json({
