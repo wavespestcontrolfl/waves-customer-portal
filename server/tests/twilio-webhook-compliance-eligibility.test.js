@@ -2,16 +2,14 @@
 // A first-contact stranger's body is never scanned for opt-out phrasing, so a
 // robotext's own "reply NO to stop texting" footer cannot earn an
 // unsubscribe reply from a Waves line (audit 2026-09-09).
-const chain = { result: null, fail: false };
+const state = { results: [], fail: false, tables: [] };
 jest.mock('../models/db', () => {
   const q = {
-    where: jest.fn(() => q),
-    whereRaw: jest.fn(() => q),
-    whereNot: jest.fn(() => q),
-    orWhereNull: jest.fn(() => q),
-    first: jest.fn(async () => { if (chain.fail) throw new Error('db down'); return chain.result; }),
+    where: jest.fn(() => q), whereIn: jest.fn(() => q), whereRaw: jest.fn(() => q),
+    whereNot: jest.fn(() => q), orWhereNull: jest.fn(() => q), join: jest.fn(() => q),
+    first: jest.fn(async () => { if (state.fail) throw new Error('db down'); return state.results.shift() ?? null; }),
   };
-  return jest.fn(() => q);
+  return jest.fn((table) => { state.tables.push(table); return q; });
 });
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -26,25 +24,39 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https:
 const { hasOutboundHistory } = require('../routes/twilio-webhook')._internals;
 
 describe('hasOutboundHistory — who may receive a STOP/HELP/START reply', () => {
-  beforeEach(() => { chain.result = null; chain.fail = false; });
+  beforeEach(() => { state.results = []; state.fail = false; state.tables = []; });
 
-  test('a number Waves never texted is not eligible', async () => {
+  test('a number Waves never texted, never bounced, never suppressed is not eligible', async () => {
     expect(await hasOutboundHistory('+18139342698')).toBe(false);
+    expect(state.tables).toEqual(['sms_log', 'messages', 'messaging_suppression']);
   });
 
-  test('a number with any customer-facing outbound row is eligible', async () => {
-    chain.result = { id: 'sms-1' };
+  test('a provider-accepted outbound row is enough', async () => {
+    state.results = [{ id: 'sms-1' }];
+    expect(await hasOutboundHistory('+19415551234')).toBe(true);
+    expect(state.tables).toEqual(['sms_log']);
+  });
+
+  test('a unified outbound message counts when the legacy log write was lost', async () => {
+    state.results = [null, { id: 'msg-1' }];
+    expect(await hasOutboundHistory('+19415551234')).toBe(true);
+    expect(state.tables).toEqual(['sms_log', 'messages']);
+  });
+
+  test('an active suppression row counts so START can clear it', async () => {
+    state.results = [null, null, { id: 'sup-1' }];
     expect(await hasOutboundHistory('+19415551234')).toBe(true);
   });
 
   test('an unusable number is never eligible', async () => {
-    chain.result = { id: 'sms-1' };
+    state.results = [{ id: 'sms-1' }];
     expect(await hasOutboundHistory('')).toBe(false);
     expect(await hasOutboundHistory('12345')).toBe(false);
+    expect(state.tables).toEqual([]);
   });
 
   test('fails OPEN on a query error so a real STOP is still honored', async () => {
-    chain.fail = true;
+    state.fail = true;
     expect(await hasOutboundHistory('+19415551234')).toBe(true);
   });
 });

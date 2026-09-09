@@ -52,19 +52,41 @@ function maskPhone(phone) {
   return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
 }
 
-// Has any Waves line ever texted this number? Internal alerts are not
-// customer-facing sends and do not count. Last-10-digit match: outbound rows
-// are E.164 but older manual sends may carry local formatting.
+// Has any Waves line ever texted this number? Evidence, any of:
+//   - a customer-facing sms_log outbound row the provider ACCEPTED
+//     (queued/sent/delivered — a 'scheduled' or 'blocked' row never reached
+//     them, codex #4211 P2); internal alerts are not customer-facing;
+//   - a unified outbound messages row on a conversation with this contact
+//     (a Twilio-accepted send whose legacy log write was lost, codex P1);
+//   - an ACTIVE suppression row: a recipient the provider bounced with
+//     21610 or a pre-portal opt-out has nothing in sms_log, yet their START
+//     must clear that row (codex P0).
+// Last-10-digit match: outbound rows are E.164 but older manual sends may
+// carry local formatting. Fails OPEN to eligible on any query error so a
+// real STOP is always honored.
 async function hasOutboundHistory(phone) {
   const digits = String(phone || '').replace(/\D/g, '').slice(-10);
   if (digits.length !== 10) return false;
+  const last10 = (col) => `right(regexp_replace(coalesce(${col}, ''), '\\D', '', 'g'), 10) = ?`;
   try {
-    const row = await db('sms_log')
+    const sent = await db('sms_log')
       .where({ direction: 'outbound' })
-      .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+      .whereIn('status', ['queued', 'sent', 'delivered'])
+      .whereRaw(last10('to_phone'), [digits])
       .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
       .first('id');
-    return Boolean(row);
+    if (sent) return true;
+    const unified = await db('messages')
+      .join('conversations', 'conversations.id', 'messages.conversation_id')
+      .where({ 'messages.channel': 'sms', 'messages.direction': 'outbound' })
+      .whereRaw(last10('conversations.contact_phone'), [digits])
+      .first('messages.id');
+    if (unified) return true;
+    const suppressed = await db('messaging_suppression')
+      .where({ active: true })
+      .whereRaw(last10('phone'), [digits])
+      .first('id');
+    return Boolean(suppressed);
   } catch (err) {
     logger.warn(`[sms-compliance] outbound-history check failed (treating sender as eligible): ${err.message}`);
     return true;
@@ -374,8 +396,9 @@ router.post('/sms', async (req, res) => {
     // "Reply NO if you need me to stop texting" earned a "You've been
     // unsubscribed" text back from a Waves line and a suppression row for
     // the vendor's number (audit 2026-09-09). Fails OPEN to eligible on a
-    // query error so a real STOP is always honored.
-    const complianceEligible = Boolean(customer) || await hasOutboundHistory(From);
+    // query error so a real STOP is always honored. The AI assistant line
+    // texts strangers by design, so every sender on it stays eligible.
+    const complianceEligible = Boolean(customer) || isAiNumber || await hasOutboundHistory(From);
     const optCommand = complianceEligible ? detectSmsOptCommand(Body) : { action: null };
 
     if (optCommand.action === 'opt_out') {
