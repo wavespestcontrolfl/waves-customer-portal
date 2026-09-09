@@ -282,6 +282,7 @@ describe('_private.threadQuoteSignal', () => {
     expect(_private.isSolicitationPitch('Is there a free trial of the mosquito program?')).toBe(false);
     expect(_private.isSolicitationPitch('I have more jobs and need extra estimates for pest control.')).toBe(false);
     expect(_private.isSolicitationPitch('I manage more customers who need pest control estimates.')).toBe(false);
+    expect(_private.isSolicitationPitch('Can you handle more lawn jobs or handle extra pest estimates?')).toBe(false);
   });
 
   test.each([
@@ -305,6 +306,9 @@ describe('_private.threadQuoteSignal', () => {
       'Could you provide extra estimates for pest control at my other properties?',
       'I need pest control for more jobs at my rentals. Can you quote them?',
       'I have extra lawn jobs at my rentals. How much would you charge?',
+      'Can I get a quote for termite service? I can connect you with the property manager for access.',
+      'Pest control service is being requested by our tenant. Can you send an estimate?',
+      'I need more estimates for pest control at my other rentals. Would you like more details?',
     ];
     for (const body of asks) {
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });

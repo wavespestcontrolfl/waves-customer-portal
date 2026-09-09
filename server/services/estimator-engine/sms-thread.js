@@ -100,11 +100,14 @@ const SOLICITATION_MARKERS = [
   { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
   { key: 'grow_business', strong: true, re: /\b(?:grow|scale|book(?:ing)?\s+more|fill)\s+(?:your\s+)?(?:business|schedule|calendar)\b/i },
   { key: 'vendor_tool', strong: true, re: /\bai\s+receptionist\b|\breview\s+system\b/i },
-  { key: 'connects_you', strong: true, re: /\bconnect(?:s|ing)?\s+(?:you|local\s+homeowners)\s+with\b/i },
-  { key: 'service_requested_by', strong: true, re: /\bservice\s+is\s+being\s+requested\s+by\b/i },
-  // Property managers also ask for more estimates/jobs for other rentals.
-  // Without explicit lead-gen wording, this needs a second weak category.
-  { key: 'additional_work', strong: false, re: /\b(?:more|extra)\s+(?:\w+\s+){0,3}(?:jobs?|customers?|estimates?)\b/i },
+  // Matching homeowners to contractors is lead generation; connecting us
+  // with a property manager for access is ordinary quote coordination.
+  { key: 'connects_you', strong: true, re: /\bconnect(?:s|ing)?\s+(?:you\s+with\s+(?:local\s+)?homeowners?\s+(?:requesting|seeking)\s+(?:quotes?|estimates?)|local\s+homeowners\s+with\s+(?:local\s+)?(?:contractors?|professionals?))\b/i },
+  // A tenant's service request is not a pitch without recruitment copy.
+  { key: 'service_requested_by', strong: true, re: /\bservice\s+is\s+being\s+requested\s+by\b[\s\S]{0,160}\b(?:apply\s+(?:here|now|today)|\d+\s*min(?:ute)?s?\s+to\s+apply)\b/i },
+  // Capacity outreach needs a second weak category. A customer's request
+  // for more estimates is not itself a marker, even with a detail question.
+  { key: 'additional_work', strong: false, re: /\b(?:handle|open\s+to)\s+(?:\d+(?:\s*[-–]\s*\d+)?\s+)?(?:more|extra)\s+(?:\w+\s+){0,3}(?:jobs?|customers?|estimates?)\b/i },
   // "$" is not a word character, so the boundary sits inside the
   // alternation rather than in front of it (codex r2).
   { key: 'no_upfront', strong: false, re: /(?:\bno|\bzero|\$0)\s+(?:upfront|up-front|set-?up|monthly)\s+(?:cost|costs|fee|fees)?|\bfree\s+(?:setup|set-up|trial)\b/i },
