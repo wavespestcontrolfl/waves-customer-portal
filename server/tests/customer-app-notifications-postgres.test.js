@@ -192,14 +192,14 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('notification_prefs').where({ customer_id: outsider }).first()).toBeUndefined();
   });
 
-  test('a provenance-only merge retains the existing consent timestamp', async () => {
+  test.each(['email', 'push'])('a request-only merge to %s retains the existing consent timestamp', async (channel) => {
     const capturedAt = new Date('2025-01-02T12:00:00Z');
     await mockPg('notification_prefs').where({ customer_id: owner }).update({ updated_at: capturedAt });
-    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel_explicit: true });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel: channel, request_channel_explicit: true });
     const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
     await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
     expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
-      request_channel: 'email', request_channel_explicit: true, updated_at: capturedAt,
+      request_channel: channel, request_channel_explicit: true, updated_at: capturedAt,
     });
   });
 
@@ -218,33 +218,6 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       platform, device_token: `qa-${randomUUID()}`, subscription_data: '{}', active: true, ...extra }).returning('*');
     return row;
   }
-
-  test('request choices record provenance only on the selected profile, not a default round trip', async () => {
-    await put({ requestChannel: 'email', weatherAlerts: false });
-    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
-      .toMatchObject({ request_channel: 'email', request_channel_explicit: false });
-    await device();
-    expect((await put({ requestChannel: 'push' })).status).toBe(200);
-    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
-      .toMatchObject({ request_channel: 'push', request_channel_explicit: true });
-    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first())
-      .toMatchObject({ request_channel: 'email', request_channel_explicit: false });
-    expect((await put({ requestChannel: 'email' })).status).toBe(200);
-    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
-      .toMatchObject({ request_channel: 'email', request_channel_explicit: true });
-    await put({ weatherAlerts: true });
-    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).request_channel_explicit).toBe(true);
-  });
-
-  test('legacy and gate-off saves preserve unknown request provenance with the App choice', async () => {
-    await mockPg('notification_prefs').where({ customer_id: property })
-      .update({ request_channel: 'push', request_channel_explicit: null });
-    expect((await http('PUT', '/api/notifications/preferences', { requestChannel: 'email' })).status).toBe(200);
-    delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
-    expect((await put({ requestChannel: 'email' })).status).toBe(200);
-    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
-      .toMatchObject({ request_channel: 'push', request_channel_explicit: null });
-  });
 
   test('readiness authenticates and returns no device identifiers', async () => {
     expect((await http('GET', '/api/push/status', null, false)).status).toBe(401);
@@ -671,5 +644,32 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     });
     expect(checks).toBe(2);
     expect(result.sent).toBe(2);
+  });
+
+  test('request choices record provenance only on the selected profile, not a default round trip', async () => {
+    await put({ requestChannel: 'email', weatherAlerts: false });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: false });
+    await device();
+    expect((await put({ requestChannel: 'push' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'push', request_channel_explicit: true });
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: false });
+    expect((await put({ requestChannel: 'email' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: true });
+    await put({ weatherAlerts: true });
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).request_channel_explicit).toBe(true);
+  });
+
+  test('legacy and gate-off saves preserve unknown request provenance with the App choice', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property })
+      .update({ request_channel: 'push', request_channel_explicit: null });
+    expect((await http('PUT', '/api/notifications/preferences', { requestChannel: 'email' })).status).toBe(200);
+    delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+    expect((await put({ requestChannel: 'email' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'push', request_channel_explicit: null });
   });
 });

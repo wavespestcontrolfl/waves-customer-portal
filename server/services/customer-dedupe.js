@@ -551,10 +551,10 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     if (winnerRow.request_channel_explicit !== explicit) updates.request_channel_explicit = explicit;
   }
   if (Object.keys(updates).length) {
-    const provenanceOnly = table === 'notification_prefs'
-      && Object.keys(updates).every((col) => col === 'request_channel_explicit');
+    const requestOnly = table === 'notification_prefs'
+      && Object.keys(updates).every((col) => ['request_channel', 'request_channel_explicit'].includes(col));
     await trx(table).where(column, winnerId).update({ ...updates,
-      ...(!provenanceOnly ? { updated_at: trx.fn.now() } : {}) });
+      ...(!requestOnly ? { updated_at: trx.fn.now() } : {}) });
   }
   await trx(table).where(column, loserId).del();
   return `merged ${Object.keys(updates).length} fields into winner row, dropped loser row`;
