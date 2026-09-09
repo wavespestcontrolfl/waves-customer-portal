@@ -4019,7 +4019,7 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
-const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel'];
+const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel'];
 const APP_OPTION = { value: 'push', label: 'App' };
 const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
 const APPOINTMENT_CHANNEL_KEYS = [
@@ -4112,7 +4112,7 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         </button>
       </div>
       <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
+        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
       </p>
       <details style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Email copies and other messages</summary>
@@ -5506,6 +5506,8 @@ function BillingTab({ customer, refreshCustomer }) {
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
+  const [invoiceChannel, setInvoiceChannel] = useState('sms');
+  const [savedInvoiceChannel, setSavedInvoiceChannel] = useState('sms');
   const [appPreferencesAvailable, setAppPreferencesAvailable] = useState(false);
   const billingApp = useAppNotifications(appPreferencesAvailable, customer?.id);
   // Receipt texts have no on/off switch (owner 08-28), but a customer who
@@ -5633,6 +5635,8 @@ function BillingTab({ customer, refreshCustomer }) {
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
+          setInvoiceChannel(prefsData.invoiceChannel || 'sms');
+          setSavedInvoiceChannel(prefsData.invoiceChannel || 'sms');
           setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
           setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
@@ -6291,9 +6295,11 @@ function BillingTab({ customer, refreshCustomer }) {
       // SMS-suppressing 'email' choice can't linger with no deliverable
       // email leg.
       billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
+      ...(appPreferencesAvailable && invoiceChannel !== savedInvoiceChannel ? { invoiceChannel } : {}),
       paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
       .then(() => {
+        setSavedInvoiceChannel(invoiceChannel);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was
@@ -7044,6 +7050,28 @@ function BillingTab({ customer, refreshCustomer }) {
             <div style={{ marginTop: 5, color: muted, fontSize: 14 }}>Invoices and receipts go here instead of your account email. Clear it and save to use your account email.</div>
           </div>
         )}
+
+        {appPreferencesAvailable && <div data-invoice-channel-row="" style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap',
+          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
+        }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Invoices</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>New invoices and payment reminders. App opens the invoice, with an allowed text backup. Email copies continue.</div>
+          </div>
+          <div style={{ display: 'flex', flex: compact ? '1 0 100%' : '0 0 auto', justifyContent: 'flex-end' }}>
+          <select
+            aria-label="Delivery method for invoices"
+            value={invoiceChannel}
+            onChange={(e) => setInvoiceChannel(e.target.value)}
+            style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, border: '1px solid #D8D0C0',
+              borderRadius: 8, padding: '7px 10px', minHeight: 44, background: '#fff', fontFamily: 'inherit' }}
+          >
+            <option value="sms">Text</option>
+            <option value="push" disabled={!billingApp.ready}>App</option>
+          </select>
+          </div>
+        </div>}
 
         <div data-billing-reminder-row="" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
