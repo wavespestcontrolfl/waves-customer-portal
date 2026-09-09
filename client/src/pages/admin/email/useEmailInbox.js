@@ -33,6 +33,7 @@ export default function useEmailInbox(active, clearDraftResult) {
   const [selectedEmail, setSelectedEmail] = useState(null);
   const [thread, setThread] = useState([]);
   const selectedIdRef = useRef(null);
+  const messageSequenceRef = useRef(0);
   const threadSequenceRef = useRef(0);
   const [threadState, setThreadState] = useState({ loading: false, error: false });
   const [messageState, setMessageState] = useState({ loading: false, error: false });
@@ -67,11 +68,14 @@ export default function useEmailInbox(active, clearDraftResult) {
     if (location.pathname.replace(/\/+$/, "") !== "/admin/communications")
       return;
     const next = new URLSearchParams(location.search);
+    const entry = window.history.state;
+    // Keep the original inbox entry across message selection and reloads.
+    const inboxIndex = next.get("id") ? entry?.usr?.emailInboxIndex : entry?.idx;
     if (id) next.set("id", id);
     else next.delete("id");
     navigate(
       { pathname: location.pathname, search: `?${next}`, hash: location.hash },
-      { replace },
+      { replace, state: { emailInboxIndex: id ? inboxIndex : null } },
     );
   };
 
@@ -174,6 +178,7 @@ export default function useEmailInbox(active, clearDraftResult) {
     }
     if (!id) { setMessageState({ loading: false, error: false }); return; }
     let cancelled = false;
+    const request = ++messageSequenceRef.current;
     setMessageState({ loading: true, error: false });
     (async () => {
       try {
@@ -184,9 +189,9 @@ export default function useEmailInbox(active, clearDraftResult) {
         // the read state so it does not toggle it back (codex P2).
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const email = await r.json();
-        if (!cancelled) await openEmail({ ...email, is_read: true });
+        if (!cancelled && request === messageSequenceRef.current) await openEmail({ ...email, is_read: true });
       } catch {
-        if (!cancelled) setMessageState({ loading: false, error: true });
+        if (!cancelled && request === messageSequenceRef.current) setMessageState({ loading: false, error: true });
       }
     })();
     return () => {
@@ -217,6 +222,7 @@ export default function useEmailInbox(active, clearDraftResult) {
   };
 
   const openEmail = async (email) => {
+    messageSequenceRef.current += 1;
     setMessageState({ loading: false, error: false });
     selectedIdRef.current = email.id;
     setSelectedEmail(email);
@@ -233,19 +239,25 @@ export default function useEmailInbox(active, clearDraftResult) {
         patchEmail(email.id, { is_read: true });
         loadStats();
       } catch {
-        setActionFeedback({ error: true, message: "The email could not be marked as read." });
+        if (isSelected(email.id)) setActionFeedback({ error: true, message: "The email could not be marked as read." });
       }
     }
     await loadThread(email);
   };
 
-  const closeEmail = (emailId) => {
+  const closeEmail = (emailId, returnToInbox = false) => {
+    messageSequenceRef.current += 1;
     setMessageState({ loading: false, error: false });
+    const selectedInUrl = new URLSearchParams(window.location.search).get("id") === emailId;
+    const entry = window.history.state, inboxIndex = entry?.usr?.emailInboxIndex;
+    if (returnToInbox && selectedInUrl && Number.isInteger(inboxIndex) && Number.isInteger(entry?.idx) && inboxIndex < entry.idx) {
+      navigate(inboxIndex - entry.idx);
+      return;
+    }
     selectedIdRef.current = null;
     setSelectedEmail(null);
     setThread([]);
-    if (new URLSearchParams(window.location.search).get("id") === emailId)
-      selectMessageId(null, true);
+    if (selectedInUrl) selectMessageId(null, true);
   };
 
   const handleStar = async (event, email) => {
@@ -319,9 +331,10 @@ export default function useEmailInbox(active, clearDraftResult) {
         }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
       setBlockInput("");
       loadBlocked();
-      setActionFeedback({ message: "Sender blocked." });
+      setActionFeedback({ error: Boolean(data.warning), message: data.warning || "Sender blocked." });
     } catch {
       setActionFeedback({ error: true, message: "Could not block the sender. Try again." });
     } finally { finishAction(); }

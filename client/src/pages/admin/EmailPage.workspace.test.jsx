@@ -52,8 +52,8 @@ beforeEach(() => {
 afterEach(() => { cleanup(); clearEmailDrafts(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("Email workspace feedback and request ownership", () => {
-  it("distinguishes unavailable connection status from a disconnected Gmail account and retries", async () => {
-    overrides.set("/api/admin/email/oauth/status", () => response({ error: "Fixture unavailable" }, 503));
+  it.each([200, 503])("distinguishes unavailable connection status from a disconnected Gmail account and retries (%s)", async (status) => {
+    overrides.set("/api/admin/email/oauth/status", () => response({ connected: false, error: "Fixture unavailable" }, status));
     mount();
     await screen.findByText("Email connection status is unavailable.");
     expect(screen.queryByRole("button", { name: /Connect Gmail/ })).not.toBeInTheDocument();
