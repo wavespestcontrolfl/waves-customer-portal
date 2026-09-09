@@ -6,8 +6,8 @@
 //   - DELETE /admin/customers/:id
 //   - GET  /admin/customers/pipeline/view
 // Scope: Directory view + header chrome + QuickAddModal redesigned.
-// Pipeline / Map / Health / AI Advisor render V1 panels via named exports
-// from CustomersPage.jsx (PR #4b/#4c/#4d will reskin those in later passes).
+// Map and outreach reuse named exports from CustomersPage.jsx.
+// Recorded health and retention segments compose with Directory filters.
 //
 // Daily driver: Virginia (CSR) + the owner. ~700 active customers + ~70
 // new leads, paginated 100 per page. Search + stage + tier + city
@@ -31,24 +31,23 @@
 // - Quick-add (POST /admin/customers) — phone duplicate check returns
 //   409. Confirm the modal surfaces the conflict cleanly with a
 //   "merge with existing?" path or a clear error.
-// - V1/V2 panel reuse: CustomerHealthSection (V1 export) renders
-//   inside V2. Watch for V1 styling leaking through — should be
-//   reskinned eventually but for now stylistic drift is the risk.
 import { useState, useEffect, useRef, useId } from "react";
 import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   Filter,
-  HeartPulse,
   MapPinned,
   MessageSquare,
   Phone,
+  Search,
   Sparkles,
   Trash2,
   UserPlus,
   Users,
 } from "lucide-react";
 import Customer360Profile from "../../components/admin/Customer360ProfileV2";
+import Customer360Workspace from "../../components/admin/Customer360Workspace";
+import CustomerDirectoryTable from "../../components/admin/CustomerDirectoryTable";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
@@ -59,7 +58,8 @@ import {
   PROPERTY_LABEL_OPTIONS,
   normalizeCustomerTag,
 } from "../../lib/customerFormOptions";
-import { CustomerHealthSection } from "./CustomerHealthTabs";
+import CustomerHealthGrade from "../../components/admin/CustomerHealthGrade";
+import CustomerHealthFilters from "../../components/admin/CustomerHealthFilters";
 import {
   Button,
   Badge,
@@ -70,6 +70,7 @@ import {
   DialogTitle,
   DialogBody,
   DialogFooter,
+  Input,
   cn,
 } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
@@ -147,13 +148,6 @@ function TierBadgeV2({ tier }) {
   return <Badge tone="neutral">{tier}</Badge>;
 }
 
-function StageBadgeV2({ stage }) {
-  const s = STAGE_MAP[stage];
-  if (!s) return null;
-  const isAlert = stage === "at_risk" || stage === "churned";
-  return <Badge tone={isAlert ? "alert" : "neutral"}>{s.label}</Badge>;
-}
-
 function formatCustomerAddress(address) {
   if (!address) return "";
   if (typeof address === "string")
@@ -170,68 +164,6 @@ function formatCustomerAddress(address) {
   return "";
 }
 
-// Health-score dot. Single color for valid score, alert red only for
-// critical (<40). Amber is collapsed to neutral per the alert-reservation
-// rule — the numeric score still communicates severity.
-// Small ring+number — visually matches Customer 360 HealthCircle, scaled
-// down for row density. Color tier: ≥70 green, 40–69 amber, <40 red.
-function HealthDot({ score }) {
-  if (score == null) {
-    return (
-      <span
-        className="inline-block w-6 h-6 rounded-full border-hairline border-zinc-200"
-        title="No score"
-      />
-    );
-  }
-  const stroke = score >= 70 ? "#10B981" : score >= 40 ? "#F59E0B" : "#C8312F";
-  const r = 10,
-    circ = 2 * Math.PI * r,
-    offset = circ - (score / 100) * circ;
-  return (
-    <svg
-      width={26}
-      height={26}
-      viewBox="0 0 26 26"
-      className="flex-shrink-0"
-      aria-label={`Health: ${score}`}
-    >
-      {" "}
-      <circle
-        cx={13}
-        cy={13}
-        r={r}
-        fill="none"
-        stroke="#E4E4E7"
-        strokeWidth={2}
-      />{" "}
-      <circle
-        cx={13}
-        cy={13}
-        r={r}
-        fill="none"
-        stroke={stroke}
-        strokeWidth={2}
-        strokeDasharray={circ}
-        strokeDashoffset={offset}
-        strokeLinecap="round"
-        transform="rotate(-90 13 13)"
-      />{" "}
-      <text
-        x={13}
-        y={16}
-        textAnchor="middle"
-        fill={stroke}
-        fontSize={9}
-        fontWeight={500}
-        fontFamily="ui-monospace, monospace"
-      >
-        {score}
-      </text>{" "}
-    </svg>
-  );
-}
-
 function getAdminRole() {
   try {
     return (
@@ -243,9 +175,7 @@ function getAdminRole() {
 }
 
 // --- Pipeline card (V2) ---
-// Monochrome card. alert-fg reserved for the delete-confirm state only —
-// the stage's own "urgency" color is collapsed to neutral chrome; the column
-// header handles the at-risk signal via StageBadgeV2.
+// Monochrome card. alert-fg is reserved for the delete-confirm state.
 function PipelineCardV2({ customer, onDelete, canDelete = false }) {
   const [confirming, setConfirming] = useState(false);
   const daysInStage = customer.stageEnteredAt
@@ -328,7 +258,7 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
       )}
       <div className="flex items-center gap-2 flex-wrap">
         {" "}
-        <HealthDot score={customer.leadScore} />
+        <CustomerHealthGrade score={customer.leadScore} label="Lead score" />
         {tier && <TierBadgeV2 tier={tier} />}
         {customer.monthlyRate > 0 && (
           <span className="font-mono u-nums text-12 text-ink-primary">
@@ -952,8 +882,7 @@ function SortHeaderV2({
 const VIEWS = [
   { key: "directory", label: "Directory", Icon: Users },
   { key: "map", label: "Map", Icon: MapPinned },
-  { key: "health", label: "Health", Icon: HeartPulse },
-  { key: "intelligence", label: "Retention & Upsells", Icon: Sparkles },
+  { key: "intelligence", label: "Outreach & Upsells", Icon: Sparkles },
 ];
 
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
@@ -986,8 +915,9 @@ function FilterPill({ active, onClick, alert = false, children }) {
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
-        "u-label px-3 h-9 rounded-full border-hairline whitespace-nowrap transition-colors",
+        "text-14 px-3 h-11 rounded-full border-hairline whitespace-nowrap transition-colors",
         active
           ? alert
             ? "bg-alert-bg text-alert-fg border-alert-fg"
@@ -998,25 +928,6 @@ function FilterPill({ active, onClick, alert = false, children }) {
       {children}
     </button>
   );
-}
-
-// Service-type initials (tone-collapsed to neutral zinc)
-function serviceInitials(c) {
-  const t = (c.serviceTypes || c.service_types || "").toLowerCase();
-  const out = [];
-  if (t.includes("pest")) out.push("P");
-  if (t.includes("lawn")) out.push("L");
-  if (t.includes("mosquito")) out.push("M");
-  if (t.includes("termite")) out.push("T");
-  return out;
-}
-
-function detectTier(c) {
-  if (c.tier && c.tier !== "Bronze") return c.tier;
-  if (c.monthlyRate > 200) return "Platinum";
-  if (c.monthlyRate > 100) return "Gold";
-  if (c.monthlyRate > 50) return "Silver";
-  return c.tier || "Bronze";
 }
 
 function pipelineCustomersFrom(data) {
@@ -1054,9 +965,22 @@ const CUSTOMER_VIEW_KEYS = new Set([
   "directory",
   "pipeline",
   "map",
-  "health",
   "intelligence",
 ]);
+
+// Same call action as the existing directory. Its confirmation, endpoint,
+// and request body remain unchanged when the action moves into the menu.
+async function callCustomer(customer) {
+  if (!window.confirm(`Call ${customer.firstName || ""} ${customer.lastName || ""} at ${customer.phone}?\n\nWaves will call your phone first — press 1 to connect.`)) return;
+  try {
+    const result = await adminFetch("/admin/communications/call", {
+      method: "POST", body: JSON.stringify({ to: customer.phone }),
+    });
+    if (!result?.success) window.alert("Call failed: " + (result?.error || "unknown error"));
+  } catch (err) {
+    window.alert("Call failed: " + err.message);
+  }
+}
 
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
@@ -1074,7 +998,7 @@ export default function CustomersPageV2() {
   // Explicit ?view=… URLs win — deep-links still work.
   const [view, setView] = useState(() => {
     const raw = searchParams.get("view");
-    if (raw) return raw;
+    if (raw && raw !== "health") return raw;
     return "directory";
   });
 
@@ -1100,6 +1024,11 @@ export default function CustomersPageV2() {
   const [search, setSearch] = useState("");
   const [filterStage, setFilterStage] = useState("all");
   const [filterTier, setFilterTier] = useState("all");
+  const atRiskFromUrl = searchParams.get("healthRisk") === "at_risk";
+  const [healthFilters, setHealthFilters] = useState(() => atRiskFromUrl ? { healthRisk: "at_risk" } : {});
+  useEffect(() => {
+    setHealthFilters((current) => ({ ...current, healthRisk: atRiskFromUrl ? "at_risk" : "" }));
+  }, [atRiskFromUrl]);
   const [sortBy, setSortBy] = useState("lastName");
   const [sortDir, setSortDir] = useState("asc");
   const isNewCustomerRoute = location.pathname === "/admin/customers/new";
@@ -1116,6 +1045,11 @@ export default function CustomersPageV2() {
     const id = searchParams.get("customerId");
     return id || null;
   });
+  // Customers defaults to the workspace; ?customer360=overlay is the rollback.
+  // Profile sheets on other surfaces keep their current presentation.
+  const workspaceMode = searchParams.get("customer360") !== "overlay";
+  const workspaceOpen = workspaceMode && !!selected360Id;
+  // The customer profile publishes its own Intelligence Bar page data (overlay or workspace).
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -1130,6 +1064,7 @@ export default function CustomersPageV2() {
     setSelected360Id(nextId);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
+      next.delete("tab");
       if (nextId) next.set("customerId", nextId);
       else next.delete("customerId");
       return next;
@@ -1149,7 +1084,8 @@ export default function CustomersPageV2() {
   // Keep the page state aligned with notification/command-palette links and
   // browser back/forward navigation after the component is already mounted.
   useEffect(() => {
-    const urlView = searchParams.get("view") || "directory";
+    const rawView = searchParams.get("view");
+    const urlView = !rawView || rawView === "health" ? "directory" : rawView;
     const urlCustomerId = searchParams.get("customerId") || null;
     setView((current) => (current === urlView ? current : urlView));
     setSelected360Id((current) =>
@@ -1285,6 +1221,11 @@ export default function CustomersPageV2() {
     if (filterHasBalance) params.set("hasBalance", "true");
     if (filterLastVisited !== "all")
       params.set("lastVisited", filterLastVisited);
+    if (isAdmin) {
+      for (const [key, value] of Object.entries(healthFilters)) {
+        if (value !== "") params.set(key, value);
+      }
+    }
     params.set("sort", sortBy);
     params.set("order", sortDir);
     params.set("page", String(pg));
@@ -1356,6 +1297,7 @@ export default function CustomersPageV2() {
     filterCards,
     filterHasBalance,
     filterLastVisited,
+    healthFilters,
     sortBy,
     sortDir,
     view,
@@ -1482,546 +1424,11 @@ export default function CustomersPageV2() {
     (filterStage !== "all" ? 1 : 0) +
     (filterLastVisited !== "all" ? 1 : 0) +
     (filterCards !== "all" ? 1 : 0) +
-    (filterHasBalance ? 1 : 0);
+    (filterHasBalance ? 1 : 0) +
+    (isAdmin ? Object.values(healthFilters).filter((value) => value !== "").length : 0);
 
-  return (
-    <div>
-      {/* ======================= HEADER ======================= */}
-      <CustomersCommandHeader
-        view={view}
-        onViewChange={changeView}
-        onAddCustomer={() => openAddCustomer()}
-        canAdd={isAdmin}
-      />
-      {view === "directory" && (
-        <div className="hidden sm:flex items-center justify-between gap-3 mb-4">
-          {" "}
-          <input
-            id="customers-search-desktop"
-            name="customerSearch"
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search customers..."
-            className="bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-3 w-full max-w-md focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-          />{" "}
-          <button
-            type="button"
-            onClick={() => setShowFilters(true)}
-            className="inline-flex items-center gap-1.5 h-9 px-3 u-label border-hairline border-zinc-300 rounded-sm text-ink-secondary bg-white hover:bg-zinc-50"
-          >
-            {" "}
-            <Filter size={14} strokeWidth={1.75} />
-            Filter
-            {activeFilterCount > 0 && (
-              <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-zinc-900 text-white u-nums text-11">
-                {activeFilterCount}
-              </span>
-            )}
-          </button>{" "}
-        </div>
-      )}
-
-      {/* Context-specific mobile stack (search/filter/stage picker) */}
-      <div className="sm:hidden mb-3">
-        {view === "directory" && (
-          <>
-            {" "}
-            <input
-              id="customers-search-mobile"
-              name="customerSearchMobile"
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search customer by name, phone number"
-              className="block w-full bg-white text-16 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
-            />{" "}
-            <div className="mt-3 flex items-center gap-2">
-              {" "}
-              <button
-                type="button"
-                onClick={() => setShowFilters(true)}
-                aria-label="Filter customers"
-                className="inline-flex items-center justify-center gap-1.5 u-label px-3 h-11 bg-white text-ink-secondary border-hairline border-zinc-300 rounded-sm transition-colors u-focus-ring"
-              >
-                {" "}
-                <Filter size={14} strokeWidth={1.75} />
-                Filter
-                {activeFilterCount > 0 && (
-                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-zinc-900 text-white u-nums text-11">
-                    {activeFilterCount}
-                  </span>
-                )}
-              </button>{" "}
-            </div>{" "}
-          </>
-        )}
-        {view === "pipeline" && (
-          <>
-            {" "}
-            <h2 className="text-12 font-medium text-ink-primary mb-1.5">
-              Stage
-            </h2>{" "}
-            <div className="grid grid-cols-2 gap-1.5">
-              {KANBAN_STAGES.map((key) => {
-                const stage = STAGE_MAP[key];
-                const count = (pipelineGroups[key] || []).length;
-                const active = pipelineStageMobile === key;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => setPipelineStageMobile(key)}
-                    className={cn(
-                      "inline-flex items-center justify-between gap-2 u-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring",
-                      active
-                        ? "bg-zinc-900 text-white border-zinc-900"
-                        : "bg-white text-ink-secondary border-zinc-300",
-                    )}
-                  >
-                    {" "}
-                    <span className="truncate">{stage.label}</span>{" "}
-                    <span
-                      className={cn(
-                        "u-nums text-11 flex-shrink-0",
-                        active ? "text-white/80" : "text-ink-tertiary",
-                      )}
-                    >
-                      {count}
-                    </span>{" "}
-                  </button>
-                );
-              })}
-            </div>{" "}
-          </>
-        )}
-      </div>
-      {/* ======================= DIRECTORY ======================= */}
-      {view === "directory" && (
-        <>
-          {" "}
-          <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
-            {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
-          </div>
-          {/* Filters dialog */}
-          <Dialog
-            open={showFilters}
-            onClose={() => setShowFilters(false)}
-          >
-            {" "}
-            <DialogHeader onClose={() => setShowFilters(false)}>
-              {" "}
-              <DialogTitle>Filter customers</DialogTitle>{" "}
-            </DialogHeader>{" "}
-            <DialogBody>
-              {" "}
-              <div className="mb-4">
-                {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
-                  Last visited
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "Any" },
-                    { v: "30", l: "≤ 30 days" },
-                    { v: "90", l: "≤ 90 days" },
-                    { v: "180", l: "≤ 180 days" },
-                    { v: "never", l: "Never" },
-                  ].map((o) => (
-                    <FilterPill
-                      key={o.v}
-                      active={filterLastVisited === o.v}
-                      onClick={() => setFilterLastVisited(o.v)}
-                    >
-                      {o.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-              <div className="mb-4">
-                {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
-                  Cards on file
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "Any" },
-                    { v: "has", l: "Has card" },
-                    { v: "none", l: "No card" },
-                  ].map((o) => (
-                    <FilterPill
-                      key={o.v}
-                      active={filterCards === o.v}
-                      onClick={() => setFilterCards(o.v)}
-                    >
-                      {o.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-              <div className="mb-4">
-                {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
-                  Status
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "All" },
-                    { v: "active_customer", l: "Active" },
-                    { v: "new_lead", l: "New Lead" },
-                    { v: "at_risk", l: "At Risk", alert: true },
-                  ].map((s) => (
-                    <FilterPill
-                      key={s.v}
-                      active={filterStage === s.v}
-                      alert={s.alert}
-                      onClick={() => setFilterStage(s.v)}
-                    >
-                      {s.l}
-                    </FilterPill>
-                  ))}
-                  <FilterPill
-                    active={filterHasBalance}
-                    alert
-                    onClick={() => setFilterHasBalance(!filterHasBalance)}
-                  >
-                    Has Balance
-                  </FilterPill>{" "}
-                </div>{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
-                  Tier
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "All Tiers" },
-                    { v: "Platinum", l: "Platinum" },
-                    { v: "Gold", l: "Gold" },
-                    { v: "Silver", l: "Silver" },
-                    { v: "Bronze", l: "Bronze" },
-                    { v: "One-Time", l: "One-Time" },
-                    { v: "none", l: "No Plan" },
-                  ].map((t) => (
-                    <FilterPill
-                      key={t.v}
-                      active={filterTier === t.v}
-                      onClick={() => setFilterTier(t.v)}
-                    >
-                      {t.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-            </DialogBody>{" "}
-            <DialogFooter>
-              {" "}
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setFilterTier("all");
-                  setFilterStage("all");
-                  setFilterLastVisited("all");
-                  setFilterCards("all");
-                  setFilterHasBalance(false);
-                }}
-              >
-                Clear all
-              </Button>{" "}
-              <Button variant="primary" onClick={() => setShowFilters(false)}>
-                Done
-              </Button>{" "}
-            </DialogFooter>{" "}
-          </Dialog>
-          {/* Desktop table header */}
-          {!isMobile && (
-            <div
-              className="grid gap-1.5 px-4 py-2.5 mb-1 text-11 uppercase tracking-label text-zinc-900"
-              style={{ gridTemplateColumns: TABLE_COLS, fontWeight: 700 }}
-            >
-              {" "}
-              <div className="flex justify-center">
-                {" "}
-                <SortHeaderV2
-                  label="Name"
-                  sortKey="lastName"
-                  currentSort={sortBy}
-                  currentDir={sortDir}
-                  onSort={handleSort}
-                />{" "}
-              </div>{" "}
-              <div className="text-center">Address</div>{" "}
-              <div className="text-center">HP</div>{" "}
-              <div className="text-center">Next Svc</div> <div />{" "}
-            </div>
-          )}
-          {/* Rows */}
-          {error ? (
-            <Card>
-              <CardBody className="p-12 text-center">
-                <div className="text-14 text-alert-fg mb-2">
-                  {isRateLimitError(error)
-                    ? "Too many requests"
-                    : "Failed to load customers"}
-                </div>
-                <div className="text-13 text-ink-tertiary mb-4">
-                  {isRateLimitError(error)
-                    ? "Wait a few seconds and try again."
-                    : error?.message || String(error)}
-                </div>
-                <Button variant="primary" onClick={() => loadCustomers()}>
-                  Retry
-                </Button>
-              </CardBody>
-            </Card>
-          ) : filteredSorted.length === 0 ? (
-            <Card>
-              {" "}
-              <CardBody className="p-12 text-center">
-                {" "}
-                <div className="text-14 text-ink-primary mb-1">
-                  No customers found
-                </div>{" "}
-                <div className="text-13 text-ink-tertiary">
-                  Try adjusting your filters or add a new customer
-                </div>{" "}
-              </CardBody>{" "}
-            </Card>
-          ) : (
-            filteredSorted.map((c) => {
-              return (
-                <div key={c.id} className="mb-2">
-                  {isMobile ? (
-                    (() => {
-                      const addr = formatCustomerAddress(c.address);
-                      return (
-                        <div
-                          data-customer-id={c.id}
-                          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3"
-                          style={{ height: 64 }}
-                        >
-                          {" "}
-                          <HealthDot score={c.healthScore} />{" "}
-                          <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-                            {" "}
-                            <button
-                              type="button"
-                              onClick={() => openCustomerProfile(c.id)}
-                              aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
-                              className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
-                            >
-                              {c.firstName} {c.lastName}
-                            </button>
-                            {addr ? (
-                              <a
-                                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="text-11 text-ink-tertiary truncate no-underline hover:text-ink-primary"
-                              >
-                                {addr}
-                              </a>
-                            ) : (
-                              <div className="text-11 text-ink-tertiary">—</div>
-                            )}
-                          </div>
-                          {c.phone && (
-                            <button
-                              type="button"
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                if (
-                                  !window.confirm(
-                                    `Call ${c.firstName || ""} ${c.lastName || ""} at ${c.phone}?\n\nWaves will call your phone first — press 1 to connect.`,
-                                  )
-                                )
-                                  return;
-                                try {
-                                  const r = await adminFetch(
-                                    "/admin/communications/call",
-                                    {
-                                      method: "POST",
-                                      body: JSON.stringify({ to: c.phone }),
-                                    },
-                                  );
-                                  if (!r?.success)
-                                    alert(
-                                      "Call failed: " +
-                                        (r?.error || "unknown error"),
-                                    );
-                                } catch (err) {
-                                  alert("Call failed: " + err.message);
-                                }
-                              }}
-                              aria-label="Call via Waves"
-                              title="Call via Waves — rings your phone first, press 1 to connect"
-                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                            >
-                              {" "}
-                              <Phone size={16} strokeWidth={1.75} />{" "}
-                            </button>
-                          )}
-                          {c.phone && (
-                            <a
-                              href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                              onClick={(e) => e.stopPropagation()}
-                              aria-label="SMS"
-                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                            >
-                              {" "}
-                              <MessageSquare
-                                size={16}
-                                strokeWidth={1.75}
-                              />{" "}
-                            </a>
-                          )}
-                        </div>
-                      );
-                    })()
-                  ) : (
-                    <div
-                      onClick={() => openCustomerProfile(c.id)}
-                      onKeyDown={(event) => {
-                        if (event.target !== event.currentTarget) return;
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          openCustomerProfile(c.id);
-                        }
-                      }}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
-                      className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
-                      style={{ gridTemplateColumns: TABLE_COLS }}
-                    >
-                      {" "}
-                      <div className="text-13 font-medium text-ink-primary text-center">
-                        {c.firstName} {c.lastName}
-                        {c.profileLabel && c.profileLabel !== "Primary" && (
-                          <span className="ml-1 text-11 font-normal text-ink-tertiary">
-                            · {c.profileLabel}
-                          </span>
-                        )}
-                      </div>{" "}
-                      <div className="text-12 text-ink-secondary truncate text-center">
-                        {(() => {
-                          const full = formatCustomerAddress(c.address);
-                          if (!full)
-                            return <span className="text-ink-tertiary">—</span>;
-                          return (
-                            <a
-                              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-zinc-900 hover:underline"
-                            >
-                              {full}
-                            </a>
-                          );
-                        })()}
-                      </div>{" "}
-                      <div className="flex items-center justify-center">
-                        {" "}
-                        <HealthDot score={c.healthScore} />{" "}
-                      </div>{" "}
-                      <div className="u-nums text-11 text-ink-secondary text-center">
-                        {c.nextServiceDate ? (
-                          formatETDateOnly(c.nextServiceDate, {
-                            month: "short",
-                            day: "numeric",
-                          })
-                        ) : (
-                          <span className="text-ink-tertiary">—</span>
-                        )}
-                      </div>{" "}
-                      <div className="flex gap-1 justify-end">
-                        {c.phone && (
-                          <button
-                            type="button"
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              if (
-                                !window.confirm(
-                                  `Call ${c.firstName || ""} ${c.lastName || ""} at ${c.phone}?\n\nWaves will call your phone first — press 1 to connect.`,
-                                )
-                              )
-                                return;
-                              try {
-                                const r = await adminFetch(
-                                  "/admin/communications/call",
-                                  {
-                                    method: "POST",
-                                    body: JSON.stringify({ to: c.phone }),
-                                  },
-                                );
-                                if (!r?.success)
-                                  alert(
-                                    "Call failed: " +
-                                      (r?.error || "unknown error"),
-                                  );
-                              } catch (err) {
-                                alert("Call failed: " + err.message);
-                              }
-                            }}
-                            aria-label="Call via Waves"
-                            title="Call via Waves — rings your phone first, press 1 to connect"
-                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
-                          >
-                            {" "}
-                            <Phone size={12} strokeWidth={1.75} />{" "}
-                          </button>
-                        )}
-                        {c.phone && (
-                          <a
-                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="SMS"
-                            title={`SMS ${c.phone}`}
-                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
-                          >
-                            {" "}
-                            <MessageSquare size={12} strokeWidth={1.75} />{" "}
-                          </a>
-                        )}
-                        {isAdmin && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startEdit(c);
-                            }}
-                            className="h-6 px-2 u-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
-                          >
-                            Edit
-                          </button>
-                        )}
-                        {isAdmin && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteCustomer(
-                                c.id,
-                                `${c.firstName} ${c.lastName}`,
-                              );
-                            }}
-                            aria-label="Delete customer"
-                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
-                          >
-                            {" "}
-                            <Trash2 size={12} strokeWidth={1.75} />{" "}
-                          </button>
-                        )}
-                      </div>{" "}
-                    </div>
-                  )}
-
-                  {/* Inline edit form */}
-                  {editingId === c.id && (
-                    <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
+  const customerEditor = (
+    <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
                       {" "}
                       <div className="text-13 font-medium text-ink-primary mb-3">
                         Edit customer
@@ -2179,7 +1586,330 @@ export default function CustomersPageV2() {
                         </Button>{" "}
                       </div>{" "}
                     </div>
+  );
+
+  return (
+    <div className={workspaceOpen ? "c360-workspace-page" : workspaceMode ? "c360-directory-page" : undefined}>
+      {!workspaceOpen && <>
+      {/* ======================= HEADER ======================= */}
+      <CustomersCommandHeader
+        view={view}
+        onViewChange={changeView}
+        onAddCustomer={() => openAddCustomer()}
+        canAdd={isAdmin}
+      />
+      {view === "directory" && (
+        <div className="customer-directory-tools flex items-center gap-2 mb-4">
+          <label className="c360-search-field min-w-0 flex-1 sm:max-w-md">
+            <Search size={17} aria-hidden />
+            <Input
+              id="customers-search"
+              name="customerSearch"
+              type="search"
+              aria-label="Search customers"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search customers..."
+              className="pl-10"
+            />
+          </label>
+          <Button variant="secondary" onClick={() => setShowFilters(true)} aria-label="Filter customers" className="shrink-0 gap-2">
+            <Filter size={16} strokeWidth={1.75} />
+            Filter
+            {activeFilterCount > 0 && <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-zinc-900 text-white font-mono text-14">{activeFilterCount}</span>}
+          </Button>
+        </div>
+      )}
+
+      {/* Context-specific mobile stage picker */}
+      <div className="sm:hidden">
+        {view === "pipeline" && (
+          <>
+            {" "}
+            <h2 className="text-12 font-medium text-ink-primary mb-1.5">
+              Stage
+            </h2>{" "}
+            <div className="grid grid-cols-2 gap-1.5">
+              {KANBAN_STAGES.map((key) => {
+                const stage = STAGE_MAP[key];
+                const count = (pipelineGroups[key] || []).length;
+                const active = pipelineStageMobile === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setPipelineStageMobile(key)}
+                    className={cn(
+                      "inline-flex items-center justify-between gap-2 u-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring",
+                      active
+                        ? "bg-zinc-900 text-white border-zinc-900"
+                        : "bg-white text-ink-secondary border-zinc-300",
+                    )}
+                  >
+                    {" "}
+                    <span className="truncate">{stage.label}</span>{" "}
+                    <span
+                      className={cn(
+                        "u-nums text-11 flex-shrink-0",
+                        active ? "text-white/80" : "text-ink-tertiary",
+                      )}
+                    >
+                      {count}
+                    </span>{" "}
+                  </button>
+                );
+              })}
+            </div>{" "}
+          </>
+        )}
+      </div>
+      {/* ======================= DIRECTORY ======================= */}
+      {view === "directory" && (
+        <>
+          {" "}
+          <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
+            {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
+          </div>
+          {/* Desktop table header */}
+          {!workspaceMode && !isMobile && (
+            <div
+              className="grid gap-1.5 px-4 py-2.5 mb-1 text-11 uppercase tracking-label text-zinc-900"
+              style={{ gridTemplateColumns: TABLE_COLS, fontWeight: 700 }}
+            >
+              {" "}
+              <div className="flex justify-center">
+                {" "}
+                <SortHeaderV2
+                  label="Name"
+                  sortKey="lastName"
+                  currentSort={sortBy}
+                  currentDir={sortDir}
+                  onSort={handleSort}
+                />{" "}
+              </div>{" "}
+              <div className="text-center">Address</div>{" "}
+              <div className="text-center">Score</div>{" "}
+              <div className="text-center">Next Svc</div> <div />{" "}
+            </div>
+          )}
+          {/* Rows */}
+          {error ? (
+            <Card>
+              <CardBody className="p-12 text-center">
+                <div className="text-14 text-alert-fg mb-2">
+                  {isRateLimitError(error)
+                    ? "Too many requests"
+                    : "Failed to load customers"}
+                </div>
+                <div className="text-13 text-ink-tertiary mb-4">
+                  {isRateLimitError(error)
+                    ? "Wait a few seconds and try again."
+                    : error?.message || String(error)}
+                </div>
+                <Button variant="primary" onClick={() => loadCustomers()}>
+                  Retry
+                </Button>
+              </CardBody>
+            </Card>
+          ) : filteredSorted.length === 0 ? (
+            <Card>
+              {" "}
+              <CardBody className="p-12 text-center">
+                {" "}
+                <div className="text-14 text-ink-primary mb-1">
+                  No customers found
+                </div>{" "}
+                <div className="text-13 text-ink-tertiary">
+                  Try adjusting your filters or add a new customer
+                </div>{" "}
+              </CardBody>{" "}
+            </Card>
+          ) : workspaceMode ? (
+            <CustomerDirectoryTable customers={filteredSorted.map((customer) => ({ ...customer, address: formatCustomerAddress(customer.address) }))} onOpen={openCustomerProfile} onEdit={startEdit} onDelete={handleDeleteCustomer} onCall={callCustomer} canEdit={isAdmin} sortBy={sortBy} sortDir={sortDir} onSort={handleSort} editingId={editingId} editor={customerEditor} />
+          ) : (
+            filteredSorted.map((c) => {
+              return (
+                <div key={c.id} className="mb-2">
+                  {isMobile ? (
+                    (() => {
+                      const addr = formatCustomerAddress(c.address);
+                      return (
+                        <div
+                          data-customer-id={c.id}
+                          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3"
+                          style={{ height: 64 }}
+                        >
+                          {" "}
+                          <CustomerHealthGrade score={c.healthScore} />{" "}
+                          <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                            {" "}
+                            <button
+                              type="button"
+                              onClick={() => openCustomerProfile(c.id)}
+                              aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
+                              className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
+                            >
+                              {c.firstName} {c.lastName}
+                            </button>
+                            {addr ? (
+                              <a
+                                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-11 text-ink-tertiary truncate no-underline hover:text-ink-primary"
+                              >
+                                {addr}
+                              </a>
+                            ) : (
+                              <div className="text-11 text-ink-tertiary">—</div>
+                            )}
+                          </div>
+                          {c.phone && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); void callCustomer(c); }}
+                              aria-label="Call via Waves"
+                              title="Call via Waves — rings your phone first, press 1 to connect"
+                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                            >
+                              {" "}
+                              <Phone size={16} strokeWidth={1.75} />{" "}
+                            </button>
+                          )}
+                          {c.phone && (
+                            <a
+                              href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                              onClick={(e) => e.stopPropagation()}
+                              aria-label="SMS"
+                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                            >
+                              {" "}
+                              <MessageSquare
+                                size={16}
+                                strokeWidth={1.75}
+                              />{" "}
+                            </a>
+                          )}
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <div
+                      onClick={() => openCustomerProfile(c.id)}
+                      onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openCustomerProfile(c.id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
+                      className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
+                      style={{ gridTemplateColumns: TABLE_COLS }}
+                    >
+                      {" "}
+                      <div className="text-13 font-medium text-ink-primary text-center">
+                        {c.firstName} {c.lastName}
+                        {c.profileLabel && c.profileLabel !== "Primary" && (
+                          <span className="ml-1 text-11 font-normal text-ink-tertiary">
+                            · {c.profileLabel}
+                          </span>
+                        )}
+                      </div>{" "}
+                      <div className="text-12 text-ink-secondary truncate text-center">
+                        {(() => {
+                          const full = formatCustomerAddress(c.address);
+                          if (!full)
+                            return <span className="text-ink-tertiary">—</span>;
+                          return (
+                            <a
+                              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-zinc-900 hover:underline"
+                            >
+                              {full}
+                            </a>
+                          );
+                        })()}
+                      </div>{" "}
+                      <div className="flex items-center justify-center">
+                        {" "}
+                        <CustomerHealthGrade score={c.healthScore} />{" "}
+                      </div>{" "}
+                      <div className="u-nums text-11 text-ink-secondary text-center">
+                        {c.nextServiceDate ? (
+                          formatETDateOnly(c.nextServiceDate, {
+                            month: "short",
+                            day: "numeric",
+                          })
+                        ) : (
+                          <span className="text-ink-tertiary">—</span>
+                        )}
+                      </div>{" "}
+                      <div className="flex gap-1 justify-end">
+                        {c.phone && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); void callCustomer(c); }}
+                            aria-label="Call via Waves"
+                            title="Call via Waves — rings your phone first, press 1 to connect"
+                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                          >
+                            {" "}
+                            <Phone size={12} strokeWidth={1.75} />{" "}
+                          </button>
+                        )}
+                        {c.phone && (
+                          <a
+                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="SMS"
+                            title={`SMS ${c.phone}`}
+                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                          >
+                            {" "}
+                            <MessageSquare size={12} strokeWidth={1.75} />{" "}
+                          </a>
+                        )}
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startEdit(c);
+                            }}
+                            className="h-6 px-2 u-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                          >
+                            Edit
+                          </button>
+                        )}
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteCustomer(
+                                c.id,
+                                `${c.firstName} ${c.lastName}`,
+                              );
+                            }}
+                            aria-label="Delete customer"
+                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
+                          >
+                            {" "}
+                            <Trash2 size={12} strokeWidth={1.75} />{" "}
+                          </button>
+                        )}
+                      </div>{" "}
+                    </div>
                   )}
+
+                  {editingId === c.id && customerEditor}
                 </div>
               );
             })
@@ -2314,13 +2044,6 @@ export default function CustomersPageV2() {
         </>
       )}
 
-      {/* ======================= HEALTH ======================= */}
-      {view === "health" && (
-        <div className="mt-4">
-          <CustomerHealthSection />
-        </div>
-      )}
-
       {/* ======================= AI ADVISOR ======================= */}
       {view === "intelligence" && (
         <div className="mt-4">
@@ -2328,6 +2051,152 @@ export default function CustomersPageV2() {
           <LegacyCustomersPanel exportName="CustomerIntelligenceTab" />{" "}
         </div>
       )}
+
+      </>}
+      {workspaceOpen && <Customer360Workspace
+        key={`${selected360Id}:${searchParams.get("tab") === "comms" ? location.key : "overview"}`}
+        initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
+        selectedId={selected360Id}
+        onSelect={openCustomerProfile}
+        onClose={closeCustomerProfile}
+      />}
+          {/* Filters dialog */}
+          <Dialog
+            open={showFilters}
+            onClose={() => setShowFilters(false)}
+          >
+            {" "}
+            <DialogHeader onClose={() => setShowFilters(false)}>
+              {" "}
+              <DialogTitle>Filter customers</DialogTitle>{" "}
+            </DialogHeader>{" "}
+            <DialogBody>
+              {isAdmin && <CustomerHealthFilters value={healthFilters} onChange={setHealthFilters} />}
+              <div className="mb-4">
+                {" "}
+                <div className="text-14 font-medium text-ink-secondary mb-1.5">
+                  Last visited
+                </div>{" "}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: "all", l: "Any" },
+                    { v: "30", l: "≤ 30 days" },
+                    { v: "90", l: "≤ 90 days" },
+                    { v: "180", l: "≤ 180 days" },
+                    { v: "never", l: "Never" },
+                  ].map((o) => (
+                    <FilterPill
+                      key={o.v}
+                      active={filterLastVisited === o.v}
+                      onClick={() => setFilterLastVisited(o.v)}
+                    >
+                      {o.l}
+                    </FilterPill>
+                  ))}
+                </div>{" "}
+              </div>{" "}
+              <div className="mb-4">
+                {" "}
+                <div className="text-14 font-medium text-ink-secondary mb-1.5">
+                  Cards on file
+                </div>{" "}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: "all", l: "Any" },
+                    { v: "has", l: "Has card" },
+                    { v: "none", l: "No card" },
+                  ].map((o) => (
+                    <FilterPill
+                      key={o.v}
+                      active={filterCards === o.v}
+                      onClick={() => setFilterCards(o.v)}
+                    >
+                      {o.l}
+                    </FilterPill>
+                  ))}
+                </div>{" "}
+              </div>{" "}
+              <div className="mb-4">
+                {" "}
+                <div className="text-14 font-medium text-ink-secondary mb-1.5">
+                  Status
+                </div>{" "}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: "all", l: "All" },
+                    { v: "active_customer", l: "Active" },
+                    { v: "new_lead", l: "New Lead" },
+                    { v: "at_risk", l: "At Risk", alert: true },
+                  ].map((s) => (
+                    <FilterPill
+                      key={s.v}
+                      active={filterStage === s.v}
+                      alert={s.alert}
+                      onClick={() => setFilterStage(s.v)}
+                    >
+                      {s.l}
+                    </FilterPill>
+                  ))}
+                  <FilterPill
+                    active={filterHasBalance}
+                    alert
+                    onClick={() => setFilterHasBalance(!filterHasBalance)}
+                  >
+                    Has Balance
+                  </FilterPill>{" "}
+                </div>{" "}
+              </div>{" "}
+              <div>
+                {" "}
+                <div className="text-14 font-medium text-ink-secondary mb-1.5">
+                  Tier
+                </div>{" "}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: "all", l: "All Tiers" },
+                    { v: "Platinum", l: "Platinum" },
+                    { v: "Gold", l: "Gold" },
+                    { v: "Silver", l: "Silver" },
+                    { v: "Bronze", l: "Bronze" },
+                    { v: "One-Time", l: "One-Time" },
+                    { v: "none", l: "No Plan" },
+                  ].map((t) => (
+                    <FilterPill
+                      key={t.v}
+                      active={filterTier === t.v}
+                      onClick={() => setFilterTier(t.v)}
+                    >
+                      {t.l}
+                    </FilterPill>
+                  ))}
+                </div>{" "}
+              </div>{" "}
+            </DialogBody>{" "}
+            <DialogFooter>
+              {" "}
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setHealthFilters({});
+                  setSearchParams((current) => {
+                    const next = new URLSearchParams(current);
+                    next.delete("healthRisk");
+                    return next;
+                  }, { replace: true });
+                  setFilterTier("all");
+                  setFilterStage("all");
+                  setFilterLastVisited("all");
+                  setFilterCards("all");
+                  setFilterHasBalance(false);
+                }}
+              >
+                Clear all
+              </Button>{" "}
+              <Button variant="primary" onClick={() => setShowFilters(false)}>
+                Done
+              </Button>{" "}
+            </DialogFooter>{" "}
+          </Dialog>
 
       {/* ======================= QUICK ADD (desktop modal / mobile Square sheet) ======================= */}
       {!isMobile && (
@@ -2357,10 +2226,11 @@ export default function CustomersPageV2() {
       )}
 
       {/* ======================= CUSTOMER 360 (V1) ======================= */}
-      {selected360Id && (
+      {selected360Id && !workspaceOpen && (
         <Customer360Profile
-          key={selected360Id}
+          key={`${selected360Id}:${searchParams.get("tab") === "comms" ? location.key : "overview"}`}
           customerId={selected360Id}
+          initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
           onSelectCustomer={openCustomerProfile}
           onClose={closeCustomerProfile}
         />

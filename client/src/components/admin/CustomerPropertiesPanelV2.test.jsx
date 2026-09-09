@@ -56,6 +56,29 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('a hung preview for the previous customer neither blocks the new customer nor clears its busy state later', async () => {
+    const pending = {};
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      if (url.endsWith('/primary-preview')) return new Promise(resolve => { pending[url] = resolve; });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
+    }));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
+    expect(screen.getByRole('button', { name: 'Make primary' })).toBeDisabled();
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c2" canEdit />);
+    // c1's preview never settled, yet c2's controls are usable at once.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Make primary' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Make primary' }));
+    expect(screen.getByRole('button', { name: 'Make primary' })).toBeDisabled();
+    // The stale c1 request settling cannot release c2's in-flight preview.
+    pending['/api/admin/customers/c1/properties/p2/primary-preview'](await jsonResponse({ _version: 'old', primary_property: { address: 'Old customer address' }, effects: [] }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(screen.getByRole('button', { name: 'Make primary' })).toBeDisabled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    pending['/api/admin/customers/c2/properties/p2/primary-preview'](await jsonResponse({ _version: 'new', primary_property: { address: '20 Oak St' }, effects: ['Keeps existing invoice addresses.'] }));
+    expect(await screen.findByText('Keeps existing invoice addresses.')).toBeInTheDocument();
+  });
+
   it('lists properties and labels the primary as the DEFAULT address for a property manager', async () => {
     const fetchMock = vi.fn(() => jsonResponse({ properties: [PRIMARY, SECOND] }));
     vi.stubGlobal('fetch', fetchMock);
@@ -314,7 +337,7 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
     vi.stubGlobal('fetch', fetchMock);
     const onChanged = vi.fn(() => Promise.resolve());
     render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit onChanged={onChanged} />);
-    await screen.findByText('No properties on file.');
+    await screen.findByText('No service address on file.');
     fireEvent.click(screen.getByRole('button', { name: 'Add service address' }));
     expect(screen.getByLabelText('Street address')).toHaveAttribute('maxlength', '200');
     expect(screen.getByLabelText('Unit / line 2')).toHaveAttribute('maxlength', '100');

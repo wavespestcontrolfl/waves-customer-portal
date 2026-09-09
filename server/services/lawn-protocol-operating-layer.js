@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { savepointRead } = require('../utils/savepoint-read');
 const { etParts } = require('../utils/datetime-et');
 const { isDeepStrictEqual } = require('node:util');
 
@@ -119,7 +120,10 @@ function normalizeGate(row) {
 // Default stays fail-soft for existing consumers (waveguard plan engine).
 async function getActiveLawnProtocol(knex = db, filters = {}) {
   const { strict = false } = filters;
-  const soft = (promise, fallback) => (strict ? promise : promise.catch(() => fallback));
+  const soft = (query, fallback) => {
+    const read = savepointRead(knex, () => query);
+    return strict ? read : read.catch(() => fallback);
+  };
   const query = knex('lawn_protocols')
     .where({ status: 'active' })
     .orderBy('effective_from', 'desc')
@@ -132,16 +136,15 @@ async function getActiveLawnProtocol(knex = db, filters = {}) {
   const protocol = normalizeProtocol(await soft(query.first(), null));
   if (!protocol) return null;
 
-  const [windows, gates] = await Promise.all([
-    soft(knex('lawn_protocol_windows')
-      .where({ lawn_protocol_id: protocol.id })
-      .orderBy('sort_order', 'asc')
-      .orderBy('month', 'asc'), []),
-    soft(knex('lawn_protocol_gates')
-      .where({ lawn_protocol_id: protocol.id })
-      .orderBy('gate_type', 'asc')
-      .orderBy('gate_key', 'asc'), []),
-  ]);
+  // Savepoints sharing a transaction must finish before the next starts.
+  const windows = await soft(knex('lawn_protocol_windows')
+    .where({ lawn_protocol_id: protocol.id })
+    .orderBy('sort_order', 'asc')
+    .orderBy('month', 'asc'), []);
+  const gates = await soft(knex('lawn_protocol_gates')
+    .where({ lawn_protocol_id: protocol.id })
+    .orderBy('gate_type', 'asc')
+    .orderBy('gate_key', 'asc'), []);
 
   return {
     ...protocol,
@@ -151,20 +154,21 @@ async function getActiveLawnProtocol(knex = db, filters = {}) {
 }
 
 async function getLawnProtocolById(knex = db, id, { strict = false } = {}) {
-  const soft = (promise, fallback) => (strict ? promise : promise.catch(() => fallback));
+  const soft = (query, fallback) => {
+    const read = savepointRead(knex, () => query);
+    return strict ? read : read.catch(() => fallback);
+  };
   const protocol = normalizeProtocol(await soft(knex('lawn_protocols').where({ id }).first(), null));
   if (!protocol) return null;
 
-  const [windows, gates] = await Promise.all([
-    soft(knex('lawn_protocol_windows')
-      .where({ lawn_protocol_id: protocol.id })
-      .orderBy('sort_order', 'asc')
-      .orderBy('month', 'asc'), []),
-    soft(knex('lawn_protocol_gates')
-      .where({ lawn_protocol_id: protocol.id })
-      .orderBy('gate_type', 'asc')
-      .orderBy('gate_key', 'asc'), []),
-  ]);
+  const windows = await soft(knex('lawn_protocol_windows')
+    .where({ lawn_protocol_id: protocol.id })
+    .orderBy('sort_order', 'asc')
+    .orderBy('month', 'asc'), []);
+  const gates = await soft(knex('lawn_protocol_gates')
+    .where({ lawn_protocol_id: protocol.id })
+    .orderBy('gate_type', 'asc')
+    .orderBy('gate_key', 'asc'), []);
 
   return {
     ...protocol,
@@ -173,7 +177,16 @@ async function getLawnProtocolById(knex = db, id, { strict = false } = {}) {
   };
 }
 
-async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId = null, windowKey = null, strict = false } = {}) {
+async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false } = {}) {
+  // An appointment's assigned version must not fall through to the currently
+  // active protocol when that assignment can no longer be resolved.
+  if (!protocolId && protocolKey) {
+    const query = knex('lawn_protocols').where({ protocol_key: protocolKey });
+    if (protocolVersion) query.where({ version: protocolVersion });
+    const assigned = await query.orderBy('effective_from', 'desc').orderBy('created_at', 'desc').first('id');
+    if (!assigned) return null;
+    protocolId = assigned.id;
+  }
   const protocol = protocolId
     ? await getLawnProtocolById(knex, protocolId, { strict })
     : await getActiveLawnProtocol(knex, { grassTrack, region, strict });
@@ -202,7 +215,8 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
       'pc.moa_group',
     )
     .orderBy('lpp.sort_order', 'asc');
-  const products = strict ? await productsQuery : await productsQuery.catch(() => []);
+  const productsRead = savepointRead(knex, () => productsQuery);
+  const products = strict ? await productsRead : await productsRead.catch(() => []);
 
   return {
     protocol,

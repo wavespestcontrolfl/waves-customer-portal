@@ -152,6 +152,20 @@ describe('service report email recipient delivery', () => {
     });
   });
 
+  test('forwards the PDF history identity to the final fence and defers without dispatch when refused', async () => {
+    const { getOrRenderServiceReportPdf } = require('../services/service-report/pdf-queue');
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    getOrRenderServiceReportPdf.mockResolvedValueOnce({ pdf: Buffer.from('pdf'), pinnedLawnHistoryIdentity: 'fixture-pdf-history' });
+    const verifyBeforeSend = jest.fn().mockResolvedValue(false);
+    const result = await sendServiceReportV1Email('record-1', {
+      token: 'token-1', pinnedLawnAssessmentId: 'none', propertyHistoryEnabled: true, verifyBeforeSend,
+    });
+    expect(verifyBeforeSend).toHaveBeenCalledWith({ renderedAssessmentId: null, renderedLawnHistoryIdentity: 'fixture-pdf-history' });
+    expect(result).toMatchObject({ ok: false, retryable: true });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
   test('keeps queue retryable when one service-report recipient fails', async () => {
     const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
 

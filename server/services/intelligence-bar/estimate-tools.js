@@ -363,7 +363,7 @@ async function executeEstimateTool(toolName, input, actionContext = {}) {
       case 'read_pricing_config': return await readPricingConfig(input);
       case 'recent_pricing_changes': return await recentPricingChanges(input);
       case 'find_similar_estimates': return await findSimilarEstimates(input);
-      case 'match_existing_customer': return await matchExistingCustomer(input);
+      case 'match_existing_customer': return await matchExistingCustomer(input, actionContext.readCustomerIds);
       case 'get_waveguard_tiers': return await getWaveGuardTiers();
       case 'get_neighborhood_grass_profile': return await getNeighborhoodGrassProfile(input);
       case 'create_pending_estimate': return await createPendingEstimate(input);
@@ -1676,7 +1676,7 @@ async function findSimilarEstimates({ monthly_total, service_interest, days = 90
   };
 }
 
-async function matchExistingCustomer({ phone, address, name }) {
+async function matchExistingCustomer({ phone, address, name }, readCustomerIds = []) {
   if (!phone && !address && !name) {
     return { error: 'Provide at least one of: phone, address, name' };
   }
@@ -1684,6 +1684,9 @@ async function matchExistingCustomer({ phone, address, name }) {
   let q = db('customers')
     .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'zip', 'waveguard_tier')
     .limit(10);
+  // Inside a customer-scoped task only the resolved customer may match: another
+  // account's contact, service and spend context never reaches the model.
+  if (readCustomerIds.length) q = q.whereIn('id', readCustomerIds);
 
   q = q.where(function () {
     if (phone) {

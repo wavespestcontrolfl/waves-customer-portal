@@ -80,15 +80,19 @@ router.get('/:token/contact.vcf', async (req, res, next) => {
     if (!customer || customer.deleted_at) return res.status(404).send('Not found');
 
     let techName = null;
+    let techLine = null;
     if (card.technician_id) {
       const tech = await db('technicians').where({ id: card.technician_id }).first('name');
       techName = tech?.name || null;
+      // Same number the JSON card shows: the tech's own line when they hold
+      // one (GATE_TECH_LINES), else the office line.
+      techLine = await require('../services/tech-line').lineForTechnician(card.technician_id);
     }
     const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
 
     const vcf = CardService.buildVcard({
       techName,
-      phoneE164: location.phoneRaw,
+      phoneE164: techLine ? techLine.number : location.phoneRaw,
       licenseLine: WAVES_FL_LICENSE_LINE,
       addressLine: WAVES_ADDRESS_LINE,
     });

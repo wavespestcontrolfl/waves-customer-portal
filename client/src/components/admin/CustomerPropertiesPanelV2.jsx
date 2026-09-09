@@ -45,6 +45,7 @@ function formatPropertyAddress(p) {
 export default function CustomerPropertiesPanelV2({
   customerId,
   contactRole,
+  primaryAddress = null,
   canEdit = false,
   // Any value the parent changes when the profile address is saved (the PUT
   // path syncs the primary customer_properties row) — the panel refetches so
@@ -84,6 +85,9 @@ export default function CustomerPropertiesPanelV2({
     setLoadErr("");
     setCanChangePrimary(false);
     setPrimaryPreview(null);
+    // A request still in flight for the previous customer must not keep this
+    // customer's controls disabled, and must not clear its own busy state later.
+    setRowBusy(null);
     adminFetch(`/admin/customers/${customerId}/properties`)
       .then((d) => {
         if (!cancelled) {
@@ -165,7 +169,7 @@ export default function CustomerPropertiesPanelV2({
     } catch (err) {
       setRowErr(err.message || "Could not update property");
     } finally {
-      setRowBusy(null);
+      if (activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
@@ -189,7 +193,7 @@ export default function CustomerPropertiesPanelV2({
     } catch (err) {
       if (activeCustomer.current === customerId) setRowErr(err.message || "Could not preview the primary change");
     } finally {
-      setRowBusy(null);
+      if (activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
@@ -213,7 +217,7 @@ export default function CustomerPropertiesPanelV2({
         setRowErr(err.message || "Could not change the primary property. Refresh to check its saved state.");
       }
     } finally {
-      setRowBusy(null);
+      if (activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
@@ -228,7 +232,7 @@ export default function CustomerPropertiesPanelV2({
       <CardBody className="p-4">
         <div className="flex items-center justify-between gap-2 mb-2">
           <div className="u-label text-ink-secondary">
-            Service addresses ({properties.length})
+            Service addresses{properties.length > 0 ? ` (${properties.length})` : ""}
           </div>
           {canEdit && !adding && (
             <Button variant="secondary" size="sm" onClick={() => { selectedAddressRef.current = null; setAdding(true); }}>
@@ -345,7 +349,7 @@ export default function CustomerPropertiesPanelV2({
               </div>
             ))}
             {properties.length === 0 && (
-              <div className="text-12 text-ink-secondary py-2">No properties on file.</div>
+              <div className="text-12 text-ink-secondary py-2">{primaryAddress?.line1 ? `Primary address: ${[primaryAddress.line1, primaryAddress.line2, primaryAddress.city, primaryAddress.state, primaryAddress.zip].filter(Boolean).join(", ")}. No additional service addresses recorded.` : "No service address on file."}</div>
             )}
           </div>
         )}

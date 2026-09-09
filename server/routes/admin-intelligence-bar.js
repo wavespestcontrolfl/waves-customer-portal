@@ -88,6 +88,10 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
 const MAX_TOOL_ROUNDS = 8;
+// Model arguments that only pick WHICH task customer an operation targets.
+// They are excluded from an operation's clarification identity so a retry
+// with the corrected target answers the original clarification.
+const CLARIFICATION_TARGET_FIELDS = new Set(['customer_id', 'customer_name', 'phone', 'email']);
 const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 const AGENT_ESTIMATE_FEATURE_KEY = 'agent_estimate';
 const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
@@ -357,6 +361,9 @@ function sanitizeQueryImages(images) {
 // taint must survive the round-trip through the client the same way the
 // image taint does.
 const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+// The persisted user turn of a task continuation. The original request is
+// already in the thread and in the client's history from the first reply.
+const CONTINUATION_TURN = 'Continue the saved request using its recorded step outcomes.';
 
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
@@ -558,16 +565,27 @@ async function loadAppointmentPin(appointmentId) {
   };
 }
 
-// Mirrors replyViaSms's own resolution order (email → customer_id → sender
-// address → typed name) so the pin is the recipient the executor would pick.
-async function resolveReplyViaSmsRecipient({ email_id, customer_name }) {
+// Mirrors replyViaSms's own resolution order (customer_id → email link →
+// sender address → typed name) so the pin is the recipient the executor
+// would pick. A supplied email_id must exist before anything else resolves.
+async function resolveReplyViaSmsRecipient({ email_id, customer_id, customer_name }) {
+  let email = null;
   if (email_id) {
-    const email = await db('emails').where('id', String(email_id)).first('customer_id', 'from_address');
+    email = await db('emails').where('id', String(email_id)).first('customer_id', 'from_address');
     // A supplied email_id MUST resolve (GH r9 P2): the card discloses the
     // source-email inbox update, so a missing/deleted row must refuse the
     // proposal — never fall through to a typed name and send an SMS whose
     // disclosed inbox effect touches zero rows.
     if (!email) return { error: 'That email could not be found — nothing was proposed.' };
+  }
+  if (customer_id) {
+    // The executor sends to exactly this row (its pinned-recipient branch),
+    // so the proposal pins the same row. A malformed or unknown id refuses;
+    // it never falls through to the email link or a typed name.
+    if (!UUID_RE.test(String(customer_id))) return null;
+    return (await db('customers').where('id', String(customer_id)).whereNull('deleted_at').first('id', 'first_name', 'last_name', 'phone')) || null;
+  }
+  if (email) {
     if (email.customer_id) {
       const c = await db('customers').where('id', email.customer_id).first('id', 'first_name', 'last_name', 'phone');
       if (c) return c;
@@ -1990,7 +2008,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeTaxTool(toolName, input);
   }
   if (LEADS_TOOL_NAMES.has(toolName)) {
-    return executeLeadsTool(toolName, input);
+    return executeLeadsTool(toolName, input, actionContext);
   }
   if (EMAIL_TOOL_NAMES.has(toolName)) {
     return executeEmailTool(toolName, input);
@@ -2183,8 +2201,16 @@ async function runQuery(req, res, next) {
     const priorThread = UUID_RE.test(String(req.body.thread_id || ''))
       ? { threadId: req.body.thread_id, threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null } : {};
     const images = sanitizeQueryImages(req.body.images);
-    const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
-    const piiTaintedHistory = hasPiiTaintedHistory(conversationHistory);
+    // A continuation of a task that already delivered a reply builds on that
+    // reply: the persisted thread receives a distinct continuation turn and
+    // the returned history keeps the earlier exchange instead of replaying
+    // the original request. A task interrupted before any reply still sends
+    // and persists its original request.
+    const priorReply = req.ibResumedTask?.checkpoint?.length ? req.ibResumedTask.response : null;
+    const continuing = Boolean(priorReply);
+    const historyBase = Array.isArray(priorReply?.conversationHistory) ? priorReply.conversationHistory : conversationHistory;
+    const imageTainted = images.length > 0 || hasImageTaintedHistory(historyBase);
+    const piiTaintedHistory = hasPiiTaintedHistory(historyBase);
 
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -2229,11 +2255,17 @@ async function runQuery(req, res, next) {
         .json(await IbTasks.snapshot(activeTask, getAdminActorId(req)));
       taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target });
       if (taskContext.error || taskContext.ambiguous) {
+        // A customer choice is the only clarification the task card can
+        // supply. A hard resolution error (stale or mismatched page record)
+        // has nothing to select, so it is answered and closed rather than
+        // parked in Saved requests as an unusable needs_information task; a
+        // rejected selection stays open because a fresh choice re-resolves it.
+        const taskState = taskContext.error && !taskContext.selectable ? 'responded' : 'needs_information';
         const payload = { response: taskContext.error || (taskContext.ambiguous
           ? 'More than one customer matches. Select the customer for this request.'
           : 'I could not match the named customer. Select the intended customer before changing a record.'),
-        ...priorThread, taskId: activeTask.id, taskState: 'needs_information', candidates: taskContext.candidates || [], pendingActions: [] };
-        await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'needs_information', target: taskContext, response: payload });
+        ...priorThread, taskId: activeTask.id, taskState, candidates: taskContext.candidates || [], pendingActions: [] };
+        await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: taskState, target: taskContext, response: payload });
         const savedTask = await IbTasks.get(activeTask.id, getAdminActorId(req), activeTask.session_id);
         return res.json(await IbTasks.snapshot(savedTask, getAdminActorId(req)));
       }
@@ -2241,8 +2273,10 @@ async function runQuery(req, res, next) {
     }
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+      // A resumed task keeps its delivered reply (history, thread cursor) so
+      // a later continuation still builds on it; only the answer text changes.
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'failed',
-        response: { ...priorThread, response: 'The model integration is unavailable. No actions were proposed.' } });
+        response: { ...(activeTask.response || {}), ...priorThread, response: 'The model integration is unavailable. No actions were proposed.' } });
       return res.status(503).json({
         error: 'AI not configured',
         message: 'ANTHROPIC_API_KEY is not set. Intelligence Bar requires Claude API access.',
@@ -2324,8 +2358,17 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
     }
     if (req.ibResumedTask && platformEnabled) {
-      const previouslyLoaded = currentMessages.flatMap(m => Array.isArray(m.content) ? m.content : [])
-        .filter(block => block.type === 'tool_use').map(block => ActionRegistry.actions.get(block.name))
+      // Restore every tool the worker had loaded: the ones it invoked and the
+      // ones a completed discovery round loaded but never reached (the
+      // continuation prompt forbids repeating that discovery). Availability is
+      // re-checked against the current scope, never trusted from the checkpoint.
+      const blocks = currentMessages.flatMap(m => Array.isArray(m.content) ? m.content : []);
+      const discoveryIds = new Set(blocks.filter(block => block.type === 'tool_use' && block.name === ActionRegistry.DISCOVERY_TOOL.name).map(block => block.id));
+      const discoveredNames = blocks.filter(block => block.type === 'tool_result' && discoveryIds.has(block.tool_use_id))
+        .flatMap(block => { try { return JSON.parse(block.content)?.capabilities || []; } catch { return []; } })
+        .filter(capability => capability?.availability === 'loaded').map(capability => capability.id);
+      const invokedNames = blocks.filter(block => block.type === 'tool_use').map(block => block.name);
+      const previouslyLoaded = [...invokedNames, ...discoveredNames].map(name => ActionRegistry.actions.get(name))
         .filter(a => ActionRegistry.allowed(a, actionScope)).map(a => apiToolDefinition(a.definition));
       tools = [...new Map([...tools, ...previouslyLoaded].map(t => [t.name, t])).values()];
     }
@@ -2333,6 +2376,23 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const toolCalls = [];
     const persistedToolCalls = []; // names + field keys only — telemetry never stores argument values
     const toolResults = [];
+    // Operations whose latest result still needs a target choice, keyed by
+    // the exact call (tool + every argument) and stamped with the round that
+    // raised them. Parallel same-tool calls in one round that differ by call
+    // id OR by target never share a marker; a LATER-round success for the
+    // same operation (tool + arguments minus the target selectors) is the
+    // corrected retry and answers the earlier marker. A sibling call in the
+    // same round never answers another call's clarification.
+    const unresolvedClarifications = new Map();
+    const operationKey = toolUse => `${toolUse.name}:${JSON.stringify(Object.entries(toolUse.input || {})
+      .filter(([key]) => !CLARIFICATION_TARGET_FIELDS.has(key)).sort(([a], [b]) => a.localeCompare(b)))}`;
+    const callKey = toolUse => `${toolUse.name}:${JSON.stringify(Object.entries(toolUse.input || {}).sort(([a], [b]) => a.localeCompare(b)))}`;
+    const settleClarification = (toolUse, round) => {
+      const operation = operationKey(toolUse);
+      for (const [key, marker] of unresolvedClarifications) {
+        if (marker.operation === operation && (marker.round < round || key === callKey(toolUse))) unresolvedClarifications.delete(key);
+      }
+    };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
@@ -2393,8 +2453,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         const toolStartedAt = Date.now();
         let executionInput = toolUse.input;
         let validationFailure = platformEnabled ? ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope) : null;
-        if (!validationFailure && platformEnabled && (taskContext.targets?.length || toolUse.name === 'draft_review_reply')
-          && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
+        if (!validationFailure && platformEnabled && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
           const readTarget = await TaskContext.prepareReadInput(toolUse.input, taskContext, {
             toolName: toolUse.name, schema: ActionRegistry.actions.get(toolUse.name).schema,
           });
@@ -2500,7 +2559,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             errorMessage = err.message;
           }
         }
-        if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && (failed || proposedCard)) writeFrontierBlocked = true;
+        // Only a card that exists blocks further writes; a proposal refused at
+        // preflight left nothing to reconcile, so a corrected call may follow.
+        if (platformEnabled && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name) && proposedCard) writeFrontierBlocked = true;
         recordToolEvent({
           source: context === 'tech' ? 'tech-intelligence-bar' : 'intelligence-bar',
           context: context || null,
@@ -2521,6 +2582,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
+        // A clarification stays open until the same operation succeeds in a
+        // later round; an unrelated or sibling call succeeding does not answer it.
+        if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
+        else if (!isToolFailure(result)) settleClarification(toolUse, round);
         if (toolActivityOn) {
           toolActivity.push({
             tool: toolUse.name,
@@ -2576,14 +2641,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // The exact turn pair the client stores — also what a persisted thread
     // keeps. Images are never persisted (their text marker is); taint
     // markers ride along so a resumed thread stays redaction-aware.
+    const requestTurn = images.length
+      ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+      : prompt;
     const persistedUserTurn = appendTaintMarker(
-      appendTaintMarker(
-        images.length
-          ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
-          : prompt,
-        imageTainted,
-        IMAGE_TAINT_MARKER,
-      ),
+      appendTaintMarker(continuing ? CONTINUATION_TURN : requestTurn, imageTainted, IMAGE_TAINT_MARKER),
       piiTainted,
       PII_TAINT_MARKER,
     );
@@ -2631,7 +2693,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           // (gate flipped mid-chat, or a detach after a rejected append)
           // survives refresh instead of persisting an amnesiac thread. The
           // service validates roles/content and caps the seed.
-          seedTurns: requestedThreadId ? null : conversationHistory.slice(-8),
+          seedTurns: requestedThreadId ? null : historyBase.slice(-8),
         });
         persistedThreadId = appended?.threadId || null;
         persistedThreadSeq = appended?.lastSeq ?? null;
@@ -2671,7 +2733,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // markers ride on the stored turns so follow-ups stay redacted; both
       // are stripped before the history reaches the model.
       conversationHistory: [
-        ...conversationHistory.slice(-8),
+        ...historyBase.slice(-8),
         { role: 'user', content: persistedUserTurn },
         { role: 'assistant', content: persistedAssistantTurn },
       ],
@@ -2681,8 +2743,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // promise), true keeps thread mode even when this exchange's append
       // failed best-effort.
       threadsEnabled: threadPersistenceActive,
+      // needs_information is reserved for a clarification the operator can
+      // act on from the task card: choosing the customer (no resolved target,
+      // or saved candidates). A child-record clarification (appointment,
+      // email, call, lead) on an already-resolved page target has no card
+      // path; it is answered in the response text and the task stays responded.
       ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length ? 'awaiting_approval'
-        : toolResults.some(r => r.result?.code === 'target_clarification_required') ? 'needs_information' : 'responded',
+        : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
     if (activeTask) {

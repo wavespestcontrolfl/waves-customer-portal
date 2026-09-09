@@ -3,6 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen, fireEvent } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../../lib/adminAuth', () => ({ getAdminAuthToken: () => 'test-token' }));
 
@@ -12,14 +13,14 @@ afterEach(() => cleanup());
 
 describe('TechLawnDiagnosticPage', () => {
   it('renders the capture step with analyze disabled until a photo is added', () => {
-    render(<TechLawnDiagnosticPage />);
+    render(<MemoryRouter><TechLawnDiagnosticPage /></MemoryRouter>);
     expect(screen.getByRole('heading', { name: /lawn diagnostic/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add photo/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /analyze lawn/i })).toBeDisabled();
   });
 
   it('reveals prospect contact + address fields when expanded', () => {
-    render(<TechLawnDiagnosticPage />);
+    render(<MemoryRouter><TechLawnDiagnosticPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: /prospect details/i }));
     expect(screen.getByPlaceholderText('Name')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Email')).toBeInTheDocument();

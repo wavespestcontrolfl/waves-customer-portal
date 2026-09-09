@@ -26,8 +26,8 @@
       "name": "url shortener in sms",
       "text": "Pay here: bit.ly/waves-pay",
       "context": { "channel": "sms", "audience": "customer" },
-      "expect": { "pass": false, "rules": ["no-url-shortener", "portal-link-scheme"] },
-      "provenance": "A2P 10DLC registration is non-resubmittable; shorteners are an instant-loss class. Also fails the link-scheme rule since psl validation (codex #3348): a bare bit.ly is a scheme-less third-party host too"
+      "expect": { "pass": false, "rules": ["no-url-shortener"] },
+      "provenance": "A2P 10DLC registration is non-resubmittable; shorteners are an instant-loss class. 2026-09-07: scheme-free links are allowed; public shorteners remain prohibited"
     },
     {
       "name": "portal link must go bare in sms",
@@ -40,15 +40,15 @@
       "name": "bare g.page loses its scheme",
       "text": "We would love a review: g.page/r/waves-review",
       "context": { "channel": "sms", "audience": "customer" },
-      "expect": { "pass": false, "rules": ["portal-link-scheme"] },
-      "provenance": "2026-08-01 SMS link-scheme ruling — g.page KEEPS https://"
+      "expect": { "pass": true },
+      "provenance": "2026-08-01 SMS link-scheme ruling — g.page KEEPS https://; superseded by owner directive 2026-09-07: all SMS links now omit https://"
     },
     {
       "name": "review link with scheme passes",
       "text": "We would love a review: https://g.page/r/waves-review",
       "context": { "channel": "sms", "audience": "customer" },
-      "expect": { "pass": true },
-      "provenance": "correct third-party link form"
+      "expect": { "pass": false, "rules": ["portal-link-scheme"] },
+      "provenance": "correct third-party link form; superseded by owner directive 2026-09-07: all SMS links now omit https://"
     },
     {
       "name": "re-entry described as safe",
@@ -208,8 +208,8 @@
       "name": "bare third-party host beyond g.page",
       "text": "You can also find us on yelp.com if that is easier.",
       "context": { "channel": "sms", "audience": "customer" },
-      "expect": { "pass": false, "rules": ["portal-link-scheme"] },
-      "provenance": "2026-08-11 codex round on #3348: the scheme rule covered only g.page — any bare third-party host skips the preview"
+      "expect": { "pass": true },
+      "provenance": "2026-08-11 codex round on #3348: the scheme rule covered only g.page — any bare third-party host skips the preview; superseded by owner directive 2026-09-07: all SMS links now omit https://"
     }
   ]
 }

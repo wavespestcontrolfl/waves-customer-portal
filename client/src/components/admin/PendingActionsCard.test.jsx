@@ -30,6 +30,20 @@ it('reconciles a dropped confirm response by reading the saved outcome without a
   expect(fetch.mock.calls[1][1].method).toBeUndefined();
 });
 
+it('a dropped confirm response reports the receipt to the host as a confirm decision', async () => {
+  const fetch = vi.fn().mockRejectedValueOnce(new TypeError('Network lost'))
+    .mockResolvedValueOnce(response({ success: true, outcome: 'completed', result: { request_id: 'synthetic-request' } }));
+  vi.stubGlobal('fetch', fetch);
+  const onResolved = vi.fn();
+  render(<PendingActionsCard actions={[action]} variant="light" onResolved={onResolved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  expect(await screen.findByText('✓ Done')).toBeInTheDocument();
+  // Hosts refresh only on a confirm decision; the reconciled receipt must not arrive as a bare status check.
+  expect(onResolved).toHaveBeenCalledTimes(1);
+  expect(onResolved.mock.calls[0][1]).toBe('confirm');
+  expect(onResolved.mock.calls[0][2]).toMatchObject({ success: true, outcome: 'completed' });
+});
+
 it('shows unknown after a consumed approval loses its receipt and offers only a status check', async () => {
   vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('Network lost'))
     .mockResolvedValue(response({ success: false, outcome: 'outcome_unknown', result: null })));

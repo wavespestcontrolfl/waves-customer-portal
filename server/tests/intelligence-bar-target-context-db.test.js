@@ -37,7 +37,7 @@ suite('IB target resolution against isolated PostgreSQL', () => {
     expect(version).toContain('.123456');
     const requests = [
       { prompt: 'Update this customer', pageData: { customer_id: customerId } },
-      { prompt: 'Update the customer', pageData: {}, selectedTarget: { customer_id: customerId } },
+      { prompt: 'Update Synthetic Targetfixture', pageData: {}, selectedTarget: { customer_id: customerId } },
       { prompt: 'Send to Synthetic Targetfixture using this customer', pageData: {} },
       { prompt: 'Send a message to Targetfixture using this customer', pageData: {} },
     ];
@@ -55,6 +55,19 @@ suite('IB target resolution against isolated PostgreSQL', () => {
       expect(task.targets).toEqual([]);
       expect((await Context.validateRecordTarget({ customer_id: customerId }, task, { toolName: 'send_sms' })).code).toBe('target_clarification_required');
     }
+  });
+
+  test('a stored city or technician name after "for" is a filter unless a customer carries that name', async () => {
+    await mockDb('customers').where('id', customerId).update({ city: 'Synthetictown' });
+    await mockDb('technicians').insert({ id: randomUUID(), name: 'Synthetic Techfixture', active: true });
+    for (const prompt of ['Show the schedule for Synthetictown', 'Show the route for Techfixture']) {
+      const task = await Context.resolve({ prompt, pageData: {} });
+      expect(task.namesRequested).toBe(false);
+      expect(task.targets).toEqual([]);
+    }
+    expect((await Context.resolve({ prompt: 'Show the schedule for Targtefixture', pageData: {} })).namesRequested).toBe(true);
+    await mockDb('customers').insert({ id: randomUUID(), first_name: 'Synthetic', last_name: 'Synthetictown', phone: '+1555' + (Date.now() + 2).toString().slice(-7), address_line1: '101 Test Street' });
+    expect((await Context.resolve({ prompt: 'Show the schedule for Synthetictown', pageData: {} })).namesRequested).toBe(true);
   });
 
   test('this/that/selected property pins the persisted row, not another property of the same customer', async () => {
@@ -97,6 +110,49 @@ suite('IB target resolution against isolated PostgreSQL', () => {
       expect(refusal.code).toBe('target_clarification_required');
       expect(mockDraft).toHaveBeenCalledTimes(1);
       expect((await executeEmailTool('get_email_thread', { thread_id: foreign }, scope)).code).toBe('target_clarification_required');
+    } finally {
+      if (oldKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = oldKey;
+    }
+  });
+
+  test('converted-lead email ownership scopes search, thread reads and drafts, including mixed and changed links', async () => {
+    const foreignId = randomUUID(), ownLead = randomUUID(), foreignLead = randomUUID();
+    await mockDb('customers').insert({ id: foreignId, first_name: 'Synthetic', last_name: 'Leadmail', phone: '+15550109877' });
+    await mockDb('leads').insert([{ id: ownLead, customer_id: customerId }, { id: foreignLead, customer_id: foreignId }]);
+    const owned = randomUUID(), mixed = randomUUID(), conflicting = randomUUID();
+    const ownEmail = randomUUID();
+    const email = (thread, customer_id, lead_id, id = randomUUID()) => ({ id, gmail_id: randomUUID(), gmail_thread_id: thread,
+      customer_id, lead_id, from_address: 'fixture@example.invalid', from_name: 'Synthetic Lead Sender', subject: 'Synthetic lead-linked email',
+      body_text: thread === owned ? 'Owned converted-lead content' : 'Foreign converted-lead content', received_at: new Date() });
+    await mockDb('emails').insert([
+      email(owned, null, ownLead, ownEmail), email(owned, null, null),
+      email(mixed, customerId, null), email(mixed, null, foreignLead),
+      email(conflicting, customerId, foreignLead),
+    ]);
+    const scope = { readCustomerIds: [customerId] };
+    const search = () => executeEmailTool('search_emails', { from: 'Synthetic Lead Sender' }, scope);
+    expect((await search()).results.map(row => row.gmail_thread_id)).toEqual([owned, owned]);
+    expect(await executeEmailTool('get_email_thread', { thread_id: owned }, scope)).toMatchObject({ thread_id: owned, message_count: 2 });
+    const oldKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'synthetic-controlled-adapter';
+    mockDraft.mockClear();
+    try {
+      expect(await executeEmailTool('draft_email_reply', { email_id: ownEmail }, scope)).toMatchObject({ draft: true, reply_draft: 'Synthetic draft' });
+      expect(mockDraft).toHaveBeenCalledTimes(1);
+      for (const thread_id of [mixed, conflicting]) {
+        expect(await executeEmailTool('get_email_thread', { thread_id }, scope)).toMatchObject({ code: 'target_clarification_required' });
+        expect(await executeEmailTool('draft_email_reply', { thread_id }, scope)).toMatchObject({ code: 'target_clarification_required' });
+      }
+      // Even a task containing both customers cannot bless contradictory links.
+      expect(await executeEmailTool('get_email_thread', { thread_id: conflicting }, { readCustomerIds: [customerId, foreignId] }))
+        .toMatchObject({ code: 'target_clarification_required' });
+      for (const changes of [{ customer_id: foreignId }, { customer_id: customerId, deleted_at: new Date() }]) {
+        await mockDb('leads').where('id', ownLead).update(changes);
+        expect((await search()).results).toEqual([]);
+        expect(await executeEmailTool('get_email_thread', { thread_id: owned }, scope)).toMatchObject({ code: 'target_clarification_required' });
+        expect(await executeEmailTool('draft_email_reply', { email_id: ownEmail }, scope)).toMatchObject({ code: 'target_clarification_required' });
+      }
+      expect(mockDraft).toHaveBeenCalledTimes(1);
     } finally {
       if (oldKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = oldKey;
     }

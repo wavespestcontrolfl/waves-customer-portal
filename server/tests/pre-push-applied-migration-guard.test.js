@@ -331,4 +331,109 @@ describe('pre-push applied-migration guard', () => {
     expect(String(failed.stderr)).toContain('HEAD -> ?');
     expect(String(failed.stderr)).toContain('M\t' + MIG_MAIN.split(path.sep).join('/'));
   });
+
+  // main repaired a migration in place (the hatch's legitimate case: its
+  // deploy had failed before migrating) and a branch merges main forward:
+  // the branch's old remote tip has the pre-repair file, so the remote
+  // diff reads M — but the content is main's, not the branch's edit
+  // (#4078 was pushed with the hatch for exactly this). A further edit on
+  // the branch is still blocked via the origin/main tip.
+  test('a branch that merges main forward and inherits a migration main repaired in place passes; editing it further is BLOCKED', () => {
+    const MIG_R = path.join(MIGRATIONS, '20260101000013_repaired_on_main.js');
+    const migRel = MIG_R.split(path.sep).join('/');
+    // main lands MIG_R; the branch is pushed carrying it.
+    git(other, ['checkout', '-q', 'main']);
+    git(other, ['pull', '-q', '--ff-only', 'origin', 'main']);
+    writeAndCommit(other, { [MIG_R]: migBody('repaired_on_main') }, 'migration that will need a repair');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['checkout', '-q', '-b', 'merge-forward', 'origin/main']);
+    writeAndCommit(work, { 'server/index.js': "module.exports = 'merge-forward';\n" }, 'feature work');
+    expect(pushResult(work, {}, 'HEAD:refs/heads/merge-forward').ok).toBe(true);
+    // main repairs MIG_R in place (from a clone without the hook).
+    const repaired = "exports.up = async () => { /* repaired on main after a failed deploy */ };\nexports.down = async () => {};\n";
+    writeAndCommit(other, { [MIG_R]: repaired }, 'repair migration in place');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    // The branch merges main forward: HEAD now carries the repair, and the
+    // branch's remote tip still has the pre-repair file.
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['merge', '-q', '--no-edit', 'origin/main']);
+    expect(git(work, ['show', 'HEAD:' + migRel])).toBe(repaired);
+    const r = pushResult(work, {}, 'HEAD:refs/heads/merge-forward');
+    expect(r.stderr).not.toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.ok).toBe(true);
+    // Editing the inherited file on the branch is the branch's edit.
+    writeAndCommit(work, { [MIG_R]: "exports.up = async () => { /* edited on the branch after the merge */ };\nexports.down = async () => {};\n" }, 'edit inherited repair');
+    const r2 = pushResult(work, {}, 'HEAD:refs/heads/merge-forward');
+    expect(r2.ok).toBe(false);
+    expect(r2.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r2.stderr).toContain('vs origin/main tip: M\t' + migRel);
+  });
+
+  // The identical-to-main exception is for in-place modifications only:
+  // a rename whose destination matches a file main carries still removes
+  // a filename the branch's preview has run (pre-push hook P1 on this
+  // change) — knex would fail that preview's next deploy.
+  test('renaming a preview-run migration onto a name main carries with identical content is still BLOCKED (R100)', () => {
+    const MIG_OLD = path.join(MIGRATIONS, '20260101000014_branch_stamped.js');
+    const MIG_NEW = path.join(MIGRATIONS, '20260101000015_main_stamped.js');
+    const body = migBody('same_ddl_two_names');
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['checkout', '-q', '-b', 'rename-onto-main', 'origin/main']);
+    writeAndCommit(work, { [MIG_OLD]: body }, 'branch migration, preview runs it');
+    expect(pushResult(work, {}, 'HEAD:refs/heads/rename-onto-main').ok).toBe(true);
+    // main lands the same DDL under its own name (from another clone).
+    git(other, ['checkout', '-q', 'main']);
+    git(other, ['pull', '-q', '--ff-only', 'origin', 'main']);
+    writeAndCommit(other, { [MIG_NEW]: body }, 'main migration with the same content');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    // The branch merges main forward and drops its own copy: vs its remote
+    // tip that is R100 old→new, and new matches main byte for byte.
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['merge', '-q', '--no-edit', 'origin/main']);
+    writeAndCommit(work, { [MIG_OLD]: null }, 'drop the branch copy');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/rename-onto-main');
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('R100\t' + MIG_OLD.split(path.sep).join('/') + '\t' + MIG_NEW.split(path.sep).join('/'));
+  });
+
+  // The exception needs a FRESH origin/main: when the refresh fails, a
+  // stale local copy must not vouch for a push that reverts the
+  // destination's migration to content main has since repaired away
+  // (pre-push hook P1 on this change) — the stale tip check would miss
+  // it too. The push targets the remote by path while origin's URL is
+  // pointed at a dead path, so only the hook's main refresh fails.
+  test('with a failed origin/main refresh, reverting the destination\'s migration to the stale local content is still BLOCKED', () => {
+    const MIG_F = path.join(MIGRATIONS, '20260101000016_repaired_after_stale.js');
+    const migRel = MIG_F.split(path.sep).join('/');
+    git(other, ['checkout', '-q', 'main']);
+    git(other, ['pull', '-q', '--ff-only', 'origin', 'main']);
+    writeAndCommit(other, { [MIG_F]: migBody('repaired_after_stale') }, 'main migration before its repair');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['checkout', '-q', '-b', 'stale-revert', 'origin/main']);
+    expect(pushResult(work, {}, 'HEAD:refs/heads/stale-revert').ok).toBe(true);
+    // main repairs MIG_F and the branch's tip is advanced to it from the
+    // other clone; this clone's origin/main stays at the pre-repair blob.
+    const repaired = "exports.up = async () => { /* repaired on main while this clone was offline */ };\nexports.down = async () => {};\n";
+    writeAndCommit(other, { [MIG_F]: repaired }, 'repair on main');
+    git(other, ['push', '-q', 'origin', 'HEAD:main', 'HEAD:refs/heads/stale-revert']);
+    writeAndCommit(work, { 'server/index.js': "module.exports = 'stale revert';\n" }, 'work on the stale local branch');
+    expect(git(work, ['show', 'HEAD:' + migRel])).toBe(git(work, ['show', 'origin/main:' + migRel]));
+    let r;
+    git(work, ['remote', 'set-url', 'origin', path.join(root, 'no-such-remote.git')]);
+    try {
+      git(work, ['push', remote, '+HEAD:refs/heads/stale-revert']);
+      r = { ok: true, stderr: '' };
+    } catch (e) {
+      r = { ok: false, stderr: String(e.stderr || '') };
+    } finally {
+      git(work, ['remote', 'set-url', 'origin', remote]);
+    }
+    expect(r.stderr).toMatch(/could not fetch main from origin/);
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('M\t' + migRel);
+  });
 });

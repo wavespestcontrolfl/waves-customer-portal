@@ -94,7 +94,7 @@ function apnsCollapseId(tag) {
 function buildApnsPayload(notification = {}) {
   const { title, body, badge, sound, url, aps: _ignore, ...rest } = notification;
   const aps = {
-    alert: { title: title || 'Waves Pest Control', body: body || '' },
+    alert: { title: title || 'Waves', body: body || '' },
     sound: sound || 'default',
   };
   if (typeof badge === 'number') aps.badge = badge;
@@ -181,6 +181,7 @@ function send(deviceToken, notification) {
       };
       const collapseId = apnsCollapseId(notification?.tag);
       if (collapseId) headers['apns-collapse-id'] = collapseId;
+      if (notification?.ephemeral) headers['apns-expiration'] = '0';
       const req = client.request(headers);
 
       let status = 0;

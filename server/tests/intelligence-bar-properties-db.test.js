@@ -371,6 +371,35 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect(await db('customers').where({ id: emptyCustomer }).first('address_line1')).toEqual({ address_line1: '900 Example Grove' });
   }, 30000);
 
+  test('a same-street partial primary is a duplicate at preview time in the portal and the bar', async () => {
+    const customerC = crypto.randomUUID(), primaryC = crypto.randomUUID();
+    const nameC = `Fixture Cedar${customerC.slice(0, 8)}`;
+    // Legacy data: the account and its primary carry the street but no city or ZIP.
+    await db('customers').insert({ id: customerC, first_name: 'Fixture', last_name: `Cedar${customerC.slice(0, 8)}`, address_line1: '700 Example Grove',
+      city: '', state: 'FL', zip: '', phone: `+15550${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}` });
+    const properties = require('../services/customer-properties');
+    await db('customer_properties').insert({ id: primaryC, customer_id: customerC, address_line1: '700 Example Grove', city: '', state: 'FL', zip: '',
+      is_primary: true, active: true, occupancy_type: 'unknown', source: 'manual', address_key: properties.addressKey({ address_line1: '700 Example Grove' }) });
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(call('discover_capabilities', { query: 'add customer property' }, 'discover'))
+      .mockResolvedValueOnce(call('add_customer_property', { customer_id: customerC, ...address(700) }, 'property'))
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'That address is already saved.' }], usage: {} });
+    const proposed = await api('/api/admin/intelligence-bar/query', { prompt: `Add 700 Example Grove, Sarasota FL 34201 as a saved property for ${nameC}`,
+      context: 'estimates', session_id: sessionId, request_key: crypto.randomUUID(), pageData: { route: '/admin/estimates', customerId: customerB } });
+    expect(proposed.status).toBe(200);
+    expect(proposed.body.taskTarget.customer_id).toBe(customerC);
+    expect(proposed.body.pendingActions).toHaveLength(0);
+    const result = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+      .find(block => block.type === 'tool_result' && block.tool_use_id === 'property');
+    expect(JSON.parse(result.content)).toMatchObject({ success: false, code: 'property_exists' });
+    expect((await api(`/api/admin/customers/${customerC}/properties`, address(700))).status).toBe(409);
+    // The refused preview completed nothing and saved nothing.
+    expect(await db('customer_properties').where({ customer_id: customerC })).toHaveLength(1);
+    expect((await db('customers').where('id', customerC).first()).city).toBe('');
+    // A genuinely different street on the same customer still previews.
+    expect((await api(`/api/admin/customers/${customerC}/properties`, address(710))).status).toBe(201);
+  }, 30000);
+
   test('portal and bar add/edit produce equivalent domain outcomes and audit; foreign property and stale approval refuse', async () => {
     const ui = await api(`/api/admin/customers/${customerB}/properties`, address(500, 'Family'));
     expect(ui.status).toBe(201);
