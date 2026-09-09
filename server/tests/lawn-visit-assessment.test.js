@@ -240,7 +240,8 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(visit.PROMPT_DIGEST).toBe(sha(visit.SYSTEM_PROMPT, '\n', JSON.stringify(visit.RESPONSE_SCHEMA)));
     expect(visit.SYSTEM_PROMPT).toContain(require('../services/lawn-diagnostic-prompt').CURATED_REFERENCE);
     const context = { season: 'peak', month: null, region: null, grassType: null, turfHeightIn: null, irrigation: null, technicianNotes: null, priorSummary: null };
-    const expected = sha(visit.PROMPT_VERSION, '\n', visit.PROMPT_DIGEST, '\n', JSON.stringify(context), '\n', '0:front:image/jpeg:', sha('a'), '\n');
+    // …and the rendered user text (its instructions and formatting), so a wording change without a version bump changes the hash.
+    const expected = sha(visit.PROMPT_VERSION, '\n', visit.PROMPT_DIGEST, '\n', sha(visit.buildUserText(1, { season: 'peak' })), '\n', JSON.stringify(context), '\n', '0:front:image/jpeg:', sha('a'), '\n');
     expect(visit.contextHash({ photos: [photo('a')], photoZones: ['front'], visionContext: { season: 'peak' } })).toBe(expected);
   });
 
@@ -445,6 +446,11 @@ describe('technician notes never reach customer copy', () => {
     expect(visit.echoesTechnicianNotes('Brown reports damage near the gate.', 'Brown reports damage near the gate')).toBe(true);
     expect(visit.echoesTechnicianNotes("The dog is Green's; brown patch by the drive.", "Green's dog digs. Brown patch by the drive.")).toBe(true);
     expect(visit.echoesTechnicianNotes('Brown patches near the drive.', 'Brown patches by the drive. Green strip is fine.')).toBe(false);
+    // A lowercase name is a name by its syntax ("kowalski reports …"); an ordinary lowercase word never is.
+    expect(visit.echoesTechnicianNotes('Kowalski reports damage near the gate.', 'kowalski reports damage')).toBe(true);
+    expect(visit.echoesTechnicianNotes("Turf worn where kowalski's dog runs.", "kowalski's dog runs the fence")).toBe(true);
+    expect(visit.echoesTechnicianNotes('The customer reported damage by the gate.', 'customer reports damage near the gate')).toBe(false);
+    expect(visit.echoesTechnicianNotes('Dog digs by the gate.', 'dog digs at the gate')).toBe(false);
     expect(visit.echoesTechnicianNotes('Turf is thin near the side gate.', '')).toBe(false);
     expect(visit.echoesTechnicianNotes('', notes)).toBe(false);
     const analysis = visit.normalizeAssessment(answer({ observations: "Mrs. Kowalski's dog has worn a path by the gate.", findings: [finding({ confirmation_step: 'Ask Mrs. Kowalski when the dog is out' }), finding({ name: 'Dollar spot', confirmation_step: 'Check the shaded strip at dawn' })] }), 2);
@@ -495,12 +501,20 @@ describe('customer copy compliance screen', () => {
     expect(visit.customerObservations('Fungal activity in the shaded strip.', [{ label: 'fungal activity', confidence: 'moderate' }])).toMatch(/^Fungal activity/);
     // A weed species collapses to the generic "weed pressure" label a low finding keeps — the species itself still needs moderate+.
     expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ label: 'weed pressure', confidence: 'low' }])).toBe(visit.NO_OBSERVATIONS);
-    expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ label: 'weed pressure', confidence: 'moderate' }])).toMatch(/^Nutsedge/);
+    expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ name: 'Nutsedge patch', label: 'weed pressure', confidence: 'moderate' }])).toMatch(/^Nutsedge/);
     expect(visit.customerObservations('Weed pressure along the walk.', [{ label: 'weed pressure', confidence: 'low' }])).toMatch(/^Weed pressure/);
+    // Specificity: a moderate GENERIC finding never authorises a species or a deficiency it did not name — the term must
+    // appear in a moderate+ finding's own name (or label), not merely collapse to the same label.
+    expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ name: 'Weeds along the walk', label: 'weed pressure', confidence: 'moderate' }])).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ name: 'Nutsedge along the walk', label: 'weed pressure', confidence: 'moderate' }])).toMatch(/^Nutsedge/);
+    expect(visit.customerObservations('Clover is coming up along the walk.', [{ name: 'Nutsedge along the walk', label: 'weed pressure', confidence: 'moderate' }])).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations('Iron deficiency in the shaded strip.', [{ name: 'Yellowing turf', label: 'color and nutrient stress', confidence: 'high' }])).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations('Iron deficiency in the shaded strip.', [{ name: 'Iron deficiency in shade', label: 'color and nutrient stress', confidence: 'high' }])).toMatch(/^Iron deficiency/);
+    expect([...visit.governedTerms('Nutsedges, grey leaf spot and Gray leaf spots; iron deficiency')]).toEqual(['nutsedge', 'gray leaf', 'iron deficiency']);
     // Every weed species the label mapper recognises is governed the same way.
     for (const species of ['Clover', 'Clovers', 'Spurge', 'Spurges', 'Sedge', 'Sedges', 'Crabgrass', 'Dollarweed']) {
       expect(visit.customerObservations(`${species} is spreading along the walk.`, [{ label: 'weed pressure', confidence: 'low' }])).toBe(visit.NO_OBSERVATIONS);
-      expect(visit.customerObservations(`${species} is spreading along the walk.`, [{ label: 'weed pressure', confidence: 'moderate' }])).toMatch(new RegExp(`^${species}`));
+      expect(visit.customerObservations(`${species} is spreading along the walk.`, [{ name: `${species} along the walk`, label: 'weed pressure', confidence: 'moderate' }])).toMatch(new RegExp(`^${species}`));
     }
     // Symptom-only prose passes regardless of confidence.
     expect(visit.customerObservations('Thin turf along the driveway edge; the shaded side holds moisture.', [low])).toMatch(/^Thin turf/);
@@ -717,6 +731,8 @@ describe('technician review on confirm', () => {
     expect(visit.safeConfirmationStep('Check the shaded strip for fungus', { label: 'chinch bug activity', confidence: 'high' })).toBe('');
     expect(visit.safeConfirmationStep('Check the shaded strip for fungus', { label: 'fungal activity', confidence: 'moderate' })).toBe('Check the shaded strip for fungus');
     expect(visit.safeConfirmationStep('Pull a nutsedge sample by the walk', { label: 'weed pressure', confidence: 'low' })).toBe('');
+    expect(visit.safeConfirmationStep('Pull a nutsedge sample by the walk', { name: 'Weeds by the walk', label: 'weed pressure', confidence: 'moderate' })).toBe('');
+    expect(visit.safeConfirmationStep('Pull a nutsedge sample by the walk', { name: 'Nutsedge by the walk', label: 'weed pressure', confidence: 'moderate' })).toBe('Pull a nutsedge sample by the walk');
     // The review keeps the raw step; only the reconciliation copy is scrubbed.
     expect(visit.buildReview(step('Float test by the side gate, code 4471'), {}).reviewed_findings[0].confirmation_step).toBe('Float test by the side gate, code 4471');
   });
@@ -778,6 +794,9 @@ describe('technician review on confirm', () => {
     // Negation is scoped to its clause: a detail that rules one cause out and confirms another names the confirmed one.
     const mixed = visit.buildReview(run, visit.validateReview({ addedDetails: [{ text: 'No signs of drought; chinch bugs confirmed by float test' }, { text: 'Checked for grubs, none found, but dollar spot is active in the shade' }, { text: 'Chinch ruled out and no drought either' }] }, run).review);
     expect(mixed.added_details.map((d) => [d.label, d.negated])).toEqual([['chinch bug activity', false], ['dollar spot', false], ['no major visible stress', true]]);
+    // Within one clause, negation binds to the mentions it governs: a part without a marker takes the nearest marked part's polarity.
+    const bound = visit.buildReview(run, visit.validateReview({ addedDetails: [{ text: 'Drought ruled out and chinch bugs confirmed by float test' }, { text: 'Chinch bugs and grubs ruled out' }, { text: 'No signs of chinch or grubs' }, { text: 'Grubs found and drought ruled out' }] }, run).review);
+    expect(bound.added_details.map((d) => [d.label, d.negated])).toEqual([['chinch bug activity', false], ['no major visible stress', true], ['no major visible stress', true], ['grub activity', false]]);
     expect(built.added_details[0].name).toBe('Checked for chinch bugs; none found'); // the technician's record is kept verbatim
     const rec = built.reconciliation;
     expect(rec.flags.filter((f) => f.type === 'untreated_condition').map((f) => f.finding_id)).toEqual(['F1', 'F2', 'T3']);
@@ -813,7 +832,7 @@ describe('confirm scores preserve NULLs', () => {
     const assessment = { turf_density: 72, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 50 };
     const scoresRaw = JSON.stringify({ turf_density: 70, weed_coverage: 20, color_health: null });
     const severities = JSON.stringify({ fungal_activity: sig('minor'), thatch_visibility: sig('moderate'), drought_stress: sig('unknown', 'unknown', '') });
-    const run = { status: 'complete', scores_raw: scoresRaw, severities };
+    const run = { status: 'complete', scores_raw: scoresRaw, severities, scores_adjusted: JSON.stringify({ turf_density: 70, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 }) };
     const partial = visit.confirmScores(assessment, run, {}, { scoreValue, calculateOverallScore: () => 77 });
     expect(partial.finalScores.color_health).toBeNull();
     expect(partial.overallScore).toBeNull();
@@ -821,11 +840,13 @@ describe('confirm scores preserve NULLs', () => {
     expect(partial).toMatchObject({ confirmed: false, missing: ['color_health'], calibrationEligible: false });
     const filled = visit.confirmScores(assessment, run, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
     expect(filled).toMatchObject({ overallScore: 77, confirmed: true, missing: [], calibrationEligible: true });
-    // the AI baseline is the run's own answer in legacy units — not the assessment row
+    // the AI baseline is the run's own snapshot in legacy units — not the assessment row
     expect(filled.aiScores).toEqual({ turf_density: 70, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 });
-    // …and the seasonally adjusted snapshot the technician was shown wins over the raw answer when the run carries one
+    // …the snapshot is REQUIRED: a complete run without scores_adjusted is not comparable (never derived from the raw answer)
     const snapshot = { ...run, scores_adjusted: JSON.stringify({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 }) };
     expect(visit.confirmScores(assessment, snapshot, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 }).aiScores).toEqual({ turf_density: 77, weed_suppression: 80, color_health: null, fungus_control: 75, thatch_level: 60, stress_damage: 60 });
+    expect(visit.runAiScores({ ...run, scores_adjusted: null })).toEqual({});
+    expect(visit.confirmScores(assessment, { ...run, scores_adjusted: null }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 })).toMatchObject({ confirmed: true, calibrationEligible: false });
     // the overall inputs can all be known while a sub-score is not — still pending
     const subScoreMissing = visit.confirmScores({ ...assessment, color_health: 70, thatch_level: null }, run, {}, { scoreValue, calculateOverallScore: () => 77 });
     expect(subScoreMissing).toMatchObject({ overallScore: 77, confirmed: false, missing: ['thatch_level'], calibrationEligible: false });
@@ -836,7 +857,7 @@ describe('confirm scores preserve NULLs', () => {
     const handScored = visit.confirmScores(assessment, { status: 'unavailable', scores_raw: null, severities: null }, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
     expect(handScored).toMatchObject({ confirmed: true, calibrationEligible: false });
     // a complete run that could determine nothing (every score undeterminable, every severity unknown) is not comparable either
-    const blank = { status: 'complete', scores_raw: JSON.stringify({ turf_density: null, weed_coverage: null, color_health: null }), severities: JSON.stringify({ fungal_activity: sig('unknown', 'unknown', ''), thatch_visibility: sig('unknown', 'unknown', '') }) };
+    const blank = { status: 'complete', scores_raw: JSON.stringify({ turf_density: null, weed_coverage: null, color_health: null }), severities: JSON.stringify({ fungal_activity: sig('unknown', 'unknown', ''), thatch_visibility: sig('unknown', 'unknown', '') }), scores_adjusted: JSON.stringify({ turf_density: null, weed_suppression: null, color_health: null, fungus_control: null, thatch_level: null, stress_damage: null }) };
     const noBaseline = visit.confirmScores(assessment, blank, { color_health: 70 }, { scoreValue, calculateOverallScore: () => 77 });
     expect(noBaseline).toMatchObject({ confirmed: true, calibrationEligible: false });
     expect(Object.values(noBaseline.aiScores).every((value) => value == null)).toBe(true);
