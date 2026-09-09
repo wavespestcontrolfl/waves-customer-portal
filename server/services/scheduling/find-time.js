@@ -20,7 +20,7 @@ const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable } = require('../technician-eligibility');
-const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement } = require('./arrival-route');
+const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements } = require('./arrival-route');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -89,12 +89,9 @@ async function findArrivalWindowSlots(opts) {
       });
       if (!context) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      for (let start = Math.ceil(floor / 60) * 60; start + durationMinutes <= ADMIN_DAY_END_MINUTES; start += 60) {
-        evaluated++;
-        const windowStart = minutesToTime(start);
-        const windowEnd = minutesToTime(start + durationMinutes);
-        const fit = evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes });
-        if (!fit.feasible) continue;
+      const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
+      evaluated += candidates.evaluated;
+      for (const { windowStart, windowEnd, fit } of candidates.placements) {
         const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
         slots.push({
           date, technician: { id: tech.id, name: tech.name },
@@ -104,7 +101,7 @@ async function findArrivalWindowSlots(opts) {
           waiting_minutes: fit.waitingMinutes, arrival_delay_minutes: fit.arrivalDelayMinutes,
           estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
           route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
-          latest_start_min: start,
+          latest_start_min: timeToMinutes(windowStart),
         });
       }
     }

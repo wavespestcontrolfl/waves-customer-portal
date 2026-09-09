@@ -52,7 +52,7 @@ describe('nativeLinks', () => {
     expect(customerAppUrl('evil.example/login', loc)).toBeNull();
   });
 
-  it('navigates only after validation and preserves query/hash', () => {
+  it.each(['/report/token?from=push#photos', '/?tab=billing&focus=payment-methods', '/?tab=dashboard&requestId=11111111-1111-4111-8111-111111111111'])('validates and preserves notification destination %s', (destination) => {
     const assign = vi.fn();
     const navigationLocation = {
       ...loc,
@@ -62,11 +62,19 @@ describe('nativeLinks', () => {
       assign,
     };
 
-    expect(navigateToCustomerUrl('/report/token?from=push#photos', navigationLocation)).toBe(true);
-    expect(assign).toHaveBeenCalledWith('https://portal.wavespestcontrol.com/report/token?from=push#photos');
+    expect(navigateToCustomerUrl(destination, navigationLocation)).toBe(true);
+    expect(assign).toHaveBeenCalledWith(`https://portal.wavespestcontrol.com${destination}`);
 
     expect(navigateToCustomerUrl('https://evil.example/phish', navigationLocation)).toBe(false);
     expect(navigateToCustomerUrl('/admin', navigationLocation)).toBe(false);
     expect(assign).toHaveBeenCalledTimes(1);
+  });
+
+  it('navigates again when a later notice opens the same request', () => {
+    const assign = vi.fn();
+    const navigationLocation = { ...loc, pathname: '/',
+      search: '?tab=dashboard&requestId=request-1&requestEvent=status-1', hash: '', assign };
+    expect(navigateToCustomerUrl('/?tab=dashboard&requestId=request-1&requestEvent=status-2', navigationLocation)).toBe(true);
+    expect(assign).toHaveBeenCalledWith('https://portal.wavespestcontrol.com/?tab=dashboard&requestId=request-1&requestEvent=status-2');
   });
 });
