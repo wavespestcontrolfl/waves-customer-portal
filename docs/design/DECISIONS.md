@@ -2224,6 +2224,12 @@ Exact assigned protocol versions remain usable after archival; unassigned select
 
 The owner replaced the historical services column with WaveGuard Tier, showing the stored Bronze, Silver, Gold, or Platinum tier and leaving other cells blank. The directory no longer displays the contact line beneath customer names. Outreach & Upsells is now Opportunities; its existing view key and actions stay the same. This supersedes the earlier directory column and navigation copy decisions without changing stored tier values, pricing, or membership rules.
 
+## 2026-09-08 — Document the accepted admin foundation in the existing catalog
+
+The owner-approved audit sequence promotes comfortable 44px controls, sentence-case 14px labels/actions, and 16px field text for new and migrated admin surfaces. Compact density reaches 36px only on desktop widths without a coarse pointer; touch density is 48px. Existing unmigrated pages retain their presentation. This supersedes the older type/case defaults for migrated work.
+
+The existing `/admin/_design-system` route demonstrates labeled fields, stable loading and retry states, missing values versus zero, nested overlays, and record/role draft ownership, with the source for each example. `AdminCommandHeader` gains an explicit workspace variant. These examples do not establish estimate pricing, durable offline recovery, or technician completion behavior; those remain separate workflow proofs in the approved sequence.
+
 
 ## 2026-09-08 — One evidence-based lawn assessment per visit
 
