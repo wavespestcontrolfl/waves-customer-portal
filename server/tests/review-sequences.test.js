@@ -94,6 +94,7 @@ function makeMock(initial = {}, opts = {}) {
       const l = valueFor(r, k); if (l == null) return false;
       return op === '>=' ? l >= v : op === '<=' ? l <= v : op === '>' ? l > v : op === '<' ? l < v : l === v;
     }));
+    if (q.followupRetryAt) rows = rows.filter(r => !r.followup_next_attempt_at || new Date(r.followup_next_attempt_at) <= q.followupRetryAt);
     if (q.order) { const [k, d] = q.order; rows.sort((a, b) => { const av = valueFor(a, k), bv = valueFor(b, k); if (av === bv) return 0; const x = av > bv ? 1 : -1; return d === 'desc' ? -x : x; }); }
     return q.limitValue ? rows.slice(0, q.limitValue) : rows;
   }
@@ -110,7 +111,7 @@ function makeMock(initial = {}, opts = {}) {
       orWhere() { return this; },
       orWhereRaw() { return this; },
       orWhereNull() { return this; },
-      whereRaw(sql) { this.raws.push(sql); return this; },
+      whereRaw(sql, bindings) { this.raws.push(sql); if (sql.includes("followup_next_attempt_at")) this.followupRetryAt = bindings[0]; return this; },
       whereNot(c, v) { this.notEquals.push([c, v]); return this; },
       whereIn(c, vs) { this.ins.push([c, vs]); return this; },
       whereNotIn(c, vs) { this.notIns.push([c, vs]); return this; },
@@ -4645,6 +4646,26 @@ describe('legacy follow-up delivery spacing', () => {
     setup({ manualAt: new Date(Date.now() - 3600000) });
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('twenty spacing-held customers leave room for later customers on the next tick', async () => {
+    const { mock, request } = setup({ manualAt: new Date(Date.now() - 3600000) });
+    const rows = mock.__state.rows;
+    for (let i = 1; i < 21; i++) {
+      const customerId = `batch-${i}`;
+      rows.customers.push({ ...rows.customers[0], id: customerId });
+      rows.review_requests.push({ ...request, id: `row-${i}`, customer_id: customerId });
+      if (i < 20) rows.sms_log.push({ ...rows.sms_log[0], customer_id: customerId });
+    }
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(rows.review_requests.slice(0, 20).every(r => r.followup_next_attempt_at > new Date())).toBe(true);
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].customerId).toBe('batch-20');
+    // The held row becomes eligible again when the retry and spacing floor expire.
+    rows.review_requests[0].followup_next_attempt_at = new Date(Date.now() - 1);
+    rows.sms_log[0].created_at = new Date(Date.now() - 73 * 3600000);
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
   });
 
   test('unavailable history leaves the follow-up for a later worker tick', async () => {
