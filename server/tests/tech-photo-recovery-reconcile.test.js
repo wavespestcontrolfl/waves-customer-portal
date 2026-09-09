@@ -287,6 +287,21 @@ describe('POST /:id/photos/reconcile — distinct expected image hashes', () => 
     });
   });
 
+  test('an expected image already on the record under another photo_type counts (uploader dedupes per record, not per type)', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
+      structured_notes: { completionPhotos: { uploaded: 1, failed: 1, expectedImageHashes: ['aaa', 'bbb'] } } }];
+    tables.service_photos = [
+      { id: 'p1', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'aaa' },
+      { id: 'p2', service_record_id: 'rec-1', photo_type: 'progress', image_sha256: 'bbb' },
+      { id: 'p3', service_record_id: 'rec-other', photo_type: 'after', image_sha256: 'ccc' },
+    ];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(200);
+      expect((await res.json()).photoSummary).toEqual({ pending: true, restored: true });
+    });
+  });
+
   test('enough rows but the wrong image is still photos_still_missing', async () => {
     tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
       structured_notes: { completionPhotos: { uploaded: 1, failed: 1, expectedImageHashes: ['aaa', 'bbb'] } } }];

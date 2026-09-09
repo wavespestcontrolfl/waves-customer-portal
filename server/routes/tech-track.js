@@ -873,12 +873,16 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
     const serviceData = parseJsonColumn(record.service_data);
     let photoSummary = { pending: false, restored: false };
     if (hasPendingPhotoSummary(serviceData)) {
-      const afterRows = await db('service_photos')
-        .where({ service_record_id: record.id, photo_type: 'after' })
-        .select('image_sha256');
+      // The uploader dedupes on (service_record_id, image_sha256) across
+      // every photo_type, so a recovered image whose bytes already exist on
+      // the record as e.g. a 'progress' row never gains an 'after' row —
+      // verify hashes over the whole record, not only 'after' rows.
+      const recordRows = await db('service_photos')
+        .where({ service_record_id: record.id })
+        .select('image_sha256', 'photo_type');
       const recovered = completionPhotosFullyRecovered(parseJsonColumn(record.structured_notes), {
-        afterPhotoCount: afterRows.length,
-        presentImageHashes: afterRows.map((row) => row.image_sha256),
+        afterPhotoCount: recordRows.filter((row) => row.photo_type === 'after').length,
+        presentImageHashes: recordRows.map((row) => row.image_sha256),
       });
       if (!recovered) {
         return res.status(409).json({ error: 'Closeout photos are still missing', code: 'photos_still_missing' });
