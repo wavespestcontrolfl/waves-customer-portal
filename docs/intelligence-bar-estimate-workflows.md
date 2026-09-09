@@ -32,43 +32,59 @@ lead, appointment, customer message or scheduled send is created.
   without reconstructable allocation refuses for editor review instead of
   silently losing the discount.
 - The existing pending-action confirmation binds actor, target, facts, options,
-  prices and estimate version. The commit locks estimate group address/send
-  guards before estimate/customer rows, matching native revision lock order.
+  prices and estimate version. The commit locks customer/property rows first,
+  then estimate group address/send guards, then the estimate row. This keeps
+  customer profile edits and estimate revisions in the same lock order.
   Administrator permission and fresh facts are rechecked inside the transaction.
 - The estimate, audit and pending-action receipt commit together. A missing
   receipt rolls back the mutation; an interruption after commit recovers the
   saved receipt. Replayed confirmation does not create another estimate.
 
 The approval card shows the target/address, saved lawn area and grass, priced
-WaveGuard tier, per-application charge, cadence and actual save effect. A saved
+WaveGuard tier, selected cadence and every customer-selectable cadence with its
+per-application price, plus the actual save effect. These options reuse the
+public pricing builder's discounts and minimum-price rules; an unsaved revision
+cannot read or populate the saved estimate's pricing cache. A saved
 receipt links to `/admin/estimates?editEstimateId=...`. The list refreshes on an
 estimate mutation; the matching editor reloads its persisted state while
-preserving edits made before or during the refresh request.
+preserving edits made before or during the refresh request. A failed refresh
+keeps the loaded editor usable and offers Retry without consuming the mutation.
 
 ## Verification
 
 Review corrections preserve canonical unknown/mixed grass instead of falling
 back to a stale property type, apply the estimator's shared field-review and
 low-confidence predicates, and conditionally persist interrupted outcomes
-without overwriting an atomic completed receipt. The affected confirmation and
-pending-action unit suites pass 63 tests; the real PostgreSQL route suite passes
-20 scenarios, including unknown/mixed grass, oversize lawns, transactional
-rollback, and a failed recovery read after commit. Independent review found no
-remaining issues in these corrections. Model output is scripted in this suite;
-pricing, domain persistence, authentication and PostgreSQL are real.
+without overwriting an atomic completed receipt. The current real PostgreSQL
+route suite passes all 25 scenarios, including alternate-cadence approval
+drift, discounted same-link revision parity with public pricing, and preview
+cache isolation. The authorization suite passes 42 tests, including disclosure
+and approval hashing of all offered cadences. Both editor lifecycle suites
+pass 21 tests, including failed-refresh retry and preservation of edits made
+after the failure. All eight scoped estimate tool schema, database, smoke and
+shape validators pass; side-effecting save smoke/shape checks are deliberately
+skipped by the validator. Model output is scripted in this suite; pricing,
+domain persistence, authentication and PostgreSQL are real.
+
+The latest browser checks at 1440×1050 and 390×844 use the actual approval card
+and editor with synthetic responses. Every offered cadence is visible and
+confirmable; a refresh error preserves the saved editor, and Retry loads the
+persisted version. Both widths have loaded fonts, zero JavaScript exceptions
+and zero horizontal overflow. Screenshots were visually inspected. These
+component checks supplement the real route/database evidence below.
 
 All fixtures are synthetic in the dedicated development Postgres database.
 The model is scripted and provider adapters are isolated. This is real
 HTTP/auth/domain/persistence evidence, not live-model or provider-send evidence.
 
-- Sixteen estimate DB scenarios cover create from Inventory with A targeted
+- The 25 estimate DB scenarios cover create from Inventory with A targeted
   while B is viewed, no new lead, primary/secondary measurement authority,
   tampered parents, same-property estimate substitution, stale approval, cadence, percentage/fixed discount handling,
   membership changes in both directions, zero-area refusal, grouped revision
   lock order, live pricing failure before/after confirmation, receipt rollback
   and post-commit recovery. The shared native edit-source endpoint independently
   reads the persisted draft.
-- Eight server suites pass 324 distinct tests across the final 203-test base
+- Earlier baseline verification: eight server suites passed 324 distinct tests across the 203-test base
   run and 180-test target/registry/authorization run: action registry, tool definitions,
   write-gate mirror, authorization contracts, pending actions, shared estimate
   persistence, task target binding and estimate billing regression coverage.

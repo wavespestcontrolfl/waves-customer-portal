@@ -100,6 +100,43 @@ describe('assistant estimate refresh', () => {
   await waitFor(()=>expect(committed()).toHaveLength(1));
   expect(committed()[0].expectedEditVersion).toBe('assistant-version');
  });
+ it('keeps the editor usable after a failed refresh and retries the saved version', async () => {
+  mount();await screen.findByDisplayValue('QA Contact');
+  const original=fetcher.getMockImplementation();
+  let refreshCalls=0;
+  fetcher.mockImplementation((url,opts)=>{
+   if(!String(url).endsWith('/edit-source')) return original(url,opts);
+   refreshCalls++;
+   return refreshCalls===1 ? response({error:'Temporary refresh failure'},503)
+    : response({...source,customerName:'QA Recovered',editVersion:'recovered-version'});
+  });
+  fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
+  await screen.findByText('Temporary refresh failure',{exact:false});
+  expect(screen.getByLabelText('Customer name')).toHaveValue('QA Contact');
+  expect(screen.getByRole('button',{name:'Save draft',exact:true})).toBeEnabled();
+  expect(refreshCalls).toBe(1);
+  fireEvent.click(screen.getByRole('button',{name:'Retry',exact:true}));
+  await screen.findByDisplayValue('QA Recovered');
+  expect(refreshCalls).toBe(2);
+  expect(screen.queryByText('Temporary refresh failure',{exact:false})).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Customer name'),{target:{value:'QA After Retry'}});
+  fireEvent.click(screen.getByRole('button',{name:'Save draft',exact:true}));
+  await waitFor(()=>expect(committed()).toHaveLength(1));
+  expect(committed()[0].expectedEditVersion).toBe('recovered-version');
+ });
+ it('preserves edits made after a failed refresh when Retry is clicked', async () => {
+  mount();await screen.findByDisplayValue('QA Contact');
+  const original=fetcher.getMockImplementation();
+  fetcher.mockImplementation((url,opts)=>String(url).endsWith('/edit-source')
+   ? response({error:'Temporary refresh failure'},503) : original(url,opts));
+  fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
+  await screen.findByText('Temporary refresh failure',{exact:false});
+  fireEvent.change(screen.getByLabelText('Customer name'),{target:{value:'QA Unsaved After Failure'}});
+  fireEvent.click(screen.getByRole('button',{name:'Retry',exact:true}));
+  await screen.findByText(/Your unsaved edits are still here/);
+  expect(screen.getByLabelText('Customer name')).toHaveValue('QA Unsaved After Failure');
+  expect(committed()).toHaveLength(0);
+ });
  it.each(['before','during'])('preserves unsaved fields entered %s the assistant refresh', async timing => {
   mount();await screen.findByDisplayValue('QA Contact');
   let finish;

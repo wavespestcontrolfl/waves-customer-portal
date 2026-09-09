@@ -264,6 +264,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('billing', `${humanKey(line.service)}: $${Number(line.per_application).toFixed(2)} per application, ${line.applications} applications per year`);
       if (line.initial) push('billing', `Initial: $${Number(line.initial).toFixed(2)}`);
     }
+    for (const cadence of preview.offered_cadences) {
+      push('billing', `Customer option${cadence.selected ? ' (selected)' : ''}: ${cadence.applications} applications per year at $${Number(cadence.per_application).toFixed(2)} per application`);
+    }
     push('operational', preview.effect);
   }
   if (propertyAction) {

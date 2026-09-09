@@ -98,6 +98,13 @@ suite('existing-customer estimates from another workspace', () => {
     expect(saved.estimate_data.engineInputs.homeSqFt).toBeUndefined();
     expect(saved.estimate_data.engineResult.lineItems[0].frequency).toBe(9);
     expect(Number(saved.annual_total)).toBe(saved.estimate_data.engineResult.summary.recurringAnnualAfterDiscount);
+    const publicPricing = await require('../routes/estimate-public').buildPricingBundle(saved);
+    const optionEffects = proposed.body.pendingActions[0].contract.effects.filter(effect => effect.label.startsWith('Customer option'));
+    expect(optionEffects).toHaveLength(publicPricing.frequencies.length);
+    for (const frequency of publicPricing.frequencies) {
+      expect(optionEffects).toContainEqual({ kind: 'billing', label:
+        `Customer option${frequency.visitsPerYear === 9 ? ' (selected)' : ''}: ${frequency.visitsPerYear} applications per year at $${Number(frequency.perTreatment).toFixed(2)} per application` });
+    }
     expect(await db('leads').count('* as count').first()).toEqual(leadCount);
     expect(await db('customers').where({ id: viewedCustomer }).first()).toEqual(beforeB);
     expect((await confirm(proposed)).status).toBe(409);
@@ -192,13 +199,45 @@ suite('existing-customer estimates from another workspace', () => {
       estimateData: data,
     }, 'PUT');
     expect(native.status).toBe(200);
-    const revised = await confirm(await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 }));
+    // A sent revision changes the existing link. Prime the real pricing cache
+    // first so the proposed revision must not reuse or overwrite its prices.
+    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: db.fn.now() });
+    const sent = await db('estimates').where({ id: estimateId }).first();
+    const publicRoute = require('../routes/estimate-public');
+    await publicRoute.buildPricingBundle(sent);
+    const cache = require('../services/estimate-pricing-cache');
+    const cachedBefore = structuredClone(cache.getEstimatePricingCache(sent));
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    expect(cache.getEstimatePricingCache(sent)).toEqual(cachedBefore);
+    const revised = await confirm(proposed);
     expect(revised.body).toMatchObject({ success: true, result: { estimate_id: estimateId } });
     const saved = await db('estimates').where({ id: estimateId }).first();
     expect(saved.estimate_data.engineInputs.manualDiscount).toMatchObject({ type: 'PERCENT', value: 10 });
     expect(saved.estimate_data.engineResult.lineItems[0].frequency).toBe(12);
     expect(saved.estimate_data.engineResult.summary.manualDiscount).toMatchObject({ type: 'PERCENT', value: 10 });
     expect(saved.token).toBe(before.token);
+    const offered = (await publicRoute.buildPricingBundle(saved)).frequencies;
+    const effects = proposed.body.pendingActions[0].contract.effects.map(effect => effect.label);
+    expect(offered.length).toBeGreaterThan(1);
+    for (const frequency of offered) {
+      expect(effects).toContain(`Customer option${frequency.visitsPerYear === 12 ? ' (selected)' : ''}: ${frequency.visitsPerYear} applications per year at $${Number(frequency.perTreatment).toFixed(2)} per application`);
+    }
+    expect(effects).toContain('Updates the saved estimate and its existing customer link. No message is sent.');
+  }, 60000);
+
+  test('a change to an alternate offered cadence invalidates confirmation before saving', async () => {
+    const fixture = await customerFixture();
+    const proposed = await propose(fixture);
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const publicRoute = require('../routes/estimate-public'), build = publicRoute.buildPricingBundle;
+    jest.spyOn(publicRoute, 'buildPricingBundle').mockImplementation(async (...args) => {
+      const pricing = await build(...args);
+      return { ...pricing, frequencies: pricing.frequencies.map(frequency => frequency.visitsPerYear === 9
+        ? frequency : { ...frequency, perTreatment: Number(frequency.perTreatment) + 1 }) };
+    });
+    const response = await confirm(proposed);
+    expect(response.status).toBe(409);
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
   }, 60000);
 
   test('revision refuses a stored fixed discount whose allocation cannot be reconstructed', async () => {

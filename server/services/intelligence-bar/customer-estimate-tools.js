@@ -176,6 +176,19 @@ async function estimatePreview(input, database = db, context = null) {
       || !lines.some(line => Number(line.annualPrice ?? line.annual) > 0)) {
     throw failure('The engine could not produce a priced lawn estimate from the saved facts.', 'pricing_unavailable');
   }
+  // Use the customer-facing projection, including discounts and hidden floor-
+  // capped cadences. An unsaved revision must neither read nor populate the
+  // saved estimate's pricing cache, so omit its cache identity.
+  const pricing = await require('../../routes/estimate-public').buildPricingBundle({ ...prepared.estimate, id: null });
+  const offeredCadences = (pricing.frequencies || []).map(frequency => ({
+    key: frequency.key, applications: Number(frequency.visitsPerYear),
+    per_application: Number(frequency.perTreatment),
+    selected: Number(frequency.visitsPerYear) === body.estimateData.engineInputs.services.lawn.lawnFreq,
+  }));
+  if (!offeredCadences.length || offeredCadences.some(cadence => ![6, 9, 12].includes(cadence.applications)
+      || !Number.isFinite(cadence.per_application) || cadence.per_application <= 0)) {
+    throw failure('The customer-selectable lawn prices could not be verified.', 'pricing_unavailable');
+  }
   return { preview: true, customer: context.customer, property: context.property,
     estimate_id: input.estimate_id || null, action: input.estimate_id ? 'revise_estimate' : 'create_estimate',
     applications_per_year: body.estimateData.engineInputs.services.lawn.lawnFreq,
@@ -184,10 +197,12 @@ async function estimatePreview(input, database = db, context = null) {
     lines: lines.map(line => ({ service: line.name || line.service, applications: line.frequency,
       per_application: perApplicationChargeAmount({ annualRate: prepared.estimate.annual_total, visitsPerYear: line.frequency }),
       initial: line.initialFee || 0 })),
+    offered_cadences: offeredCadences,
     engine_result_digest: engineDigest,
     current_services: context.current_services, quote_tier: body.waveguardTier,
     effect: prior && prior.status !== 'draft' ? 'Updates the saved estimate and its existing customer link. No message is sent.' : 'Saves a draft. No customer message, appointment or scheduled send.',
-    _version: { facts: context._version, estimate: prior ? persistence.estimateEditVersion(prior) : null, pricing: engineDigest },
+    _version: { facts: context._version, estimate: prior ? persistence.estimateEditVersion(prior) : null,
+      pricing: engineDigest, cadences: agentEngineResultDigest(offeredCadences) },
     _body: body };
 }
 

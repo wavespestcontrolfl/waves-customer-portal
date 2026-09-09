@@ -1801,6 +1801,7 @@ export default function EstimateToolViewV2({
   // contact fields only and the operator rebuilds the quote before saving.
   const [editMode, setEditMode] = useState(null);
   const [editLoadError, setEditLoadError] = useState(null);
+  const [editLoadAttempt, setEditLoadAttempt] = useState(0);
   useEffect(() => {
     if (!editMode || !/^#estimate-(customer|services|pricing|review)$/.test(window.location.hash)) return;
     requestAnimationFrame(() => document.querySelector(window.location.hash)?.scrollIntoView({ block: "start" }));
@@ -1950,8 +1951,9 @@ export default function EstimateToolViewV2({
   useEffect(() => {
     if (!editEstimateId || (sameEstimateId(editEstimateId, editMode?.id) && (!estimateRefresh || loadedEstimateRefresh.current === estimateRefresh))) return undefined;
     const refreshing = sameEstimateId(editEstimateId, editMode?.id);
-    loadedEstimateRefresh.current = estimateRefresh;
     if (refreshing && dirty) {
+      loadedEstimateRefresh.current = estimateRefresh;
+      setEditLoadError(null);
       setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");
       return undefined;
     }
@@ -1973,6 +1975,7 @@ export default function EstimateToolViewV2({
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
         if (cancelled) return;
         if (refreshing && JSON.stringify(formRef.current) !== observedForm) {
+          loadedEstimateRefresh.current = estimateRefresh;
           setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");
           return;
         }
@@ -1984,6 +1987,7 @@ export default function EstimateToolViewV2({
           return;
         }
         const seeded = formFromEditSource(d);
+        loadedEstimateRefresh.current = estimateRefresh;
         // Reopening the SAME job must not trip the per-job rodent-guarantee
         // confirmation reset (it fires on identity change vs this ref).
         rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
@@ -2012,7 +2016,7 @@ export default function EstimateToolViewV2({
         setExistingCustomerMatch(d.customer || null);
       } catch (e) {
         if (!cancelled) {
-          setEditMode(null);
+          if (!refreshing) setEditMode(null);
           setEditLoadError(e.message);
         }
       }
@@ -2020,7 +2024,7 @@ export default function EstimateToolViewV2({
     return () => {
       cancelled = true;
     };
-  }, [editEstimateId, estimateRefresh]);
+  }, [editEstimateId, estimateRefresh, editLoadAttempt]);
 
   function exitEditMode() {
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
@@ -4350,17 +4354,18 @@ export default function EstimateToolViewV2({
           <div className="mb-4 flex items-start justify-between gap-4 border-hairline border-zinc-300 rounded-xs bg-zinc-50 px-4 py-3">
             <div className="text-14 text-zinc-700">
               <span className="font-medium text-zinc-900">
-                Couldn&apos;t open the estimate for editing.
+                {editMode ? "Couldn’t refresh the saved estimate. Your current edits are still here." : "Couldn’t open the estimate for editing."}
               </span>{" "}
               {editLoadError}
             </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setEditLoadError(null)}
-            >
-              Dismiss
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setEditLoadAttempt(attempt => attempt + 1)}>
+                Retry
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setEditLoadError(null)}>
+                Dismiss
+              </Button>
+            </div>
           </div>
         )}
         {editMode && (
