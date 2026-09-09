@@ -3160,9 +3160,10 @@ router.post('/outbound-connect', async (req, res) => {
     });
     // A bridge already placed by a card keeps its completion evidence after rollback.
     const callbackRow = CALL_LOG_ID_SHAPE.test(String(rawCallLogId || '')) && !require('../services/callback-cards').enabled()
-      ? await db('call_log').where({ id: rawCallLogId }).first('metadata') : null;
+      ? await db('call_log').where({ id: rawCallLogId }).first('metadata').catch(() => null) : undefined;
+    // On a read failure, keep dialing and retain the harmless completion action.
     const callbackCompletion = require('../services/callback-cards').enabled()
-      || !!foldVoiceMetadata(callbackRow?.metadata, {}).relatedCommitmentId;
+      || callbackRow === null || !!foldVoiceMetadata(callbackRow?.metadata, {}).relatedCommitmentId;
     const dial = twiml.dial({
       callerId: callerIdNumber,
       record: 'record-from-answer-dual',

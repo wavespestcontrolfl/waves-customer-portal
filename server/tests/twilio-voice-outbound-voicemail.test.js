@@ -161,6 +161,19 @@ describe('POST /outbound-connect', () => {
     expect(res.body).not.toContain('machineDetection');
   });
 
+  test('a failed linkage lookup still dials with completion evidence enabled', async () => {
+    db.mockImplementation(() => {
+      const query = { where: () => query, update: async () => 1,
+        first: async () => { throw new Error('Synthetic database unavailable'); } };
+      return query;
+    });
+    const res = mockRes();
+    await connect()(req(), res);
+    expect(res.body).toContain(`<Number>${CUSTOMER}</Number>`);
+    expect(res.body).toContain(`/outbound-dial-complete?callLogId=${CALL_LOG_ID}`);
+    expect(res.body).not.toContain('unable to connect');
+  });
+
   test('gate off → TwiML is the pre-lane shape: no machineDetection, no action', async () => {
     const res = mockRes();
     await connect()(req(), res);
