@@ -8,13 +8,13 @@ function restockMeta(raw) {
 }
 
 async function listRestockRequests({ status = 'active', limit = 100, showSpend = false, requestId, productId } = {}) {
-    if (requestId && require('joi').string().guid().validate(requestId).error) throw Object.assign(new Error('Invalid restock request id'), { statusCode: 400 });
-    if (productId && require('joi').string().guid().validate(productId).error) throw Object.assign(new Error('Invalid product id'), { statusCode: 400 });
+    if (requestId && require('joi').string().guid().validate(requestId).error) throw Object.assign(new Error('Invalid restock request id'), { statusCode: 400, isOperational: true });
+    if (productId && require('joi').string().guid().validate(productId).error) throw Object.assign(new Error('Invalid product id'), { statusCode: 400, isOperational: true });
     if (!(await db.schema.hasTable('product_restock_requests'))) {
       return { requests: [] };
     }
     status = String(status).toLowerCase();
-    if (!['open', 'ordered', 'active', 'received', 'cancelled', 'all'].includes(status)) throw Object.assign(new Error('Invalid request status'), { statusCode: 400 });
+    if (!['open', 'ordered', 'active', 'received', 'cancelled', 'all'].includes(status)) throw Object.assign(new Error('Invalid request status'), { statusCode: 400, isOperational: true });
     // vendor_orders (PR 2 ledger) is one row per request at most; absent
     // table (older schema) → no order columns.
     const hasOrders = await db.schema.hasTable('vendor_orders');

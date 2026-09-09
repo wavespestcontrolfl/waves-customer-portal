@@ -815,7 +815,7 @@ async function changePrimaryProperty(customerId, propertyId, options = {}) {
     // reuses that row as the old primary instead of inserting a duplicate,
     // which the address-key index would refuse.
     if (customer.address_line1 && !properties.some(p => p.is_primary && p.active)) {
-      const saved = properties.find(p => p.active && p.id !== propertyId && addressKey(p) === addressKey(customer));
+      const saved = properties.find(p => p.active && addressKey(p) === addressKey(customer));
       if (saved) await trx('customer_properties').where({ id: saved.id }).update({ is_primary: true, updated_at: trx.fn.now() });
     }
     await ensurePrimaryProperty(customer, { conn: trx });
@@ -844,7 +844,7 @@ async function preserveSettledVisitAddresses(trx, customerId, oldPrimary) {
   const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
   await trx('scheduled_services')
     .where({ customer_id: customerId })
-    .whereNull('property_id')
+    .where(function () { this.whereNull('property_id').orWhere('property_id', oldPrimary.id); })
     .whereNull('service_address_line1')
     .whereIn('status', TERMINAL_VISIT_STATUSES)
     .where(function () {
