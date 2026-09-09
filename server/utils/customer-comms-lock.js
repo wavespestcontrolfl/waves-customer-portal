@@ -81,4 +81,25 @@ async function withCustomerCommsLock(db, customerId, fn, { connection } = {}) {
   }, { connection });
 }
 
-module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock };
+// Reuse the provider STOP/START namespace, including absent suppression rows.
+// SMS handoff order: customer-comms → phone → customer/lead rows.
+// STOP/START and provider recorders take phone only, never customer-comms:
+// reminders already hold customer-comms while calling those recorders.
+async function lockSmsPhone(trx, phone) {
+  const normalized = require('./phone').toE164(phone);
+  if (!normalized) throw new Error('SMS authority requires a phone');
+  await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [normalized]);
+}
+
+// The callback covers final authority reads and the SDK call only. Provider
+// preparation and error recorders use separate connections and run outside it.
+async function withSmsConsentLock(dbh, { phone, customerId }, fn) {
+  if (!customerId) throw new Error('SMS authority requires a customer');
+  return dbh.transaction(async (trx) => {
+    await lockCustomerComms(trx, customerId);
+    await lockSmsPhone(trx, phone);
+    return fn(trx);
+  });
+}
+
+module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock };

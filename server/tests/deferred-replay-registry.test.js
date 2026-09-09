@@ -13,6 +13,11 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/retry-collectibility', () => ({
+  ...jest.requireActual('../services/retry-collectibility'),
+  loadRetryContext: jest.fn(() => ({ lookupWarnings: [] })),
+  classifyFailedPaymentRetry: jest.fn(async () => ({ disposition: 'charge' })),
+}));
 jest.mock('../services/invoice-followups', () => ({
   isTerminalInvoice: jest.fn((inv) => ['paid', 'prepaid', 'void'].includes(String(inv?.status || ''))),
 }));
@@ -100,6 +105,38 @@ function throwChain() {
 
 describe('deferred-replay registry', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  test.each([
+    [{ status: 'failed', retry_count: 1 }, true],
+    [{ status: 'failed', retry_count: 2 }, false],
+    [{ status: 'paid', retry_count: 1 }, false],
+    [null, false],
+  ])('billing failure replay checks current payment and retry stage: %j', async (payment, eligible) => {
+    const q = firstChain(payment);
+    db.mockReturnValueOnce(q);
+    if (eligible) db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    expect(await recheckDeferredReplay('billing_failure_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1', retry_count: 1,
+    })).toMatchObject({ eligible });
+    expect(q.where).toHaveBeenCalledWith({ id: 'pay-1', customer_id: 'cust-1' });
+  });
+
+  test('billing failure replay retains its retry on a database outage', async () => {
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('billing_failure_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1', retry_count: 1,
+    })).toMatchObject({ eligible: false, retryable: true });
+  });
+
+  test.each(['SUPERSEDE_BY_COLLECTOR', 'SELF_SUPERSEDE'])('billing failure replay suppresses an obligation resolved by %s', async (kind) => {
+    db.mockReturnValueOnce(firstChain({ status: 'failed', retry_count: 1 }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    const rules = require('../services/retry-collectibility');
+    rules.classifyFailedPaymentRetry.mockResolvedValueOnce({ disposition: rules.DISPOSITIONS[kind], reason: 'settled' });
+    expect(await recheckDeferredReplay('billing_failure_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1', retry_count: 1,
+    })).toEqual({ eligible: false, reason: 'settled' });
+  });
 
   test('unregistered entry points are inert', async () => {
     expect(await recheckDeferredReplay('some_future_unregistered_deferred', {})).toBeNull();
