@@ -513,21 +513,27 @@ const { validScope, UNCLASSIFIED } = require('./scope-policy');
 // reader then receives the saved property's own full address, never the
 // supplied text, so "123 Main St, Tampa" cannot ride a customer saved at
 // "123 Main St, Bradenton" and a bare street line cannot resolve a
-// different parcel on a repeated street name.
+// different parcel on a repeated street name. Returns the saved row's full
+// address and its stored coordinates (null when the row has none).
 async function bindSavedAddress(supplied, targets) {
   const { sameStreetAddress } = require('../estimator-engine/address-compare');
   const { formatAddress } = require('../../utils/address-normalizer');
-  const ids = targets.map(target => target.customer_id);
-  const [customers, properties] = await Promise.all([
-    db('customers').whereIn('id', ids).whereNull('deleted_at').select('address_line1', 'city', 'state', 'zip'),
-    db('customer_properties').whereIn('customer_id', ids).where('active', true).select('address_line1', 'address_line2', 'city', 'state', 'zip'),
-  ]);
-  const saved = [...customers, ...properties]
-    .filter(row => String(row.address_line1 || '').trim())
-    .map(row => formatAddress({ line1: row.address_line1, line2: row.address_line2, city: row.city, state: row.state, zip: row.zip }));
   const text = String(supplied || '').trim();
   if (!text) return null;
-  return saved.find(address => sameStreetAddress(text, address, { requireExactUnit: true })) || null;
+  const ids = targets.map(target => target.customer_id);
+  const fields = ['address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude'];
+  const [customers, properties] = await Promise.all([
+    db('customers').whereIn('id', ids).whereNull('deleted_at').select(fields),
+    db('customer_properties').whereIn('customer_id', ids).where('active', true).select(fields),
+  ]);
+  const coordinate = value => (value == null || value === '' || Number.isNaN(Number(value)) ? null : Number(value));
+  const saved = [...customers, ...properties]
+    .filter(row => String(row.address_line1 || '').trim())
+    .map(row => ({
+      address: formatAddress({ line1: row.address_line1, line2: row.address_line2, city: row.city, state: row.state, zip: row.zip }),
+      lat: coordinate(row.latitude), lng: coordinate(row.longitude),
+    }));
+  return saved.find(({ address }) => sameStreetAddress(text, address, { requireExactUnit: true })) || null;
 }
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
@@ -672,21 +678,24 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   if (context.targets?.length && scope === 'address_keyed') {
     const bound = await bindSavedAddress(params.address, context.targets);
     if (!bound) return { error: 'Use the task customer\'s own saved address for this property lookup', code: 'target_clarification_required' };
-    input.address = bound;
+    input.address = bound.address;
   }
   // The slot finder's destination is a location, not a record. Inside a
   // customer-scoped task the destination is the task customer: supplied
   // coordinates are dropped (the reader resolves the customer's own), and a
-  // supplied address must be one of the customer's active saved properties.
-  // Otherwise the returned neighbouring stops would describe whatever
-  // location the model chose.
+  // supplied address must be one of the customer's active saved properties;
+  // that property's own stored coordinates travel with it so a secondary
+  // property is searched around itself, not the primary address. Otherwise
+  // the returned neighbouring stops would describe whatever location the
+  // model chose.
   if (context.targets?.length && toolName === 'find_available_slots') {
     delete input.lat;
     delete input.lng;
     if (params.address !== undefined) {
       const bound = await bindSavedAddress(params.address, context.targets);
       if (!bound) return { error: 'Use the task customer\'s own saved address as the slot-search destination', code: 'target_clarification_required' };
-      input.address = bound;
+      input.address = bound.address;
+      if (bound.lat != null && bound.lng != null) Object.assign(input, { lat: bound.lat, lng: bound.lng });
     }
   }
   let readContext = context;

@@ -98,7 +98,10 @@ old list).
   destination is pinned to the task customer (supplied `lat`/`lng` are
   dropped so the reader resolves the customer's own coordinates, and a
   supplied `address` must be one of the customer's active saved properties
-  and is replaced by that saved address). Outside a customer-scoped task the
+  and is replaced by that saved address together with the property's stored
+  coordinates; the executor treats an explicit address as the destination and
+  geocodes it when no coordinates came with it, rather than falling back to
+  the primary address). Outside a customer-scoped task the
   slots it returns still name the neighbouring stops' customers
   (`find-time.js` `insertion.after_name` / `before`) around whatever location
   the operator asked about. Redacting those names, or moving the tool to

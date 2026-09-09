@@ -1722,8 +1722,11 @@ async function findAvailableSlotsTool(input) {
   const { findAvailableSlots } = require('../scheduling/find-time');
   let { customer_id, address, lat, lng, duration_minutes, date_from, date_to, technician_name, top_n } = input;
 
-  // Resolve customer → lat/lng if provided
-  if (customer_id && (!lat || !lng)) {
+  // Resolve customer → lat/lng if provided. An explicit address is the
+  // destination: it is geocoded below rather than replaced by the customer's
+  // primary coordinates, so a search for a customer's other property is
+  // run around that property.
+  if (customer_id && !address && (!lat || !lng)) {
     const c = await db('customers').where('id', customer_id).select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
     if (c?.latitude && c?.longitude) { lat = parseFloat(c.latitude); lng = parseFloat(c.longitude); }
     else if (c && !address) address = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');

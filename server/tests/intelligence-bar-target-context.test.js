@@ -867,6 +867,7 @@ test('compute_estimate binds its lead to the task customer', async () => {
 
 test('address-keyed readers take only a task customer\'s own active saved address and receive the saved full address', async () => {
   Object.assign(rows.customers[0], { address_line1: '1234 Main St.', city: 'Bradenton', state: 'FL', zip: '34203' });
+  rows.customers[1] = { id: B, address_line1: '40 Tower Ct', address_line2: 'Apt 12', city: 'Sarasota', state: 'FL', zip: '34236' };
   rows.customer_properties.push(
     { id: '30000000-0000-4000-8000-000000000002', customer_id: A, address_line1: '99 Beach Rd', address_line2: 'Apt 4', city: 'Venice', state: 'FL', zip: '34285', active: true },
     { id: '30000000-0000-4000-8000-000000000003', customer_id: A, address_line1: '7 Old Rd', city: 'Venice', state: 'FL', zip: '34285', active: false },
@@ -881,6 +882,10 @@ test('address-keyed readers take only a task customer\'s own active saved addres
   expect(await read('1234 Main St', context())).toEqual({ input: { address: main } });
   expect(await read('1234 Main St 34203', context())).toEqual({ input: { address: main } });
   expect(await read('99 BEACH RD APT 4, Venice FL', context())).toEqual({ input: { address: beach } });
+  // A unit stored on the customer row itself (no property row) is part of the saved address.
+  expect(await read('40 Tower Ct Apt 12, Sarasota FL', context(B))).toEqual({ input: { address: '40 Tower Ct, Apt 12, Sarasota, FL 34236' } });
+  expect((await read('40 Tower Ct, Sarasota FL', context(B))).code).toBe('target_clarification_required');
+  expect((await read('40 Tower Ct Apt 13, Sarasota FL', context(B))).code).toBe('target_clarification_required');
   // A different city or ZIP on the same street line is a different parcel.
   expect((await read('1234 Main St, Tampa FL', context())).code).toBe('target_clarification_required');
   expect((await read('1234 Main St, Bradenton FL 34205', context())).code).toBe('target_clarification_required');
@@ -899,14 +904,26 @@ test('address-keyed readers take only a task customer\'s own active saved addres
 });
 
 test('the slot finder inside a customer-scoped task is pinned to the task customer\'s own location', async () => {
-  Object.assign(rows.customers[0], { address_line1: '1234 Main St', city: 'Bradenton', state: 'FL', zip: '34203' });
+  Object.assign(rows.customers[0], { address_line1: '1234 Main St', address_line2: 'Unit 7', city: 'Bradenton', state: 'FL', zip: '34203', latitude: '27.4989000', longitude: '-82.5748000' });
+  rows.customer_properties.push(
+    { id: '30000000-0000-4000-8000-000000000004', customer_id: A, address_line1: '99 Beach Rd', city: 'Venice', state: 'FL', zip: '34285', latitude: '27.0998000', longitude: '-82.4543000', active: true },
+    { id: '30000000-0000-4000-8000-000000000005', customer_id: A, address_line1: '5 Pier Ln', city: 'Venice', state: 'FL', zip: '34285', latitude: null, longitude: null, active: true },
+  );
   const schema = { properties: { customer_id: { type: 'string' }, address: { type: 'string' }, lat: { type: 'number' }, lng: { type: 'number' }, date_from: { type: 'string' } } };
   const read = (params, ctx) => Context.prepareReadInput(params, ctx, { toolName: 'find_available_slots', schema });
   // Supplied coordinates are dropped and the destination becomes the task customer.
   expect(await read({ lat: 27.1, lng: -82.4, date_from: '2026-09-10' }, context())).toEqual({ input: { customer_id: A, date_from: '2026-09-10' } });
   expect(await read({ customer_id: A, lat: 27.1, lng: -82.4 }, context())).toEqual({ input: { customer_id: A } });
-  // A supplied address must be one of the customer's saved properties and is replaced by the saved full address.
-  expect(await read({ address: '1234 Main Street, Bradenton' }, context())).toEqual({ input: { customer_id: A, address: '1234 Main St, Bradenton, FL 34203' } });
+  // A supplied address must be one of the customer's saved properties (the customer row's own unit counts) and is
+  // replaced by the saved full address plus that property's stored coordinates.
+  expect(await read({ address: '1234 Main Street Unit 7, Bradenton' }, context()))
+    .toEqual({ input: { customer_id: A, address: '1234 Main St, Unit 7, Bradenton, FL 34203', lat: 27.4989, lng: -82.5748 } });
+  expect((await read({ address: '1234 Main Street, Bradenton' }, context())).code).toBe('target_clarification_required');
+  // A secondary property carries ITS coordinates, and a model-supplied pair never overrides them.
+  expect(await read({ address: '99 Beach Rd, Venice', lat: 27.1, lng: -82.4 }, context()))
+    .toEqual({ input: { customer_id: A, address: '99 Beach Rd, Venice, FL 34285', lat: 27.0998, lng: -82.4543 } });
+  // A property without stored coordinates passes only its address, which the executor geocodes instead of using the primary.
+  expect(await read({ address: '5 Pier Ln, Venice FL' }, context())).toEqual({ input: { customer_id: A, address: '5 Pier Ln, Venice, FL 34285' } });
   expect((await read({ address: '500 Anywhere Ave, Tampa FL' }, context())).code).toBe('target_clarification_required');
   expect((await read({ address: '1234 Main St, Tampa FL' }, context())).code).toBe('target_clarification_required');
   // Another customer's id is still a relationship failure, and an unresolved name still fails closed.
