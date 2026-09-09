@@ -11,15 +11,18 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { executionOutcome } = require('./outcomes');
+const { phoneMatchDigits } = require('../../utils/phone');
 
 const TTL_MINUTES = 10;
 
 // Deterministic stringify (sorted keys, recursively) so the hash is stable
 // across JSON property ordering.
 function stableStringify(value) {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value.toJSON === 'function') return stableStringify(value.toJSON());
+  if (Array.isArray(value)) return `[${value.map(item => stableStringify(item) ?? 'null').join(',')}]`;
   if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+    return `{${Object.keys(value).sort().filter(k => value[k] !== undefined).map(k => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
   }
   return JSON.stringify(value);
 }
@@ -30,8 +33,91 @@ function paramsHash(toolName, params) {
     .digest('hex');
 }
 
-async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash }) {
-  const [row] = await db('ib_pending_actions').insert({
+function canonicalStepInput(toolName, params, preview = {}) {
+  const canonical = Object.fromEntries(Object.entries(params || {}).filter(([key]) => !key.startsWith('_') && !['confirmed', 'confirm'].includes(key)));
+  for (const [snake, camel, name] of [['customer_id', 'customerId', 'customer_name'], ['lead_id', 'leadId', 'lead_name'], ['technician_id', 'technicianId', 'technician_name']]) {
+    if (!(canonical[snake] || canonical[camel])) continue;
+    canonical[snake] = String(canonical[snake] || canonical[camel]).toLowerCase();
+    delete canonical[camel]; delete canonical[name];
+  }
+  if (canonical.customer_id) delete canonical.customerName;
+  if (preview.product?.id) { canonical.product_id = preview.product.id; delete canonical.product_name; }
+  for (const key of ['customer_ids', 'lead_ids', 'service_ids']) {
+    if (Array.isArray(canonical[key])) canonical[key] = [...new Set(canonical[key])].sort();
+  }
+  if (toolName === 'send_sms') {
+    canonical.message_type = canonical.message_type || 'manual';
+    if (canonical.phone) canonical.phone = phoneMatchDigits(canonical.phone)[0] || String(canonical.phone).replace(/\D/g, '');
+  }
+  if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(toolName)) {
+    for (const key of ['unit', 'priority', 'vendor', 'needed_by', 'reason']) {
+      if (preview[key] !== undefined) canonical[key] = preview[key];
+    }
+  }
+  if (canonical.engineInputs) delete canonical.engineResult; // Derived cross-check, never a second intended effect.
+  return canonical;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const IDENTIFIER_KEY_RE = /^(?:id|estimate_identifier)$|_ids?$|Ids?$/;
+const SET_ID_KEYS = new Set(['customer_ids', 'lead_ids', 'service_ids']);
+function normalizeStepIds(value, key = '') {
+  if (value && typeof value.toJSON === 'function') return normalizeStepIds(value.toJSON(), key);
+  if (Array.isArray(value)) {
+    const items = value.map(item => normalizeStepIds(item, key));
+    return SET_ID_KEYS.has(key) ? [...new Set(items)].sort() : items;
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, normalizeStepIds(item, name)]));
+  }
+  return typeof value === 'string' && IDENTIFIER_KEY_RE.test(key) && UUID_RE.test(value) ? value.toLowerCase() : value;
+}
+
+function stepKey(toolName, params, preview) {
+  return paramsHash(toolName, normalizeStepIds(canonicalStepInput(toolName, params, preview)));
+}
+
+// Persisted pre-version keys are an external contract. Prove their original
+// input before comparing a normalized retry; today's product preview cannot
+// reconstruct a product/default that existed only in yesterday's preview.
+function legacyStepKey(row) {
+  const canonical = canonicalStepInput(row.tool_name, row.params);
+  const oldHashes = [paramsHash(row.tool_name, canonical)];
+  if (row.tool_name === 'send_sms' && row.params.phone) {
+    oldHashes.push(paramsHash(row.tool_name, { ...canonical, phone: String(row.params.phone).replace(/\D/g, '') }));
+  }
+  if (!oldHashes.includes(row.step_key)) {
+    throw Object.assign(new Error('Reconcile the earlier action before preparing another write of this kind'), { code: 'action_reconciliation_required' });
+  }
+  return paramsHash(row.tool_name, normalizeStepIds(canonical));
+}
+
+async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey, runnerToken }) {
+  const persist = async trx => {
+  if (taskId) {
+    const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
+      .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
+    if (!task) throw new Error('Task execution was superseded');
+    const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
+    const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
+      || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
+    if (existing) return existing;
+    if (previous.some(row => row.status !== 'confirmed'
+      || !['completed', 'provider_accepted'].includes(executionOutcome(row.result)))) {
+      throw new Error('Resolve the preceding action outcome before preparing another write');
+    }
+  }
+  // New step hashes include normalized UUID identity even when their canonical
+  // product/default inputs come from a preview. Old approval payloads/hashes
+  // remain untouched; the marker is server-owned and bound in new params_hash.
+  if (taskId) params = { ...params, _ib_step_key_version: 2 };
+  if (params?._ib_task_context) {
+    const scope = await require('./task-context').validateRecordTarget(params, params._ib_task_context,
+      { toolName, forApproval: true });
+    if (scope.error) throw Object.assign(new Error(scope.error), { code: scope.code });
+    params = { ...params, _ib_task_context: scope };
+  }
+  let insert = trx('ib_pending_actions').insert({
     tool_name: toolName,
     params: JSON.stringify(params || {}),
     params_hash: paramsHash(toolName, params || {}),
@@ -44,10 +130,21 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
     // its hash is what the operator's Confirm must echo.
     contract: contract ? JSON.stringify(contract) : null,
     contract_hash: contractHash || null,
-  }).returning('*');
+    ...(taskId ? { task_id: taskId, step_key: actionStepKey } : {}),
+  });
+  if (taskId) insert = insert.onConflict(['task_id', 'step_key']).ignore();
+  const [created] = await insert.returning('*');
+  const row = created || await trx('ib_pending_actions').where({ task_id: taskId, step_key: actionStepKey, requested_by: String(requestedBy) }).first();
+  if (!row) throw new Error('Pending action could not be recorded');
 
   logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
   return row;
+  };
+  return taskId ? db.transaction(persist) : persist(db);
+}
+
+async function forTask(taskId, requestedBy) {
+  return db('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) }).orderBy('created_at');
 }
 
 /**
@@ -115,9 +212,36 @@ async function recordResult(id, result) {
       result: JSON.stringify(result ?? null),
       updated_at: db.fn.now(),
     });
+    return true;
   } catch (err) {
-    logger.warn(`[intelligence-bar:pending] Could not record result for ${id}: ${err.message}`);
+    logger.warn(`[intelligence-bar:pending] Could not record result for ${id} (code=${err.code || 'unknown'})`);
+    return false;
   }
+}
+
+/** Actor-bound recovery after disconnect. Consumed-without-result is unknown,
+ * never permission to execute again. Confirmation credentials stay client-only.
+ */
+async function getActionReceipt(id, requestedBy) {
+  const row = await db('ib_pending_actions').where({ id, requested_by: String(requestedBy) }).first();
+  return row ? actionReceipt(row) : null;
+}
+
+// Format rows already selected under their actor scope. Task snapshots and
+// lists share this projection without issuing a second read per action.
+function actionReceipt(row) {
+  const result = typeof row.result === 'string' ? JSON.parse(row.result) : row.result;
+  const outcome = row.status === 'confirmed' ? executionOutcome(result)
+    : row.status === 'cancelled' ? 'canceled'
+      : new Date(row.expires_at).getTime() <= Date.now() ? 'expired' : 'awaiting_approval';
+  return {
+    id: row.id, tool: row.tool_name, outcome,
+    summary: row.summary || null, contract: row.contract || null,
+    result: result || null,
+    success: ['completed', 'partially_completed', 'provider_accepted'].includes(outcome),
+    consumedAt: row.consumed_at || null, updatedAt: row.updated_at,
+    retryAllowed: outcome === 'awaiting_approval',
+  };
 }
 
 /**
@@ -138,12 +262,16 @@ async function attachThread(ids, threadId, turnSeq, requestedBy) {
 }
 
 module.exports = {
+  actionReceipt,
   TTL_MINUTES,
   paramsHash,
+  stepKey,
   stableStringify,
   createPendingAction,
   claimForConfirm,
   cancelPendingAction,
   recordResult,
+  getActionReceipt,
   attachThread,
+  forTask,
 };
