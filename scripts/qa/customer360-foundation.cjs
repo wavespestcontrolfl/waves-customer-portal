@@ -69,6 +69,7 @@ const detail = {
 (async () => {
   const report = [];
   const outcome = { ...evidence(root), passed: false, scenarios: report };
+  fs.rmSync(output, { recursive: true, force: true });
   fs.mkdirSync(output, { recursive: true });
   let server;
   try {
@@ -90,8 +91,11 @@ const detail = {
         });
         const page = await context.newPage();
         const errors = [],
+          consoleErrors = [],
           writes = [],
           unmatched = [];
+        const scenario = { device, errors, consoleErrors, writes, unmatched, overflow: null };
+        report.push(scenario);
         page.setDefaultTimeout(15000);
         await page.addInitScript(() => {
           localStorage.setItem("waves_admin_token", "synthetic-local-token");
@@ -118,6 +122,7 @@ const detail = {
                 )
               : originalFetch(input, options);
         });
+        page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
         page.on("pageerror", (e) => {
           errors.push(e.message);
           console.error(e.message);
@@ -376,22 +381,16 @@ const detail = {
         await page.getByRole("button", { name: "Cancel", exact: true }).click();
         await page.keyboard.press("Escape");
         await page.locator(".c360-panel").waitFor({ state: "detached" });
-        report.push({
-          device,
-          errors,
-          writes,
-          unmatched,
-          overflow: await page.evaluate(
-            () => document.documentElement.scrollWidth > innerWidth,
-          ),
-        });
+        scenario.overflow = await page.evaluate(
+          () => document.documentElement.scrollWidth > innerWidth,
+        );
         console.log(`Customer360 interactions complete: ${device}`);
       } finally {
         await browser.close();
       }
     }
     assert.ok(
-      report.every((item) => item.errors.length === 0 && !item.overflow),
+      report.every((item) => item.errors.length === 0 && item.consoleErrors.length === 0 && !item.overflow),
     );
     assert.deepEqual(
       report.flatMap((item) => item.unmatched),
