@@ -2493,6 +2493,7 @@ describe('Agent Estimate round-6 hardening', () => {
         engineResult: ENGINE_RESULT,
         estimatorEngine: { origin: 'manual_agent' },
         proposal: { enabled: true, buildings: [{ name: 'Main office' }] },
+        proposalCosting: { revenueYears: 1, rows: [{ category: 'labor', description: 'PRIVATE crew cost', quantity: 1, unit: 'hour', unitCost: 35, occurrences: 1 }] },
       }),
     };
     const { database, writes } = makeDatabase({ estimate: existing, estimateRows: [] });
@@ -2510,6 +2511,7 @@ describe('Agent Estimate round-6 hardening', () => {
     const stored = JSON.parse(update.estimate_data);
     expect(stored.proposal).toBeUndefined();
     expect(stored.proposalDelivery).toBeUndefined();
+    expect(stored.proposalCosting).toBeUndefined();
     expect(stored.proposalInvalidated?.reason).toMatch(/pricing was revised/i);
     expect(stored.estimatorEngine.origin).toBe('manual_agent');
   });

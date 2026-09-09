@@ -53,6 +53,35 @@ const formatLineBasis = (line) => `${formatQuantity(line)} × ${formatUnitPrice(
 // otherwise). Shared by the public card, the browser document and SSR.
 const showsLineBasis = (line) => Boolean(line.unit) || Number(line.quantity) !== 1 || roundDecimal(line.unitPrice) !== roundCents(line.unitPrice);
 
+// Decimal inputs: finite, in range, at most four decimal places (string
+// forms may not smuggle more precision through exponents).
+function decimalValid(value, { min = 0, max = 99999999.99 } = {}) {
+  if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return false;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min || n > max) return false;
+  if (typeof value === 'string') {
+    const match = /^[+-]?(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(value.trim());
+    if (!match) return false;
+    const fraction = match[2] || '';
+    const digits = match[1] + fraction;
+    const trailingZeros = digits.length - digits.replace(/0+$/, '').length;
+    return fraction.length - Number(match[3] || 0) - trailingZeros <= 4;
+  }
+  return Math.abs(n - roundDecimal(n)) <= Number.EPSILON * Math.abs(n);
+}
+// ONE definition of a saveable cost row, shared by the server validator and
+// the costing card's completeness predicate, so the UI never shows a margin
+// for a cost model the save would refuse (GH codex P2 r2 on #4270).
+const COST_ROW_LIMITS = { descriptionLength: 200, phaseLength: 120, quantityMax: 1000000000, occurrencesMax: 1000, extendedMax: 99999999.99, rowsMax: 100 };
+function costRowIssue(row) {
+  if (!row || typeof row.description !== 'string' || !row.description.trim() || row.description.length > COST_ROW_LIMITS.descriptionLength || String(row.phase || '').length > COST_ROW_LIMITS.phaseLength) return 'Cost rows need a description (up to 200 characters) and a phase of up to 120 characters.';
+  if (!Object.hasOwn(COST_CATEGORIES, row.category) || !Object.hasOwn(PROPOSAL_UNITS, row.unit)) return 'Choose a category and unit for each cost row.';
+  if (!decimalValid(row.quantity, { min: 0.0001, max: COST_ROW_LIMITS.quantityMax }) || !decimalValid(row.unitCost)) return 'Cost quantities must be positive and unit costs nonnegative, with at most four decimal places.';
+  if (!Number.isInteger(Number(row.occurrences)) || String(row.occurrences).trim() === '' || Number(row.occurrences) < 1 || Number(row.occurrences) > COST_ROW_LIMITS.occurrencesMax) return 'Cost occurrences must be a whole number from 1 to 1,000.';
+  if (Number(row.quantity) * Number(row.unitCost) * Number(row.occurrences) > COST_ROW_LIMITS.extendedMax) return 'Each extended project cost must be at most $99,999,999.99.';
+  return null;
+}
+
 function computeProjectCosts(costing, totals) {
   const rows = Array.isArray(costing?.rows) ? costing.rows : [];
   // An absent period keeps the one-year default; a PRESENT blank or invalid
@@ -60,9 +89,7 @@ function computeProjectCosts(costing, totals) {
   const rawYears = costing?.revenueYears;
   const revenueYears = rawYears == null ? 1
     : (String(rawYears).trim() !== '' && Number.isInteger(Number(rawYears)) && Number(rawYears) >= 1 && Number(rawYears) <= 30 ? Number(rawYears) : null);
-  const costsComplete = revenueYears != null && rows.length > 0 && rows.every((row) => String(row.description || '').trim()
-    && [row.quantity, row.unitCost, row.occurrences].every((value) => value != null && String(value).trim() !== '' && Number.isFinite(Number(value)))
-    && Number(row.quantity) > 0 && Number(row.unitCost) >= 0 && Number.isInteger(Number(row.occurrences)) && Number(row.occurrences) > 0);
+  const costsComplete = revenueYears != null && rows.length > 0 && rows.length <= COST_ROW_LIMITS.rowsMax && rows.every((row) => !costRowIssue(row));
   const byCategory = {};
   for (const row of rows) {
     const amount = proposalLineAmount({ quantity: row.quantity, unitPrice: row.unitCost }, Number(row.occurrences || 1));
@@ -74,4 +101,4 @@ function computeProjectCosts(costing, totals) {
   return { cost, revenue, revenueYears, profit, marginPercent: costsComplete && revenue > 0 ? roundDecimal(profit / revenue * 100, 2) : null, byCategory, costsComplete };
 }
 
-module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, computeProjectCosts };
+module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, decimalValid, COST_ROW_LIMITS, costRowIssue, computeProjectCosts };

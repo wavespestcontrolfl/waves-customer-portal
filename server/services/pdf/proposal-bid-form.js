@@ -1,17 +1,80 @@
 const crypto = require('node:crypto');
-const { PDFDocument, PDFArray, PDFName, StandardFonts, rgb } = require('pdf-lib');
+const { PDFDocument, PDFArray, PDFDict, PDFName, PDFRef, PDFStream, PDFRawStream, StandardFonts, rgb } = require('pdf-lib');
 const { normalizeProposal, computeProposalTotals } = require('../estimate-proposal');
 const { validDateOnly } = require('../../utils/date-only');
 const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQuantity, formatUnitPrice } = require('../../../shared/proposal-bid.cjs');
 
-// Hashes of the blank form page's content streams, not of customer documents.
-// Requiring the reviewed page prevents prices being overlaid on a different
-// revision/layout. Originals are supplied per download and are never stored.
-const FORM_PAGE_HASHES = {
-  north_port_pr27_02: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45',
-  cove_termite: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4',
+// Fingerprints of the blank form page, not of customer documents: the
+// content streams (drawing commands) AND the page's resource dependencies —
+// fonts, images/XObjects, graphics states, colour spaces — hashed by their
+// object content, so a page that keeps the approved commands but swaps a
+// referenced image, font or graphics state is refused too (GH codex P2 r2 on
+// #4270). Requiring the reviewed page prevents prices being overlaid on a
+// different revision/layout. Originals are supplied per download and never
+// stored. A revised original needs a reviewed profile update: run
+// `node server/scripts/bid-form-fingerprint.js <pdf> <page>` and record both
+// values here.
+const FORM_PAGE_FINGERPRINTS = {
+  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: '8b675577f3453c7d8205de28e12062dc8373556588d3e49f7a36855637be6f6e' },
+  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'eba4dad62d71a3a86f5b1148d7653f8ad4980710562a95090b58b60f6c7f27d7' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
+// Hash every object the page's /Resources reaches (dictionaries by sorted
+// key, streams by dictionary + raw bytes), following references once.
+// Standard fonts a previous pdf-lib export added (`/Helvetica-<n>`) are
+// skipped so a fingerprint can be recorded from a reviewed export of the
+// original; the approved content stream never references them.
+function pageResourceHash(document, page) {
+  const hash = crypto.createHash('sha256');
+  const seen = new Set();
+  const sortedEntries = (dict) => [...dict.entries()].sort((a, b) => (a[0].toString() < b[0].toString() ? -1 : 1));
+  const visitDict = (dict) => {
+    hash.update('<<');
+    for (const [key, value] of sortedEntries(dict)) {
+      const name = key.toString();
+      if (name === '/Parent' || name === '/P') continue;
+      hash.update(name);
+      visit(value);
+    }
+    hash.update('>>');
+  };
+  const visit = (value) => {
+    if (value instanceof PDFRef) {
+      const key = value.toString();
+      if (seen.has(key)) { hash.update('ref-seen'); return; }
+      seen.add(key);
+      value = document.context.lookup(value);
+    }
+    if (value instanceof PDFStream) {
+      hash.update('stream');
+      visitDict(value.dict);
+      hash.update(value instanceof PDFRawStream ? Buffer.from(value.contents) : Buffer.from(value.getContents ? value.getContents() : []));
+      return;
+    }
+    if (value instanceof PDFDict) { visitDict(value); return; }
+    if (value instanceof PDFArray) { hash.update('['); value.asArray().forEach(visit); hash.update(']'); return; }
+    hash.update(String(value));
+  };
+  const resources = page.node.Resources();
+  if (!resources) return hash.update('none').digest('hex');
+  for (const [key, value] of sortedEntries(resources)) {
+    hash.update(key.toString());
+    const dict = document.context.lookup(value);
+    if (key.toString() === '/Font' && dict instanceof PDFDict) {
+      hash.update('<<');
+      for (const [fontKey, fontValue] of sortedEntries(dict)) {
+        if (/^\/Helvetica-\d+$/.test(fontKey.toString())) continue;
+        hash.update(fontKey.toString());
+        visit(fontValue);
+      }
+      hash.update('>>');
+    } else visit(value);
+  }
+  return hash.digest('hex');
+}
+function pageFingerprint(document, page) {
+  return { contents: pageContentHash(document, page), resources: pageResourceHash(document, page) };
+}
 function pageContentHash(document, page) {
   const contents = page.node.Contents();
   const streams = contents instanceof PDFArray ? contents.asArray() : [contents];
@@ -106,8 +169,10 @@ async function buildProposalBidForm({ estimate, sourcePdf, template, pageNumber,
   if (document.getPageCount() > 100) throw invalid('Upload the bid-form PDF with no more than 100 pages.');
   if (!Number.isInteger(Number(pageNumber)) || pageNumber < 1 || pageNumber > document.getPageCount()) throw invalid('The selected form page is outside this PDF.');
   const page = document.getPage(Number(pageNumber) - 1);
-  if (pageContentHash(document, page) !== FORM_PAGE_HASHES[template]) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
   assertBlankFormState(document, page);
+  const expected = module.exports.FORM_PAGE_FINGERPRINTS[template];
+  const actual = pageFingerprint(document, page);
+  if (actual.contents !== expected.contents || actual.resources !== expected.resources) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
   const font = await document.embedFont(StandardFonts.Helvetica);
   // Coordinates are points measured from the top of each reviewed original.
   const write = (text, x, top, width, size = 9) => {
@@ -163,4 +228,4 @@ async function buildProposalBidForm({ estimate, sourcePdf, template, pageNumber,
   }
   return Buffer.from(await document.save());
 }
-module.exports = { buildProposalBidForm, mapFormPrices, pageContentHash };
+module.exports = { buildProposalBidForm, mapFormPrices, pageContentHash, pageResourceHash, pageFingerprint, FORM_PAGE_FINGERPRINTS };

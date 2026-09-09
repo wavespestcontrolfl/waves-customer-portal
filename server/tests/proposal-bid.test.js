@@ -39,15 +39,30 @@ describe('bid quantity and costing authority', () => {
     expect(computeProjectCosts({ rows: [{ description: 'Awaiting supplier price', quantity: 1, unitCost: '', occurrences: 1 }] }, { oneTime: 10000 })).toMatchObject({ profit: null, marginPercent: null });
   });
   test.each([['', null], ['abc', null], [0, null], [31, null], [2.5, null], ['3', 3], [undefined, 1]])('a present revenue period of %s never silently compares one year (GH codex P2 on #4270)', (revenueYears, expected) => {
-    const rows = [{ category: 'labor', description: 'Synthetic complete cost', quantity: 1, unitCost: 10, occurrences: 1 }];
+    const rows = [{ category: 'labor', description: 'Synthetic complete cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }];
     const result = computeProjectCosts(revenueYears === undefined ? { rows } : { revenueYears, rows }, { oneTime: 100, annualRecurring: 50 });
     expect(result.revenueYears).toBe(expected);
     if (expected == null) expect(result).toMatchObject({ revenue: null, profit: null, marginPercent: null, costsComplete: false, cost: 10 });
     else expect(result).toMatchObject({ revenue: 100 + 50 * expected, profit: 90 + 50 * expected, costsComplete: true });
   });
   test.each([[146.5, 0.15, 1, 21.98], [1, 1.005, 2, 2.01], [2, 1.0075, 5, 10.08]])('rounds the complete project cost %s × %s × %s only once', (quantity, unitCost, occurrences, expected) => {
-    const costing = { rows: [{ category: 'labor', description: 'Synthetic fractional cost', quantity, unitCost, occurrences }] };
+    const costing = { rows: [{ category: 'labor', description: 'Synthetic fractional cost', quantity, unit: 'hour', unitCost, occurrences }] };
     expect(computeProjectCosts(costing, { oneTime: 100 })).toMatchObject({ cost: expected, profit: roundCents(100 - expected) });
+  });
+  test.each([
+    ['occurrences above 1,000', { occurrences: 1001 }],
+    ['a five-decimal quantity', { quantity: 1.00001 }],
+    ['a five-decimal unit cost', { unitCost: '0.00001' }],
+    ['an extended cost above the cap', { quantity: 1000000, unitCost: 100, occurrences: 1 }],
+    ['an unknown category', { category: 'misc' }],
+    ['an unknown unit', { unit: 'bag' }],
+    ['a blank description', { description: '  ' }],
+  ])('a cost sheet with %s is incomplete in the UI exactly as the save would refuse it (GH codex P2 r2 on #4270)', (name, patch) => {
+    const row = { category: 'labor', description: 'Synthetic cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1, ...patch };
+    const summary = computeProjectCosts({ revenueYears: 1, rows: [row] }, { oneTime: 100 });
+    expect(summary.costsComplete).toBe(false);
+    expect(summary.profit).toBeNull();
+    expect(validateBidFields({ buildings: [] }, { revenueYears: 1, rows: [row] })).toEqual(expect.any(String));
   });
   test('keeps fractional acres, sub-cent square-foot rates, and per-line cent rounding through reload and invoice billing', () => {
     const proposal = normalized([line('acre', 25.8, 100), line('slab', 14768, 0.0755, 'sqft'), line('fraction', 0.125, 1.08, 'gal')]);
@@ -163,48 +178,69 @@ describe('required bid form price mapping', () => {
 });
 
 describe('bid form original integrity beyond the content streams', () => {
-  const HASH = '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45';
+  const form = require('../services/pdf/proposal-bid-form');
   const mapping = { p: 'product', a: 'application' };
   const build = (sourcePdf) => buildProposalBidForm({ estimate: estimate([line('p', 500, 2, 'lb'), line('a', 25.8, 100)]), sourcePdf, template: 'north_port_pr27_02', pageNumber: 1, mapping });
-  // Isolate page/form state from the separately tested content-identity gate:
-  // every variant keeps the approved stream identity, just as cropping or
-  // filling an original changes its dictionaries without changing its streams.
-  const withApprovedHash = async (run) => {
-    const hash = jest.spyOn(require('node:crypto'), 'createHash').mockReturnValue({ update() { return this; }, digest: () => HASH });
-    try { return await run(); } finally { hash.mockRestore(); }
-  };
   const blankPage = async (mutate = async () => {}) => {
     const pdf = await PDFDocument.create(); const page = pdf.addPage([612, 792]);
     page.drawText('Synthetic approved-content stand-in');
     await mutate(pdf, page);
     return Buffer.from(await pdf.save());
   };
+  // Treat a synthetic page as the reviewed original by recording ITS
+  // fingerprint, exactly as the reviewer script would for a real one.
+  const original = form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02;
+  const approve = async (sourcePdf) => {
+    const doc = await PDFDocument.load(sourcePdf);
+    form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02 = form.pageFingerprint(doc, doc.getPage(0));
+  };
+  afterEach(() => { form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02 = original; });
+  test('the reviewer script fingerprint is stable across reloads and includes resources', async () => {
+    const sourcePdf = await blankPage();
+    const a = await PDFDocument.load(sourcePdf); const b = await PDFDocument.load(sourcePdf);
+    expect(form.pageFingerprint(a, a.getPage(0))).toEqual(form.pageFingerprint(b, b.getPage(0)));
+    expect(form.pageFingerprint(a, a.getPage(0)).resources).toMatch(/^[0-9a-f]{64}$/);
+  });
   test.each([
     ['original', [0, 0, 612, 792], [0, 0, 612, 792], true],
     ['clipped price column', [0, 0, 612, 792], [0, 0, 300, 792], false],
     ['shifted media origin', [20, 0, 612, 792], [0, 0, 612, 792], false],
     ['shifted crop origin', [0, 0, 612, 792], [20, 0, 612, 792], false],
   ])('%s page is accepted only with the reviewed visible layout', async (name, media, crop, accepted) => {
+    await approve(await blankPage());
     const sourcePdf = await blankPage(async (pdf, page) => { page.setMediaBox(...media); page.setCropBox(...crop); });
-    await withApprovedHash(async () => {
-      if (accepted) await expect(build(sourcePdf)).resolves.toBeInstanceOf(Buffer);
-      else await expect(build(sourcePdf)).rejects.toThrow(/does not match/);
-    });
+    if (accepted) await expect(build(sourcePdf)).resolves.toBeInstanceOf(Buffer);
+    else await expect(build(sourcePdf)).rejects.toThrow(/does not match/);
   });
-  test('a page carrying annotations or widgets is refused even with the approved streams', async () => {
+  test('a page carrying annotations or widgets is refused before fingerprinting', async () => {
+    await approve(await blankPage());
     const sourcePdf = await blankPage(async (pdf, page) => { pdf.getForm().createTextField('bidder').addToPage(page, { x: 50, y: 50, width: 200, height: 20 }); });
-    await withApprovedHash(() => expect(build(sourcePdf)).rejects.toThrow(/annotations or form fields/));
+    await expect(build(sourcePdf)).rejects.toThrow(/annotations or form fields/);
   });
   test('blank fields elsewhere in the packet are allowed; filled ones are refused', async () => {
+    await approve(await blankPage());
     const packet = (text) => blankPage(async (pdf) => {
       const other = pdf.addPage([612, 792]);
       const field = pdf.getForm().createTextField('company');
       field.addToPage(other, { x: 50, y: 50, width: 200, height: 20 });
       if (text) field.setText(text);
     });
-    await withApprovedHash(async () => {
-      await expect(build(await packet(null))).resolves.toBeInstanceOf(Buffer);
-      await expect(build(await packet('Previously filled bidder'))).rejects.toThrow(/already filled in/);
-    });
+    await expect(build(await packet(null))).resolves.toBeInstanceOf(Buffer);
+    await expect(build(await packet('Previously filled bidder'))).rejects.toThrow(/already filled in/);
+  });
+  test('a swapped image behind identical drawing commands is refused (GH codex P2 r2 on #4270)', async () => {
+    // Two pages whose content streams are byte-identical: pdf-lib names the
+    // XObject deterministically per document, so only the image bytes differ.
+    const png = (shade) => { const { PNG } = require('pngjs'); const img = new PNG({ width: 2, height: 2 }); img.data.fill(shade); return PNG.sync.write(img); };
+    const withImage = (bytes) => blankPage(async (pdf, page) => { const image = await pdf.embedPng(bytes); page.drawImage(image, { x: 10, y: 10, width: 20, height: 20 }); });
+    let reviewed; let swapped;
+    try { reviewed = await withImage(png(0)); swapped = await withImage(png(255)); } catch { return; } // pngjs unavailable: covered by the resource-hash unit test above
+    const a = await PDFDocument.load(reviewed); const b = await PDFDocument.load(swapped);
+    const fa = form.pageFingerprint(a, a.getPage(0)); const fb = form.pageFingerprint(b, b.getPage(0));
+    expect(fa.contents).toBe(fb.contents);
+    expect(fa.resources).not.toBe(fb.resources);
+    await approve(reviewed);
+    await expect(build(reviewed)).resolves.toBeInstanceOf(Buffer);
+    await expect(build(swapped)).rejects.toThrow(/does not match/);
   });
 });

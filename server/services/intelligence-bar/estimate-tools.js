@@ -3047,6 +3047,10 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     if (currentData.proposal?.enabled) {
       delete mergedData.proposal;
       delete mergedData.proposalDelivery;
+      // The private cost sheet was costed against THAT proposal; served
+      // beside the repriced synthesized totals it would read as current
+      // margin (GH codex P2 r2 on #4270).
+      delete mergedData.proposalCosting;
       mergedData.proposalInvalidated = {
         at: new Date().toISOString(),
         reason: 'Agent Estimate pricing was revised; re-author the proposal before delivery.',
