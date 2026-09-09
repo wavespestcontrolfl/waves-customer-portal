@@ -193,6 +193,8 @@ describe('commercial bid authoring', () => {
     row.status = 'draft';
     const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal() });
     expect(res.statusCode).toBe(200);
+    // The response carries the version this write committed (pre-push codex P1 r3).
+    expect(res.body.editVersion).toBe(persistence.estimateEditVersion(row));
     expect(row.onetime_total).toBe(2580);
     expect(dataOf().proposal.buildings[0].lineItems[0]).toMatchObject({ quantity: 25.8, unit: 'acre', amount: 2580 });
   });
