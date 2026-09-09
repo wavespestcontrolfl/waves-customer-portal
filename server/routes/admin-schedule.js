@@ -1170,8 +1170,10 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
       // sentinel) — safeSendAppointment then treats the primary as opted
       // out rather than texting past a possibly-stored explicit opt-out.
-      const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
-      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+      // Visit-aware (app property scope, PR 3): a NON-primary saved property
+      // owns notify-primary, so the recipient list follows it. Same sentinel
+      // on a failed read or an unreadable property under enforcement.
+      const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
       const apptTime = parseETDateTime(noticeTime);
       const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
       const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');

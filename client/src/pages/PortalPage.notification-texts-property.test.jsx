@@ -76,4 +76,14 @@ describe('Appointment texts per saved property', () => {
     expect(screen.getByText('Tech en route')).toBeInTheDocument();
     expect(screen.getByText('All alerts off')).toBeInTheDocument();
   });
+  it('names the picker entries by HOUSE and moves the five category switches off the profile card', async () => {
+    render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
+    await screen.findByText('Appointment texts');
+    // The rental has no label: its relationship chip names it, never "Primary".
+    expect(screen.getAllByText('Rental').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Primary residence · 77 Pine Ct/)).not.toBeInTheDocument();
+    // The profile card keeps the delivery choice but not the on/off switch.
+    expect(await screen.findByTestId('per-property-techEnRoute')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Tech En Route Alert' })).not.toBeInTheDocument();
+  });
 });

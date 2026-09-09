@@ -4069,6 +4069,9 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
+// The five appointment toggles a saved property owns once GATE_APP_PROPERTY_TEXTS
+// enforces (server: property-notification-prefs APPOINTMENT_TOGGLES).
+const PROPERTY_OWNED_PREF_KEYS = ['appointmentConfirmation', 'serviceReminder72h', 'serviceReminder24h', 'techEnRoute', 'techArrived'];
 const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel', 'requestChannel'];
 const APP_OPTION = { value: 'push', label: 'App' };
 const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
@@ -4282,7 +4285,16 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
     };
   }, [open, place]);
   if (!current && !savedEntries) return null;
-  const label = (p) => p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property');
+  // Saved-property entries (a `propertyId`) are named by the HOUSE — its
+  // label, else its relationship chip, else "Primary residence" / "Property"
+  // — and only the primary PROPERTY reads "Primary residence" (GitHub codex
+  // #4299 r2 P2). Profile entries keep the profile label.
+  const savedEntry = (p) => p.propertyId !== undefined && p.propertyId !== null;
+  const isPrimaryEntry = (p) => (savedEntry(p) ? p.isPrimaryProperty === true : p.isPrimaryProfile === true);
+  const label = (p) => (savedEntry(p)
+    ? (p.label || propertyRelationshipChip(p) || (p.isPrimaryProperty ? 'Primary residence' : 'Property'))
+    : (p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')));
+  const subline = (p) => `${isPrimaryEntry(p) ? 'Primary residence · ' : ''}${formatPropertyAddress(p) || 'No address on file'}`;
   const busy = !!switchingId;
   return (
     <div ref={ref} style={{ position: 'relative', minWidth: 0 }}>
@@ -4313,7 +4325,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
             {busy ? 'Switching…' : (current ? label(current) : 'Select a property')}
           </span>
           <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {current ? `${current.isPrimaryProfile ? 'Primary residence · ' : ''}${formatPropertyAddress(current) || 'No address on file'}` : 'Your properties are still loading'}
+            {current ? subline(current) : 'Your properties are still loading'}
           </span>
         </span>
         <span style={{ display: 'inline-flex', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}>
@@ -4350,10 +4362,10 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
                   textAlign: 'left', fontFamily: 'inherit', color: B.glassNavy,
                 }}
               >
-                <GlassTile name={p.isPrimaryProfile ? 'home' : 'building'} />
+                <GlassTile name={isPrimaryEntry(p) ? 'home' : 'building'} />
                 <span style={{ minWidth: 0, flex: 1 }}>
                   <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>{label(p)}</span>
-                  <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3 }}>{p.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(p) || 'No address on file'}</span>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3 }}>{subline(p)}</span>
                   {nextById && (
                     <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 2 }}>
                       {nextById[p.id] ? `Next visit ${nextVisitLabel(nextById[p.id])}` : 'No visit scheduled'}
@@ -5366,7 +5378,15 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
                     {/* Real switch semantics: the old plain div was invisible
                         to keyboards and screen readers. */}
-                    <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
+                    {/* Once appointment texts are per SAVED property, the five
+                        category switches live on the property card below —
+                        this row keeps only the account-level delivery choice
+                        (GitHub codex #4299 r2 P2). */}
+                    {perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key) ? (
+                      <span data-testid={`per-property-${p.key}`} style={{ fontSize: 13, fontWeight: 700, color: muted, whiteSpace: 'nowrap' }}>Set per property below</span>
+                    ) : (
+                      <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
+                    )}
                     {p.locked && (
                       <span style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
