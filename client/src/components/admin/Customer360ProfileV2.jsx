@@ -4472,7 +4472,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4490,9 +4490,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-15 font-medium text-zinc-900">Send annual prepay invoice</div>
-            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+            <div className="text-ui-caption text-ink-secondary mt-0.5">{customerName}</div>
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !saving && onClose?.()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4502,12 +4502,12 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         </div>
         <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           {activeTermEnd && (
-            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
           {depositCredit && depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
               {depositCredit.estimateSlug ? ` (estimate ${depositCredit.estimateSlug})` : ""} — NOT
               applied here: this customer's invoices bill to a third party, and the homeowner's
@@ -4515,7 +4515,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             </div>
           )}
           {depositCredit && !depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               <label className="flex items-start gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -4540,85 +4540,85 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             onChange={handleServiceTypeChange}
           />
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Cadence</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Cadence</div>
+            <Select
               value={coverageCadence}
               onChange={(e) => handleCadenceChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Applications covered</div>
+            <Input
               type="number"
               min="1"
               max="24"
               step="1"
               value={visitCount}
               onChange={(e) => handleVisitCountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">
+            <div className="ui-label text-ink-secondary mb-1">
               {isCommercialCustomer ? "Pre-tax service amount" : "Invoice amount"}
             </div>
-            <input
+            <Input
               type="number"
               min="0"
               step="0.01"
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
             {perVisit > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Commercial: ~7% county sales tax is added — customer is invoiced
                 ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term starts</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term starts</div>
+            <Input
               type="date"
               value={termStart}
               onChange={(e) => handleStartChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term ends</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term ends</div>
+            <Input
               type="date"
               value={termEnd}
               onChange={(e) => setTermEnd(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Invoice due</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Invoice due</div>
+            <Input
               type="date"
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">First visit (optional)</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">First visit (optional)</div>
+            <Input
               type="date"
               value={firstVisitDate}
               onChange={(e) => {
@@ -4630,38 +4630,38 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               }}
               min={termStart || undefined}
               max={termEnd || undefined}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
-            <div className="text-11 text-ink-secondary mt-1">
+            <div className="text-ui-caption text-ink-secondary mt-1">
               {firstVisitDateError || "Date you already promised the customer. Blank starts coverage at the term start."}
             </div>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">First visit time</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">First visit time</div>
+            <Input
               type="time"
               step={3600}
               value={firstVisitWindowStart}
               onChange={(e) => setFirstVisitWindowStart(e.target.value)}
               disabled={!firstVisitDate}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
             />
-            <div className="text-11 text-ink-secondary mt-1">
+            <div className="text-ui-caption text-ink-secondary mt-1">
               {firstVisitTimeError || "Arrival time for visit 1, on the hour. Needs a first-visit date."}
             </div>
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Invoice note</div>
-            <textarea
+            <div className="ui-label text-ink-secondary mb-1">Invoice note</div>
+            <Textarea
               rows={3}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
         </div>
         {error && (
-          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {error}
           </div>
         )}
@@ -4692,6 +4692,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
 // blocked. The server re-checks eligibility on confirm.
 // ============================================================================
 export function CancelSignupModal({ customer, onClose, onDone }) {
+  const density = useUiDensity();
   const [preview, setPreview] = useState(null);
   const [loadErr, setLoadErr] = useState("");
   const [running, setRunning] = useState(false);
@@ -4733,7 +4734,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !running && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4752,7 +4753,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
           <div className="text-15 font-medium text-zinc-900">
             Cancel signup &amp; refund deposit
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !running && onClose()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4760,12 +4761,12 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
             ×
           </button>
         </div>
-        <div className="p-4 text-13 text-zinc-900">
+        <div className="p-4 text-ui-body text-zinc-900">
           {!preview && !loadErr && (
             <div className="text-ink-secondary">Checking eligibility…</div>
           )}
           {loadErr && (
-            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{loadErr}</div>
+            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{loadErr}</div>
           )}
           {preview && !preview.eligible && !result && (
             <div>
@@ -4780,7 +4781,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
               {/* First-run lesson (2026-07-15): the preview reads "done"
                   enough that the owner closed it here thinking the run had
                   fired. State the not-yet-ness explicitly. */}
-              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-13 text-zinc-900">
+              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-ui-body text-zinc-900">
                 <span className="font-medium">Preview only — nothing has happened yet.</span>{" "}
                 <span className="text-ink-secondary">
                   No refund is issued and nothing is cancelled until you press the red button below.
@@ -4806,7 +4807,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
                 <li>Refund the <span className="font-medium u-nums">{fmtCurrency(preview.refundTotal)}</span> deposit to the original payment method</li>
                 <li>Email the customer a cancellation + refund confirmation</li>
               </ul>
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 The refund is issued through Stripe and typically lands in 5–10 business days.
               </div>
             </div>
@@ -4829,29 +4830,29 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
                 </li>
               </ul>
               {result.refundSkipped && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.refundSkipped}
                 </div>
               )}
               {result.refundIncomplete && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.refundIncomplete}
                 </div>
               )}
               {result.visitFailures?.length > 0 && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.visitFailures.length} visit(s) could not be cancelled — handle them on the Schedule page.
                 </div>
               )}
               {result.unresolvedInvoices?.length > 0 && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   Open visit invoice(s) could not be voided: {result.unresolvedInvoices.join(", ")} — resolve on the Invoices page.
                 </div>
               )}
             </div>
           )}
           {runErr && (
-            <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{runErr}</div>
+            <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{runErr}</div>
           )}
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
@@ -4898,6 +4899,7 @@ function paymentRefundState(p) {
 }
 
 export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
+  const density = useUiDensity();
   const { refundedCents, remainingCents } = paymentRefundState(payment);
   // The entered amount is BASE dollars: the server adds the prorated share
   // of the recorded card surcharge on top and caps the gross at the
@@ -5007,7 +5009,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !running && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -5024,7 +5026,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div className="text-15 font-medium text-zinc-900">Refund payment</div>
-          <button
+          <button data-ui-text-action
             onClick={() => !running && onClose()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -5032,7 +5034,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
             ×
           </button>
         </div>
-        <div className="p-4 text-13 text-zinc-900">
+        <div className="p-4 text-ui-body text-zinc-900">
           {done ? (
             <div>
               <div className="mb-2 font-medium">
@@ -5043,11 +5045,11 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
                   : ""}
                 .
               </div>
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 Issued through Stripe — it typically lands in 5–10 business days.
               </div>
               {done.refreshErr && (
-                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {done.refreshErr}
                 </div>
               )}
@@ -5076,7 +5078,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
               </div>
               <label
                 htmlFor="refund-amount"
-                className="block text-12 text-ink-secondary mb-1"
+                className="block text-ui-label text-ink-secondary mb-1"
               >
                 Refund amount
               </label>
@@ -5092,24 +5094,24 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
                 onChange={(e) => setAmountStr(e.target.value)}
               />
               {amountStr !== "" && !amountValid && (
-                <div className="mt-1.5 text-12 text-alert-fg">
+                <div className="mt-1.5 text-ui-label text-alert-fg">
                   Enter an amount between $0.01 and{" "}
                   {fmtCurrency(maxEntryCents / 100)}.
                 </div>
               )}
               {remainingSurchargeCents > 0 && (
-                <div className="mt-2 text-12 text-ink-secondary">
+                <div className="mt-2 text-ui-label text-ink-secondary">
                   The {fmtCurrency(remainingSurchargeCents / 100)} card-surcharge
                   share is returned automatically on top — in full with a full
                   refund, prorated with a partial amount.
                 </div>
               )}
-              <div className="mt-2 text-12 text-ink-secondary">
+              <div className="mt-2 text-ui-label text-ink-secondary">
                 Issued through Stripe — refunds typically land in 5–10 business
                 days.
               </div>
               {err && (
-                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {err}
                 </div>
               )}
@@ -5188,7 +5190,7 @@ function CustomerWorkspaceHeader({
       <div className="c360-workspace-identity">
         <div className="c360-workspace-name">
           <div className="c360-workspace-name-row">
-            <h1>{name}</h1>
+            <h1 className="ui-record-title">{name}</h1>
             <StageBadgeV2 stage={c.pipelineStage} />
           </div>
           <div className="c360-workspace-meta">
@@ -5218,9 +5220,12 @@ function CustomerWorkspaceHeader({
           </div>
         </div>
       </div>
-      <div className="c360-workspace-actions">
+      <div className="c360-workspace-actions ui-record-actions">
         {c.phone && (
-          <Button className="c360-message-action" onClick={onMessage}>
+          <Button className="c360-message-action" aria-haspopup="dialog" onClick={(event) => {
+            event.currentTarget.focus({ preventScroll: true });
+            onMessage();
+          }}>
             <MessageSquare size={16} />
             Message
             {unreadConversations > 0 && (
@@ -5235,7 +5240,7 @@ function CustomerWorkspaceHeader({
         )}
         {isAdmin && (
           <a
-            className="u-focus-ring"
+            className={buttonStyles({ variant: "secondary", density: "comfortable" })}
             href={customerEstimateHref({ ...c, address })}
           >
             <FileText size={16} />
@@ -5255,7 +5260,7 @@ function CustomerWorkspaceHeader({
         >
           <Button
             variant="ghost"
-            className="c360-icon-button"
+            className="ui-icon-action"
             aria-label="More customer actions"
             aria-expanded={menuOpen}
             aria-controls={menuId}
@@ -5267,21 +5272,22 @@ function CustomerWorkspaceHeader({
             <MoreHorizontal size={20} />
           </Button>
           {menuOpen && (
-            <div id={menuId} className="c360-workspace-action-menu">
+            <div id={menuId} className="ui-action-menu">
               {actions.map((action) =>
                 action.href ? (
                   <a
                     key={action.label}
-                    className="u-focus-ring"
+                    className={buttonStyles({ variant: "ghost", density: "comfortable", className: "ui-menu-action" })}
                     href={action.href}
                   >
                     {action.label}
                   </a>
                 ) : (
-                  <button
+                  <Button
                     key={action.label}
                     type="button"
-                    className="u-focus-ring"
+                    variant="ghost"
+                    className="ui-menu-action"
                     onClick={() => {
                       menuRef.current?.querySelector("button")?.focus();
                       setMenuOpen(false);
@@ -5289,7 +5295,7 @@ function CustomerWorkspaceHeader({
                     }}
                   >
                     {action.label}
-                  </button>
+                  </Button>
                 ),
               )}
             </div>
@@ -5301,6 +5307,7 @@ function CustomerWorkspaceHeader({
           <div>
             <Button
               variant="secondary"
+              className="c360-contact-action"
               onClick={() => callViaBridge(c.phone, name)}
             >
               <Phone size={16} />
@@ -5312,7 +5319,7 @@ function CustomerWorkspaceHeader({
         {c.email && (
           <div>
             <a
-              className="c360-outline-link u-focus-ring"
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "c360-contact-action" })}
               href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`}
               target="_blank"
               rel="noopener noreferrer"
@@ -5326,7 +5333,7 @@ function CustomerWorkspaceHeader({
         {address && (
           <div>
             <a
-              className="c360-outline-link u-focus-ring"
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "c360-contact-action" })}
               href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`}
               target="_blank"
               rel="noopener noreferrer"
@@ -5430,7 +5437,7 @@ function CustomerAddressLink({ address, mobile = false }) {
       rel="noopener noreferrer"
       className={
         mobile
-          ? "block text-13 text-ink-secondary no-underline hover:text-zinc-900 mb-2 truncate"
+          ? "block text-ui-body text-ink-secondary no-underline hover:text-zinc-900 mb-2 truncate"
           : "text-zinc-900 hover:underline"
       }
     >
@@ -5442,7 +5449,7 @@ function CustomerMessageTime({ message, inverted = false }) {
   return (
     <div
       className={cn(
-        "text-10 mt-1 text-right",
+        "text-ui-caption mt-1 text-right",
         inverted ? "text-zinc-300" : "text-ink-secondary",
       )}
     >
@@ -5455,7 +5462,7 @@ function CustomerSmsMessage({ message: m, embedded }) {
   return (
     <div
       className={cn(
-        "max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline",
+        "max-w-[75%] px-3 py-2 text-ui-body leading-relaxed border-hairline",
         inbound
           ? "self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs"
           : "self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs",
@@ -5493,18 +5500,18 @@ function CustomerCallMessage({ message: m }) {
       {" "}
       <div className="flex items-center gap-2 mb-1">
         {" "}
-        <span className="text-10 font-medium tracking-label uppercase text-ink-secondary">
+        <span className="text-ui-caption font-medium tracking-label uppercase text-ink-secondary">
           {inbound ? "Call in" : "Call out"}
         </span>
         {duration && (
-          <span className="text-11 u-nums text-zinc-900">{duration}</span>
+          <span className="text-ui-caption u-nums text-zinc-900">{duration}</span>
         )}
         {m.answeredBy && (
-          <span className="text-10 text-ink-secondary">· {m.answeredBy}</span>
+          <span className="text-ui-caption text-ink-secondary">· {m.answeredBy}</span>
         )}
       </div>
       {summary && (
-        <div className="text-12 text-zinc-900 leading-relaxed">{summary}</div>
+        <div className="text-ui-label text-zinc-900 leading-relaxed">{summary}</div>
       )}
       {recordingId && (
         <AuthenticatedCallAudio
@@ -5554,7 +5561,7 @@ function CustomerOverlayHeader({
               <HealthCircle score={score} /> <TierBadgeV2 tier={c.tier} />{" "}
               <StageBadgeV2 stage={c.pipelineStage} />{" "}
             </div>{" "}
-            <button
+            <button data-ui-text-action
               onClick={onClose}
               aria-label="Close"
               className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -5563,7 +5570,7 @@ function CustomerOverlayHeader({
             </button>{" "}
           </div>
           {(c.phone || c.email) && (
-            <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-1.5">
+            <div className="flex gap-4 items-center flex-wrap text-ui-label text-ink-secondary mb-1.5">
               <CustomerContactLinks
                 phone={c.phone}
                 email={c.email}
@@ -5598,7 +5605,7 @@ function CustomerOverlayHeader({
           ]
             .filter((slot) => slot.phone || slot.email)
             .map((slot) => (
-              <div key={slot.key} className="text-12 text-ink-secondary mb-1.5">
+              <div key={slot.key} className="text-ui-label text-ink-secondary mb-1.5">
                 {" "}
                 <span className="text-ink-tertiary mr-1">{slot.label}</span>
                 {slot.name && (
@@ -5613,7 +5620,7 @@ function CustomerOverlayHeader({
                 />
               </div>
             ))}
-          <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
+          <div className="flex gap-4 items-center flex-wrap text-ui-label text-ink-secondary mb-2.5">
             <CustomerAddressLink address={c.address} />
             <span className="u-nums text-zinc-900">
               {fmtCurrency(c.monthlyRate)}/mo
@@ -5627,11 +5634,11 @@ function CustomerOverlayHeader({
                 {" "}
                 <a
                   href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Text
                 </a>{" "}
-                <button
+                <button data-ui-text-action
                   type="button"
                   onClick={() =>
                     callViaBridge(
@@ -5639,7 +5646,7 @@ function CustomerOverlayHeader({
                       `${c.firstName || ""} ${c.lastName || ""}`.trim(),
                     )
                   }
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Call
                 </button>{" "}
@@ -5647,35 +5654,35 @@ function CustomerOverlayHeader({
             )}
             <a
               href={`/admin/schedule?customer=${customerId}`}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
             >
               Book Appt
             </a>{" "}
             <a
               href={`/admin/invoices?customer=${customerId}`}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
             >
               Invoice
             </a>
             {isAdmin && (
-              <button
+              <button data-ui-text-action
                 type="button"
                 onClick={() => setAnnualPrepayInvoiceOpen(true)}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
               >
                 Prepay Invoice
               </button>
             )}
-            <button
+            <button data-ui-text-action
               onClick={() => setActiveTab("comms")}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
             >
               Add Note
             </button>
             {isAdmin && (
-              <button
+              <button data-ui-text-action
                 onClick={openEditModal}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
               >
                 Edit
               </button>
@@ -5701,7 +5708,7 @@ function CustomerOverlayHeader({
           <CustomerAddressLink address={c.address} mobile />
           {/* Contact — listed on mobile (desktop shows these in its header) */}
           {(c.phone || c.email) && (
-            <div className="flex flex-col gap-1 mb-3 text-13">
+            <div className="flex flex-col gap-1 mb-3 text-ui-body">
               <CustomerContactLinks
                 phone={c.phone}
                 email={c.email}
@@ -5721,21 +5728,21 @@ function CustomerOverlayHeader({
             {" "}
             <div className="flex-1">
               {" "}
-              <div className="u-label text-ink-tertiary">Monthly</div>{" "}
+              <div className="ui-label text-ink-tertiary">Monthly</div>{" "}
               <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">
                 {fmtCurrency(c.monthlyRate)}
               </div>{" "}
             </div>{" "}
             <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
               {" "}
-              <div className="u-label text-ink-tertiary">Annual</div>{" "}
+              <div className="ui-label text-ink-tertiary">Annual</div>{" "}
               <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">
                 {fmtCurrency(c.annualValue)}
               </div>{" "}
             </div>{" "}
             <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
               {" "}
-              <div className="u-label text-ink-tertiary">Health</div>{" "}
+              <div className="ui-label text-ink-tertiary">Health</div>{" "}
               <div
                 className={cn(
                   "u-nums text-15 font-medium mt-0.5",
@@ -5762,14 +5769,14 @@ function CustomerProfileAlerts({ alerts }) {
           <div
             key={i}
             className={cn(
-              "inline-flex items-center gap-1.5 h-6 px-2 text-11 font-medium rounded-xs border-hairline",
+              "inline-flex items-center gap-1.5 h-6 px-2 text-ui-caption font-medium rounded-xs border-hairline",
               a.alert
                 ? "bg-alert-bg border-alert-fg text-alert-fg"
                 : "bg-white border-zinc-200 text-zinc-700",
             )}
           >
             {" "}
-            <span className="uppercase tracking-label text-10">
+            <span className="ui-label text-ui-caption">
               {a.label}
             </span>{" "}
             <span className="normal-case">{a.text}</span>{" "}
@@ -5818,13 +5825,13 @@ function CustomerOverlayNavigation({
         {CUSTOMER_360_SECTIONS.filter(
           (section) => section.key !== "estimates",
         ).map((t) => (
-          <button
+          <button data-ui-text-action
             key={t.key}
             ref={activeTab === t.key ? activeTabButtonRef : null}
             aria-pressed={activeTab === t.key}
             onClick={() => setActiveTab(t.key)}
             className={cn(
-              "h-11 px-4 text-12 uppercase tracking-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
+              "h-11 px-4 text-ui-label ui-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
               activeTab === t.key
                 ? "text-zinc-900 border-zinc-900"
                 : "text-ink-secondary border-transparent hover:text-zinc-900",
@@ -5913,13 +5920,13 @@ function CustomerProfileOverview({
               const content = (
                 <>
                   {" "}
-                  <div className="text-13 font-medium text-zinc-900">
+                  <div className="text-ui-body font-medium text-zinc-900">
                     {p.profileLabel || "Service property"}
                   </div>{" "}
-                  <div className="text-12 text-ink-secondary truncate">
+                  <div className="text-ui-label text-ink-secondary truncate">
                     {addr || "No address on file"}
                   </div>{" "}
-                  <div className="text-11 text-ink-tertiary mt-1">
+                  <div className="text-ui-caption text-ink-tertiary mt-1">
                     {fmtCurrency(p.monthlyRate || 0)}/mo
                   </div>{" "}
                 </>
@@ -5936,7 +5943,7 @@ function CustomerProfileOverview({
                 );
               }
               return (
-                <button
+                <button data-ui-text-action
                   key={p.id}
                   type="button"
                   onClick={() => onSelectCustomer?.(p.id)}
@@ -5977,7 +5984,7 @@ function CustomerProfileOverview({
                       .filter(Boolean)
                       .join(" · ") || "No contact on file"}
                   </div>{" "}
-                  <div className="text-12 text-ink-tertiary mt-1 truncate">
+                  <div className="text-ui-label text-ink-tertiary mt-1 truncate">
                     {addr || "Address on file"}
                     {n.matchedVia === "property" ? " · secondary property" : ""}
                   </div>{" "}
@@ -5995,7 +6002,7 @@ function CustomerProfileOverview({
                 );
               }
               return (
-                <button
+                <button data-ui-text-action
                   key={n.id}
                   type="button"
                   onClick={() => onSelectCustomer?.(n.id)}
@@ -6012,15 +6019,15 @@ function CustomerProfileOverview({
         {" "}
         <div>
           {" "}
-          <div className="text-13 font-medium text-zinc-900">
+          <div className="text-ui-body font-medium text-zinc-900">
             Already left a Google review
           </div>{" "}
-          <div className="text-11 text-ink-secondary">
+          <div className="text-ui-caption text-ink-secondary">
             When on, this customer is excluded from review-request and 48h
             followup SMS.
           </div>
           {c.reviewMarkedAt && c.hasLeftGoogleReview && (
-            <div className="text-10 text-ink-tertiary mt-0.5 u-nums">
+            <div className="text-ui-caption text-ink-tertiary mt-0.5 u-nums">
               Marked {fmtDate(c.reviewMarkedAt)}
             </div>
           )}
@@ -6085,16 +6092,16 @@ function CustomerProfileOverview({
                     className="c360-upcoming-appointment bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
                   >
                     {" "}
-                    <div className="text-13 font-medium text-zinc-900">
+                    <div className="text-ui-body font-medium text-zinc-900">
                       {s.service_type}
                     </div>{" "}
-                    <div className="text-12 text-ink-secondary">
+                    <div className="text-ui-label text-ink-secondary">
                       {fmtDateOnly(s.scheduled_date)} · {s.status}
                     </div>{" "}
                   </div>
                 ))
               ) : (
-                <div className="text-12 text-ink-secondary mb-3">
+                <div className="text-ui-label text-ink-secondary mb-3">
                   No upcoming appointments
                 </div>
               )}
@@ -6104,7 +6111,7 @@ function CustomerProfileOverview({
                 return (
                   <div
                     key={i}
-                    className="c360-recent-service py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
+                    className="c360-recent-service py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
                   >
                     {" "}
                     <span className="text-zinc-900 flex items-center gap-1.5">
@@ -6120,7 +6127,7 @@ function CustomerProfileOverview({
                 );
               })}
               {services.length === 0 && (
-                <div className="text-12 text-ink-secondary">
+                <div className="text-ui-label text-ink-secondary">
                   No services recorded
                 </div>
               )}
@@ -6133,16 +6140,16 @@ function CustomerProfileOverview({
                 <div className="mt-4">
                   {" "}
                   <SectionTitle>Referral Stats</SectionTitle>{" "}
-                  <div className="text-12 text-zinc-900">
+                  <div className="text-ui-label text-zinc-900">
                     Code: <span className="u-nums">{c.referralCode}</span>{" "}
                   </div>
                   {referral.total_referrals != null && (
-                    <div className="text-12 text-ink-secondary">
+                    <div className="text-ui-label text-ink-secondary">
                       Referrals: {referral.total_referrals}
                     </div>
                   )}
                   {referral.total_earned != null && (
-                    <div className="text-12 text-zinc-900">
+                    <div className="text-ui-label text-zinc-900">
                       Earned:{" "}
                       <span className="u-nums">
                         {fmtCurrency(referral.total_earned)}
@@ -6156,7 +6163,7 @@ function CustomerProfileOverview({
                   {" "}
                   <SectionTitle>Active Discounts</SectionTitle>
                   {discounts.map((d, i) => (
-                    <div key={i} className="text-12 text-zinc-900 py-0.5">
+                    <div key={i} className="text-ui-label text-zinc-900 py-0.5">
                       {d.discount_name || "Discount"}:{" "}
                       <span className="u-nums">
                         {d.discount_type === "percentage"
@@ -6234,7 +6241,7 @@ function CustomerProfileBilling({
         <>
           <div className="c360-billing-actions">
             <a
-              className="c360-outline-link u-focus-ring"
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })}
               href={`/admin/invoices?customer=${c.id}`}
             >
               Manage invoices
@@ -6278,7 +6285,7 @@ function CustomerProfileBilling({
         <div className="c360-invoices-heading">
           <SectionTitle>Recent invoices ({invoices.length})</SectionTitle>
           <a
-            className="c360-outline-link u-focus-ring"
+            className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })}
             href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}`}
           >
             All invoices
@@ -6289,18 +6296,18 @@ function CustomerProfileBilling({
       )}
       {invoices.length > 0 ? (
         <Table className="mb-5">
-          {" "}
+
           <THead>
-            {" "}
+
             <TR>
-              {" "}
+
               {embedded && <TH>Invoice</TH>}
               <TH>Date</TH>
               <TH align="right">Amount</TH>
               <TH align="right">Paid</TH>
-              <TH>Status</TH>{" "}
-            </TR>{" "}
-          </THead>{" "}
+              <TH>Status</TH>
+            </TR>
+          </THead>
           <TBody>
             {invoices.map((inv, i) => (
               <TR key={i}>
@@ -6313,14 +6320,14 @@ function CustomerProfileBilling({
                       #{inv.invoice_number || inv.id.slice(0, 8)}
                     </a>
                   </TD>
-                )}{" "}
-                <TD>{fmtDate(inv.created_at || inv.invoice_date)}</TD>{" "}
+                )}
+                <TD>{fmtDate(inv.created_at || inv.invoice_date)}</TD>
                 <TD align="right" className="u-nums">
                   {fmtCurrency(inv.amount_due)}
-                </TD>{" "}
+                </TD>
                 <TD align="right" className="u-nums">
                   {fmtCurrency(inv.amount_paid)}
-                </TD>{" "}
+                </TD>
                 <TD>
                   {" "}
                   <Badge
@@ -6332,13 +6339,13 @@ function CustomerProfileBilling({
                   >
                     {inv.status}
                   </Badge>{" "}
-                </TD>{" "}
+                </TD>
               </TR>
             ))}
-          </TBody>{" "}
+          </TBody>
         </Table>
       ) : (
-        <div className="text-13 text-ink-secondary mb-5">No invoices</div>
+        <div className="text-ui-body text-ink-secondary mb-5">No invoices</div>
       )}
       <SectionTitle>Payment History ({payments.length})</SectionTitle>
       {payments.slice(0, 10).map((p, i) => {
@@ -6347,7 +6354,7 @@ function CustomerProfileBilling({
         return (
           <div
             key={i}
-            className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
+            className="py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
           >
             {" "}
             <span
@@ -6400,7 +6407,7 @@ function CustomerProfileBilling({
           {cards.map((cd, i) => (
             <div
               key={i}
-              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-13 flex justify-between items-center"
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-ui-body flex justify-between items-center"
             >
               {" "}
               <span className="text-zinc-900">
@@ -6426,7 +6433,7 @@ function CustomerProfileBilling({
       {isAdmin && (
         <div className="mt-5 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
           {" "}
-          <div className="text-12 text-ink-secondary">
+          <div className="text-ui-label text-ink-secondary">
             Customer cancelling at the deposit stage? This voids the signup
             invoice, cancels visits, and refunds the deposit.
           </div>{" "}
@@ -6442,7 +6449,7 @@ function CustomerProfileBilling({
       {isAdmin && data.cancelPlanEnabled && (
         <div className="mt-3 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
           {" "}
-          <div className="text-12 text-ink-secondary">
+          <div className="text-ui-label text-ink-secondary">
             Cancelling an active plan? Same engine the customer portal uses:
             pulls visits, stops billing, records the case, and confirms to the
             customer.
@@ -6472,7 +6479,7 @@ function CustomerProfileServices({
       <summary>Service records, reports & photos</summary>{" "}
       <SectionTitle>Service History ({services.length})</SectionTitle>
       {services.length === 0 ? (
-        <div className="text-13 text-ink-secondary">No service records</div>
+        <div className="text-ui-body text-ink-secondary">No service records</div>
       ) : (
         <div className="flex flex-col">
           {services.map((s, i) => (
@@ -6497,7 +6504,7 @@ function CustomerProfileServices({
           {upcomingScheduled.map((s, i) => (
             <div
               key={i}
-              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-13"
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-ui-body"
             >
               {" "}
               <span className="font-medium text-zinc-900">
@@ -6508,7 +6515,7 @@ function CustomerProfileServices({
               </span>{" "}
               <span
                 className={cn(
-                  "text-11 uppercase tracking-label font-medium",
+                  "text-ui-caption ui-label font-medium",
                   s.status === "confirmed"
                     ? "text-zinc-900"
                     : "text-ink-secondary",
@@ -6601,7 +6608,7 @@ function CustomerProfileProperty({
               href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(formatAddress(c.address))}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="block p-5 bg-zinc-50 text-center text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+              className="block p-5 bg-zinc-50 text-center text-ui-body text-zinc-900 hover:bg-zinc-100 u-focus-ring"
             >
               View on Google Maps
             </a>
@@ -6636,7 +6643,7 @@ function CustomerProfileProperty({
               val && (
                 <div
                   key={label}
-                  className="flex justify-between py-1 text-12 border-b border-hairline border-zinc-200/60"
+                  className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60"
                 >
                   {" "}
                   <span className="text-ink-secondary">{label}</span>{" "}
@@ -6663,7 +6670,7 @@ function CustomerProfileProperty({
               val && (
                 <div
                   key={label}
-                  className="flex justify-between py-1 text-12 border-b border-hairline border-zinc-200/60 gap-2"
+                  className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60 gap-2"
                 >
                   {" "}
                   <span className="text-ink-secondary flex-shrink-0">
@@ -6700,13 +6707,13 @@ function CustomerProfileCompliance({
               {" "}
               <CardBody className="p-4">
                 {" "}
-                <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
                   Nitrogen
                 </div>{" "}
                 <div className="u-nums text-22 font-medium text-zinc-900">
                   {fmtNumber(nutrientSummary.nApplied)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary">
+                <div className="text-ui-caption text-ink-secondary">
                   lb N / 1k sqft
                 </div>{" "}
               </CardBody>{" "}
@@ -6715,13 +6722,13 @@ function CustomerProfileCompliance({
               {" "}
               <CardBody className="p-4">
                 {" "}
-                <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
                   Phosphorus
                 </div>{" "}
                 <div className="u-nums text-22 font-medium text-zinc-900">
                   {fmtNumber(nutrientSummary.pApplied)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary">
+                <div className="text-ui-caption text-ink-secondary">
                   lb P / 1k sqft
                 </div>{" "}
               </CardBody>{" "}
@@ -6730,13 +6737,13 @@ function CustomerProfileCompliance({
               {" "}
               <CardBody className="p-4">
                 {" "}
-                <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
                   Potassium
                 </div>{" "}
                 <div className="u-nums text-22 font-medium text-zinc-900">
                   {fmtNumber(nutrientSummary.kApplied)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary">
+                <div className="text-ui-caption text-ink-secondary">
                   lb K / 1k sqft
                 </div>{" "}
               </CardBody>{" "}
@@ -6745,13 +6752,13 @@ function CustomerProfileCompliance({
               {" "}
               <CardBody className="p-4">
                 {" "}
-                <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
                   Entries
                 </div>{" "}
                 <div className="u-nums text-22 font-medium text-zinc-900">
                   {nutrientSummary.entries || 0}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary">
+                <div className="text-ui-caption text-ink-secondary">
                   {nutrientLedger.year || new Date().getFullYear()}
                 </div>{" "}
               </CardBody>{" "}
@@ -6759,34 +6766,34 @@ function CustomerProfileCompliance({
           </div>
           {nutrientRows.length > 0 && (
             <Table className="mb-5">
-              {" "}
+
               <THead>
-                {" "}
+
                 <TR>
-                  {" "}
+
                   <TH>Date</TH>
                   <TH>Product</TH>
                   <TH>Analysis</TH>
                   <TH>N/P/K per 1k</TH>
-                  <TH>Blackout</TH>{" "}
-                </TR>{" "}
-              </THead>{" "}
+                  <TH>Blackout</TH>
+                </TR>
+              </THead>
               <TBody>
                 {nutrientRows.map((r) => (
                   <TR key={r.id}>
-                    {" "}
-                    <TD>{fmtDate(r.application_date)}</TD>{" "}
-                    <TD className="text-zinc-900">{r.product_name}</TD>{" "}
-                    <TD className="u-nums">{r.analysis || "—"}</TD>{" "}
+
+                    <TD>{fmtDate(r.application_date)}</TD>
+                    <TD className="text-zinc-900">{r.product_name}</TD>
+                    <TD className="u-nums">{r.analysis || "—"}</TD>
                     <TD className="u-nums">
                       {fmtNumber(r.n_applied_per_1000)} /{" "}
                       {fmtNumber(r.p_applied_per_1000)} /{" "}
                       {fmtNumber(r.k_applied_per_1000)}
-                    </TD>{" "}
-                    <TD>{r.blackout_status || "—"}</TD>{" "}
+                    </TD>
+                    <TD>{r.blackout_status || "—"}</TD>
                   </TR>
                 ))}
-              </TBody>{" "}
+              </TBody>
             </Table>
           )}
         </>
@@ -6794,39 +6801,39 @@ function CustomerProfileCompliance({
       <SectionTitle>Application History ({compliance.length})</SectionTitle>
       {compliance.length > 0 ? (
         <Table className="mb-5">
-          {" "}
+
           <THead>
-            {" "}
+
             <TR>
-              {" "}
+
               <TH>Date</TH>
               <TH>Product</TH>
               <TH>Rate</TH>
               <TH>Area</TH>
-              <TH>Technician</TH>{" "}
-            </TR>{" "}
-          </THead>{" "}
+              <TH>Technician</TH>
+            </TR>
+          </THead>
           <TBody>
             {compliance.map((r, i) => (
               <TR key={i}>
-                {" "}
-                <TD>{fmtDate(r.applied_at)}</TD>{" "}
+
+                <TD>{fmtDate(r.applied_at)}</TD>
                 <TD className="text-zinc-900">
                   {r.product_name || r.product_id}
-                </TD>{" "}
+                </TD>
                 <TD className="u-nums">
                   {r.rate_per_1000_sqft
                     ? `${r.rate_per_1000_sqft}/1k sqft`
                     : "—"}
-                </TD>{" "}
-                <TD>{r.area_treated || "—"}</TD>{" "}
-                <TD>{r.technician_name || "—"}</TD>{" "}
+                </TD>
+                <TD>{r.area_treated || "—"}</TD>
+                <TD>{r.technician_name || "—"}</TD>
               </TR>
             ))}
-          </TBody>{" "}
+          </TBody>
         </Table>
       ) : (
-        <div className="text-13 text-ink-secondary">No application records</div>
+        <div className="text-ui-body text-ink-secondary">No application records</div>
       )}
       {showLawnData && (
         <Card className="mt-5">
@@ -6834,7 +6841,7 @@ function CustomerProfileCompliance({
           <CardBody className="p-4">
             {" "}
             <SectionTitle>Product usage</SectionTitle>{" "}
-            <div className="text-12 text-ink-secondary space-y-1">
+            <div className="text-ui-label text-ink-secondary space-y-1">
               {" "}
               <div>
                 Celsius entries in the history shown:{" "}
@@ -6906,12 +6913,12 @@ function CustomerProfileTimeline({
                 label: "Notes",
               },
             ].map((f) => (
-              <button
+              <button data-ui-text-action
                 key={f.key}
                 onClick={() => setTimelineFilter(f.key)}
                 disabled={timelineError}
                 className={cn(
-                  "h-6 px-2.5 text-10 uppercase tracking-label font-medium rounded-xs border-hairline u-focus-ring transition-colors",
+                  "h-6 px-2.5 text-ui-caption ui-label font-medium rounded-xs border-hairline u-focus-ring transition-colors",
                   timelineFilter === f.key
                     ? "bg-zinc-900 text-white border-zinc-900"
                     : "bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-100",
@@ -6939,7 +6946,7 @@ function CustomerProfileTimeline({
             return (
               <div
                 key={i}
-                className="flex gap-2.5 py-1.5 border-b border-hairline border-zinc-200/60 text-12 items-center"
+                className="flex gap-2.5 py-1.5 border-b border-hairline border-zinc-200/60 text-ui-label items-center"
               >
                 {" "}
                 <Badge tone="neutral">
@@ -6956,7 +6963,7 @@ function CustomerProfileTimeline({
                     </span>
                   )}
                 </div>{" "}
-                <span className="text-ink-secondary text-10 u-nums flex-shrink-0">
+                <span className="text-ink-secondary text-ui-caption u-nums flex-shrink-0">
                   {timeAgo(item.date)}
                 </span>{" "}
               </div>
@@ -6978,7 +6985,7 @@ function CustomerProfileTimeline({
             </div>
           )}
           {!timelineError && filteredTimeline.length === 0 && (
-            <div className="text-ink-secondary text-12 text-center py-4">
+            <div className="text-ink-secondary text-ui-label text-center py-4">
               No timeline events
             </div>
           )}
@@ -7028,7 +7035,7 @@ function CustomerProfileMobileActions({
         }}
       >
         {" "}
-        <button
+        <button data-ui-text-action
           onClick={onClose}
           aria-label="Back"
           className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
@@ -7040,7 +7047,7 @@ function CustomerProfileMobileActions({
           {c.phone && (
             <a
               href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Text
             </a>
@@ -7050,22 +7057,22 @@ function CustomerProfileMobileActions({
               phone={c.phone}
               customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
               styledButton
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Call
             </CallBridgeLink>
           )}
           {isAdmin && (
-            <button
+            <button data-ui-text-action
               onClick={openEditModal}
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
             >
               Edit
             </button>
           )}
           <div ref={menuRef} className="relative">
             {" "}
-            <button
+            <button data-ui-text-action
               ref={menuButtonRef}
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="More"
@@ -7081,51 +7088,51 @@ function CustomerProfileMobileActions({
                 className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
               >
                 {isAdmin && (
-                  <button
+                  <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
                       menuButtonRef.current?.focus();
                       openEditModal();
                       setMenuOpen(false);
                     }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                   >
                     Edit customer
                   </button>
                 )}
                 {isAdmin && (
-                  <button
+                  <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
                       menuButtonRef.current?.focus();
                       setAnnualPrepayInvoiceOpen(true);
                       setMenuOpen(false);
                     }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                   >
                     Send prepay invoice
                   </button>
                 )}
                 {isAdmin && (
-                  <button
+                  <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
                       menuButtonRef.current?.focus();
                       setAnnualPrepayOpen(true);
                       setMenuOpen(false);
                     }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                   >
                     Record collected prepay
                   </button>
                 )}
-                <button
+                <button data-ui-text-action
                   role="menuitem"
                   onClick={() => {
                     setActiveTab("comms");
                     setMenuOpen(false);
                   }}
-                  className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                 >
                   Add note
                 </button>{" "}
@@ -7177,6 +7184,7 @@ function CustomerProfileEditor({
   initialEditForm,
   reloadCustomer,
 }) {
+  const density = useUiDensity();
   return (
     editOpen && (
       <div
@@ -7201,7 +7209,7 @@ function CustomerProfileEditor({
             <div className="text-15 font-medium text-zinc-900">
               Edit customer
             </div>{" "}
-            <button
+            <button data-ui-text-action
               onClick={() => !savingEdit && setEditOpen(false)}
               aria-label="Close"
               className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -7225,7 +7233,7 @@ function CustomerProfileEditor({
             ].map((f) => (
               <div key={f.key} className={f.full ? "sm:col-span-2" : ""}>
                 {" "}
-                <label className="u-label text-ink-secondary block mb-1">
+                <label htmlFor={`customer-edit-${f.key}`} className="ui-label text-ink-secondary block mb-1">
                   {f.label}
                 </label>{" "}
                 {f.key === "addressLine1" ? (
@@ -7267,10 +7275,10 @@ function CustomerProfileEditor({
                         .getElementById("customer-edit-addressLine2")
                         ?.focus();
                     }}
-                    className="w-full h-10 px-2.5 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                    className={inputStyles({ density, className: "w-full h-10 px-2.5 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring" })}
                   />
                 ) : (
-                  <input
+                  <Input
                     id={`customer-edit-${f.key}`}
                     aria-label={f.label}
                     type={f.type || "text"}
@@ -7278,22 +7286,22 @@ function CustomerProfileEditor({
                     onChange={(e) =>
                       setEditForm((p) => ({ ...p, [f.key]: e.target.value }))
                     }
-                    className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                    className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
                   />
                 )}{" "}
               </div>
             ))}
             <div>
               {" "}
-              <label className="u-label text-ink-secondary block mb-1">
+              <label htmlFor="c360-edit-tier" className="ui-label text-ink-secondary block mb-1">
                 Tier
               </label>{" "}
-              <select
+              <Select id="c360-edit-tier"
                 value={editForm.tier || ""}
                 onChange={(e) =>
                   setEditForm((p) => ({ ...p, tier: e.target.value }))
                 }
-                className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
               >
                 {" "}
                 <option value="">No Plan</option>{" "}
@@ -7302,37 +7310,37 @@ function CustomerProfileEditor({
                 <option value="Silver">Silver</option>{" "}
                 <option value="Bronze">Bronze</option>{" "}
                 <option value="One-Time">One-Time</option>{" "}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
             <div>
               {" "}
               <label
-                className="u-label text-ink-secondary block mb-1"
+                className="ui-label text-ink-secondary block mb-1"
                 htmlFor="c360-edit-contact-role"
               >
                 Contact role
               </label>{" "}
-              <select
+              <Select
                 id="c360-edit-contact-role"
                 value={editForm.contactRole || ""}
                 onChange={(e) =>
                   setEditForm((p) => ({ ...p, contactRole: e.target.value }))
                 }
-                className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
               >
                 {CONTACT_ROLE_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
                     {o.label}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
             <div>
               {" "}
-              <label className="u-label text-ink-secondary block mb-1">
+              <label htmlFor="c360-edit-stage" className="ui-label text-ink-secondary block mb-1">
                 Stage
               </label>{" "}
-              <select
+              <Select id="c360-edit-stage"
                 value={editForm.pipelineStage || ""}
                 onChange={(e) =>
                   setEditForm((p) => ({
@@ -7340,24 +7348,24 @@ function CustomerProfileEditor({
                     pipelineStage: e.target.value,
                   }))
                 }
-                className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
               >
                 {Object.entries(STAGE_LABELS).map(([k, label]) => (
                   <option key={k} value={k}>
                     {label}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
           </div>
           {editErr && (
-            <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+            <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
               {editErr}
             </div>
           )}
           <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
             {" "}
-            <button
+            <button data-ui-text-action
               type="button"
               onClick={async () => {
                 if (deletingCustomer || savingEdit) return;
@@ -7478,14 +7486,14 @@ function CustomerBillingPause({
       {" "}
       {c.servicePausedAt && (
         <div role="alert" className="mb-3 rounded border border-hairline p-2.5">
-          <div className="text-12 font-medium text-alert-fg">
+          <div className="text-ui-label font-medium text-alert-fg">
             {/* servicePausedOn is the ET calendar date; the raw
                             servicePausedAt timestamp would render in the
                             browser's timezone and land on the wrong day. */}
             Billing paused since{" "}
             {fmtDate(c.servicePausedOn || c.servicePausedAt)}
           </div>
-          <div className="text-12 text-ink-secondary mt-0.5">
+          <div className="text-ui-label text-ink-secondary mt-0.5">
             Monthly dues are not being collected
             {copy.reason}. Visits are unaffected. {copy.policy} it removes this
             block only — other billing guards (autopay state, plan type, prepaid
@@ -7503,7 +7511,7 @@ function CustomerBillingPause({
             </Button>
           )}
           {resumeBillingErr && (
-            <div className="text-12 text-alert-fg mt-1">{resumeBillingErr}</div>
+            <div className="text-ui-label text-alert-fg mt-1">{resumeBillingErr}</div>
           )}
         </div>
       )}
@@ -7513,7 +7521,7 @@ function CustomerBillingPause({
       {resumeBillingNote && (
         <div
           role="status"
-          className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
+          className="mb-3 rounded border border-hairline p-2.5 text-ui-label text-ink-secondary"
         >
           {resumeBillingNote}
         </div>
@@ -7566,7 +7574,7 @@ function CustomerBillingSummary({
               value={fmtCurrency(c.lifetimeRevenue)}
             />{" "}
           </div>
-          <div className="text-12 text-ink-secondary mb-1.5">
+          <div className="text-ui-label text-ink-secondary mb-1.5">
             {cards.length > 0
               ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
               : "No card on file"}
@@ -7588,7 +7596,7 @@ function CustomerBillingSummary({
                 return (
                   <div
                     key={i}
-                    className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
+                    className="py-1 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
                   >
                     {" "}
                     <span
@@ -7602,7 +7610,7 @@ function CustomerBillingSummary({
                       {fmtCurrency(p.amount)}
                     </span>{" "}
                     {(rowRefund.partial || (!isCollected && !isRefund)) && (
-                      <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
+                      <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-ui-caption text-ink-secondary uppercase">
                         {rowRefund.partial
                           ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
                           : p.status}
@@ -7620,7 +7628,7 @@ function CustomerBillingSummary({
                 );
               })
             ) : (
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 No transactions yet
               </div>
             )}
@@ -7629,10 +7637,10 @@ function CustomerBillingSummary({
       )}
       {displayedAnnualPrepayTerm && (
         <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-          <div className="text-12 font-medium text-zinc-900">
+          <div className="text-ui-label font-medium text-zinc-900">
             {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
           </div>
-          <div className="text-11 text-ink-secondary mt-0.5">
+          <div className="text-ui-caption text-ink-secondary mt-0.5">
             Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
             {" · "}
             {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
@@ -7641,7 +7649,7 @@ function CustomerBillingSummary({
               : ""}
           </div>
           {displayedAnnualPrepayTerm.renewalDecision && (
-            <div className="text-11 text-ink-secondary mt-0.5">
+            <div className="text-ui-caption text-ink-secondary mt-0.5">
               Decision:{" "}
               {displayedAnnualPrepayTerm.renewalDecision.replace("_", " ")}
             </div>
@@ -7671,12 +7679,12 @@ function CustomerBillingSummary({
                 className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-12 font-medium text-zinc-900 truncate">
+                  <div className="text-ui-label font-medium text-zinc-900 truncate">
                     {plan.serviceType}
                     {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
                   </div>
                   <span
-                    className="inline-flex items-center rounded-full text-10 font-medium uppercase tracking-label"
+                    className="inline-flex items-center rounded-full text-ui-caption font-medium ui-label"
                     style={{
                       height: 18,
                       padding: "0 8px",
@@ -7686,12 +7694,12 @@ function CustomerBillingSummary({
                     {active ? "Active" : "Used"}
                   </span>
                 </div>
-                <div className="text-11 text-ink-secondary mt-1">
+                <div className="text-ui-caption text-ink-secondary mt-1">
                   {plan.usedVisits} of {plan.paidVisits} used
                   {active ? ` · ${plan.remainingVisits} remaining` : ""}
                   {" · "}${plan.perVisitAmount.toFixed(2)}/visit
                 </div>
-                <div className="text-11 text-ink-secondary mt-0.5">
+                <div className="text-ui-caption text-ink-secondary mt-0.5">
                   Total ${plan.seriesTotal.toFixed(2)}
                   {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
                   {plan.nextVisitDate
@@ -7709,7 +7717,7 @@ function CustomerBillingSummary({
           {invoices.slice(0, 3).map((inv, i) => (
             <div
               key={i}
-              className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between"
+              className="py-1 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between"
             >
               {" "}
               <span className="u-nums text-zinc-900">
@@ -7717,7 +7725,7 @@ function CustomerBillingSummary({
               </span>{" "}
               <span
                 className={cn(
-                  "font-medium uppercase tracking-label text-10",
+                  "font-medium ui-label text-ui-caption",
                   inv.status === "paid" ? "text-zinc-900" : "text-alert-fg",
                 )}
               >
@@ -7751,7 +7759,7 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
   } = payer;
   return (
     <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-      <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
+      <div className="text-ui-caption ui-label text-ink-tertiary mb-1">
         Default Bill-To (third-party payer)
       </div>
       <div className="flex items-center gap-2 flex-wrap">
@@ -7760,7 +7768,7 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
           value={c.payerId ? String(c.payerId) : ""}
           disabled={payerSaving || !isAdmin}
           onChange={(e) => handlePayerSelect(e.target.value)}
-          className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
+          className="h-9 px-3 text-ui-body bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
         >
           <option value="">Customer pays (self)</option>
           {payers.map((p) => (
@@ -7774,12 +7782,12 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
           {isAdmin && <option value="__new__">＋ New payer…</option>}
         </Select>
         {payerSaving && (
-          <span className="text-12 text-ink-tertiary">Saving…</span>
+          <span className="text-ui-label text-ink-tertiary">Saving…</span>
         )}
       </div>
       {showNewPayer && isAdmin && (
         <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
-          <div className="text-12 font-medium text-zinc-900 mb-2">
+          <div className="text-ui-label font-medium text-zinc-900 mb-2">
             New payer
           </div>
           {[
@@ -7804,21 +7812,21 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
                   field.key === "apEmail" ? "block mb-1" : "block mb-2"
                 }
               >
-                <span className="u-label text-ink-tertiary block mb-1">
+                <span className="ui-label text-ink-tertiary block mb-1">
                   {field.label}
                 </span>
-                <input
+                <Input
                   type={field.type}
                   value={newPayer[field.key]}
                   onChange={(e) =>
                     setNewPayer((p) => ({ ...p, [field.key]: e.target.value }))
                   }
                   placeholder={field.placeholder}
-                  className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                  className="w-full h-9 px-3 text-ui-body bg-white border-hairline border-zinc-300 rounded-sm"
                 />
               </label>
               {field.key === "apEmail" && (
-                <div className="text-12 text-ink-secondary mb-2">
+                <div className="text-ui-label text-ink-secondary mb-2">
                   Without an email, invoices to this payer can’t be delivered
                   until one is added in Finance → Payers.
                 </div>
@@ -7826,24 +7834,24 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
             </div>
           ))}
           {newPayerError && (
-            <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
+            <div className="text-ui-label text-alert-fg mb-2">{newPayerError}</div>
           )}
           <div className="flex items-center gap-2">
-            <button
+            <button data-ui-text-action
               type="button"
               onClick={saveNewPayer}
               disabled={newPayerSaving || !newPayer.displayName.trim()}
-              className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
+              className="h-9 px-3 text-ui-body font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
             >
               {newPayerSaving ? "Saving…" : "Create & select"}
             </button>
-            <button
+            <button data-ui-text-action
               type="button"
               onClick={() => {
                 setShowNewPayer(false);
                 setNewPayerError("");
               }}
-              className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
+              className="h-9 px-3 text-ui-body text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
             >
               Cancel
             </button>
@@ -7851,11 +7859,11 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
         </div>
       )}
       {newPayerNotice && (
-        <div className="text-12 text-ink-secondary mt-1.5">
+        <div className="text-ui-label text-ink-secondary mt-1.5">
           {newPayerNotice}
         </div>
       )}
-      <div className="text-12 text-ink-secondary mt-1.5">
+      <div className="text-ui-label text-ink-secondary mt-1.5">
         Routes every invoice for this account to a builder / property manager
         instead of the customer. A single job can override this on the
         appointment. Manage payers in Finance → Payers.
@@ -7926,13 +7934,13 @@ function CustomerRecipientDetails({
               key={label}
               className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm"
             >
-              <div className="text-10 uppercase tracking-label text-ink-tertiary">
+              <div className="text-ui-caption ui-label text-ink-tertiary">
                 {label}
               </div>
-              <div className="text-12 font-medium text-zinc-900 mt-1">
+              <div className="text-ui-label font-medium text-zinc-900 mt-1">
                 {names.find(Boolean)}
               </div>
-              <div className="text-12 text-ink-secondary break-all">
+              <div className="text-ui-label text-ink-secondary break-all">
                 {contacts.find(Boolean)}
               </div>
             </div>
@@ -7940,10 +7948,10 @@ function CustomerRecipientDetails({
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
           <label className="block">
-            <span className="u-label text-ink-tertiary block mb-1">
+            <span className="ui-label text-ink-tertiary block mb-1">
               Billing contact name
             </span>
-            <input
+            <Input
               id="c360-billing-contact-name"
               name="billingContactName"
               value={recipientPrefsDraft.billingContactName}
@@ -7955,14 +7963,14 @@ function CustomerRecipientDetails({
                 }))
               }
               placeholder="Landlord, AP contact, property manager"
-              className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+              className="block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
             />
           </label>
           <label className="block">
-            <span className="u-label text-ink-tertiary block mb-1">
+            <span className="ui-label text-ink-tertiary block mb-1">
               Billing recipient email
             </span>
-            <input
+            <Input
               id="c360-billing-recipient-email"
               name="billingEmail"
               value={recipientPrefsDraft.billingEmail}
@@ -7975,12 +7983,12 @@ function CustomerRecipientDetails({
               }
               type="email"
               placeholder={c.email || "billing@example.com"}
-              className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+              className="block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
             />
           </label>
         </div>
         <div className="flex items-center justify-between gap-3 mb-3">
-          <div className="text-12 text-ink-secondary">
+          <div className="text-ui-label text-ink-secondary">
             Invoices and receipts use the billing email when set. Appointment
             reminders and service reports use the on-location contact when
             present.
@@ -7998,7 +8006,7 @@ function CustomerRecipientDetails({
           </Button>
         </div>
         {recipientPrefsErr && (
-          <div className="mb-3 text-12 text-alert-fg">{recipientPrefsErr}</div>
+          <div className="mb-3 text-ui-label text-alert-fg">{recipientPrefsErr}</div>
         )}
         {!embedded &&
           [
@@ -8083,10 +8091,10 @@ function CustomerRecipientDetails({
                 }
               />
               <div>
-                <div className="text-12 font-medium text-zinc-900">
+                <div className="text-ui-label font-medium text-zinc-900">
                   {field.title}
                 </div>
-                <div className="text-12 text-ink-secondary">
+                <div className="text-ui-label text-ink-secondary">
                   {field.description}
                 </div>
               </div>
@@ -8133,12 +8141,12 @@ function CustomerConversation({
       <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
       <div className="flex flex-col gap-1.5 mb-3">
         {commsLoading && (
-          <div className="text-ink-secondary text-13 text-center py-5">
+          <div className="text-ink-secondary text-ui-body text-center py-5">
             Loading messages…
           </div>
         )}
         {commsErr && (
-          <div className="text-alert-fg text-13 text-center py-5">
+          <div className="text-alert-fg text-ui-body text-center py-5">
             {commsErr}
           </div>
         )}
@@ -8156,7 +8164,7 @@ function CustomerConversation({
           );
         })}
         {!commsLoading && !commsErr && commsLoaded && comms.length === 0 && (
-          <div className="text-ink-secondary text-13 text-center py-5">
+          <div className="text-ink-secondary text-ui-body text-center py-5">
             No messages
           </div>
         )}
@@ -8191,7 +8199,7 @@ function CustomerConversation({
           {" "}
           <div className="flex gap-2">
             {" "}
-            <input
+            <Input
               id="c360-sms-reply"
               name="smsReply"
               value={smsReply}
@@ -8206,14 +8214,14 @@ function CustomerConversation({
                   sendSms();
                 }
               }}
-              className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
+              className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-ui-body text-zinc-900 u-focus-ring"
             />{" "}
             <Button onClick={sendSms} disabled={sendingSms || !smsReply.trim()}>
               {sendingSms ? "…" : "Send"}
             </Button>{" "}
           </div>
           {smsErr && (
-            <div className="mt-1.5 text-12 text-alert-fg">{smsErr}</div>
+            <div className="mt-1.5 text-ui-label text-alert-fg">{smsErr}</div>
           )}
         </div>
       )}
@@ -8227,7 +8235,7 @@ function CustomerConversation({
           {interactions.slice(0, 10).map((n, i) => (
             <div
               key={i}
-              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-12"
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-ui-label"
             >
               {" "}
               <div className="flex justify-between mb-1">
@@ -8235,7 +8243,7 @@ function CustomerConversation({
                 <span className="font-medium text-zinc-900">
                   {n.interaction_type}: {n.subject}
                 </span>{" "}
-                <span className="text-ink-secondary text-10">
+                <span className="text-ink-secondary text-ui-caption">
                   {timeAgo(n.created_at)}
                 </span>{" "}
               </div>
@@ -8274,12 +8282,12 @@ function CustomerProfileStyles() {
 function CustomerProfileActionError({ error }) {
   return (
     error && (
-      <div
-        role="alert"
+      <ActionFeedback
+        error
         className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm"
       >
         {error}
-      </div>
+      </ActionFeedback>
     )
   );
 }
@@ -9511,7 +9519,7 @@ function CustomerProfilePending({
         onClick={(e) => e.stopPropagation()}
       >
         {loading ? (
-          <div className="text-ink-secondary text-center py-16 text-13">
+          <div className="text-ink-secondary text-center py-16 text-ui-body">
             Loading customer profile…
           </div>
         ) : (
