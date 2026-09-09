@@ -4475,6 +4475,8 @@ describe('shared ask history foundation', () => {
     'Could you leave a Google review?',
     'Would you mind leaving us a Google review?',
     'https://g.page/office-slug/review',
+    'A quick review helps: https://portal.test/l/abc123',
+    'A quick review means a lot: https://portal.test/l/abc123',
     'Please consider posting a Google review.',
     'How about writing a review?',
     'Please review us when you have a moment.',

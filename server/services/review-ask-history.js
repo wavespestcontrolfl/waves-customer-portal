@@ -12,7 +12,7 @@ function looksLikeReviewAsk(body) {
   return REVIEW_LINK_RE.test(text) || REVIEW_INTENT_RE.test(text)
     || (/maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i.test(text)
       && /\b(?:share|leave|give)\s+(?:(?:us|me)\s+)?(?:(?:your|some)\s+)?feedback\b/i.test(text))
-    || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+review\b|\breview\s+link\b/i.test(text));
+    || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+link\b/i.test(text));
 }
 
 function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
