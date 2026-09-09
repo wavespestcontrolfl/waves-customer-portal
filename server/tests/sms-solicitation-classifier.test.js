@@ -132,6 +132,8 @@ test('a model failure in enforcement mode keeps ordinary handling', async () => 
 test.each([
   'I have two leads for you: my neighbors both need pest control. Can you quote them?',
   'I have more lawn leads for you from my neighbors. Can you quote them?',
+  'I can send you more pest-control leads from my neighbors. Can you quote them?',
+  'We can provide you with more lawn leads from our neighbors who need service.',
 ])('a neighbor referral reaches the model before any enforcement: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });

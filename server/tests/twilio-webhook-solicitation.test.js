@@ -201,15 +201,19 @@ test('failed unified persistence bypasses screening and retains ordinary SMS log
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
 });
 
-test.each(['location', 'domain_tracking', 'van_tracking', 'tech_line'])(
-  'an enforced pitch on a %s line persists read without replies or downstream work', async (type) => {
+test.each([
+  ['location', PITCH], ['domain_tracking', PITCH], ['van_tracking', PITCH], ['tech_line', PITCH],
+  ['location', 'We can send you more pest-control leads.'],
+  ['location', 'We can provide you with more lawn leads.'],
+])(
+  'an enforced pitch on a %s line persists read without replies or downstream work: %s', async (type, body) => {
     process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
     const line = numbers.allNumbers.find((entry) => entry.type === (type === 'domain_tracking' ? 'pest_domain' : type));
     // Turn on tech-line routing only inside this test, using its actual registry.
     const savedTechGate = process.env.GATE_TECH_LINES;
     if (type === 'tech_line') process.env.GATE_TECH_LINES = 'true';
     try {
-      const res = await receive(PITCH, line.number);
+      const res = await receive(body, line.number);
       expect(res.body).toBe('<Response></Response>');
       expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({
         isRead: false,
@@ -265,6 +269,8 @@ test('a rental-service request remains actionable with enforcement enabled', asy
 test.each([
   'I have two leads for you: my neighbors both need pest control. Can you quote them?',
   'I have more lawn leads for you from my neighbors. Can you quote them?',
+  'I can send you more pest-control leads from my neighbors. Can you quote them?',
+  'We can provide you with more lawn leads from our neighbors who need service.',
 ])('a genuine referral remains unread and reaches ordinary handling in enforcement mode: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   await receive(body);
