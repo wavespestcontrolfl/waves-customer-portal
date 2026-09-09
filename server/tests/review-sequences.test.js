@@ -1703,6 +1703,20 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       }
     });
 
+    test.each(['deferred', 'redeeming'])('a %s final rechecks at night without an SMS-window hold', async status => {
+      mockGates.smsSendWindow = true;
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-27T01:00:00Z').getTime());
+      const mock = makeMock({ review_sequences: [{ id: 'parked-night', customer_id: 'night-customer', status,
+        current_step: 0, plan: '[{"day":0,"channel":"sms","templateKey":"day0_ask"}]',
+        next_run_at: new Date('2026-05-27T01:05:00Z') }] });
+      db.mockImplementation(mock);
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['night-customer']);
+        expect(map['night-customer'].nextSendTickAt.toISOString()).toBe('2026-05-27T01:14:00.000Z');
+        expect(map['night-customer']).toMatchObject({ parked: true, fallbackTickAt: null, fallbackChannel: null, plannedChannel: null });
+      } finally { nowSpy.mockRestore(); mockGates.smsSendWindow = false; }
+    });
+
     test('a parked series final is a cadence in the candidate map (parked, next re-check), and an active row wins over it (codex #4140 r12 P2)', async () => {
       const parkAt = new Date(Date.now() + 20 * 60000);
       const mock = makeMock({
@@ -4432,6 +4446,11 @@ describe('shared ask history foundation', () => {
 
   test.each([
     'Thanks for your Google review',
+    'Thanks for leaving us a Google review',
+    'Office directions: https://maps.app.goo.gl/abc123',
+    'Meet here: https://goo.gl/maps/abc123',
+    'https://maps.google.com/?q=office',
+    'Our office: https://g.page/office-location',
     'Please review your invoice: https://portal.test/pay/abc',
     'Please review and sign your agreement: https://portal.test/contract/abc',
     'Could you review the service report?',
@@ -4445,12 +4464,16 @@ describe('shared ask history foundation', () => {
 
   test.each([
     'Could you leave a Google review?',
+    'Would you mind leaving us a Google review?',
+    'https://g.page/office-slug/review',
+    'Please consider posting a Google review.',
+    'How about writing a review?',
     'Please review us when you have a moment.',
     'Share your experience in a review.',
     'A review would mean a lot: https://portal.test/l/abc123',
     'https://www.yelp.com/writeareview/biz/example',
     'https://facebook.com/example/reviews',
-    'https://maps.app.goo.gl/abc123',
+    'Please leave a review: https://maps.app.goo.gl/abc123',
   ])('request intent and review destinations count: %s', body => {
     expect(history.looksLikeReviewAsk(body)).toBe(true);
   });
