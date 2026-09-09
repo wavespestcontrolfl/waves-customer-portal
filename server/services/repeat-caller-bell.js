@@ -102,23 +102,28 @@ async function ringRepeatCallerIfNeeded(callSid) {
     }
     let stats = null;
     let delivered = false;
-    // A sibling call may start after the claim snapshot. Each delivery guard
-    // reads the caller's current window, including newly active/booked calls.
-    const stillQuiet = async () => !await db('call_log')
-      .where({ direction: 'inbound' })
-      .whereRaw(`${PHONE_KEY_SQL} = ?`, [key])
-      .modify(whereNotSandboxCall)
-      .modify(whereNotBlockedCall)
-      .where('created_at', '>', new Date(Date.now() - REPEAT_WINDOW_MS))
-      .where(q => q.whereRaw(BOOKED_SQL).orWhereRaw("COALESCE(status, '') <> ALL(?)", [[...TERMINAL_STATUSES]]))
-      .first('id');
+    // Re-plan current eligibility without lease fields: our claim stays fenced.
+    // Keep the payload tied to its claimed window and newest-call grace.
+    const stillEligible = async () => {
+      const rows = await db('call_log')
+        .where({ direction: 'inbound' })
+        .whereRaw(`${PHONE_KEY_SQL} = ?`, [key])
+        .modify(whereNotSandboxCall)
+        .modify(whereNotBlockedCall)
+        .where('created_at', '>', new Date(Date.now() - REPEAT_WINDOW_MS))
+        .orderBy('created_at', 'desc').orderBy('id', 'desc')
+        .select('id', 'created_at', 'updated_at', 'status', 'answered_by', db.raw(`${BOOKED_SQL} AS booked`));
+      const currentPlan = repeatCallerPlan(rows);
+      return currentPlan?.count === plan.count && currentPlan.unanswered === plan.unanswered
+        && rows.every(row => plan.windowIds.includes(row.id));
+    };
     try {
       const customer = call.customer_id
         ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
         : null;
       const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
       const { triggerNotification } = require('./notification-triggers');
-      if (!await stillQuiet()) { stats = { superseded: true }; return false; }
+      if (!await stillEligible()) { stats = { superseded: true }; return false; }
       stats = await triggerNotification('repeat_caller', {
         customerId: call.customer_id || null,
         name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || null,
@@ -128,7 +133,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
         unanswered: plan.unanswered,
         callLogId: call.id,
         repeatCallerDeliveryId: String(plan.deliveryId),
-      }, { beforePush: stillQuiet });
+      }, { beforePush: stillEligible });
     } finally {
       // Settle only delivery or deliberate silence; release a failed attempt for retry.
       delivered = Boolean(stats && !stats.error
@@ -142,7 +147,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
     }
     // A booking or new call can arrive while preferences or badge counts load.
     // Retire the persisted bell too, including when push is disabled.
-    if (stats?.bellWritten && !await stillQuiet()) {
+    if (stats?.bellWritten && !await stillEligible()) {
       await require('./notification-service').supersedeMissedCallAdmin({ callLogId: call.id, triggerKey: 'repeat_caller' });
     }
     return delivered;

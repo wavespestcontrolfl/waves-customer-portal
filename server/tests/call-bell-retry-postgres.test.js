@@ -150,9 +150,10 @@ jest.setTimeout(30000);
     expect(triggerNotification.mock.calls[0][1]).toMatchObject({ count: 3, unanswered: 2 });
   });
 
-  test.each(['booking', 'active call'])('a new %s after the claim suppresses delivery and releases the lease', async event => {
+  test.each(['booking', 'active call', 'block', 'completed call'])('a new %s after the claim suppresses delivery and releases the lease', async event => {
     const customerId = randomUUID();
     const rows = [call(60), call(30), call(10, { customer_id: customerId })];
+    const lateCall = call(0, { status: event === 'active call' ? 'in-progress' : 'completed', answered_by: 'human' });
     await database('call_log').insert(rows);
     await database('customers').insert({ id: customerId });
     const query = database.client.query;
@@ -160,7 +161,8 @@ jest.setTimeout(30000);
       const result = await query.call(this, connection, request);
       if (request.sql.startsWith('select') && request.sql.includes('from "customers"')) {
         if (event === 'booking') await database('scheduled_services').insert({ id: randomUUID(), source_call_log_id: rows[2].id, status: 'confirmed' });
-        else await database('call_log').insert(call(0, { status: 'in-progress', answered_by: 'human' }));
+        else if (event === 'block') await database('blocked_numbers').insert({ number: rows[2].from_phone, block_type: 'hard_block' });
+        else await database('call_log').insert(lateCall);
       }
       return result;
     });
@@ -168,11 +170,19 @@ jest.setTimeout(30000);
     expect(triggerNotification).not.toHaveBeenCalled();
     expect((await database('call_log').where({ id: rows[2].id }).first()).metadata.repeat_caller_claim).toBeUndefined();
     expect(await sweepRepeatCallers()).toBe(0);
+    if (event === 'completed call') {
+      jest.restoreAllMocks();
+      await database('call_log').where({ id: lateCall.id }).update({ created_at: new Date(now - 6 * 60000), updated_at: new Date(now - 6 * 60000) });
+      expect(await sweepRepeatCallers()).toBe(1);
+      expect(triggerNotification.mock.calls[0][1]).toMatchObject({ count: 4, unanswered: 3, callLogId: lateCall.id });
+    }
   });
 
   test.each([
     ['booking', 'push'], ['booking', 'bell-only'],
     ['active call', 'push'], ['active call', 'bell-only'],
+    ['block', 'push'], ['block', 'bell-only'],
+    ['completed call', 'push'], ['completed call', 'bell-only'],
   ])('a new %s during %s notification delivery retires only its repeat bell', async (event, delivery) => {
     const rows = [call(60), call(30), call(10)];
     await database('call_log').insert(rows);
@@ -187,7 +197,8 @@ jest.setTimeout(30000);
         { id: otherId, recipient_type: 'admin', category: 'missed_call', metadata: { triggerKey: 'repeat_caller', payload: { callLogId: rows[1].id } } },
       ]);
       if (event === 'booking') await database('scheduled_services').insert({ id: randomUUID(), source_call_log_id: rows[0].id, status: 'confirmed' });
-      else await database('call_log').insert(call(0, { status: 'in-progress', answered_by: 'human' }));
+      else if (event === 'block') await database('blocked_numbers').insert({ number: rows[2].from_phone, block_type: 'hard_block' });
+      else await database('call_log').insert(call(0, { status: event === 'active call' ? 'in-progress' : 'completed', answered_by: 'human' }));
       if (delivery === 'push') expect(await beforePush()).toBe(false);
       return { bellWritten: true, push: delivery === 'push' ? { sent: 0, skipped: 'superseded_before_push' } : null };
     });
