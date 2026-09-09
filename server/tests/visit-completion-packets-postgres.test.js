@@ -35,7 +35,7 @@ jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: 
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const { saveVisitCompletionPacket, runVisitCompletionPacketEffects, resumePendingVisitCompletions } = require('../services/visit-completion-packets');
+const { saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, resumePendingVisitCompletions } = require('../services/visit-completion-packets');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const { etDateString } = require('../utils/datetime-et');
 const { stopBaseKey, dateOnly } = require('../services/visit-groups');
@@ -196,8 +196,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
     for (const item of input.items) item.body.formResponses = { checked: true };
     const saved = await saveVisitCompletionPacket(input);
     expect(await mockPg('job_form_submissions').where({ customer_id: fixture.customerId })).toHaveLength(2);
-    await Promise.all([runVisitCompletionPacketEffects(saved.body.packetId), runVisitCompletionPacketEffects(saved.body.packetId)]);
-    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+    await Promise.all([runVisitCompletionPacketMemberEffects(saved.body.packetId), runVisitCompletionPacketMemberEffects(saved.body.packetId)]);
+    expect(await runVisitCompletionPacketMemberEffects(saved.body.packetId)).toMatchObject({
       status: 202, body: { state: 'member_effects_ready' },
     });
     const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
@@ -209,7 +209,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     // Simulate losing the response after the canonical attempt succeeded.
     await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
       scheduled_service_id: fixture.serviceIds[1] }).update({ status: 'processing' });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
     expect(await mockPg('job_form_submissions').where({ customer_id: fixture.customerId })).toHaveLength(2);
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
@@ -226,14 +226,14 @@ postgres('visit completion packet records on PostgreSQL', () => {
     for (const item of input.items) item.body.sendCompletionSms = sendSms;
     const saved = await saveVisitCompletionPacket(input);
     jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValueOnce(new Error('Synthetic token outage'));
-    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+    expect(await runVisitCompletionPacketMemberEffects(saved.body.packetId)).toMatchObject({
       status: 202, body: { state: 'service_effects_pending', code: 'service_report_token_mint_failed' },
     });
     expect(await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
       scheduled_service_id: fixture.serviceIds[0] }).first()).toMatchObject({ status: 'processing' });
     expect(await mockPg('service_completion_attempts').where({ service_id: fixture.serviceIds[0] }).first())
       .toMatchObject({ status: 'side_effects_pending' });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     const records = await mockPg('service_records').where({ customer_id: fixture.customerId });
     expect(records).toHaveLength(2);
     expect(records.every((record) => /^[a-f0-9]{32}$/.test(record.report_view_token))).toBe(true);
@@ -246,7 +246,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       structured_notes: mockPg.raw("structured_notes || ?::jsonb", [JSON.stringify({ typedReportDelivery: 'internal_only' })]),
     });
     jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValue(new Error('Synthetic token outage'));
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
@@ -269,13 +269,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const screen = indicators.findBannedCustomerCopy;
     jest.spyOn(indicators, 'findBannedCustomerCopy').mockImplementation((value) =>
       value === 'Fixture observation' ? ['synthetic_caption_rule'] : screen(value));
-    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+    expect(await runVisitCompletionPacketMemberEffects(saved.body.packetId)).toMatchObject({
       status: 200, body: { state: 'office_required', code: 'photo_caption_banned_copy' },
     });
     expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'failed' });
     expect(await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
       scheduled_service_id: fixture.serviceIds[0] }).first()).toMatchObject({ status: 'failed' });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('office_required');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('office_required');
     await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).update({ updated_at: new Date(Date.now() - 120000) });
     const attemptCount = (await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId })
       .orderBy('scheduled_service_id')).map((item) => item.attempt_count);
@@ -302,7 +302,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       config.s3.bucket = priorBucket;
     }
     // The saved form no longer holds bytes; the member attempt hash must match it.
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
       .every((item) => item.status === 'done')).toBe(true);
     expect(await mockPg('service_photos').whereIn('service_record_id', saved.body.items.map((item) => item.serviceRecordId)))
@@ -321,7 +321,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('service_completion_attempts').where({ service_id: fixture.serviceIds[0] }).update({
       status: 'side_effects_running', updated_at: new Date(Date.now() - 2 * require('../services/completion-attempts').STALE_SIDE_EFFECTS_MS),
     });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(await mockPg('activity_log').where({ customer_id: fixture.customerId, action: 'service_completed' })).toHaveLength(2);
     expect(require('../services/notification-triggers').triggerNotification).toHaveBeenCalledWith('job_complete',
       expect.objectContaining({ serviceId: fixture.serviceIds[0], customerId: fixture.customerId }),
@@ -341,11 +341,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
       }
       return execute.call(this, connection, query);
     });
-    await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('Synthetic record reload outage');
+    await expect(runVisitCompletionPacketMemberEffects(saved.body.packetId)).rejects.toThrow('Synthetic record reload outage');
     expect(interrupted).toBe(true);
     expect(await mockPg('service_completion_attempts').where({ service_id: fixture.serviceIds[0] }).first())
       .toMatchObject({ status: 'side_effects_pending' });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
     expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
   });
@@ -354,7 +354,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     process.env.PEST_RECAP = 'true';
     const enqueue = jest.spyOn(require('../services/service-report/recap-pipeline'), 'enqueueRecap').mockResolvedValue({ queued: true });
     const saved = await saveVisitCompletionPacket(submission());
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect((await mockPg('service_records').where({ customer_id: fixture.customerId })).every((record) => record.service_line === 'pest')).toBe(true);
     expect(enqueue).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -369,7 +369,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     for (const item of input.items) item.body.backfill = true;
     const saved = await saveVisitCompletionPacket(input);
     jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValue(new Error('Synthetic token outage'));
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     expect(require('../services/customer-card').ensureCardForCompletion).not.toHaveBeenCalled();
@@ -386,11 +386,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const saved = await saveVisitCompletionPacket(submission());
     jest.spyOn(require('../services/completion-attempts'), 'markCompletionAttemptSucceeded')
       .mockRejectedValueOnce(new Error('Synthetic interruption after notification'));
-    await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('Synthetic interruption');
+    await expect(runVisitCompletionPacketMemberEffects(saved.body.packetId)).rejects.toThrow('Synthetic interruption');
     const pushSends = async () => (await Promise.all(require('../services/push-notifications').sendToAdminUsers.mock.results
       .map((call) => call.value))).map((result) => result.sent);
     expect(await pushSends()).toEqual([1]);
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     // The interrupted member's push was already claimed: the provider is
     // consulted again but refuses at the post-lookup claim, so nothing
     // buzzes twice.
@@ -407,7 +407,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('service_completion_profiles').insert({ service_key: `fixture_${fixture.catalogId}`,
       service_name_snapshot: 'Fixture General Pest Control', completion_mode: 'project_required',
       project_type: 'fixture_project', active: true });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
     expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
     expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
@@ -437,7 +437,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     if (frozenInternalOnly) await mockPg('service_completion_profiles').where({ service_key: profile.service_key }).del();
     else await mockPg('service_completion_profiles').insert(profile);
     const supplies = jest.spyOn(require('../services/supplies-consumption'), 'consumeCompletionSupplies').mockResolvedValue(undefined);
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(supplies).toHaveBeenCalledTimes(2);
     expect(supplies.mock.calls.every(([, args]) => args.isInternalOnlyCompletion === frozenInternalOnly)).toBe(true);
   });
@@ -452,7 +452,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     // The catalog key now resolves to no specialty lane: the same observation
     // would be refused at intake, but these records are committed.
     await mockPg('services').where({ id: fixture.catalogId }).update({ service_key: `fixture_${fixture.catalogId}` });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
     expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
     expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
@@ -472,7 +472,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       }
       return real(input, context);
     });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(raced).toBe(true);
     expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
     expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
@@ -506,7 +506,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       saved = await saveVisitCompletionPacket(input);
       expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
       expect(score).not.toHaveBeenCalled();
-      expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+      expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     } finally {
       config.s3.bucket = priorBucket;
     }
@@ -540,11 +540,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
       }
       return execute.call(this, connection, query);
     });
-    await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('remains pending');
+    await expect(runVisitCompletionPacketMemberEffects(saved.body.packetId)).rejects.toThrow('remains pending');
     expect(interrupted).toBe(true);
     expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
       .every((item) => item.status === 'processing' && !item.notification_push_started_at)).toBe(true);
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
       .every((item) => item.status === 'done' && item.notification_push_started_at)).toBe(true);
   });
@@ -614,9 +614,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
       applicationMethod: 'bait_placement', areaValue: 1000, areaUnit: 'sqft' }];
     const saved = await saveVisitCompletionPacket(input);
     jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValueOnce(new Error('Synthetic token outage'));
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('service_effects_pending');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('service_effects_pending');
     expect(await mockPg('dispatch_alerts').where({ type: 'moa_violation', job_id: fixture.serviceIds[0] })).toHaveLength(1);
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(await mockPg('dispatch_alerts').where({ type: 'moa_violation' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(2);
     expect(Number((await mockPg('products_catalog').where({ id: fixture.productId }).first()).inventory_on_hand)).toBe(8);
   });

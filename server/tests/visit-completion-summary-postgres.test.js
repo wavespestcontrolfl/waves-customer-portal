@@ -21,6 +21,7 @@ const { sendOne } = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { ABORTED_BEFORE_DISPATCH } = require('../services/email-template-library');
 const { etDateString } = require('../utils/datetime-et');
+const { runVisitCompletionPacketEffects, enrollVisitCompletionReview } = require('../services/visit-completion-packets');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
@@ -733,4 +734,374 @@ postgres('visit summary recipient recovery', () => {
     expect(sendOne).toHaveBeenCalledTimes(2);
   });
 
+
+  test('an internal-only packet closes without minting a summary link or needing the key', async () => {
+    await mockPg('service_records').whereIn('id', fixture.recordIds)
+      .update({ structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'internal_only' }) });
+    await mockPg('service_visits').where({ id: fixture.visitId })
+      .update({ summary_token_hash: null, summary_token_enc: null, summary_token_issued_at: null });
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    const key = process.env.DATA_HYGIENE_VAULT_KEY;
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({
+        status: 200, body: { state: 'done', delivery: { state: 'delivered' }, summaryUrl: null },
+      });
+    } finally {
+      process.env.DATA_HYGIENE_VAULT_KEY = key;
+    }
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+      .toMatchObject({ status: 'closed', summary_token_hash: null, summary_token_issued_at: null });
+    expect((await mockPg('visit_effects').where({ visit_id: fixture.visitId }).whereIn('effect_type', ['completion_sms', 'completion_email']))
+      .map((effect) => effect.status)).toEqual(['suppressed', 'suppressed']);
+    expect(sendOne).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a bounce on the only accepted summary email reopens delivery for office review, once', async () => {
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    expect(messages).toHaveLength(2);
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    const bounce = (message) => handleEmailMessageEvent({ event: 'bounce', reason: 'mailbox unavailable',
+      timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
+    await bounce(messages[0]);
+    // One recipient still proves an accepted send: delivery stands.
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent' });
+    await bounce(messages[1]);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    const { getCloseoutStatus } = require('../services/closeout-status');
+    expect((await getCloseoutStatus(fixture.serviceIds[0])).facts.reportDelivery).toMatchObject({ state: 'unknown' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
+    // A redelivered bounce cannot raise a second alert.
+    await bounce({ ...messages[1], bounced_at: null });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
+  });
+
+  test('a resend from the provider-retry rail settles a bounced summary back to delivered', async () => {
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    for (const message of messages) {
+      // A provider block (not a bad mailbox): the webhook schedules the
+      // existing transactional retry instead of suppressing the address.
+      await handleEmailMessageEvent({ event: 'blocked', reason: '550 temporarily deferred', type: 'blocked',
+        timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
+    }
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+    // The existing rail retries one blocked recipient and the provider accepts it.
+    expect(await mockPg('email_messages').where({ id: messages[0].id }).first()).toMatchObject({ status: 'failed' });
+    await mockPg('email_messages').where({ id: messages[0].id }).update({ provider_retry_next_at: new Date(Date.now() - 1000) });
+    await mockPg('email_messages').where({ id: messages[1].id }).update({ provider_retry_next_at: null });
+    sendOne.mockClear();
+    // The inline reconciliation after the resend fails transiently: the
+    // message is sent and off the rail, so the delivery webhook must settle it.
+    jest.spyOn(Summary, 'reconcileSummaryEmailRecovery').mockRejectedValueOnce(new Error('Synthetic reconcile outage'));
+    expect(await require('../services/transactional-email-provider-retry').runDueRetries()).toMatchObject({ claimed: 1, sent: 1 });
+    expect(require('../services/logger').warn.mock.calls.filter(([m]) => /summary recovery/.test(m))).toHaveLength(1);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery' });
+    const resent = await mockPg('email_messages').where({ id: messages[0].id }).first();
+    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, resent);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+    const { getCloseoutStatus } = require('../services/closeout-status');
+    expect((await getCloseoutStatus(fixture.serviceIds[0])).facts.reportDelivery).toMatchObject({ state: 'done' });
+  });
+
+  test.each([
+    ['opt_out', async () => mockPg('notification_prefs').insert({ customer_id: fixture.customerId, email_enabled: false })],
+    ['revocation', async () => mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() })],
+    ['contact', async () => mockPg('customers').where({ id: fixture.customerId })
+      .update({ email: 'replaced@example.invalid', service_contact_email: 'replaced-service@example.invalid' })],
+  ])('the provider-retry rail re-authorizes a blocked summary recipient before resending (%s)', async (change, apply) => {
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    for (const message of messages) {
+      await handleEmailMessageEvent({ event: 'blocked', reason: '550 temporarily deferred', type: 'blocked',
+        timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
+    }
+    await mockPg('email_messages').where({ id: messages[0].id }).update({ provider_retry_next_at: new Date(Date.now() - 1000) });
+    await mockPg('email_messages').where({ id: messages[1].id }).update({ provider_retry_next_at: null });
+    sendOne.mockClear();
+    await apply();
+    try {
+      expect(await require('../services/transactional-email-provider-retry').runDueRetries()).toMatchObject({ claimed: 1, sent: 0 });
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).del();
+    }
+    expect(sendOne).not.toHaveBeenCalled();
+    expect(await mockPg('email_messages').where({ id: messages[0].id }).first())
+      .toMatchObject({ status: 'blocked', error_message: expect.stringMatching(/^Suppressed before retry: visit_summary_/) });
+    // The leg stays on office review: the bounce alert and the reopened effect remain.
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+  });
+
+  test('a recovery delivery keeps the coordinator alert while the SMS leg is still uncertain', async () => {
+    await priorClaim('completion_sms', { status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
+    sendOne.mockImplementation(async ({ customArgs }) => {
+      await mockPg('email_messages').where({ id: customArgs.email_message_id })
+        .update({ status: 'bounced', bounced_at: new Date(), error_message: 'mailbox unavailable' });
+      return { messageId: randomUUID() };
+    });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+    const [original] = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const [recovery] = await mockPg('email_messages').insert({
+      provider: 'sendgrid', template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_type: 'customer', recipient_id: fixture.customerId, recipient_email_snapshot: 'corrected@example.invalid',
+      idempotency_key: `bounce_recovery:${original.id}`, status: 'sent', sent_at: new Date(), provider_message_id: randomUUID(),
+      send_attempt_token: randomUUID(), subject_snapshot: 'S', from_email_snapshot: 'contact@wavespestcontrol.com',
+      from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com',
+      categories: JSON.stringify(['email_template', 'bounce_recovery']),
+    }).returning('*');
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, recovery);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    // The email leg settled, but the SMS leg is terminal-uncertain: the office still owns this visit.
+    const open = await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at');
+    expect(open).toHaveLength(1);
+    expect(open[0].payload).toMatchObject({ delivery: 'delivery_review' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
+  });
+
+  test.each([
+    ['backfill members mint the card silently and earn no referral', { backfill: true }, { card: { suppressIssuedEmail: true }, referral: false }],
+    ['an internal-only report posture keeps both the card and the referral', { typedReportDelivery: 'internal_only' }, { card: { suppressIssuedEmail: false }, referral: true }],
+    ['an internal-only consultation mints no card but keeps the referral', { internalOnlyCompletion: true, typedReportDelivery: 'disabled' }, { card: null, referral: true }],
+  ])('%s', async (_label, notes, expected) => {
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ is_recurring: true });
+    await mockPg('service_records').whereIn('id', fixture.recordIds)
+      .update({ structured_notes: JSON.stringify({ visitOutcome: 'completed', ...notes }) });
+    const card = require('../services/customer-card').ensureCardForCompletion.mockClear();
+    const referral = require('../services/referral-engine').creditReferralOnFirstService.mockClear();
+    expect((await runVisitCompletionPacketEffects(fixture.packetId)).status).toBe(200);
+    if (expected.card) {
+      expect(card).toHaveBeenCalledTimes(1);
+      expect(card.mock.calls[0][0]).toMatchObject({ customerId: fixture.customerId, ...expected.card });
+      if (notes.backfill) expect(card.mock.calls[0][0].firstVisitAt).toBeInstanceOf(Date);
+    } else expect(card).not.toHaveBeenCalled();
+    if (expected.referral) expect(referral).toHaveBeenCalledWith({ customerId: fixture.customerId, serviceId: fixture.serviceIds[0] });
+    else expect(referral).not.toHaveBeenCalled();
+  });
+
+  test('a packet with one recorded member still enrolls its requested review', async () => {
+    await mockPg('visit_completion_packet_items').where({ packet_id: fixture.packetId, scheduled_service_id: fixture.serviceIds[1] }).del();
+    await mockPg('service_records').where({ id: fixture.recordIds[0] })
+      .update({ structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }) });
+    const enroll = jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    expect(await enrollVisitCompletionReview(fixture.packetId)).toMatchObject({ enrolled: true });
+    expect(enroll).toHaveBeenCalledWith(expect.objectContaining({ serviceRecordId: fixture.recordIds[0] }));
+  });
+
+  test('a prerequisite read failure during paid-invoice review enrollment reopens the done packet', async () => {
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done' });
+    const execute = mockPg.client.constructor.prototype._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failVisitRead(connection, query) {
+      if (!interrupted && query.sql.startsWith('select * from "service_visits"')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic visit read outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    expect(await require('../services/review-request').enrollForPaidInvoice({ id: randomUUID(), visit_completion_packet_id: fixture.packetId }))
+      .toMatchObject({ enrolled: false, retryable: true, reason: 'error' });
+    expect(interrupted).toBe(true);
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first())
+      .toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+  });
+
+  test('a corrected-address recovery delivery settles a hard-bounced summary', async () => {
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    for (const message of messages) {
+      await handleEmailMessageEvent({ event: 'bounce', type: 'bounce', reason: 'mailbox unavailable',
+        timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
+    }
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    // The bounce-recovery rail's resend keeps the trigger identity (unit-tested
+    // in email-bounce-recovery) and the corrected address accepts it.
+    const [recovery] = await mockPg('email_messages').insert({
+      provider: 'sendgrid', template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_type: 'customer', recipient_id: fixture.customerId, recipient_email_snapshot: 'corrected@example.invalid',
+      idempotency_key: `bounce_recovery:${messages[0].id}`, status: 'sent', sent_at: new Date(), provider_message_id: randomUUID(),
+      send_attempt_token: randomUUID(), subject_snapshot: 'S', from_email_snapshot: 'contact@wavespestcontrol.com',
+      from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com',
+      categories: JSON.stringify(['email_template', 'bounce_recovery']),
+    }).returning('*');
+    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, recovery);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+  });
+
+  test('a paid invoice projection applies the whole packet review policy before representative-record enrollment', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'paid', visit_completion_packet_id: fixture.packetId });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', requestReview: true, typedReportDelivery: 'auto_send' }),
+    });
+    await mockPg('service_records').where({ id: fixture.recordIds[1] }).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', requestReview: false, typedReportDelivery: 'auto_send' }),
+    });
+    const Review = require('../services/review-request');
+    const enroll = jest.spyOn(Review, 'enrollPostService').mockResolvedValue({ started: true });
+    try {
+      const projection = { id: invoiceId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0] };
+      expect(await Review.enrollForPaidInvoice(projection)).toMatchObject({ enrolled: false, reason: 'visit_outcome' });
+      expect(enroll).not.toHaveBeenCalled();
+      await mockPg('service_records').where({ id: fixture.recordIds[1] }).update({
+        structured_notes: JSON.stringify({ visitOutcome: 'completed', requestReview: true, typedReportDelivery: 'auto_send' }),
+      });
+      expect(await Review.enrollForPaidInvoice(projection)).toMatchObject({ enrolled: true });
+      expect(enroll).toHaveBeenCalledWith(expect.objectContaining({ serviceRecordId: fixture.recordIds[0] }));
+    } finally { await mockPg('invoices').where({ id: invoiceId }).del(); }
+  });
+
+  test.each(['cancelled', 'rescheduled'])('the coordinator collects through a recorded member beside %s history', async (status) => {
+    const retainedId = fixture.serviceIds[0];
+    await mockPg('visit_completion_packet_items').where({ packet_id: fixture.packetId, scheduled_service_id: retainedId }).del();
+    await mockPg('scheduled_services').where({ id: retainedId }).update({ status, technician_id: null });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: {
+        state: 'done', payment: { state: 'payment_needed', invoiceId }, delivery: { state: 'delivered' },
+      } });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled', total: '120.00' });
+    } finally { await mockPg('invoices').where({ id: invoiceId }).del(); }
+  });
+
+  test('a failed packet lookup for a paid invoice reopens the packet through the invoice link', async () => {
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'paid', visit_completion_packet_id: fixture.packetId });
+    const execute = mockPg.client.constructor.prototype._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failLookup(connection, query) {
+      if (!interrupted && query.sql.startsWith('select "visit_completion_packet_id" from "invoices"')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic invoice read outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      // The Stripe path passes the narrow projection without the packet link.
+      expect(await require('../services/review-request').enrollForPaidInvoice({ id: invoiceId, customer_id: fixture.customerId }))
+        .toMatchObject({ enrolled: false, retryable: true, reason: 'error', reopened: true });
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+    expect(interrupted).toBe(true);
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first())
+      .toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+  });
+
+  test('a recovery delivery settles an in-flight bounce that finalized as unknown', async () => {
+    sendOne.mockImplementation(async ({ customArgs }) => {
+      await mockPg('email_messages').where({ id: customArgs.email_message_id })
+        .update({ status: 'bounced', bounced_at: new Date(), error_message: 'mailbox unavailable' });
+      return { messageId: randomUUID() };
+    });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+    const [original] = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const [recovery] = await mockPg('email_messages').insert({
+      provider: 'sendgrid', template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_type: 'customer', recipient_id: fixture.customerId, recipient_email_snapshot: 'corrected@example.invalid',
+      idempotency_key: `bounce_recovery:${original.id}`, status: 'sent', sent_at: new Date(), provider_message_id: randomUUID(),
+      send_attempt_token: randomUUID(), subject_snapshot: 'S', from_email_snapshot: 'contact@wavespestcontrol.com',
+      from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com',
+      categories: JSON.stringify(['email_template', 'bounce_recovery']),
+    }).returning('*');
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, recovery);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+  });
+
+  test('the full coordinator closes the visit and replay preserves one email per recipient', async () => {
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({
+      status: 200, body: { state: 'done', payment: { state: 'no_charge' }, delivery: { state: 'delivered' } },
+    });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+      .toMatchObject({ status: 'closed', close_reason: 'completed' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(sendOne).toHaveBeenCalledTimes(2);
+  });
+
+  test('the coordinator records one office alert for uncertain delivery', async () => {
+    sendOne.mockRejectedValueOnce(new Error('provider response unavailable'));
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
+    expect(sendOne).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([undefined, false])('the canonical review default preserves an omitted field but honors %s', async (requested) => {
+    for (const item of fixture.payload.items) item.body.requestReview = requested;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    const reviews = jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    expect(await enrollVisitCompletionReview(fixture.packetId)).toMatchObject({ enrolled: requested !== false });
+    expect(reviews).toHaveBeenCalledTimes(requested === false ? 0 : 1);
+  });
+
+  test('a thrown legacy review enrollment reopens a done packet for recovery', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({
+      status: 'done', payload: JSON.stringify(fixture.payload),
+    });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    jest.spyOn(require('../services/review-request'), 'enrollPostService')
+      .mockRejectedValueOnce(new Error('legacy database temporarily unavailable')).mockResolvedValue({ started: true });
+    expect(await require('../services/review-request').enrollForPaidInvoice({ visit_completion_packet_id: fixture.packetId }))
+      .toMatchObject({ retryable: true, reason: 'error' });
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first())
+      .toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+  });
+
+  test('review enrollment retries through the saved packet and stays suppressed for partial outcomes', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    const reviews = jest.spyOn(require('../services/review-request'), 'enrollPostService')
+      .mockResolvedValueOnce({ started: false, reason: 'plan_resolution_failed' }).mockResolvedValue({ started: true });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 202, body: { state: 'effects_pending' } });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(sendOne).toHaveBeenCalledTimes(2);
+    expect(reviews).toHaveBeenCalledWith(expect.objectContaining({ serviceRecordId: fixture.recordIds[0] }));
+    await mockPg('service_records').where({ id: fixture.recordIds[1] }).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'incomplete', requestReview: false }),
+    });
+    expect(await enrollVisitCompletionReview(fixture.packetId)).toMatchObject({ enrolled: false, reason: 'visit_outcome' });
+    expect(reviews).toHaveBeenCalledTimes(2);
+  });
 });
