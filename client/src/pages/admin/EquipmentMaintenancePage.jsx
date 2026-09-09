@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { BarChart3, Truck } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { etDateString } from "../../lib/timezone";
+import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
@@ -606,7 +606,7 @@ function EquipmentCard({
           }}>
                 {overdue ? "OVERDUE: " : "Next: "}
                 {nm.task_name}
-                {nm.next_due_at && <span>({new Date(nm.next_due_at).toLocaleDateString()})</span>}
+                {nm.next_due_at && <span>({formatETDateOnly(nm.next_due_at)})</span>}
               </div>}
           </div>{" "}
           <div style={{
@@ -638,9 +638,9 @@ function EquipmentCard({
             {" "}
             <InfoRow label="Serial" value={detail.equipment.serial_number} />{" "}
             <InfoRow label="VIN" value={detail.equipment.vin} />{" "}
-            <InfoRow label="Purchase Date" value={detail.equipment.purchase_date ? new Date(detail.equipment.purchase_date).toLocaleDateString() : null} />{" "}
+            <InfoRow label="Purchase Date" value={detail.equipment.purchase_date ? formatETDateOnly(detail.equipment.purchase_date) : null} />{" "}
             <InfoRow label="Purchase Price" value={detail.equipment.purchase_price ? fmt(detail.equipment.purchase_price) : null} />{" "}
-            <InfoRow label="Warranty" value={detail.equipment.warranty_expiration ? `Expires ${new Date(detail.equipment.warranty_expiration).toLocaleDateString()}` : null} />{" "}
+            <InfoRow label="Warranty" value={detail.equipment.warranty_expiration ? `Expires ${formatETDateOnly(detail.equipment.warranty_expiration)}` : null} />{" "}
             <InfoRow label="Engine" value={detail.equipment.engine_type} />{" "}
             <InfoRow label="Location" value={detail.equipment.location} />{" "}
             <InfoRow label="Depreciation" value={detail.equipment.depreciation_method} />{" "}
@@ -740,7 +740,7 @@ function EquipmentCard({
                     color: s.is_overdue ? D.red : D.text
                   }}>
                           {s.is_overdue && "OVERDUE "}
-                          {s.next_due_at ? new Date(s.next_due_at).toLocaleDateString() : ""}
+                          {s.next_due_at ? formatETDateOnly(s.next_due_at) : ""}
                           {s.next_due_miles ? ` / ${fmtN(s.next_due_miles)} mi` : ""}
                           {s.next_due_hours ? ` / ${s.next_due_hours} hrs` : ""}
                         </td>{" "}
@@ -871,7 +871,7 @@ function EquipmentCard({
                   padding: "6px 8px",
                   color: D.text
                 }}>
-                          {new Date(r.performed_at).toLocaleDateString()}
+                          {formatETDate(r.performed_at)}
                         </td>{" "}
                         <td style={{
                   padding: "6px 8px",
@@ -1203,7 +1203,7 @@ function EquipmentCard({
                   padding: "4px 6px",
                   color: D.text
                 }}>
-                          {new Date(l.log_date).toLocaleDateString()}
+                          {formatETDateOnly(l.log_date)}
                         </td>{" "}
                         <td style={{
                   padding: "4px 6px",
@@ -2390,7 +2390,7 @@ function AnalyticsTab({
                 }}>
                           OVERDUE
                         </span>}
-                      {s.next_due_at ? new Date(s.next_due_at).toLocaleDateString() : "--"}
+                      {s.next_due_at ? formatETDateOnly(s.next_due_at) : "--"}
                     </td>{" "}
                     <td style={{
                 padding: "8px"

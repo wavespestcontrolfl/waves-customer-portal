@@ -222,7 +222,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   // so callers log deferred, not lost; a failed enqueue falls through and
   // returns the block unchanged (loudly logged).
   if (!result.sent
-    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'].includes(result.code)
+    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(result.code)
     && result.deferred
     && result.nextAllowedAt) {
     try {

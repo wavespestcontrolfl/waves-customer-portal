@@ -83,7 +83,7 @@ const sBtn = (bg, color) => ({
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
-  fontSize: 10,
+  fontSize: 12, // UI audit F0540
   padding: "2px 8px",
   borderRadius: 4,
   background: bg,
@@ -208,7 +208,7 @@ function MetaHealthStrip({ health, onRefresh }) {
           Facebook: {fbDetails.pageName || "Page check"} · Linked IG: {linkedIg} · Instagram: {igLabel} · {quotaLabel}
         </div>
         {health?.checkedAt && (
-          <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>
+          <div style={{ fontSize: 11, color: D.muted, marginTop: 3 }}>
             Checked {new Date(health.checkedAt).toLocaleString('en-US', { timeZone: 'America/New_York' })}
           </div>
         )}
@@ -518,7 +518,7 @@ export default function SocialMediaPage() {
                 {cred?.lastError && healthStatus !== "healthy" && (
                   <div
                     style={{
-                      fontSize: 10,
+                      fontSize: 11,
                       color: D.muted,
                       marginTop: 4,
                       overflow: "hidden",
@@ -589,7 +589,7 @@ export default function SocialMediaPage() {
               </div>{" "}
               <div
                 style={{
-                  fontSize: 10,
+                  fontSize: 11,
                   color: D.muted,
                   textTransform: "uppercase",
                   letterSpacing: 1,
@@ -977,7 +977,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700, color: item.color }}>
               {item.value}
             </div>
-            <div style={{ fontSize: 10, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>
               {item.label}
             </div>
           </div>
@@ -1134,7 +1134,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                                 background: D.card,
                               }}
                             >
-                              <div style={{ fontSize: 10, fontWeight: 700, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>
                                 {platform === "gbp" ? "GBP" : platform}
                               </div>
                               <div style={{ fontSize: 12, color: D.text, whiteSpace: "pre-wrap", maxHeight: 110, overflowY: "auto" }}>
@@ -2562,7 +2562,7 @@ function AnalyticsTab() {
             </div>{" "}
             <div
               style={{
-                fontSize: 9,
+                fontSize: 11,
                 color: D.muted,
                 textTransform: "uppercase",
                 letterSpacing: 1,
@@ -2705,12 +2705,23 @@ function AnalyticsTab() {
           >
             Weekly Posting Trend
           </div>{" "}
+          {/* Up to 12 weekly buckets: each column keeps a floor width so the
+              12px MM-DD labels never collide, and the row scrolls sideways on
+              phones instead of widening the Analytics tab (Codex round 4). */}
+          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
           <div
             style={{
               display: "flex",
               alignItems: "flex-end",
               gap: 4,
-              height: 100,
+              // 80px bar + 13px value + 12px rotated label + gaps: the old
+              // 100px box let the tallest columns overflow into the heading.
+              height: 136,
+              // The -45deg label hangs ~10px below its line box; without this
+              // padding the scrollport above clips it (overflow-x: auto makes
+              // the y axis scrollable rather than visible).
+              paddingBottom: 16,
+              minWidth: "max-content",
             }}
           >
             {weeklyTrend.map((w, i) => {
@@ -2721,6 +2732,7 @@ function AnalyticsTab() {
                   key={i}
                   style={{
                     flex: 1,
+                    minWidth: 36,
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
@@ -2728,7 +2740,7 @@ function AnalyticsTab() {
                   }}
                 >
                   {" "}
-                  <div style={{ fontSize: 9, color: D.muted }}>
+                  <div style={{ fontSize: 13, color: D.muted, fontVariantNumeric: "tabular-nums" }}>
                     {w.total}
                   </div>{" "}
                   <div
@@ -2741,7 +2753,7 @@ function AnalyticsTab() {
                   />{" "}
                   <div
                     style={{
-                      fontSize: 8,
+                      fontSize: 12, // UI audit F0540 (was 8px rotated)
                       color: D.muted,
                       transform: "rotate(-45deg)",
                       transformOrigin: "center",
@@ -2754,6 +2766,7 @@ function AnalyticsTab() {
               );
             })}
           </div>{" "}
+          </div>
         </div>
       )}
     </div>

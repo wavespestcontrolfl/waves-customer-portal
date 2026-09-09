@@ -282,6 +282,11 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
     // flips is exactly the opt-out this exists to honor.
     dbUpdates.service_reminder_72h_channel_explicit = true;
   }
+  // A full preference round trip may echo the default Email value. Only a
+  // changed request channel proves a choice; unrelated saves keep provenance.
+  if (updates.requestChannel !== undefined && updates.requestChannel !== (existing.request_channel || 'email')) {
+    dbUpdates.request_channel_explicit = true;
+  }
   return dbUpdates;
 }
 
@@ -607,6 +612,7 @@ router.put('/preferences', async (req, res, next) => {
         if (owner?.[col] === 'push') {
           delete channelDbUpdates[col];
           delete propertyDbUpdates[col];
+          if (key === 'requestChannel') delete propertyDbUpdates.request_channel_explicit;
           delete updates[key];
         }
       }

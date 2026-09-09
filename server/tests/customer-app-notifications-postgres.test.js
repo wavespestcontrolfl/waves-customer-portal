@@ -1,5 +1,6 @@
 // Opt-in against a verified private QA database. Clone the migrated table
 // shapes into a disposable schema; all recipients and providers are fictional.
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'qa-customer-app-notifications-only';
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
   db.raw = (...args) => mockPg.raw(...args);
@@ -13,6 +14,12 @@ jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: j
 jest.mock('../services/apns', () => ({ send: jest.fn(), status: () => ({ configured: true }) }));
 jest.mock('../services/fcm', () => ({ send: jest.fn(), status: () => ({ configured: true }) }));
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => ({})) }));
+jest.mock('../utils/scheduled-cron', () => ({ schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn() }));
+jest.mock('../utils/cron-lock', () => ({ ...jest.requireActual('../utils/cron-lock'), settleDeadRunningJobs: jest.fn(async () => ({})) }));
+jest.mock('../services/time-tracking-crons', () => ({ initTimeTrackingCrons: jest.fn() }));
+jest.mock('../services/equipment-crons', () => ({ initEquipmentCrons: jest.fn() }));
+jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons: jest.fn() }));
+jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 
 const { randomUUID } = require('node:crypto');
 const express = require('express');
@@ -38,11 +45,14 @@ jest.setTimeout(30000);
 
 postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   beforeAll(async () => {
-    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(new URL(connection).pathname)) throw new Error('Use a verified private QA database');
+    const target = new URL(connection);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
+    const ci = process.env.CI === 'true' && target.hostname === 'localhost' && target.pathname === '/waves_test';
+    if (!privateQa && !ci) throw new Error('Use a verified private QA database or the isolated CI database');
     admin = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = require('knex')({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
-    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log', 'scheduled_services', 'payers', 'service_requests', 'technicians']) {
+    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log', 'scheduled_services', 'payers', 'service_requests', 'technicians', 'ops_email_send_state']) {
       await mockPg.raw('CREATE TABLE ?? (LIKE ?? INCLUDING ALL)', [table, `public.${table}`]);
     }
     expect(await mockPg.schema.hasColumn('notification_prefs', 'push_enabled')).toBe(true);
@@ -77,6 +87,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     } finally { await probe.rollback(); }
     expect(await mockPg.schema.hasColumn('service_requests', 'status_version')).toBe(hadVersion);
     await versionMigration.up(mockPg);
+    await require('../models/migrations/20260909000064_request_channel_provenance').up(mockPg);
     await mockPg('customers').insert([
       { id: owner, account_id: owner, is_primary_profile: true },
       { id: property, account_id: owner, is_primary_profile: false },
@@ -132,11 +143,70 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   });
 
   test.each([['email', 'push'], ['push', 'email']])('profile merge preserves a request Email choice: %s + %s', async (winner, loser) => {
-    await mockPg('notification_prefs').where({ customer_id: owner }).update({ request_channel: winner });
-    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel: loser });
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ request_channel: winner, request_channel_explicit: true });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel: loser, request_channel_explicit: true });
     const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
     await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
     expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({ request_channel: 'email' });
+  });
+
+  test('provenance migration preserves historical uncertainty and consent timestamps through repeatable up/down', async () => {
+    const migration = require('../models/migrations/20260909000064_request_channel_provenance');
+    const capturedAt = new Date('2025-01-02T12:00:00Z');
+    const probe = await mockPg.transaction();
+    try {
+      await migration.down(probe);
+      await probe('notification_prefs').update({ request_channel: 'email', updated_at: capturedAt });
+      await probe('notification_prefs').where({ customer_id: property }).update({ request_channel: 'push' });
+      await migration.up(probe); await migration.up(probe);
+      for (const id of [owner, property, outsider]) {
+        expect(await probe('notification_prefs').where({ customer_id: id }).first()).toMatchObject({
+          request_channel_explicit: id === property ? true : null, updated_at: capturedAt,
+        });
+      }
+      const [fresh] = await probe('notification_prefs').insert({ customer_id: randomUUID() }).returning('*');
+      expect(fresh).toMatchObject({ request_channel: 'email', request_channel_explicit: false });
+      await migration.down(probe); await migration.down(probe); await migration.up(probe);
+      expect(await probe.schema.hasColumn('notification_prefs', 'request_channel_explicit')).toBe(true);
+    } finally { await probe.rollback(); }
+    expect(await mockPg.schema.hasColumn('notification_prefs', 'request_channel_explicit')).toBe(true);
+  });
+
+  test.each([
+    ['email', false, 'push', true, 'push', true],
+    ['push', true, 'email', false, 'push', true],
+    ['email', null, 'push', true, 'email', null],
+    ['push', true, 'email', null, 'email', null],
+    ['email', false, 'email', true, 'email', true],
+    ['email', true, 'email', false, 'email', true],
+    ['email', false, 'email', null, 'email', null],
+    ['email', null, 'email', false, 'email', null],
+    ['push', false, 'push', true, 'push', true],
+    ['push', true, 'push', false, 'push', true],
+  ])('request merge keeps the selected channel and provenance: %s/%s + %s/%s', async (winner, winnerExplicit, loser, loserExplicit, channel, explicit) => {
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({
+      request_channel: winner, request_channel_explicit: winnerExplicit, sms_enabled: true,
+    });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({
+      request_channel: loser, request_channel_explicit: loserExplicit, sms_enabled: false,
+    });
+    const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
+    await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
+      request_channel: channel, request_channel_explicit: explicit, sms_enabled: false,
+    });
+    expect(await mockPg('notification_prefs').where({ customer_id: outsider }).first()).toBeUndefined();
+  });
+
+  test.each(['email', 'push'])('a request-only merge to %s retains the existing consent timestamp', async (channel) => {
+    const capturedAt = new Date('2025-01-02T12:00:00Z');
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ updated_at: capturedAt });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel: channel, request_channel_explicit: true });
+    const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
+    await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
+      request_channel: channel, request_channel_explicit: true, updated_at: capturedAt,
+    });
   });
 
   const prefsUrl = '/api/notifications/preferences?appPreferences=1';
@@ -154,6 +224,122 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       platform, device_token: `qa-${randomUUID()}`, subscription_data: '{}', active: true, ...extra }).returning('*');
     return row;
   }
+
+  test.each(['ios', 'android'])('%s transient delivery retries the same bell and settles after acceptance', async (platform) => {
+    await device(owner, platform); await put({ requestChannel: 'push' });
+    const [request] = await mockPg('service_requests').insert({ customer_id: property, category: 'general', subject: 'QA retry request', status: 'new' }).returning('*');
+    const provider = platform === 'ios' ? apns : fcm;
+    provider.send.mockResolvedValueOnce({ ok: false, retryable: true, retryAfterMs: 900000 }).mockResolvedValue({ ok: true });
+    const notice = { customerId: property, to: '+19415550101', body: 'Request received', messageType: 'service_request_received',
+      explicitPushOnly: true, notificationEventKey: `request:${request.id}:service_request_received:0`,
+      requestNotification: { id: request.id, status: request.status, version: request.status_version } };
+    const routing = require('../services/messaging/push-channel-routing');
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: false, retryable: true, retryAfterMs: 900000 });
+    expect(await mockPg('notifications').first()).toMatchObject({ metadata: { pushState: 'failed' } });
+    expect(await mockPg('push_subscriptions').first()).toMatchObject({ active: true });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(provider.send).toHaveBeenCalledTimes(2);
+    expect(provider.send.mock.calls[0][1].tag).toBe(provider.send.mock.calls[1][1].tag);
+    expect(await mockPg('notifications')).toHaveLength(1);
+    expect(await mockPg('notifications').first()).toMatchObject({ metadata: { pushState: 'accepted' } });
+  });
+
+  test('the scheduled invoice rail respects native backoff and its existing five-attempt cap', async () => {
+    const [invoice] = await mockPg('invoices').insert({ customer_id: property, token: randomUUID(),
+      invoice_number: 'QA-NATIVE-RETRY', status: 'scheduled', scheduled_send_at: new Date(0), scheduled_send_attempts: 0 }).returning('*');
+    const Invoice = require('../services/invoice');
+    const gates = require('../config/feature-gates');
+    const originalGate = gates.isEnabled;
+    const gate = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'smsSendWindow' ? false : originalGate(key));
+    const jitter = jest.spyOn(Math, 'random').mockReturnValue(0);
+    const send = jest.spyOn(Invoice, 'sendViaSMSAndEmail').mockResolvedValue({ ok: false, creditApplied: 0,
+      sms: { code: 'APP_PROVIDER_RETRY', deferred: true, retryAfterMs: 900000, nextAllowedAt: new Date(Date.now() + 900000).toISOString() },
+    });
+    try {
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        await mockPg('invoices').where({ id: invoice.id }).update({ scheduled_send_at: new Date(0) });
+        const startedAt = Date.now();
+        expect(await Invoice.processScheduledSends()).toEqual({ sent: 0, failed: 1, deferred: 0 });
+        const row = await mockPg('invoices').where({ id: invoice.id }).first();
+        expect(row).toMatchObject({ status: 'scheduled', scheduled_send_attempts: attempt });
+        expect(row.scheduled_send_at.getTime()).toBeGreaterThanOrEqual(startedAt + 900000 * (2 ** (attempt - 1)));
+      }
+      await mockPg('invoices').where({ id: invoice.id }).update({ scheduled_send_at: new Date(0) });
+      expect(await Invoice.processScheduledSends()).toEqual({ sent: 0, failed: 0, deferred: 0 });
+      expect(send).toHaveBeenCalledTimes(5);
+    } finally { send.mockRestore(); gate.mockRestore(); jitter.mockRestore(); }
+  });
+
+  test('native retries preserve the existing fallback outcome for other App families', async () => {
+    await device(); await put({ serviceReminder24hChannel: 'push' });
+    apns.send.mockResolvedValue({ ok: false, retryable: true, retryAfterMs: 900000 });
+    const result = await require('../services/messaging/push-channel-routing').attemptPushFirst({
+      customerId: property, to: '+19415550101', body: 'QA reminder', messageType: 'appointment_reminder',
+      explicitPushOnly: true, notificationEventKey: 'qa-reminder-unchanged-policy',
+    });
+    expect(result.delivered).toBe(false);
+    expect(result.retryable).toBeUndefined();
+    expect(apns.send).toHaveBeenCalledTimes(1);
+  });
+
+  test('one accepting device settles the event despite another temporary failure', async () => {
+    await device(owner, 'ios'); await device(owner, 'android');
+    apns.send.mockResolvedValue({ ok: false, retryable: true, retryAfterMs: 900000 });
+    const opts = { dedupeKey: 'qa:mixed-acceptance', awaitPush: true, pushOptions: { nativeOnly: true } };
+    expect((await Notifications.notifyCustomer(property, 'service', 'QA update', 'QA body', opts)).push.accepted).toBe(1);
+    expect((await Notifications.notifyCustomer(property, 'service', 'QA update', 'QA body', opts)).push.accepted).toBe(1);
+    expect(apns.send).toHaveBeenCalledTimes(1);
+    expect(fcm.send).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([['ios', true], ['android', true], ['ios', false], ['android', false]])('%s expired=%s is not a temporary retry', async (platform, expired) => {
+    await device(owner, platform); await put({ requestChannel: 'push' });
+    (platform === 'ios' ? apns : fcm).send.mockResolvedValue({ ok: false, expired, reason: expired ? 'Unregistered' : 'invalid_payload' });
+    const result = await Notifications.notifyCustomer(property, 'service', 'QA update', 'QA body', { awaitPush: true });
+    expect(result.push.accepted).toBe(0);
+    expect(result.push.retryable).toBeUndefined();
+    expect((await mockPg('push_subscriptions').first()).active).toBe(!expired);
+  });
+
+  test('scheduled request delivery backs off, stops after three retries, and keeps App intent', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ request_channel: 'push' });
+    const [request] = await mockPg('service_requests').insert({ customer_id: property, category: 'general', subject: 'QA bounded retry', status: 'new' }).returning('*');
+    const send = jest.spyOn(require('../services/messaging/send-customer-message'), 'sendCustomerMessage').mockResolvedValue({
+      sent: false, code: 'APP_PROVIDER_RETRY', retryable: true, deferred: true, retryAfterMs: 900000,
+      nextAllowedAt: new Date(Date.now() + 900000).toISOString(),
+    });
+    const gate = jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation((name) => name === 'cronJobs');
+    const logGates = jest.spyOn(require('../config/feature-gates'), 'logGateStatus').mockImplementation(() => {});
+    const jitter = jest.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      require('../services/scheduler').initScheduledJobs();
+      const registration = require('../utils/scheduled-cron').schedule.mock.calls.find(([, tick]) => String(tick).includes('claimDueScheduledSms'));
+      expect(registration).toBeDefined();
+      const tick = registration[1];
+      await require('../services/request-app-notifications').send({ customerId: property, request, received: true });
+      const queued = await mockPg('sms_log').where({ status: 'scheduled' }).first();
+      expect(queued).toBeDefined();
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(Date.now() - 60000) });
+        const startedAt = Date.now();
+        await tick();
+        const row = await mockPg('sms_log').where({ id: queued.id }).first();
+        expect(row.metadata.scheduled_sms_attempts).toBe(attempt);
+        expect(row.status).toBe(attempt === 3 ? 'blocked' : 'scheduled');
+        if (attempt < 3) {
+          expect(row.metadata.provider_retry_code).toBe('APP_PROVIDER_RETRY');
+          expect(new Date(row.scheduled_for).getTime()).toBeGreaterThanOrEqual(startedAt + 900000 * (2 ** attempt));
+        }
+      }
+      await tick();
+      expect(send).toHaveBeenCalledTimes(4); // initial attempt + the existing three-retry cap
+      for (const [input] of send.mock.calls) {
+        expect(input).toMatchObject({ customerInitiated: true, metadata: { appOnly: true, service_request_id: request.id,
+          request_status_version: 0, notificationEventKey: `request:${request.id}:service_request_received:0` } });
+      }
+    } finally { send.mockRestore(); gate.mockRestore(); logGates.mockRestore(); jitter.mockRestore(); }
+  });
 
   test('readiness authenticates and returns no device identifiers', async () => {
     expect((await http('GET', '/api/push/status', null, false)).status).toBe(401);
@@ -580,5 +766,32 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     });
     expect(checks).toBe(2);
     expect(result.sent).toBe(2);
+  });
+
+  test('request choices record provenance only on the selected profile, not a default round trip', async () => {
+    await put({ requestChannel: 'email', weatherAlerts: false });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: false });
+    await device();
+    expect((await put({ requestChannel: 'push' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'push', request_channel_explicit: true });
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: false });
+    expect((await put({ requestChannel: 'email' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: true });
+    await put({ weatherAlerts: true });
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).request_channel_explicit).toBe(true);
+  });
+
+  test('legacy and gate-off saves preserve unknown request provenance with the App choice', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property })
+      .update({ request_channel: 'push', request_channel_explicit: null });
+    expect((await http('PUT', '/api/notifications/preferences', { requestChannel: 'email' })).status).toBe(200);
+    delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+    expect((await put({ requestChannel: 'email' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'push', request_channel_explicit: null });
   });
 });

@@ -392,6 +392,7 @@ const NotificationService = {
           failed: outcome.failed,
           expired: outcome.expired,
           skipped: outcome.skipped,
+          ...(outcome.retryable ? { retryable: outcome.retryable, retryAfterMs: outcome.retryAfterMs } : {}),
           ...(outcome.reason ? { reason: outcome.reason } : {}),
           ...(outcome.deduped ? { deduped: true } : {}),
         } };
@@ -498,19 +499,20 @@ const NotificationService = {
     return q.update({ read_at: new Date() });
   },
 
-  // A voicemail landed for a call the missed-call lane already rang for
-  // (the recording callback can persist after the 2-minute missed-call
-  // claim): the voicemail bell supersedes — retire the missed-call bell so
-  // the owner never holds two contradictory alerts for one call. System
-  // writer (no role scoping): every admin copy of that bell is retired.
-  async supersedeMissedCallAdmin({ callLogId, callSid } = {}) {
+  // Retire superseded call alerts without crossing triggers: voicemail
+  // supersedes a missed call; a booking supersedes a repeat-caller alert.
+  // System writer (no role scoping): every admin copy is retired.
+  async supersedeMissedCallAdmin({ callLogId, callSid, triggerKey = 'customer_missed_call' } = {}) {
     if (!callLogId && callSid) {
       const row = await db('call_log').where('twilio_call_sid', callSid).first('id');
       callLogId = row?.id || null;
     }
     if (!callLogId) return 0;
+    // Both triggers share the category; the caller must name which event
+    // became obsolete so voicemail and booking cannot retire each other's bell.
     return db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
+      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey])
       .whereNull('read_at')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
       .update({ read_at: new Date() });
