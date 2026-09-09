@@ -41,10 +41,14 @@ jest.setTimeout(30000);
     await db('invoices').insert({ ...inv, id: randomUUID(), line_items: JSON.stringify(inv.line_items) });
     expect((await readPlan()).skipped).toEqual({ ambiguous: 2 });
   });
-  test('refuses a second visit even if only the first has completion evidence', async () => {
+  test.each(['confirmed', null])('refuses a second visit (status %s) even if only the first has completion evidence', async (status) => {
     const ids = await seedPair(db);
-    await db('scheduled_services').insert({ id: randomUUID(), customer_id: ids.customerId, scheduled_date: '2020-01-01', status: 'confirmed' });
+    await db('scheduled_services').insert({ id: randomUUID(), customer_id: ids.customerId, scheduled_date: '2020-01-01', status });
     expect((await readPlan()).skipped).toEqual({ ambiguous: 1 });
+  });
+  test('a NULL-status visit is itself a live pairing candidate', async () => {
+    const ids = await seedPair(db, { visit: { status: null } });
+    expect((await evaluate(db, ids.invoiceId)).pairing).toMatchObject({ visitId: ids.visitId, visitStatus: null });
   });
   test('treats a NULL-status invoice as live for uniqueness and existing-bill checks', async () => {
     const ids = await seedPair(db);
