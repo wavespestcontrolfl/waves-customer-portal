@@ -206,8 +206,12 @@ function nextCoverageDate(template, row) {
 
 function measureRecurringSeries(template, visits, { todayET = etDateString(), decision = null, holds = [] } = {}) {
   const { etDateDiffDays } = require('./recurring-appointment-seeder');
-  const live = visits.filter(row => row.is_recurring && !row.is_callback && !row.followup_included
-    && !['cancelled', 'rescheduled', 'skipped', 'no_show'].includes(row.status))
+  const retained = visits.filter(row => row.is_recurring && !row.is_callback && !row.followup_included
+    && !['cancelled', 'skipped', 'no_show'].includes(row.status));
+  // A parked reschedule remains owed work. Its date is the abandoned slot,
+  // so it cannot establish future placement or actual visit spacing.
+  const awaitingPlacement = retained.filter(row => row.status === 'rescheduled');
+  const live = retained.filter(row => row.status !== 'rescheduled')
     .sort((a, b) => formatDateOnly(a.scheduled_date).localeCompare(formatDateOnly(b.scheduled_date))
       || String(a.id).localeCompare(String(b.id)));
   const upcoming = live.filter(row => row.status !== 'completed' && formatDateOnly(row.scheduled_date) >= todayET);
@@ -220,7 +224,7 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
     ? [...live].sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b))) : [];
   const expectedDates = new Map(cadenceOrder.slice(1).map((row, index) => [row.id, nextCoverageDate(template, cadenceOrder[index])]));
   const paused = holds.some(hold => hold.status === 'active' && formatDateOnly(hold.starts_on) <= todayET && formatDateOnly(hold.resume_on) > todayET);
-  const stopped = decision === 'cancel_series' || (decision === 'let_lapse' && upcoming.length === 0);
+  const stopped = decision === 'cancel_series' || (decision === 'let_lapse' && upcoming.length === 0 && awaitingPlacement.length === 0);
   const intervals = live.slice(1).map((row, index) => {
     const previous = live[index];
     const from = formatDateOnly(previous.scheduled_date);
@@ -247,6 +251,7 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
   const issues = stopped || paused ? [] : Object.entries({
     ongoing_plan_has_no_future_visit: template.recurring_ongoing && upcoming.length === 0,
     overdue_uncompleted_visits: overdue.length > 0,
+    rescheduled_visits_awaiting_placement: awaitingPlacement.length > 0,
   }).filter(([, present]) => present).map(([issue]) => issue);
   return {
     parentId: template.id, customerId: template.customer_id, propertyId: template.property_id || null,
@@ -259,6 +264,7 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
     continuationDueDate: template.recurring_ongoing ? nextCoverageDate(template, cadenceOrder.at(-1)) : null,
     upcomingVisits: upcoming.length, untimedUpcomingVisits: upcoming.filter(row => !row.window_start).length,
     overdueVisits: overdue.length,
+    awaitingPlacementVisits: awaitingPlacement.length,
     daysSinceLastCompletedVisit: etDateDiffDays(formatDateOnly(lastCompleted?.scheduled_date), todayET),
     intervals,
   };
