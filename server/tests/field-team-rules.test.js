@@ -3,7 +3,7 @@ const { execFileSync } = require('node:child_process');
 
 const rule = ruleDefinition({ service_rules: [{ service_key: 'pest_quarterly', credit_type: 'routine', rework_window_days: 30 }], rework_minimum: 10, handoff_minimum: 10, activation_share_bps: null });
 const allocation = { service_key: 'pest_quarterly', net_value_cents: 60000, planned_visits: 4, credit_type: 'routine' };
-const productionInput = { rule, allocation, roleKey: 'technician_i', serviceKey: 'pest_quarterly', ordinal: 1, participant: { value_cents: 15000, share_bps: 10000 }, exclusion: 'none', provenance: 'verified' };
+const productionInput = { rule, allocation, roleKey: 'technician_i', serviceKey: 'pest_quarterly', ordinal: 1, participants: [{ technician_id: 'a', share_bps: 10000 }], technicianId: 'a', exclusion: 'none', provenance: 'verified' };
 const linkedReturn = { return_service_id: 'return-service', same_issue_confirmed: true, return_service_date: '2026-03-10' };
 const evidence = (overrides = {}) => ({ service_key: 'pest_quarterly', service_date: '2026-03-01', created_at: '2026-04-01T16:00:00Z', facts: { provenance: 'verified', exclusion: 'none', complete_at_cutoff: true, cutoff_at: '2026-03-01T23:00:00Z', repair_reason: 'none', rework_outcome: 'no_return', ...overrides } });
 const cohort = (size, failures = 0, kind = 'rework') => Array.from({ length: size }, (_, i) => evidence(i < failures ? kind === 'rework' ? { ...linkedReturn, rework_outcome: 'technician_execution' } : { complete_at_cutoff: false } : {}));
@@ -38,6 +38,14 @@ describe('Field Team Program revision 2b simulation contract', () => {
   });
   test.each([['technician_i', 900], ['technician_ii', 1200]])('%s adds the modeled production amount', (roleKey, amount) => {
     expect(production({ ...productionInput, roleKey })).toMatchObject({ status: 'simulated', amount_cents: amount });
+  });
+  test('derives crew cents from the retained allocation, ignoring stale participant values', () => {
+    const participants = [{ technician_id: 'b', share_bps: 5000, value_cents: 99000 }, { technician_id: 'a', share_bps: 5000, value_cents: 99000 }];
+    const input = { ...productionInput, allocation: { ...allocation, net_value_cents: 60004 }, participants };
+    const rows = ['a', 'b'].map(technicianId => production({ ...input, technicianId }));
+    expect(rows.map(row => row.value_cents)).toEqual([7501, 7500]);
+    expect(rows.reduce((sum, row) => sum + row.value_cents, 0)).toBe(15001);
+    expect(production({ ...input, technicianId: 'missing' }).amount_cents).toBeNull();
   });
   test.each(['corrective', 'duplicate', 'unnecessary', 'planned_followup', 'inspection'])('%s produces no credit', exclusion => {
     expect(production({ ...productionInput, exclusion })).toMatchObject({ status: 'excluded', amount_cents: 0 });
@@ -104,6 +112,9 @@ describe('Field Team Program revision 2b simulation contract', () => {
   test('a premature no-return review needs a review after the observation window closes', () => {
     expect(outcomeBonus('rework', [...cohort(10), { ...evidence(), created_at: '2026-03-02T16:00:00Z' }], rule, '2026-04-01')).toMatchObject({ status: 'unresolved', amount_cents: null });
   });
+  test.each([{ return_service_id: 'return-service' }, { return_service_date: '2026-03-10' }, linkedReturn])('a no-return review cannot retain contradictory return evidence: %j', linked => {
+    expect(outcomeBonus('rework', [...cohort(10), evidence(linked)], rule, '2026-04-01')).toMatchObject({ status: 'unresolved', amount_cents: null });
+  });
   test('non-technician causation does not count as avoidable rework', () => {
     expect(outcomeBonus('rework', cohort(10).map(row => ({ ...row, facts: { ...row.facts, ...linkedReturn, rework_outcome: 'protocol' } })), rule, '2026-04-01')).toMatchObject({ amount_cents: 20000, failures: 0 });
   });
@@ -119,8 +130,11 @@ describe('Field Team Program revision 2b simulation contract', () => {
     const defined = { ...rule, activation_share_bps: 4000 };
     expect(commission({ ...facts, payment_reference: '' }, defined, '2026-04-01').amount_cents).toBe(0);
     expect(commission(facts, defined, '2026-03-31')).toMatchObject({ activation_cents: 1000, retention_cents: 0, retention_due: '2026-04-01' });
-    expect(commission(facts, defined, '2026-04-01')).toMatchObject({ activation_cents: 1000, retention_cents: 1500, amount_cents: 2500 });
-    expect(commission({ ...facts, retained_at_90: false }, defined, '2026-04-01').retention_cents).toBe(0);
+    expect(commission(facts, defined, '2026-04-01', '2026-04-01T16:00:00Z')).toMatchObject({ activation_cents: 1000, retention_cents: 1500, amount_cents: 2500 });
+    expect(commission({ ...facts, retained_at_90: false }, defined, '2026-04-01', '2026-04-01T16:00:00Z').retention_cents).toBe(0);
+    expect(commission(facts, defined, '2026-05-01').retention_cents).toBe(0);
+    expect(commission(facts, defined, '2026-05-01', '2026-04-01T01:00:00Z').retention_cents).toBe(0);
+    expect(commission(facts, defined, '2026-04-01', '2026-04-02T16:00:00Z').retention_cents).toBe(0);
   });
   test('technical advancement needs evidence but no management vacancy', () => {
     const facts = { from_role: 'technician_i', to_role: 'technician_ii', sustained_results: 'verified', items: [{ result: 'pass', critical: true }], position_available: false };

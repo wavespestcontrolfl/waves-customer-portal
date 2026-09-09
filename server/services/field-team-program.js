@@ -5,7 +5,7 @@ const { recordAuditEvent } = require('./audit-log');
 const { resolveServiceRecord } = require('./job-costing');
 const { etDateString, parseETDateTime, addETDays, etWeekStart } = require('../utils/datetime-et');
 const {
-  PROGRAM, schemas, validate, reject, dateOnly, ruleDefinition, allocatedCents, splitCents,
+  PROGRAM, schemas, validate, reject, dateOnly, ruleDefinition, splitCents,
   production, outcomeBonus, commission, assessmentResult,
 } = require('./field-team-rules');
 
@@ -191,17 +191,15 @@ async function saveServiceEvidence(input, actor) {
       service_label: last.service_label, allocation_id: data.allocation_id, ordinal: data.ordinal,
       claims_allocation: claimsAllocation, facts,
     }).returning('*');
-    const total = allocation ? allocatedCents(allocation.net_value_cents, allocation.planned_visits, data.ordinal) : 0;
-    const shares = splitCents(total, data.participants);
     const previousCalculations = await trx('field_production_simulations').where({ evidence_id: last.id });
-    for (const participant of shares) {
+    for (const participant of data.participants) {
       const previous = previousCalculations.find(item => item.technician_id === participant.technician_id) || {};
       const rule = (previous.rule_id ? await trx('field_program_rules').where({ id: previous.rule_id }).first() : await ruleAt(trx, dateOnly(row.service_date))) || { id: null, definition: null };
       const level = (previous.level_id ? await trx('field_program_levels').where({ id: previous.level_id }).first() : await levelAt(trx, participant.technician_id, dateOnly(row.service_date))) || { id: null, role_key: null };
       await trx('field_production_simulations').insert({
         id: randomUUID(), evidence_id: row.id, technician_id: participant.technician_id,
         rule_id: rule.id, level_id: level.id,
-        calculation: production({ roleKey: level.role_key, rule: rule.definition, serviceKey: row.service_key, allocation, ordinal: data.ordinal, participant, exclusion: facts.exclusion, provenance: facts.provenance }),
+        calculation: production({ roleKey: level.role_key, rule: rule.definition, serviceKey: row.service_key, allocation, ordinal: data.ordinal, participants: data.participants, technicianId: participant.technician_id, exclusion: facts.exclusion, provenance: facts.provenance }),
       });
     }
     await audit(trx, 'field_service_evidence', row, actor);
@@ -316,7 +314,7 @@ async function loadOverview(conn, technicianId, selectedMonth) {
   const level = levels.find(row => dateOnly(row.effective_date) <= today) || null;
   const monthlyLevel = levels.find(row => dateOnly(row.effective_date) <= range.start) || null;
   const businessRules = businesses.length ? await conn('field_program_rules').whereIn('id', businesses.map(row => row.rule_id).filter(Boolean)) : [];
-  const business = businesses.map(row => ({ ...row, accepted_date: dateOnly(row.accepted_date), calculation: commission(row.facts, businessRules.find(item => item.id === row.rule_id)?.definition, today) }));
+  const business = businesses.map(row => ({ ...row, accepted_date: dateOnly(row.accepted_date), calculation: commission(row.facts, businessRules.find(item => item.id === row.rule_id)?.definition, today, row.created_at) }));
   const simulation = {
     mode: 'simulation', program_version: PROGRAM.version, month: selectedMonth, as_of_date: today,
     period_closed: range.end <= today, rule_id: rule?.id || null,
