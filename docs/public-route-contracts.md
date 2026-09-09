@@ -1373,7 +1373,7 @@ own late claim can fall back to voicemail without changing another ring; a predi
 to a newer reconnect returns a bare response instead of stale fallback TwiML.
 Any change to the claim, the owner fence, the reconnect fence, the sandbox
 branch or what the whisper may speak is security-critical).
-`/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
+`/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`, `/:token/replace-intent`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up
 Auto Pay" link (`appointment_card_requests.kind='customer'`, dark behind
@@ -1421,9 +1421,61 @@ pay link; terminal invoices release the anchor). A recurring
 plan-bearing request REFUSES `/complete` until a durable
 `per_application` selection exists, and the completion claim is
 plan-value-guarded so a selection switch cannot cross a capture
-mid-flight. Treat the token, the verification
-gates, the selection/mint transaction, and the claim mechanics as
-security-critical.
+mid-flight. `/:token/replace-intent` (POST `{ setupIntentId }`, both row
+kinds; "use a different payment method" after a capture already
+SUCCEEDED, 2026-09-08 — same design as the estimate accept's
+`replaceSetupIntentId`): the deterministic mint replays a succeeded
+SetupIntent on every reopen and Stripe will not cancel it, so the GET
+renders a succeeded replay as a saved-method panel (`capturedMethodType`
+set from the live payment method; `paymentMethodTypes` alongside) with
+"Use a different payment method". The named intent must be THIS
+request's own capture (purpose + request id; foreign or unknown id →
+400). The replacement is minted FIRST (key salted by the retired id —
+no generation consumed; the standalone lane mints under the CURRENT
+tender policy), then the succeeded intent is stamped
+`metadata.retired='true'` + `replaced_by=<new id>` in Stripe, then the
+row is re-pointed; a mint or stamp failure leaves the saved method
+untouched (503). Everything runs under the request ROW LOCK (`FOR
+UPDATE`), which is how it serializes with completion: the completion
+claim (pending → completing) waits behind it and the tail re-reads the
+intent LIVE under its claim — a retired capture is refused there (claim
+reverted, nothing saved or enrolled; an unreadable one stays
+retryable), on the page POST AND on the `setup_intent.succeeded` webhook
+backstop (which trusts its event payload — the intent as it succeeded).
+A non-pending / expired row under the lock retires nothing (409
+`request_closed`), and neither does a link the GET would render closed —
+the visit lane re-runs the completion predicate (visit live, not past,
+priced > 0, no third-party payer) and the plan gate (a plan-bearing
+recurring request needs a durable `per_application` selection — the plan
+mode is derived before the lock through the THROWING derivation (an
+unknown mode is 503, never "not recurring"), the selection read from the
+locked row; 409 `plan_required`, the client re-renders the choice) and the standalone lane the GET's
+closure checks (archived customer, payer-billed, unsupported billing
+lane, Auto Pay paused, Auto Pay already active — which retires the row as
+the GET does),
+all under the lock BEFORE any Stripe state changes (409
+`no_longer_needed`; a lookup failure — the Auto-Pay-active probe runs
+fail-closed on the locked handle — is 503, never a retirement on an
+unknown answer). The client refetches on either 409. The GET's row
+repoint is a compare-and-set on the pointer that load observed: a
+replacement committing mid-load cannot be overwritten with the retired
+id — the load follows the row to the replacement instead, adopts the
+intent when a concurrent first load stored the same one, or renders
+`unavailable` if the row moved on; the standalone lane's generation
+mint uses the same observed-pointer CAS and follows a replacement
+pointer on a miss. Every nested read under the
+replacement lock (visit, payer, tender, customer, Auto Pay probe, and
+the Stripe-customer link-up inside the mint) rides the transaction
+handle — one pool connection per request. An unfinished or already-
+retired id has nothing to retire and returns the ordinary mint under the
+same lock. Every minted/replayed intent is re-read LIVE before it is
+judged (an idempotent replay returns the ORIGINAL create body, never a
+later success or retirement stamp); a retired replay follows
+`replaced_by` to the live head, refusing a chain that leaves the
+request's own capture family, and a broken/canceled chain walks the
+generation salt as before. Treat the token, the verification
+gates, the selection/mint transaction, the replacement lock, and the
+claim mechanics as security-critical.
 **Appointment-card enforcement rails (2026-08-01, both dark, fail-closed
 `feature-gates.js` money gates):** the /secure page RENDER stamps the
 disclosed terms onto the pending request row (`no_show_fee_amount` /

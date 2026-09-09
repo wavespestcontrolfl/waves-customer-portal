@@ -310,13 +310,16 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
   const heading = { margin: 0, fontSize: 15, color: B.glassNavy, fontWeight: 700, outline: 'none' };
   const body = { fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 };
   const backLink = { ...smallLinkButton, fontSize: 14, padding: '6px 0', marginLeft: 0 };
+  // Same treatment as the portal's PillSelector: gold ring + navy text when
+  // selected, never brand red (red is for genuine alerts) and no 999 pills.
   const chip = (active) => ({
-    padding: '13px 16px', borderRadius: 999, fontSize: 14, fontWeight: 700,
-    border: `1px solid ${active ? B.red : '#D8D0C0'}`,
-    background: active ? `${B.red}10` : '#fff',
-    color: active ? B.red : B.grayDark,
-    cursor: 'pointer', fontFamily: FONTS.body,
+    minHeight: 44, padding: '8px 12px', borderRadius: 8, fontSize: 14, fontWeight: 500,
+    border: `1px solid ${active ? B.yellow : '#D8D0C0'}`,
+    background: active ? '#F8FCFE' : '#fff',
+    color: active ? B.glassNavy : B.grayDark,
+    cursor: 'pointer', fontFamily: FONTS.body, boxShadow: 'none',
   });
+  const chipGlass = (active) => (active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' });
   const field = {
     width: '100%', marginTop: 10, padding: '12px 14px', borderRadius: 8, fontSize: 16,
     border: '1px solid #D8D0C0', fontFamily: FONTS.body, boxSizing: 'border-box',
@@ -414,7 +417,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
           {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map((r) => (
-            <button key={r} type="button" onClick={() => setLegacyReason(r)} className="waves-focus-ring" aria-pressed={legacyReason === r} style={chip(legacyReason === r)}>{r}</button>
+            <button key={r} type="button" {...chipGlass(legacyReason === r)} onClick={() => setLegacyReason(r)} className="pill-chip waves-focus-ring" aria-pressed={legacyReason === r} style={chip(legacyReason === r)}>{r}</button>
           ))}
         </div>
         <textarea value={details} onChange={(e) => setDetails(e.target.value)} placeholder="Anything else you'd like us to know?" aria-label="Cancellation details" rows={3} className="waves-focus-ring" style={{ ...field, resize: 'vertical' }} />
@@ -476,7 +479,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
         <div style={body}>Optional. It helps us do better, and it may turn up an option that fits.</div>
         <div role="group" aria-label="Reason" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
           {visible.map((r) => (
-            <button key={r.code} type="button" onClick={() => setReason(reason === r.code ? '' : r.code)} className="waves-focus-ring" aria-pressed={reason === r.code} style={chip(reason === r.code)}>{r.label}</button>
+            <button key={r.code} type="button" {...chipGlass(reason === r.code)} onClick={() => setReason(reason === r.code ? '' : r.code)} className="pill-chip waves-focus-ring" aria-pressed={reason === r.code} style={chip(reason === r.code)}>{r.label}</button>
           ))}
         </div>
         {!moreReasons && (
