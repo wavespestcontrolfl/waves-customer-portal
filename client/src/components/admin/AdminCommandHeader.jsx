@@ -120,7 +120,11 @@ export default function AdminCommandHeader({
             <Heading
               className={cn(
                 "m-0 min-w-0 font-medium tracking-normal text-zinc-900",
-                headingLevel === 2 ? "text-16 md:text-18" : "text-18 md:text-22",
+                headingLevel === 2
+                  ? "text-16 md:text-18"
+                  : density === "legacy"
+                    ? "text-18 md:text-22"
+                    : "text-22 leading-[1.3]",
               )}
             >
               {title}
