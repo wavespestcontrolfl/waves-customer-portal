@@ -233,6 +233,17 @@ describe('analyzeVisit — the one dispatch', () => {
     expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [{ photo: 2, quality: 'limited' }, { photo: 1, quality: 'poor' }] }) }, 2)).toBeNull();
   });
 
+  test('the context hash seeds with the composed prompt and schema, not only the version label', () => {
+    const crypto = require('crypto');
+    const sha = (...parts) => { const h = crypto.createHash('sha256'); for (const part of parts) h.update(part); return h.digest('hex'); };
+    // A shared rubric block edited without a version bump changes the digest, so a replay can never claim it rebuilt the original input.
+    expect(visit.PROMPT_DIGEST).toBe(sha(visit.SYSTEM_PROMPT, '\n', JSON.stringify(visit.RESPONSE_SCHEMA)));
+    expect(visit.SYSTEM_PROMPT).toContain(require('../services/lawn-diagnostic-prompt').CURATED_REFERENCE);
+    const context = { season: 'peak', month: null, region: null, grassType: null, turfHeightIn: null, irrigation: null, technicianNotes: null, priorSummary: null };
+    const expected = sha(visit.PROMPT_VERSION, '\n', visit.PROMPT_DIGEST, '\n', JSON.stringify(context), '\n', '0:front:image/jpeg:', sha('a'), '\n');
+    expect(visit.contextHash({ photos: [photo('a')], photoZones: ['front'], visionContext: { season: 'peak' } })).toBe(expected);
+  });
+
   test('the context hash changes with the photos, their media types, their zones, and the visit context — not with unrelated fields', () => {
     const photos = [photo('a'), photo('b')];
     const base = visit.contextHash({ photos, photoZones: [null, null], visionContext: { season: 'peak' } });
@@ -403,6 +414,41 @@ describe('legacy column derivation — missing is not healthy', () => {
   });
 });
 
+describe('determinability is a literal claim', () => {
+  test('only can_determine === true keeps the confidence: an omitted key or a non-boolean reads as undeterminable', () => {
+    const named = (extra) => visit.normalizeAssessment(answer({ findings: [finding({ name: 'Chinch bug damage', confidence: 'high', photo_refs: [1], ...extra })] }), 2).findings[0];
+    expect(named({ can_determine: true })).toMatchObject({ can_determine: true, confidence: 'high', label: 'chinch bug activity' });
+    const omitted = { ...finding({ name: 'Chinch bug damage', confidence: 'high', photo_refs: [1] }) };
+    delete omitted.can_determine;
+    expect(visit.normalizeAssessment(answer({ findings: [omitted] }), 2).findings[0]).toMatchObject({ can_determine: false, confidence: 'unknown', label: 'general lawn stress', cannot_determine_reason: 'determinability not stated' });
+    expect(named({ can_determine: 'false' })).toMatchObject({ can_determine: false, confidence: 'unknown', cannot_determine_reason: 'determinability not stated' });
+    expect(named({ can_determine: 'true' })).toMatchObject({ can_determine: false, confidence: 'unknown' });
+    expect(named({ can_determine: 1 })).toMatchObject({ can_determine: false, confidence: 'unknown' });
+    // A stated false keeps the model's own reason.
+    expect(named({ can_determine: false, cannot_determine_reason: 'no blade close-up' })).toMatchObject({ can_determine: false, confidence: 'unknown', cannot_determine_reason: 'no blade close-up' });
+    expect(named({ can_determine: false, cannot_determine_reason: '' })).toMatchObject({ can_determine: false, cannot_determine_reason: '' });
+  });
+});
+
+describe('customer copy compliance screen', () => {
+  test('a banned safety, approval, timing or absence claim drops the observation to the neutral fallback; legal copy passes', () => {
+    expect(visit.customerObservations('Turf is thin along the driveway edge; the shaded side holds moisture.')).toBe('Turf is thin along the driveway edge; the shaded side holds moisture.');
+    for (const text of [
+      'The application is pet-safe, so the dog can go right back out.',
+      'Today\'s product is EPA-approved for turf.',
+      'Keep pets off the lawn for 30 minutes after treatment.',
+      'The chinch bug problem has been eliminated.',
+      'We guarantee the fungus will not return.',
+      'The lawn is clear of weeds now.',
+    ]) expect(visit.customerObservations(text)).toBe(visit.NO_OBSERVATIONS);
+    // The approved idiom carries no number and stays legal.
+    expect(visit.customerObservations('The treated area is safe once dry; your technician confirms the timing.')).toMatch(/safe once dry/);
+    expect(visit.unpublishableCustomerCopy('Gate code 4471 on the side gate')).toBe(true);
+    expect(visit.safeConfirmationStep('Check whether the brown patch is gone after irrigation')).toBe('');
+    expect(visit.safeConfirmationStep('Float test at the driveway edge')).toBe('Float test at the driveway edge');
+  });
+});
+
 describe('run row', () => {
   test('maps the analysis to the provenance row, JSON columns stringified, tokens from usage', () => {
     const analysis = { status: 'complete', provider: 'openai', model: 'gpt-6-astra', fallbackUsed: true, failures: [{ provider: 'gemini', reason: 'gemini_503' }], reason: null,
@@ -503,6 +549,18 @@ describe('technician review on confirm', () => {
     // Second confirm fills a score and sends only appliedProducts.
     const second = visit.buildReview(stored, visit.validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['F1'] }] }, stored).review);
     expect(second.reviewed_findings.find((f) => f.finding_id === 'F2')).toMatchObject({ keep: false, tech_note: 'not chinch' });
+    // An untouched model finding is restored as the model wrote it — its raw name, its own confidence, its stored label —
+    // never rewritten to the label at moderate as if the technician had renamed it.
+    expect(second.reviewed_findings.map((f) => [f.finding_id, f.name, f.confidence, f.label, f.renamed])).toEqual([
+      ['F1', 'Irregular browning along the driveway edge', 'moderate', 'thinning turf', false],
+      ['F2', 'Chinch bug damage', 'low', 'general lawn stress', false],
+    ]);
+    // A rename the technician did make is restored with its technician confidence.
+    const renamedFirst = visit.buildReview(run, visit.validateReview({ reviewedFindings: [{ finding_id: 'F2', name: 'weed pressure' }] }, run).review);
+    expect(renamedFirst.reviewed_findings[1]).toMatchObject({ name: 'weed pressure', label: 'weed pressure', confidence: 'moderate', renamed: true });
+    const renamedStored = { ...run, reviewed_findings: JSON.stringify(renamedFirst.reviewed_findings), added_details: '[]', reconciliation: JSON.stringify(renamedFirst.reconciliation) };
+    const renamedSecond = visit.buildReview(renamedStored, visit.validateReview({ appliedProducts: [] }, renamedStored).review);
+    expect(renamedSecond.reviewed_findings.map((f) => [f.finding_id, f.name, f.confidence, f.renamed])).toEqual([['F1', 'Irregular browning along the driveway edge', 'moderate', false], ['F2', 'weed pressure', 'moderate', true]]);
     expect(second.added_details).toHaveLength(1);
     expect(second.added_details[0].name).toBe('Dog run along the back fence');
     expect(second.reconciliation.products.map((p) => p.product_name)).toEqual(['Celsius']);
@@ -528,6 +586,19 @@ describe('technician review on confirm', () => {
     const cleared = visit.buildReview(stored, visit.validateReview({ addedDetails: [] }, stored).review);
     expect(cleared.added_details).toEqual([]);
     expect(cleared.reconciliation.products.map((p) => p.product_name)).toEqual(['Bifen I/T']);
+    // The high-water mark survives a cleared detail list: the retained product still maps to T1, so the next detail
+    // added must not become T1 and silently inherit that treatment.
+    const clearedMapped = visit.buildReview(remapped, visit.validateReview({ addedDetails: [] }, remapped).review);
+    expect(clearedMapped.reconciliation.technician_finding_high_water).toBe(1);
+    expect(clearedMapped.reconciliation.products[0].addresses_findings).toEqual(['T1']);
+    const clearedStored = { ...remapped, added_details: JSON.stringify(clearedMapped.added_details), reconciliation: JSON.stringify(clearedMapped.reconciliation) };
+    const afterClear = visit.buildReview(clearedStored, visit.validateReview({ addedDetails: [{ text: 'Sprinkler head broken by the drive', zone: 'front' }] }, clearedStored).review);
+    expect(afterClear.added_details.map((d) => d.finding_id)).toEqual(['T2']);
+    expect(afterClear.reconciliation.treatment_rationale[0].addresses_findings).toEqual([]);
+    expect(afterClear.reconciliation.technician_finding_high_water).toBe(2);
+    // A stored reconciliation without the mark (or with the products dropped too) still never reuses an addressed id.
+    const noMark = { ...clearedStored, reconciliation: JSON.stringify({ ...clearedMapped.reconciliation, technician_finding_high_water: undefined }) };
+    expect(visit.buildReview(noMark, visit.validateReview({ addedDetails: [{ text: 'Sprinkler head broken by the drive' }] }, noMark).review).added_details.map((d) => d.finding_id)).toEqual(['T2']);
     // A first review on a run with no stored review starts from nothing.
     expect(visit.mergedReviewInputs(run, { sent: {}, reviewedFindings: [], addedDetails: [], appliedProducts: [] })).toEqual({ reviewedFindings: [], addedDetails: [], appliedProducts: [] });
   });
