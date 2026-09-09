@@ -44,6 +44,7 @@ const {
   buildWatchItems,
   scrubCustomerText,
   CONDITION_LABEL_VALUES,
+  SUMMARY_CAUSE_RE,
 } = require('./lawn-diagnostic-report');
 const { containsReportAccessCode } = require('./service-report/technician-report-copy');
 const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
@@ -589,7 +590,7 @@ function deriveLegacyScores(analysis) {
     stress_damage: stressParts.length ? Math.min(...stressParts) : null,
     overwatering_signal: level('overwatering_signal') === 'yes',
     drought_stress: drought && drought !== 'unknown' ? drought : null,
-    observations: customerObservations(analysis.observations),
+    observations: customerObservations(analysis.observations, analysis.findings),
   };
 }
 
@@ -601,11 +602,33 @@ function deriveLegacyScores(analysis) {
 // detector flags (a gate / garage / lockbox code the model echoed from the
 // technician's notes despite the prompt) is suppressed whole; an empty
 // result (nothing written, or nothing left) gets the neutral complete-run
-// fallback — never the outage sentinel.
-function customerObservations(text) {
+// fallback — never the outage sentinel. The naming gate applies to this
+// prose too: a cause it names must be one the visit's findings PUBLISH (the
+// confidence-gated label), so an observation that outranks its findings —
+// "consistent with chinch bug activity" beside a low-confidence chinch
+// finding whose label is the generic symptom — falls back whole instead of
+// naming the cause the label withheld (Codex #4149 r8).
+function customerObservations(text, findings = []) {
   const scrubbed = scrubCustomerText(text || '').slice(0, 600).trim();
   if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return NO_OBSERVATIONS;
+  if (namesUnpublishedCause(scrubbed, (findings || []).map((finding) => finding?.label))) return NO_OBSERVATIONS;
   return scrubbed;
+}
+
+// True when the text names a governed cause (the report lane's
+// SUMMARY_CAUSE_RE, kept in lockstep with the cause-mapped labels) that none
+// of the published labels carries. Each term is resolved through the same
+// allowlist the labels came from, so "chinch pressure" is published by a
+// "chinch bug activity" label and by nothing else; a term the allowlist does
+// not map (insects, pests, disease as a class) is never published by prose.
+function namesUnpublishedCause(text, publishedLabels) {
+  const published = new Set((publishedLabels || []).filter(Boolean));
+  const re = new RegExp(SUMMARY_CAUSE_RE.source, 'gi');
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    if (!published.has(safeConditionLabel(match[1], 'high'))) return true;
+  }
+  return false;
 }
 
 // The customer-copy compliance screen every other customer surface applies,
@@ -1006,7 +1029,7 @@ function buildReview(run, rawReview = {}) {
   // a product treats — it stays in the review, out of the reconciliation.
   const reconcilable = [...reviewed.filter((finding) => finding.keep), ...added]
     .filter((finding) => finding.label !== NO_STRESS_LABEL)
-    .map((finding) => ({ ...finding, name: finding.label, confirmation_step: safeConfirmationStep(finding.confirmation_step) }));
+    .map((finding) => ({ ...finding, name: finding.label, confirmation_step: safeConfirmationStep(finding.confirmation_step, finding.label) }));
   const products = normalizeProducts(review.appliedProducts);
   const treatmentRationale = buildTreatmentRationale({ products, findings: reconcilable });
   const flags = buildReconciliationFlags({ findings: reconcilable, products, treatmentRationale });
@@ -1029,10 +1052,14 @@ function buildReview(run, rawReview = {}) {
 // The model's confirmation_step is concatenated into the customer-facing
 // watch items, so it is egress-scrubbed like the observations column; one
 // that carries an access code is dropped (the builder's "monitor response"
-// fallback takes its place).
-function safeConfirmationStep(text) {
+// fallback takes its place). It is cause-gated on the finding's own
+// published label: a step that names a cause the label withheld ("confirm
+// suspected chinch pressure" under "general lawn stress") is dropped the
+// same way (Codex #4149 r8).
+function safeConfirmationStep(text, publishedLabel = null) {
   const scrubbed = scrubCustomerText(text || '').slice(0, 200).trim();
-  return !scrubbed || unpublishableCustomerCopy(scrubbed) ? '' : scrubbed;
+  if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return '';
+  return namesUnpublishedCause(scrubbed, [publishedLabel]) ? '' : scrubbed;
 }
 
 async function reviewRun({ run, review, technicianId }, knex) {
@@ -1208,6 +1235,7 @@ module.exports = {
   NO_OBSERVATIONS,
   customerObservations,
   unpublishableCustomerCopy,
+  namesUnpublishedCause,
   runAiScores,
   billedUsage,
   safeConfirmationStep,

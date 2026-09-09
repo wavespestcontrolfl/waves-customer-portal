@@ -447,6 +447,28 @@ describe('customer copy compliance screen', () => {
     expect(visit.safeConfirmationStep('Check whether the brown patch is gone after irrigation')).toBe('');
     expect(visit.safeConfirmationStep('Float test at the driveway edge')).toBe('Float test at the driveway edge');
   });
+
+  test('the observation may name only a cause the findings publish: prose that outranks a low/unknown finding falls back whole', () => {
+    const low = { label: 'general lawn stress', confidence: 'low' };
+    const chinch = { label: 'chinch bug activity', confidence: 'high' };
+    const prose = 'The browning pattern along the driveway is consistent with chinch bug activity.';
+    expect(visit.customerObservations(prose, [low])).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations(prose, [])).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations(prose)).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations(prose, [chinch, low])).toBe(prose);
+    // A different cause than the published one is still withheld; the generic class words never publish from prose.
+    expect(visit.customerObservations('Signs point to fungus in the shade.', [chinch])).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations('Some insect pressure is likely.', [chinch])).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations('Fungal activity in the shaded strip.', [{ label: 'fungal activity' }])).toMatch(/^Fungal activity/);
+    // Symptom-only prose passes regardless of confidence.
+    expect(visit.customerObservations('Thin turf along the driveway edge; the shaded side holds moisture.', [low])).toMatch(/^Thin turf/);
+    expect(visit.namesUnpublishedCause('Drought stress near the curb', ['drought stress'])).toBe(false);
+    expect(visit.namesUnpublishedCause('Drought stress near the curb', ['general lawn stress'])).toBe(true);
+    // deriveLegacyScores hands the findings through.
+    const analysis = { status: 'complete', observations: prose, findings: [low], severities: {}, scores: {} };
+    expect(visit.deriveLegacyScores(analysis).observations).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.deriveLegacyScores({ ...analysis, findings: [chinch] }).observations).toBe(prose);
+  });
 });
 
 describe('run row', () => {
@@ -630,6 +652,13 @@ describe('technician review on confirm', () => {
     expect(watch('Float test by the side gate, code 4471')).toBe('chinch bug activity: monitor response');
     expect(watch('')).toBe('chinch bug activity: monitor response');
     expect(visit.safeConfirmationStep('The lockbox is 2288')).toBe('');
+    // The step is cause-gated on the finding's published label: a low-confidence chinch finding (label "general lawn
+    // stress") never publishes "confirm suspected chinch pressure"; the same step under a published chinch label does.
+    const gated = (confidence, label) => ({ ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch bug damage', confidence, severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: 'Float test at the margin to confirm suspected chinch pressure', customer_wording: null, photo_refs: [1], zone: 'front', label, source: 'model' }]) });
+    expect(visit.buildReview(gated('low', 'general lawn stress'), { reviewedFindings: [] }).reconciliation.watch_items[0]).toBe('general lawn stress: monitor response');
+    expect(visit.buildReview(gated('high', 'chinch bug activity'), { reviewedFindings: [] }).reconciliation.watch_items[0]).toMatch(/^chinch bug activity: Float test at the margin to confirm suspected chinch pressure/);
+    expect(visit.safeConfirmationStep('Check the shaded strip for fungus', 'chinch bug activity')).toBe('');
+    expect(visit.safeConfirmationStep('Check the shaded strip for fungus', 'fungal activity')).toBe('Check the shaded strip for fungus');
     // The review keeps the raw step; only the reconciliation copy is scrubbed.
     expect(visit.buildReview(step('Float test by the side gate, code 4471'), {}).reviewed_findings[0].confirmation_step).toBe('Float test by the side gate, code 4471');
   });
