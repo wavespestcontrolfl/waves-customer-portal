@@ -465,12 +465,15 @@ function Tag({ type, children }) {
 }
 
 function Btn({ variant = "ghost", onClick, disabled, children, style: extra }) {
+  // UI audit F0517: ~28px touch height before; 36px on desktop, 44px below
+  // the 640px mobile breakpoint (live, not a module-load snapshot).
+  const mobile = useIsMobile(640);
   const base = {
     display: "inline-flex",
     alignItems: "center",
     gap: 6,
     padding: "7px 14px",
-    minHeight: 36, // UI audit F0517: ~28px touch height before
+    minHeight: mobile ? 44 : 36,
     borderRadius: 8,
     fontFamily: C.sans,
     fontSize: 13,
@@ -1425,7 +1428,10 @@ function VelocityChart({ velocity }) {
       }}
     >
       {velocity.map((v, i) => {
-        const h = Math.round((v.reviews / max) * 100);
+        // Bars scale against 70% of the column so the value above and the
+        // date below (11px each plus margins) fit inside the 150px chart
+        // instead of pushing the tallest column into the heading.
+        const h = Math.round((v.reviews / max) * 70);
         const wk = v.week ? new Date(v.week) : null;
         return (
           <div
