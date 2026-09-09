@@ -412,7 +412,7 @@ function parseCompletionReviewDelayMinutes(body = {}) {
   if (!hasExplicitTiming) return undefined;
 
   // "Automatic (recommended)" = no operator override: legacy 120-min separate
-  // ask (never bundled), cadence smart send window (calculateReviewSendTime).
+  // ask (never bundled), cadence smart send window (calculateReviewSendPlan).
   if (body.reviewTiming === 'auto') return undefined;
   // 'now' is the legacy value (still posted by the one-time recap path);
   // 'customer_requested' is the panel's "Customer asked for the link" — same
