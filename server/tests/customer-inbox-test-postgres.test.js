@@ -132,7 +132,7 @@ jest.setTimeout(30000);
     expect(await count()).toBe(2);
   });
   test('a second-insert SQL failure rolls back the first notification and audit', async () => {
-    await mockPg.raw("ALTER TABLE notifications ADD CONSTRAINT reject_second CHECK (title <> 'Badge test 2 of 2')");
+    await mockPg.raw("ALTER TABLE notifications ADD CONSTRAINT reject_second CHECK (title <> 'Badge test 2 of 2') NOT VALID");
     try {
       expect((await post(true)).status).toBe(500);
       expect(await rows()).toHaveLength(0); expect(await audits()).toHaveLength(0);
