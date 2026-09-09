@@ -1278,6 +1278,7 @@ module.exports = {
   sourceEstimateForScope,
   customerPrefersNoWeekends,
   preferenceRowBlocksWeekends,
+  etDateDiffDays,
   findActiveRecurringSeries,
   seriesCreateLockKeys,
   inferRecurringPattern,
