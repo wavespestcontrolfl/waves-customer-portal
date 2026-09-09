@@ -1062,6 +1062,22 @@ function safeConfirmationStep(text, publishedLabel = null) {
   return namesUnpublishedCause(scrubbed, [publishedLabel]) ? '' : scrubbed;
 }
 
+// The stored observation, re-gated against the review: the column was
+// written at /assess against the model's own published labels, and a
+// technician who rejects or renames the finding that published a cause
+// withdraws it — the prose naming it must fall back the same way (Codex
+// #4149 r9). Returns the value the column should hold, or null when the
+// column carries technician-authored text (anything other than the
+// model-derived copy or the neutral fallback — the only two values this
+// module ever writes there), which the review never overwrites.
+function reviewedObservations({ assessment, run }) {
+  const modelDerived = customerObservations(run?.observations, parseJsonArray(run?.findings));
+  const current = assessment?.observations;
+  if (current != null && current !== modelDerived && current !== NO_OBSERVATIONS) return null;
+  const kept = [...parseJsonArray(run?.reviewed_findings).filter((finding) => finding.keep !== false), ...parseJsonArray(run?.added_details)];
+  return customerObservations(run?.observations, kept);
+}
+
 async function reviewRun({ run, review, technicianId }, knex) {
   const built = buildReview(run, review);
   const [row] = await knex('lawn_assessment_runs').where({ id: run.id }).update({
@@ -1273,6 +1289,7 @@ module.exports = {
   validateReview,
   buildReview,
   reviewRun,
+  reviewedObservations,
   resolveConfirmScores,
   scoreVisit,
   photoFieldsFor,

@@ -696,6 +696,23 @@ describe('technician review on confirm', () => {
     expect(rec.computed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  test('the stored observation is re-gated against the review: rejecting or renaming the finding that published a cause withdraws it; technician text is never overwritten', () => {
+    const prose = 'The browning along the driveway is consistent with chinch bug activity.';
+    const chinch = { finding_id: 'F1', name: 'Chinch bug damage', confidence: 'high', severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: '', customer_wording: null, photo_refs: [1], zone: 'front', label: 'chinch bug activity', source: 'model' };
+    const base = { ...run, observations: prose, findings: JSON.stringify([chinch]) };
+    const after = (review) => { const built = visit.buildReview(base, visit.validateReview(review, base).review); return { ...base, reviewed_findings: JSON.stringify(built.reviewed_findings), added_details: JSON.stringify(built.added_details) }; };
+    const assessment = { observations: prose }; // what /assess stored (the model-derived copy)
+    expect(visit.reviewedObservations({ assessment, run: after({ reviewedFindings: [] }) })).toBe(prose);
+    expect(visit.reviewedObservations({ assessment, run: after({ reviewedFindings: [{ finding_id: 'F1', keep: false }] }) })).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.reviewedObservations({ assessment, run: after({ reviewedFindings: [{ finding_id: 'F1', name: 'drought stress' }] }) })).toBe(visit.NO_OBSERVATIONS);
+    // A technician-added detail publishes its own label, so prose naming that cause passes.
+    expect(visit.reviewedObservations({ assessment, run: after({ reviewedFindings: [{ finding_id: 'F1', keep: false }], addedDetails: [{ text: 'Chinch confirmed by float test' }] }) })).toBe(prose);
+    // A row already on the fallback re-gates too (a later confirm restoring the finding brings the prose back).
+    expect(visit.reviewedObservations({ assessment: { observations: visit.NO_OBSERVATIONS }, run: after({ reviewedFindings: [] }) })).toBe(prose);
+    // Technician-authored observations are left alone.
+    expect(visit.reviewedObservations({ assessment: { observations: 'Tech note: the dog run is the cause.' }, run: after({ reviewedFindings: [{ finding_id: 'F1', keep: false }] }) })).toBeNull();
+  });
+
   test('with no products every kept finding reads untreated — the honest state until the completion records what was applied', () => {
     const built = visit.buildReview(run, { reviewedFindings: [], addedDetails: [], appliedProducts: [] });
     expect(built.reconciliation.flags.filter((f) => f.type === 'untreated_condition').map((f) => f.finding_id)).toEqual(['F1', 'F2']);
