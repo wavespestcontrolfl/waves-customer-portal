@@ -247,6 +247,45 @@ describe('_private.threadQuoteSignal', () => {
     }));
   });
 
+  test('a vendor pitch to Waves is vetoed before any model call (audit 2026-09-09 corpus)', async () => {
+    const pitches = [
+      'Hey Waves Pest Control Lakewood Ranch, Maya here. Our Labor Day Deal for Home-Service leads gets you a free setup, no monthly cost, & we fund your ads. Want details?',
+      'Hi Waves, Jay here. We\'re running a 3 day UNLIMITED leads trial. Homeowners are requesting estimates. Would you like more details?',
+      'Isabel here. I can bring you 3-5 exclusive turf & artificial grass leads daily with no upfront cost. Interested?',
+      'hey man, this is leon. im looking for one local home service company that can handle 5-15 more jobs over the next 8 weeks... just say "byebye" if you want me to stop',
+      'Hello Waves Pest Control Parrish, Your service is being requested by DLM Property Mgmnt. for Bradenton jobs. 2 min to apply',
+      "hey, it's Zach. Just checking in about leads for $55 each. No upfront fees & no ad spend.",
+      "hey, I'm Adissen. curious if you've ever thought about having an ai receptionist to answer calls when you're busy on site",
+      "Hey, it's Keegan. Do you have a google review system set up for your business yet?",
+      'Sarah here. We\'re offering a 3-day trial that connects you with homeowners requesting estimates. Interested in learning more?',
+      'Adam here. Are you open to more booked jobs over the next 6 weeks, or are you already at capacity? Reply "NO" if you need me to stop texting',
+    ];
+    for (const body of pitches) {
+      const signal = await _private.threadQuoteSignal(body);
+      // Either the quote-hint prefilter or the solicitation veto stops it; the
+      // contract is no model call for a pitch.
+      expect(signal.quoteRequest).toBe(false);
+      expect(['regex', 'regex_solicitation']).toContain(signal.method);
+    }
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('homeowner quote asks that share vendor vocabulary still reach the classifier', async () => {
+    const asks = [
+      'Do you have any availability for a one-time service? I need a rate for a rat problem.',
+      'How much do you charge for a monthly pest plan? No contract preferred.',
+      'Can you give me a free estimate on lawn treatment for my new house?',
+      'We\'re looking for pest control to solve a rat problem, please let me know your price or quote first. This is at 2380 Bay St, Sarasota',
+    ];
+    for (const body of asks) {
+      await _private.threadQuoteSignal(body);
+    }
+    expect(mockDispatch).toHaveBeenCalledTimes(asks.length);
+    for (const call of mockDispatch.mock.calls) {
+      expect(call[1].text).toContain('business-to-business pitch TO Waves');
+    }
+  });
+
   test('low classifier confidence is not a quote request', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { quote_request: true, confidence: 0.4 } });
     const signal = await _private.threadQuoteSignal('price?');

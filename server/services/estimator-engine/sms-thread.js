@@ -81,6 +81,32 @@ const QUOTE_HINT_RE = new RegExp(
   'i',
 );
 
+// Business-to-business pitches TO Waves. Lead-gen / marketing / software /
+// staffing robotexts to the location lines pass QUOTE_HINT_RE on words like
+// "service", "cost", "rate", "lawn" (18 senders, 41 texts in the 60 days to
+// 2026-09-09) and the classifier prompt had no vendor category, so a
+// confident "quote_request: true" would mint an owed-quote bell and a DEEP
+// composer run for a sales pitch. Deliberately explicit phrasings only —
+// a homeowner never writes these; anything softer is left to the model,
+// which is now told vendors are not quote requests.
+const SOLICITATION_RE = new RegExp(
+  [
+    '\\b(?:exclusive|qualified|unlimited|more|extra)\\s+(?:\\w+\\s+){0,3}(?:leads?|jobs?|customers?|estimates?)\\b',
+    '\\bleads?\\s+(?:for|to)\\s+(?:you|your)\\b',
+    '\\b(?:no|zero|\\$0)\\s+(?:upfront|up-front|set-?up|monthly)\\s+(?:cost|costs|fee|fees)?',
+    '\\bfund\\s+your\\s+ads?\\b',
+    '\\bfree\\s+(?:setup|set-up|trial)\\b',
+    '\\b(?:grow|scale|book(?:ing)?\\s+more|fill)\\s+(?:your\\s+)?(?:business|schedule|calendar)\\b',
+    '\\bai\\s+receptionist\\b',
+    '\\breview\\s+system\\b',
+    '\\bconnect(?:s|ing)?\\s+(?:you|local\\s+homeowners)\\s+with\\b',
+    '\\b(?:want|like)\\s+(?:more\\s+)?details\\?',
+    '\\bservice\\s+is\\s+being\\s+requested\\s+by\\b',
+    '\\b(?:reply|say|text)\\s+"?(?:stop|no|byebye|end)"?\\s+(?:if|to)\\b',
+  ].join('|'),
+  'i',
+);
+
 // Markers that the sender is REPLACING the previous ask rather than
 // continuing it. Deliberately narrow — an explicit correction word plus a
 // trigger body that itself names nothing out of scope; the grounded
@@ -106,6 +132,7 @@ async function threadQuoteSignal(body, triage = null, { hintGate = true } = {}) 
   // question ("power wash my yard") and rarely carry quote vocabulary, so
   // the cheap prefilter would hide them from the grounded scope vetoes.
   if (hintGate && !QUOTE_HINT_RE.test(text)) return { quoteRequest: false, method: 'regex' };
+  if (SOLICITATION_RE.test(text)) return { quoteRequest: false, method: 'regex_solicitation' };
   try {
     const grounded = !!triage;
     const contextBlock = grounded && triage.lines.length
@@ -126,12 +153,12 @@ Decide three things about the sender's message:
 - service_offered: does the request map to a service Waves offers? (true when it's unclear which service they mean)
 - relates_to_existing_job: is this coordinating, scheduling, or adding detail to a visit that is ALREADY BOOKED, or asking for work the customer's CURRENT services already cover — including a third party texting on a customer's behalf? Pricing for a NEW or ADDITIONAL service is a quote request even from an existing customer at a known address (quote_request true, relates_to_existing_job false) — e.g. a pest-control customer asking what a mosquito program costs.
 
-NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
+NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers, and any business-to-business pitch TO Waves (lead generation, marketing or ads, software, staffing/recruiting, another contractor offering Waves their services or a partnership).
 
 Message: ${JSON.stringify(text)}`
       : `An SMS arrived at Waves Pest Control (pest control + lawn care). Decide if the sender is asking for a QUOTE or PRICING for a service (new or additional service, "how much", "can you give me a price", describing a pest/lawn problem they want serviced).
 
-NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
+NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers, and any business-to-business pitch TO Waves (lead generation, marketing or ads, software, staffing/recruiting, another contractor offering Waves their services or a partnership).
 
 Message: ${JSON.stringify(text)}`;
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
@@ -499,5 +526,5 @@ async function startSmsThreadDraft({
 module.exports = {
   smsThreadDraftsEnabled,
   startSmsThreadDraft,
-  _private: { threadQuoteSignal, smsOrigin, runThreadDraft, QUOTE_HINT_RE },
+  _private: { threadQuoteSignal, smsOrigin, runThreadDraft, QUOTE_HINT_RE, SOLICITATION_RE },
 };
