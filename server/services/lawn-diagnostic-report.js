@@ -548,6 +548,10 @@ const CAUSE_LABELS = new Set([
   'drought stress',
 ]);
 const GENERIC_STRESS_LABEL = 'general lawn stress';
+// Technician renames use exactly the labels the customer egress can publish.
+const CONDITION_LABEL_VALUES = Object.freeze([
+  ...new Set([...CONDITION_LABELS.map(([, label]) => label), GENERIC_STRESS_LABEL, 'a lawn condition we are monitoring']),
+]);
 
 // A finding is "clean" only when it LEADS with a negation / health phrase. This catches
 // "No visible disease" / "Healthy, dense turf" without misreading a positive finding
@@ -1178,6 +1182,7 @@ module.exports = {
   spaceJoinedNon,
   stripNegatedRecovery,
   stripIntensifierNot,
+  CONDITION_LABEL_VALUES,
   safeCustomerSummary,
   SUMMARY_CAUSE_RE,
   lowerConfidence,
