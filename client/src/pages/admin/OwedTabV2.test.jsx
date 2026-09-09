@@ -22,6 +22,8 @@ const rows = () => [
 
 let calls;
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-05T15:00:00Z"));
   calls = [];
   localStorage.setItem("waves_admin_token", "t");
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
@@ -32,6 +34,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   window.location.hash = "";
 });
@@ -51,6 +54,15 @@ describe("OwedTabV2", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.queryByText("Send the caller an estimate")).not.toBeInTheDocument();
     expect(screen.getByText(/Nothing owed/)).toBeInTheDocument();
+  });
+
+  it.each([true, false])("explains the server's active callback deadline policy (cards enabled: %s)", async (enabled) => {
+    globalThis.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({
+      commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: enabled,
+    }) });
+    render(<OwedTabV2 />);
+    await waitFor(() => expect(screen.getByText(enabled ? /a callback after four staffed hours/ : /a callback after the day of the call/)).toBeInTheDocument());
+    expect(screen.queryByText(enabled ? /a callback after the day of the call/ : /a callback after four staffed hours/)).not.toBeInTheDocument();
   });
 
   it("lists open promises overdue-first with who, source, and the possibly-kept hint", async () => {
@@ -124,6 +136,9 @@ describe("OwedTabV2", () => {
     expect(dueLabel({ overdue: false, due_at: "2026-09-05T20:00:00Z" }, now).tone).toBe("strong");
     // A stated deadline that passed after the page loaded is overdue now, whatever the snapshot said (codex #3725 r19 P2).
     expect(dueLabel({ overdue: false, due_at: "2026-09-05T14:00:00Z" }, now)).toMatchObject({ tone: "alert" });
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T20:00:00Z" }, now))
+      .toMatchObject({ text: expect.stringContaining("Due Sep 5"), tone: "strong" });
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T14:00:00Z" }, now).tone).toBe("alert");
     expect(dueLabel({ overdue: false, due_at: null }, now)).toEqual({ text: "No due time", tone: "neutral" });
     // A human-recorded promise is open since it was recorded, not since the (older) call.
     expect(dueLabel({ overdue: true, due_at: null, source: "human", created_at: "2026-09-01T15:00:00Z", call_started_at: "2026-07-01T15:00:00Z" }, now).text).toMatch(/open since Sep 1/);

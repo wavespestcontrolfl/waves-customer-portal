@@ -596,6 +596,11 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
         [callLogId, recordingSid],
       );
     }
+    // Recompute unreviewed callback fallbacks after extraction, including
+    // source-call timing corrections. Gate-off never references the new column.
+    const callbackDeadlineUpdate = require('./callback-cards').enabled()
+      ? "callback_due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' AND call_commitments.kind = 'callback' AND call_commitments.party = 'waves' THEN NULL ELSE call_commitments.callback_due_at END,"
+      : '';
     let written = 0;
     for (const row of rows) {
       // ON CONFLICT … DO UPDATE only when the row is still the AI's to
@@ -608,6 +613,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
             evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (call_log_id, commitment_key) DO UPDATE SET
+           ${callbackDeadlineUpdate}
            description = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.description ELSE call_commitments.description END,
            channel = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.channel ELSE call_commitments.channel END,
            due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_at ELSE call_commitments.due_at END,
@@ -685,6 +691,9 @@ async function recordCallCommitments({
     const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration, recordingSid: call?.recording_sid || null });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;
+    if (!result.ownershipLost && require('./callback-cards').enabled()) {
+      await require('./callback-cards').prepareCallbackCards(conn, { callId: call.id });
+    }
     return summary;
   } catch (err) {
     logger.warn(`[call-commitments] recording failed for call ${call?.id}: ${err.message}`);
@@ -706,6 +715,9 @@ function normalizeRow(row) {
   };
   return {
     ...row,
+    // Display the staffed deadline without turning it into an editable stated promise.
+    effective_due_at: row.due_at || (row.kind === 'callback' && row.party === 'waves'
+      && require('./callback-cards').enabled() ? row.callback_due_at : null) || null,
     evidence: parse(row.evidence) || [],
     fulfillment: parse(row.fulfillment),
     confidence: row.confidence == null ? null : Number(row.confidence),
@@ -1358,7 +1370,8 @@ function implicitDueAt(row) {
   const from = basis ? new Date(basis) : null;
   if (!from || Number.isNaN(from.getTime())) return null;
   if (row.kind === 'send_estimate') return new Date(from.getTime() + OVERDUE_IMPLICIT_ESTIMATE_HOURS * 60 * 60 * 1000);
-  if (row.kind === 'callback') return endOfETDay(from);
+  if (row.kind === 'callback') return require('./callback-cards').enabled()
+    ? (row.callback_due_at ? new Date(row.callback_due_at) : null) : endOfETDay(from);
   return new Date(from.getTime() + OVERDUE_IMPLICIT_DAYS * 24 * 60 * 60 * 1000);
 }
 
@@ -1375,10 +1388,12 @@ function isOverdue(row, now = new Date()) {
 function effectiveDueSql(cc = 'cc', cl = 'cl') {
   const basis = `CASE WHEN ${cc}.source = 'human' THEN ${cc}.created_at ELSE ${cl}.created_at END`;
   const promptKinds = [...PROMPT_KINDS].map((k) => `'${k}'`).join(', ');
+  const callbackDue = require('./callback-cards').enabled() ? `${cc}.callback_due_at`
+    : `(((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`;
   return `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
     + ` WHEN ${cc}.party <> 'waves' THEN NULL`
     + ` WHEN ${cc}.kind = 'send_estimate' THEN (${basis}) + interval '${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours'`
-    + ` WHEN ${cc}.kind = 'callback' THEN (((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`
+    + ` WHEN ${cc}.kind = 'callback' THEN ${callbackDue}`
     + ` WHEN ${cc}.kind IN (${promptKinds}) THEN (${basis}) + interval '${OVERDUE_IMPLICIT_DAYS} days'`
     + ' ELSE NULL END';
 }
@@ -1404,7 +1419,7 @@ function selectOverdue(rows, { now = new Date() } = {}) {
   return (rows || []).filter((r) => isOverdue(r, now));
 }
 
-async function listOpenCommitments(conn, { party = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
+async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -1420,6 +1435,7 @@ async function listOpenCommitments(conn, { party = null, customerId = null, lead
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .modify((b) => {
       if (party === 'waves' || party === 'customer') b.where('cc.party', party);
+      if (kind) b.where('cc.kind', kind);
       if (customerId) b.where('cl.customer_id', customerId);
       if (leadId) {
         b.where(function leadScope() {

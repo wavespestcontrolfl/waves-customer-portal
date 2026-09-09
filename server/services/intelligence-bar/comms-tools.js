@@ -533,12 +533,14 @@ async function getOpenCommitments(input) {
     party: party || 'all',
     customer: customerLabel,
     // The implicit-deadline rules the queue applies when no time was stated
-    // (Codex #3733 P2): an estimate is due 24 h after the call, a callback by
-    // the end of the call's ET day, other prompts after OVERDUE_IMPLICIT_DAYS.
+    // (Codex #3733 P2): estimates use elapsed hours, callbacks use the active
+    // callback policy, and other prompts use OVERDUE_IMPLICIT_DAYS.
     // Each row also carries its own effective_due_at below.
     implicit_due_rules: {
       send_estimate: `${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours after the call`,
-      callback: "the end of the call's day (Eastern)",
+      callback: require('../callback-cards').enabled()
+        ? 'four staffed hours after the call, using office hours and blackout dates'
+        : "the end of the call's day (Eastern)",
       other_prompts: `${OVERDUE_IMPLICIT_DAYS} days after the call`,
     },
     total_open: rows.length,

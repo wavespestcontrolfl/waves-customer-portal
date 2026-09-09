@@ -271,6 +271,28 @@ router.get('/commitments/sms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.get('/follow-through', async (req, res, next) => {
+  try {
+    const cards = require('../services/callback-cards');
+    const offset = Number(req.query.offset || 0);
+    if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
+    const callbacksEnabled = cards.enabled();
+    if (callbacksEnabled) await cards.prepareCallbackCards(db);
+    let callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
+    if (callbacksEnabled) {
+      const { refreshFulfillment } = require('../services/call-commitments');
+      let changed = 0;
+      for (const callId of rotatingRefreshWindow([...new Set(callbacks.map((row) => row.call_log_id))])) {
+        const result = await refreshFulfillment(db, callId).catch(() => ({}));
+        changed += (result.fulfilled || 0) + (result.hinted || 0) + (result.cleared || 0);
+      }
+      if (changed) callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
+    }
+    res.json({ actor_id: req.technicianId, callbacks_enabled: callbacksEnabled,
+      callbacks: callbacks.slice(0, 100), has_more: callbacks.length > 100, next_offset: offset + 100 });
+  } catch (err) { next(err); }
+});
+
 router.get('/commitments/open', async (req, res, next) => {
   try {
     const { party, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;
@@ -320,6 +342,7 @@ router.get('/commitments/open', async (req, res, next) => {
       next_offset: hasMore ? pageOffset + pageLimit : null,
       overdue_implicit_days: OVERDUE_IMPLICIT_DAYS,
       overdue_implicit_estimate_hours: OVERDUE_IMPLICIT_ESTIMATE_HOURS,
+      callbacks_enabled: require('../services/callback-cards').enabled(),
       enabled,
     });
   } catch (err) { next(err); }
@@ -359,7 +382,7 @@ router.patch('/commitments/:id', async (req, res, next) => {
     if (!isEnabled('callCommitments') && !smsCommitmentsEnabled()) {
       return res.status(409).json({ error: 'Commitments are disabled', code: 'COMMITMENTS_DISABLED' });
     }
-    const existing = await db('call_commitments').where({ id: req.params.id }).first('call_log_id', 'sms_log_id');
+    const existing = await db('call_commitments').where({ id: req.params.id }).first('call_log_id', 'sms_log_id', 'kind', 'party');
     if (!existing) return res.status(404).json({ error: 'Commitment not found' });
     if (existing.sms_log_id) {
       if (!UUID_RE.test(String(req.body?.customer_id || ''))) return res.status(400).json({ error: 'customer_id must be a UUID' });
@@ -369,6 +392,14 @@ router.patch('/commitments/:id', async (req, res, next) => {
       return res.json({ commitment: row });
     }
     if (!isEnabled('callCommitments')) return res.status(409).json({ error: 'Call commitments are disabled', code: 'COMMITMENTS_DISABLED' });
+    const callbacks = require('../services/callback-cards');
+    if (callbacks.enabled() && existing.kind === 'callback' && existing.party === 'waves') {
+      const commitment = await callbacks.actOnCallback(db, req.params.id, {
+        action: req.body?.action, actorId: req.technicianId, expectedAt: req.body?.expected_at,
+        description: req.body?.description, due_at: req.body?.due_at, note: req.body?.note, snooze: req.body?.snooze,
+      });
+      return res.json({ commitment });
+    }
     const { applyHumanUpdate } = require('../services/call-commitments');
     const row = await applyHumanUpdate(db, req.params.id, {
       action: req.body?.action,

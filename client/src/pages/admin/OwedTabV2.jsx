@@ -49,19 +49,21 @@ export function whoLabel(row) {
 }
 
 export function isOverdueNow(row, now = Date.now()) {
-  return Boolean(row.overdue) || (Boolean(row.due_at) && new Date(row.due_at).getTime() < now);
+  const due = row.effective_due_at || row.due_at;
+  return Boolean(row.overdue) || (Boolean(due) && new Date(due).getTime() < now);
 }
 
 export function dueLabel(row, now = Date.now()) {
+  const due = row.effective_due_at || row.due_at;
   // A human-recorded promise is open since it was RECORDED — the instant its
   // implicit deadline ages from — not since a call that may be weeks older.
   const openSince = row.source === "human" ? row.created_at : (row.call_started_at || row.created_at);
   // The server's overdue flag is a snapshot; a stated deadline that passed
   // while the tab stayed open is overdue NOW (Codex #3725 r19 P2).
-  if (isOverdueNow(row, now)) return { text: row.due_at ? `Overdue · was due ${fmtWhen(row.due_at)}` : `Overdue · open since ${fmtWhen(openSince, false)}`, tone: "alert" };
-  if (row.due_at) {
-    const soon = new Date(row.due_at).getTime() - now < 24 * 60 * 60 * 1000;
-    return { text: `Due ${fmtWhen(row.due_at)}`, tone: soon ? "strong" : "neutral" };
+  if (isOverdueNow(row, now)) return { text: due ? `Overdue · was due ${fmtWhen(due)}` : `Overdue · open since ${fmtWhen(openSince, false)}`, tone: "alert" };
+  if (due) {
+    const soon = new Date(due).getTime() - now < 24 * 60 * 60 * 1000;
+    return { text: `Due ${fmtWhen(due)}`, tone: soon ? "strong" : "neutral" };
   }
   return { text: "No due time", tone: "neutral" };
 }
@@ -69,7 +71,7 @@ export function dueLabel(row, now = Date.now()) {
 export default function OwedTabV2() {
   const [party, setParty] = useState("waves");
   const [showHints, setShowHints] = useState(true);
-  const [state, setState] = useState({ status: "loading", rows: [], error: null, implicitDays: null, implicitEstimateHours: null, enabled: true, hasMore: false, nextOffset: null });
+  const [state, setState] = useState({ status: "loading", rows: [], error: null, implicitDays: null, implicitEstimateHours: null, callbacksEnabled: false, enabled: true, hasMore: false, nextOffset: null });
   const [loadingMore, setLoadingMore] = useState(false);
   // A minute tick so a deadline that passes while the tab is open re-renders
   // as overdue without a reload.
@@ -91,7 +93,7 @@ export default function OwedTabV2() {
       params.set("limit", "200");
       const body = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
       if (seq !== requestSeq.current) return;
-      setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? null, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null });
+      setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? null, callbacksEnabled: body.callbacks_enabled === true, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null });
     } catch (err) {
       if (seq !== requestSeq.current) return;
       setState((s) => ({
@@ -137,7 +139,7 @@ export default function OwedTabV2() {
     if (busyId) return;
     setBusyId(row.id);
     try {
-      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action }) });
+      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await loadRef.current();
     } catch (err) {
       setState((s) => ({ ...s, error: err.message || "That change did not save." }));
@@ -174,7 +176,7 @@ export default function OwedTabV2() {
         </label>
         <span className="text-13 md:text-12 text-ink-tertiary">
           {state.status === "ready" ? `${rows.length}${state.hasMore ? "+" : ""} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
-          {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours ?? 24} hours, a callback after the day of the call, other promises after ${state.implicitDays} days` : ""}
+          {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours ?? 24} hours, a callback ${state.callbacksEnabled ? "after four staffed hours (office hours and blackout dates apply)" : "after the day of the call"}, other promises after ${state.implicitDays} days` : ""}
         </span>
         <Button size="sm" variant="ghost" onClick={load} disabled={state.status === "loading"}>Refresh</Button>
       </div>

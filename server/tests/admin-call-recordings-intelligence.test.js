@@ -6,11 +6,14 @@ jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'aut
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn(), quarantineCardRecording: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(() => Promise.resolve(true)) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
+jest.mock('../services/callback-cards', () => ({
+  enabled: jest.fn(() => false), prepareCallbackCards: jest.fn(), listCallbackCards: jest.fn(async () => []), actOnCallback: jest.fn(),
+}));
 jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
   addHumanCommitment: jest.fn(),
@@ -88,6 +91,78 @@ beforeEach(() => {
   mockRole = 'admin';
   isEnabled.mockReturnValue(true);
   require('../services/sms-operational-actions').smsCommitmentsEnabled.mockReturnValue(false);
+  require('../services/callback-cards').enabled.mockReturnValue(false);
+});
+
+describe('callback actions use the commitment PATCH endpoint', () => {
+  test.each([
+    { action: 'snooze', snooze: 'two_hours' },
+    { action: 'edit', description: 'Call after lunch', due_at: null, note: 'Customer asked' },
+  ])('forwards the complete $action payload and displayed version', async (payload) => {
+    const cards = require('../services/callback-cards');
+    cards.enabled.mockReturnValue(true);
+    cards.actOnCallback.mockResolvedValue({ id: COMMIT_ID });
+    mockDb([{ kind: 'callback', party: 'waves', call_log_id: CALL_ID }]);
+    const expected_at = new Date().toISOString();
+    await withServer(async (base) => {
+      const response = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, expected_at }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ commitment: { id: COMMIT_ID } });
+    });
+    expect(cards.actOnCallback).toHaveBeenCalledWith(db, COMMIT_ID,
+      expect.objectContaining({ ...payload, actorId: 'tech-1', expectedAt: expected_at }));
+    expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /follow-through', () => {
+  test('bounds each refresh and rotates through every source on a full page', async () => {
+    const cards = require('../services/callback-cards');
+    cards.enabled.mockReturnValue(true);
+    cards.listCallbackCards.mockResolvedValue(Array.from({ length: 100 }, (_, i) => ({ id: `card-${i}`, call_log_id: `call-${i}` })));
+    commitments.refreshFulfillment.mockResolvedValue({ fulfilled: 0 });
+    await withServer(async (base) => {
+      for (let page = 0; page < 4; page += 1) {
+        const before = commitments.refreshFulfillment.mock.calls.length;
+        const response = await fetch(`${base}/admin/call-recordings/follow-through`);
+        expect(response.status).toBe(200);
+        expect((await response.json()).callbacks).toHaveLength(100);
+        expect(commitments.refreshFulfillment.mock.calls.length - before).toBe(25);
+      }
+    });
+    expect(new Set(commitments.refreshFulfillment.mock.calls.map((args) => args[1])).size).toBe(100);
+  });
+
+  test('refreshes distinct source calls and returns the completed callback off the page before its deadline', async () => {
+    const cards = require('../services/callback-cards');
+    cards.enabled.mockReturnValue(true);
+    const rows = ['callback-1', 'callback-2'].map((id) => ({ id, call_log_id: CALL_ID, overdue: false }));
+    cards.listCallbackCards.mockResolvedValueOnce(rows).mockResolvedValueOnce([]);
+    commitments.refreshFulfillment.mockResolvedValueOnce({ fulfilled: 2 });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/follow-through`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).callbacks).toEqual([]);
+    });
+    expect(commitments.refreshFulfillment).toHaveBeenCalledTimes(1);
+    expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
+    expect(cards.listCallbackCards).toHaveBeenCalledTimes(2);
+  });
+
+  test('a disabled feed performs no fulfillment writes', async () => {
+    const cards = require('../services/callback-cards');
+    cards.listCallbackCards.mockResolvedValueOnce([]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/follow-through`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).callbacks_enabled).toBe(false);
+    });
+    expect(cards.prepareCallbackCards).not.toHaveBeenCalled();
+    expect(commitments.refreshFulfillment).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /calls/:id/intelligence', () => {
