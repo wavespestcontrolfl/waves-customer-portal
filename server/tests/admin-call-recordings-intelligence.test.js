@@ -11,6 +11,9 @@ jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
+jest.mock('../services/callback-cards', () => ({
+  enabled: jest.fn(() => false), prepareCallbackCards: jest.fn(), listCallbackCards: jest.fn(async () => []), actOnCallback: jest.fn(),
+}));
 jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
   addHumanCommitment: jest.fn(),
@@ -88,6 +91,37 @@ beforeEach(() => {
   mockRole = 'admin';
   isEnabled.mockReturnValue(true);
   require('../services/sms-operational-actions').smsCommitmentsEnabled.mockReturnValue(false);
+  require('../services/callback-cards').enabled.mockReturnValue(false);
+});
+
+describe('GET /follow-through', () => {
+  test('refreshes distinct source calls and returns the completed callback off the page before its deadline', async () => {
+    const cards = require('../services/callback-cards');
+    cards.enabled.mockReturnValue(true);
+    const rows = ['callback-1', 'callback-2'].map((id) => ({ id, call_log_id: CALL_ID, overdue: false }));
+    cards.listCallbackCards.mockResolvedValueOnce(rows).mockResolvedValueOnce([]);
+    commitments.refreshFulfillment.mockResolvedValueOnce({ fulfilled: 2 });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/follow-through`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).callbacks).toEqual([]);
+    });
+    expect(commitments.refreshFulfillment).toHaveBeenCalledTimes(1);
+    expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
+    expect(cards.listCallbackCards).toHaveBeenCalledTimes(2);
+  });
+
+  test('a disabled feed performs no fulfillment writes', async () => {
+    const cards = require('../services/callback-cards');
+    cards.listCallbackCards.mockResolvedValueOnce([]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/follow-through`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).callbacks_enabled).toBe(false);
+    });
+    expect(cards.prepareCallbackCards).not.toHaveBeenCalled();
+    expect(commitments.refreshFulfillment).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /calls/:id/intelligence', () => {
