@@ -104,9 +104,21 @@ postgres('recurring schedule anomaly audit against migrated PostgreSQL', () => {
     await trx('scheduled_services').where('id', parent.id).update({ status: 'completed', recurring_ongoing: true, skip_weekends: false });
     await trx('property_preferences').insert({ customer_id: customerId, preferred_day: 'monday' });
     const result = await auditRecurringScheduleCoverage({ customerId, now: new Date('2040-03-15T12:00:00Z') }, trx);
-    expect(result.series[0]).toMatchObject({ nextExpectedDate: '2040-04-02', continuationDueDate: '2040-05-03' });
+    expect(result.series[0]).toMatchObject({ nextExpectedDate: '2040-04-02', continuationDueDate: '2040-05-02' });
     expect(result.series[0].intervals[0]).toMatchObject({ expectedDate: '2040-04-02', driftDays: 0 });
     expect((await trx('scheduled_services').where('id', parent.id).first('skip_weekends')).skip_weekends).toBe(false);
+  });
+
+  test('coverage applies one-off blackouts and weekly closures without rewriting visits', async () => {
+    const parent = await series({ pattern: 'custom', intervalDays: 31, dates: ['2040-03-01', '2040-04-03'] });
+    await trx('scheduled_services').where('id', parent.id).update({ status: 'completed', recurring_ongoing: true });
+    await trx('schedule_blackout_dates').insert({ date: '2040-04-01', reason: 'Synthetic closure' }).onConflict('date').ignore();
+    await trx('system_settings').insert({ key: 'schedule_weekly_days_off', value: '[1]' }).onConflict('key').merge({ value: '[1]' });
+    const before = await trx('scheduled_services').where('customer_id', customerId).orderBy('id');
+    const result = await auditRecurringScheduleCoverage({ customerId, now: new Date('2040-03-15T12:00:00Z') }, trx);
+    expect(result.series[0]).toMatchObject({ nextExpectedDate: '2040-04-03', continuationDueDate: '2040-05-02' });
+    expect(result.series[0].intervals[0]).toMatchObject({ expectedDate: '2040-04-03', driftDays: 0 });
+    expect(await trx('scheduled_services').where('customer_id', customerId).orderBy('id')).toEqual(before);
   });
 
   test.each([null, 'recurring'])('stored one-time patterns are excluded with catalog billing %s', async (billingType) => {

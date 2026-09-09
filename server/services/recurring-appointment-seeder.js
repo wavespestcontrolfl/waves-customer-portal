@@ -355,6 +355,25 @@ function copyIfPresent(target, source, fields) {
   }
 }
 
+// The canonical anchored date walk, shared by row generation and coverage
+// measurement. Nudges never become the anchor for the following occurrence.
+function* recurringDateCandidates(baseDate, pattern, {
+  recurrenceOptions = {}, skipWeekends = false, weekendShift = DEFAULT_WEEKEND_SHIFT,
+  existingDates = [], blackoutDates = null, maxAttempts,
+} = {}) {
+  const rOpts = recurrenceOrdinalOptions(baseDate, recurrenceOptions);
+  const seen = new Set([baseDate, ...existingDates]);
+  for (let attempt = 1; attempt < maxAttempts; attempt++) {
+    const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
+    const shifted = shiftPastWeekend(rawNext, skipWeekends, weekendShift);
+    const cleared = nudgeOffBlackoutDates(shifted, blackoutDates, { skipWeekends });
+    const nextDate = clampDateToSeason(pattern, cleared, { skipWeekends, blackoutDates });
+    if (!nextDate || recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDate) || seen.has(nextDate)) continue;
+    seen.add(nextDate);
+    yield nextDate;
+  }
+}
+
 function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent.recurring_pattern);
   const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
@@ -386,24 +405,10 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   // forward a day at a time (re-applying the weekend shift) until clear —
   // skipping the visit entirely would silently shrink the customer's plan.
   const blackoutDates = opts.blackoutDates instanceof Set ? opts.blackoutDates : null;
-  const clearOfBlackout = (dateStr) => nudgeOffBlackoutDates(dateStr, blackoutDates, { skipWeekends });
-
-  // Weekend shift and blackout nudge can cross the season edge — clamp back
-  // into Feb–Oct (see clampDateToSeason for the direction rules).
-  const clampToSeason = (dateStr) => clampDateToSeason(pattern, dateStr, { skipWeekends, blackoutDates });
-
-  let attempt = 1;
-  while (rows.length < targetNewRows && attempt < maxAttempts) {
-    const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
-    attempt++;
-    const nextDateStr = clampToSeason(clearOfBlackout(shiftPastWeekend(rawNext, skipWeekends, shiftDir)));
-    // A null candidate means the blackout nudge exhausted its bounded search
-    // — skip it rather than book a closure.
-    if (!nextDateStr) continue;
-    if (recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDateStr)) continue;
-    if (existingDates.has(nextDateStr)) continue;
-    existingDates.add(nextDateStr);
-
+  for (const nextDateStr of recurringDateCandidates(baseDate, pattern, {
+    recurrenceOptions: rOpts, skipWeekends, weekendShift: shiftDir, existingDates, blackoutDates, maxAttempts,
+  })) {
+    if (rows.length >= targetNewRows) break;
     const row = {
       customer_id: parent.customer_id,
       technician_id: opts.technicianId ?? parent.technician_id ?? null,
@@ -1289,6 +1294,7 @@ module.exports = {
   normalizeRecurringPattern,
   patternFromVisitsPerYear,
   plannedVisitCountForPattern,
+  recurringDateCandidates,
   planFollowUpSeedDates,
   seedFollowUpsForParent,
   serviceKeyFor,

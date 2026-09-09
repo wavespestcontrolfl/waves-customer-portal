@@ -191,20 +191,25 @@ function recurringCadenceDate(row = {}) {
   return formatDateOnly(row.recurring_dispatch_due_date || row.scheduled_date);
 }
 
-function nextCoverageDate(template, row) {
+function nextCoverageDate(template, row, ordinal = 0, blackoutDates = null) {
   const seeder = require('./recurring-appointment-seeder');
   const pattern = seeder.normalizeRecurringPattern(template.recurring_pattern);
-  const baseDate = recurringCadenceDate(row);
-  if (!baseDate || !pattern || (pattern === 'custom' && !(Number(template.recurring_interval_days) > 0))) return null;
-  const [anchor] = seeder.buildRecurringFollowUpRows({ ...template, scheduled_date: recurringCadenceDate(template) }, {
-    pattern, plannedCount: 2,
-  });
-  return seeder.buildRecurringFollowUpRows({ ...template, scheduled_date: baseDate }, {
-    pattern, plannedCount: 2, recurringNth: anchor?.recurring_nth, recurringWeekday: anchor?.recurring_weekday,
-  })[0]?.scheduled_date || null;
+  const baseDate = recurringCadenceDate(template);
+  const previousDate = recurringCadenceDate(row);
+  if (!baseDate || !previousDate || !pattern || (pattern === 'custom' && !(Number(template.recurring_interval_days) > 0))) return null;
+  let position = 0;
+  for (const candidate of seeder.recurringDateCandidates(baseDate, pattern, {
+    recurrenceOptions: { nth: template.recurring_nth, weekday: template.recurring_weekday, intervalDays: template.recurring_interval_days },
+    skipWeekends: !!template.skip_weekends, weekendShift: template.weekend_shift, blackoutDates,
+    maxAttempts: Math.max(ordinal + 1, seeder.etDateDiffDays(baseDate, previousDate) + 1) * 4 + 30,
+  })) {
+    position++;
+    if (position > ordinal && candidate > previousDate) return candidate;
+  }
+  return null;
 }
 
-function measureRecurringSeries(template, visits, { todayET = etDateString(), decision = null, holds = [] } = {}) {
+function measureRecurringSeries(template, visits, { todayET = etDateString(), decision = null, holds = [], blackoutDates = null } = {}) {
   const { etDateDiffDays } = require('./recurring-appointment-seeder');
   const retained = visits.filter(row => row.is_recurring && !row.is_callback && !row.followup_included
     && !['cancelled', 'skipped', 'no_show'].includes(row.status));
@@ -222,7 +227,8 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
   // positions keep the spacing measurements but cannot prove cadence drift.
   const cadenceOrder = live.every(row => recurringCadenceDate(row))
     ? [...live].sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b))) : [];
-  const expectedDates = new Map(cadenceOrder.slice(1).map((row, index) => [row.id, nextCoverageDate(template, cadenceOrder[index])]));
+  const followingDates = new Map(cadenceOrder.map((row, index) => [row.id, nextCoverageDate(template, row, index, blackoutDates)]));
+  const expectedDates = new Map(cadenceOrder.slice(1).map((row, index) => [row.id, followingDates.get(cadenceOrder[index].id)]));
   const paused = holds.some(hold => hold.status === 'active' && formatDateOnly(hold.starts_on) <= todayET && formatDateOnly(hold.resume_on) > todayET);
   const stopped = decision === 'cancel_series' || (decision === 'let_lapse' && upcoming.length === 0 && awaitingPlacement.length === 0);
   const intervals = live.slice(1).map((row, index) => {
@@ -246,7 +252,7 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
   const lastCompleted = completed.at(-1);
   const next = upcoming[0];
   const nextExpectedDate = lastCompleted
-    ? nextCoverageDate(template, cadenceOrder.filter(row => row.status === 'completed').at(-1))
+    ? followingDates.get(cadenceOrder.filter(row => row.status === 'completed').at(-1)?.id) || null
     : recurringCadenceDate(live[0] || template);
   const issues = stopped || paused ? [] : Object.entries({
     ongoing_plan_has_no_future_visit: template.recurring_ongoing && upcoming.length === 0,
@@ -261,7 +267,7 @@ function measureRecurringSeries(template, visits, { todayET = etDateString(), de
     issues, lastCompletedScheduledDate: formatDateOnly(lastCompleted?.scheduled_date), nextExpectedDate,
     nextRecordedDate: formatDateOnly(next?.scheduled_date),
     nextTimedVisitDate: formatDateOnly(upcoming.find(row => row.window_start)?.scheduled_date),
-    continuationDueDate: template.recurring_ongoing ? nextCoverageDate(template, cadenceOrder.at(-1)) : null,
+    continuationDueDate: template.recurring_ongoing ? followingDates.get(cadenceOrder.at(-1)?.id) || null : null,
     upcomingVisits: upcoming.length, untimedUpcomingVisits: upcoming.filter(row => !row.window_start).length,
     overdueVisits: overdue.length,
     awaitingPlacementVisits: awaitingPlacement.length,
@@ -299,6 +305,20 @@ async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, o
   const noWeekends = new Set(preferences.filter(preferenceRowBlocksWeekends).map(row => row.customer_id));
   const children = rootIds.length ? await conn('scheduled_services')
     .whereIn('recurring_parent_id', rootIds).whereIn('customer_id', customerIds).select('*') : [];
+  // Include the next projected occurrence plus the canonical nudge search.
+  // Current closure rules are shared with generation; a read failure cannot
+  // certify an expected date on an assumed-open day.
+  const horizonDates = [...selected, ...children].map(recurringCadenceDate).filter(Boolean);
+  for (const template of eligible) {
+    const rows = [template, ...children.filter(row => row.recurring_parent_id === template.id)]
+      .filter(row => recurringCadenceDate(row)).sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b)));
+    const next = nextCoverageDate(template, rows.at(-1), rows.length - 1);
+    if (next) horizonDates.push(next);
+  }
+  horizonDates.sort();
+  const blackoutDates = horizonDates.length ? await require('./scheduling/blackout-dates').getBlackoutLayers(
+    horizonDates[0], etDateString(addETDays(parseETDateTime(`${horizonDates.at(-1)}T12:00`), 75)), conn,
+  ) : null;
   const decisions = rootIds.length ? await conn('recurring_plan_alerts')
     .whereIn('recurring_parent_id', rootIds).whereIn('customer_id', customerIds)
     .whereNotNull('resolved_at').orderBy('resolved_at', 'desc').orderBy('id', 'desc')
@@ -314,6 +334,7 @@ async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, o
     const effectiveTemplate = { ...root, skip_weekends: root.skip_weekends || noWeekends.has(root.customer_id) };
     return measureRecurringSeries(effectiveTemplate, [historicalRoot, ...children.filter(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)], {
       todayET,
+      blackoutDates,
       decision: decisions.find(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)?.resolved_action,
       holds: holds.filter(row => row.customer_id === root.customer_id && families.includes(row.family_key)),
     });

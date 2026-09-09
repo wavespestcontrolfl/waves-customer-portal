@@ -75,6 +75,34 @@ describe('recurring series coverage measurements', () => {
     expect(measure([custom], { ...custom, recurring_interval_days: null }).nextExpectedDate).toBeNull();
   });
 
+  test.each(['forward', 'back'])('weekend shifts %s do not re-anchor a day-based series', weekendShift => {
+    const template = { ...root, scheduled_date: '2040-03-01', recurring_pattern: 'custom',
+      recurring_interval_days: 31, skip_weekends: true, weekend_shift: weekendShift };
+    const generated = require('../services/recurring-appointment-seeder').buildRecurringFollowUpRows(template, { plannedCount: 4 });
+    const rows = [template, ...generated.slice(0, 2).map((row, index) => ({ ...row, id: `shifted-${index}` }))];
+    const result = measure(rows, template);
+    expect(result.intervals.map(row => row.driftDays)).toEqual([0, 0]);
+    expect(result.continuationDueDate).toBe(generated[2].scheduled_date);
+  });
+
+  test('blackout nudges share the anchored generator and do not accumulate into later dates', () => {
+    const template = { ...root, scheduled_date: '2040-03-01', recurring_pattern: 'custom', recurring_interval_days: 31 };
+    const blackoutDates = new Set(['2040-04-01', '2040-04-02', '2040-05-02']);
+    const result = measure([template, visit('april', '2040-04-03'), visit('may', '2040-05-03')], template, { blackoutDates });
+    expect(result.intervals.map(row => row.driftDays)).toEqual([0, 0]);
+    expect(result.continuationDueDate).toBe('2040-06-02');
+  });
+
+  test('coverage can continue a historical series beyond the seeder insertion batch limit', () => {
+    const template = { ...root, scheduled_date: '2040-01-01', recurring_pattern: 'weekly' };
+    const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
+    const rows = Array.from({ length: 30 }, (_, index) => ({ ...template, id: `week-${index}`,
+      scheduled_date: etDateString(addETDays(parseETDateTime('2040-01-01T12:00'), index * 7)) }));
+    const result = measure(rows, template);
+    expect(result.intervals.every(row => row.driftDays === 0)).toBe(true);
+    expect(result.continuationDueDate).toBe(etDateString(addETDays(parseETDateTime('2040-01-01T12:00'), 30 * 7)));
+  });
+
   test('an exception moved past the following visit keeps both original cadence positions', () => {
     const moved = visit('moved', '2026-12-14', { date_exception: true, date_exception_cadence_date: '2026-09-07' });
     const result = measure([root, moved, visit('following', '2026-12-07')]);
