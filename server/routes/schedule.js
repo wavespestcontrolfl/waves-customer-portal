@@ -451,8 +451,9 @@ router.post('/:id/reschedule', async (req, res, next) => {
           });
         }
       }
+      let request;
       if (!deduped) {
-        await trx('service_requests').insert({
+        [request] = await trx('service_requests').insert({
           customer_id: req.customerId,
           category: 'schedule_change',
           subject: `Reschedule request: ${normalizeServiceType(service.service_type)}`,
@@ -465,10 +466,10 @@ router.post('/:id/reschedule', async (req, res, next) => {
           photos: JSON.stringify([]),
           status: 'new',
           source: 'customer_portal_reschedule',
-        });
+        }).returning('*');
       }
 
-      return { service, deduped };
+      return { service, deduped, request };
     });
 
     // Legacy flip only (!keepOnBooks): the visit just left the books as
@@ -499,7 +500,7 @@ router.post('/:id/reschedule', async (req, res, next) => {
     if (outcome.error) {
       return res.status(outcome.statusCode).json({ error: outcome.error });
     }
-    const { service, deduped } = outcome;
+    const { service, deduped, request } = outcome;
 
     logger.info(`Reschedule requested by customer: ${req.params.id}${deduped ? ' (absorbed into open request)' : ''}`);
 
@@ -510,6 +511,14 @@ router.post('/:id/reschedule', async (req, res, next) => {
         success: true,
         message: 'Reschedule request submitted. Our team will contact you to confirm a new date.',
       });
+    }
+
+    // Only a newly committed request gets a receipt. The shared sender owns
+    // App eligibility, event identity and any deferred delivery.
+    try {
+      await require('../services/request-app-notifications').send({ customerId: req.customerId, request, received: true });
+    } catch (appErr) {
+      logger.error(`Failed to send App receipt for reschedule request ${request.id}: ${appErr.message}`);
     }
 
     // The durable status/notes update is authoritative. Surface it in the
