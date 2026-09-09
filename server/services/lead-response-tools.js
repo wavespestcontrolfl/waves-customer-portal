@@ -14,6 +14,7 @@ const {
 } = require('./estimate-automation-duplicates');
 
 const { phoneMatchDigits } = require('../utils/phone');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 // Authority comes from the server's assigned session, never model arguments.
 async function resolveLeadSubject(input, context, conn = db, lock = false) {
@@ -22,6 +23,9 @@ async function resolveLeadSubject(input, context, conn = db, lock = false) {
       (input.customer_id && input.customer_id !== context.customerId)) {
     return { error: 'Tool target does not match assigned lead', validationError: true };
   }
+  // Booking and estimate acceptance hold this advisory key before rows.
+  // Join their fence before either row lock, including legacy lead-first writers.
+  if (lock) await lockCustomerComms(conn, context.customerId);
   // Customer 360 locks the customer before its lead fanout. Use the same
   // order so database mutations remain live and bound to that customer.
   const customerQuery = conn('customers').where('id', context.customerId).whereNull('deleted_at');

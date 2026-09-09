@@ -234,12 +234,19 @@ const LeadResponseAgent = {
               }, toolContext);
               if (queued?.queued !== true) throw new Error(queued?.error || 'Draft was not saved');
               toolResult = {
+                ...queued,
                 sent: false,
                 queued: true,
                 autoSendSuppressed: true,
                 note: 'Queued for human review due to missing context; no fallback SMS sent.',
               };
-              actionTaken = 'auto_send_suppressed_queued';
+              if (isToolFailure(queued)) {
+                failed = true;
+                toolError = queued.error || 'Owner alert delivery failed';
+                if (!queued.validationError) leadToolBreaker.recordFailure();
+              } else {
+                actionTaken = 'auto_send_suppressed_queued';
+              }
             } catch (err) {
               toolResult = { error: `Human-review queue failed: ${err.message}` };
               failed = true;
