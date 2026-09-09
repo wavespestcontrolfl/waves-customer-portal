@@ -100,13 +100,25 @@ const SKIP = !process.env.DATABASE_URL;
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
-  test('alert failure preserves the committed draft and replay does not alert twice', async () => {
-    mockSend.mockRejectedValue(new Error('QA provider unavailable'));
+  test('alert failure preserves the draft and retry records delivery before closing replay', async () => {
+    mockSend.mockRejectedValueOnce(new Error('QA provider unavailable'));
     const first = await executeLeadTool('queue_for_adam', input, context);
-    expect(first).toMatchObject({ queued: true, alertStatus: 'failed' });
-    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, activityId: first.activityId });
+    expect(first).toMatchObject({ queued: true, alertStatus: 'failed', failed: true, retryable: true });
+    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, activityId: first.activityId, alertStatus: 'sent' });
+    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'sent' });
     expect(await db('lead_activities').where({ lead_id: leadId })).toHaveLength(1);
+    expect(mockSend).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(['before_send', 'abandoned_claim'])('a retry recovers a process exit at %s', async crash => {
+    const metadata = { sessionId: context.sessionId, toolUseId: context.toolUseId, draftResponse: input.draft_response, reason: input.reason };
+    if (crash === 'abandoned_claim') Object.assign(metadata, { alertClaimToken: randomUUID(), alertLeaseUntil: new Date(Date.now() - 1000).toISOString() });
+    await db('lead_activities').insert({ lead_id: leadId, activity_type: 'draft_queued', description: 'Synthetic abandoned draft', metadata: JSON.stringify(metadata) });
+    expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'sent' });
     expect(mockSend).toHaveBeenCalledTimes(1);
+    const saved = await db('lead_activities').where({ lead_id: leadId }).first();
+    expect(saved.metadata.alertStatus).toBe('sent');
+    expect(saved.metadata.alertClaimToken).toBeUndefined();
   });
 
   test('foreign, deleted and reassigned subjects cannot create a draft', async () => {
@@ -183,7 +195,10 @@ const SKIP = !process.env.DATABASE_URL;
   }, 30000);
 
   test('pipeline and interaction writes roll back with a rejected note, then commit together', async () => {
+    const logger = require('../services/logger');
+    logger.info.mockClear();
     await expect(executeLeadTool('update_lead_pipeline', { stage: 'won', note: 'QA\u0000reject' }, context)).rejects.toThrow();
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringMatching(/^Pipeline:/));
     expect((await db('customers').where({ id: customerId }).first()).pipeline_stage).toBe('new_lead');
     expect(await db('customer_interactions').where({ customer_id: customerId })).toHaveLength(0);
     expect(await executeLeadTool('update_lead_pipeline', { stage: 'won', note: 'QA transition' }, context)).toMatchObject({ updated: true });

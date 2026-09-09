@@ -4,6 +4,7 @@
  */
 
 const db = require('../models/db');
+const { randomUUID } = require('node:crypto');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
@@ -421,37 +422,48 @@ async function executeLeadTool(toolName, input, context) {
         const existing = await trx('lead_activities')
           .where({ lead_id: context.leadId, activity_type: 'draft_queued' })
           .whereRaw("metadata->>'sessionId' = ? AND metadata->>'toolUseId' = ?", [context.sessionId, context.toolUseId])
-          .first('id');
-        if (existing) return { id: existing.id, replayed: true };
-        const [activity] = await trx('lead_activities').insert({
+          .first();
+        const metadata = existing
+          ? (typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : existing.metadata)
+          : { draftResponse: input.draft_response, reason: input.reason, urgency: input.urgency,
+            sessionId: context.sessionId, toolUseId: context.toolUseId };
+        if (existing && ['notified', 'sent', 'suppressed', 'not_configured'].includes(metadata.alertStatus)) {
+          return { id: existing.id, replayed: true, alertStatus: metadata.alertStatus };
+        }
+        if (existing && new Date(metadata.alertLeaseUntil).getTime() > Date.now()) {
+          return { id: existing.id, replayed: true, alertStatus: 'pending', nextAllowedAt: metadata.alertLeaseUntil };
+        }
+        const [activity] = existing ? [existing] : await trx('lead_activities').insert({
           lead_id: context.leadId,
           activity_type: 'draft_queued',
           description: `Queued for Adam: ${input.reason}`,
           performed_by: 'lead_agent',
-          metadata: JSON.stringify({
-            draftResponse: input.draft_response,
-            reason: input.reason,
-            urgency: input.urgency,
-            sessionId: context.sessionId,
-            toolUseId: context.toolUseId,
-          }),
+          metadata: JSON.stringify(metadata),
         }).returning('id');
-        return { id: activity.id, customer: current.customer };
+        // Extend this draft's replay state with a bounded alert claim. No
+        // database connection stays pinned while the notification sends.
+        const alertClaimToken = randomUUID();
+        await trx('lead_activities').where({ id: activity.id }).update({ metadata: JSON.stringify({
+          ...metadata, alertClaimToken, alertLeaseUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        }) });
+        return { id: activity.id, customer: current.customer, metadata, alertClaimToken, replayed: !!existing };
       });
       if (queued.error) return queued;
-      if (queued.replayed) return { queued: true, activityId: queued.id, replayed: true };
+      if (!queued.alertClaimToken) return { queued: true, activityId: queued.id, replayed: true, alertStatus: queued.alertStatus,
+        ...(queued.alertStatus === 'pending' ? { failed: true, retryable: true, nextAllowedAt: queued.nextAllowedAt,
+          error: 'Draft saved; owner alert delivery is still in progress' } : {}) };
       const customer = queued.customer;
       let alertStatus = 'not_configured';
 
       // SMS Adam with the lead details + suggested reply
       try {
         const TwilioService = require('./twilio');
-        const slaLabel = { urgent: '15 min', normal: '1 hour', low: '4 hours' }[input.urgency || 'normal'];
+        const slaLabel = { urgent: '15 min', normal: '1 hour', low: '4 hours' }[queued.metadata.urgency || 'normal'];
         const adamMsg = `📋 Lead needs your reply (${slaLabel} SLA):\n` +
           `${customer ? customer.first_name + ' ' + customer.last_name : 'Unknown'}\n` +
           `📞 ${customer?.phone || 'N/A'}\n` +
-          `Reason: ${input.reason}\n\n` +
-          `Suggested reply:\n"${(input.draft_response || '').substring(0, 200)}"`;
+          `Reason: ${queued.metadata.reason}\n\n` +
+          `Suggested reply:\n"${(queued.metadata.draftResponse || '').substring(0, 200)}"`;
 
         if (process.env.ADAM_PHONE) {
           const alert = await TwilioService.sendSMS(process.env.ADAM_PHONE, adamMsg, { messageType: 'internal_alert' });
@@ -462,8 +474,14 @@ async function executeLeadTool(toolName, input, context) {
         }
       } catch { alertStatus = 'failed'; }
 
+      await db('lead_activities').where({ id: queued.id })
+        .whereRaw("metadata->>'alertClaimToken' = ?", [queued.alertClaimToken])
+        .update({ metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'alertClaimToken' - 'alertLeaseUntil') || jsonb_build_object('alertStatus', ?::text)", [alertStatus]) });
+
       logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
-      return { queued: true, activityId: queued.id, alertStatus, reason: input.reason, urgency: input.urgency || 'normal' };
+      return { queued: true, activityId: queued.id, alertStatus, replayed: queued.replayed,
+        reason: queued.metadata.reason, urgency: queued.metadata.urgency || 'normal',
+        ...(alertStatus === 'failed' ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}) };
     }
 
     // ── Pipeline & follow-up ────────────────────────────────────
