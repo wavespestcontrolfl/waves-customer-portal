@@ -87,8 +87,9 @@ const QUOTE_HINT_RE = new RegExp(
 // 2026-09-09) and the classifier prompt had no vendor category, so a
 // confident "quote_request: true" would mint an owed-quote bell and a DEEP
 // composer run for a sales pitch. Deliberately explicit phrasings only —
-// a homeowner never writes these; anything softer is left to the model,
-// which is now told vendors are not quote requests.
+// a homeowner never writes these ("want more details?" was dropped: a
+// prospect describing a termite problem writes it too); anything softer
+// is left to the model, which is now told vendors are not quote requests.
 const SOLICITATION_RE = new RegExp(
   [
     '\\b(?:exclusive|qualified|unlimited|more|extra)\\s+(?:\\w+\\s+){0,3}(?:leads?|jobs?|customers?|estimates?)\\b',
@@ -100,7 +101,6 @@ const SOLICITATION_RE = new RegExp(
     '\\bai\\s+receptionist\\b',
     '\\breview\\s+system\\b',
     '\\bconnect(?:s|ing)?\\s+(?:you|local\\s+homeowners)\\s+with\\b',
-    '\\b(?:want|like)\\s+(?:more\\s+)?details\\?',
     '\\bservice\\s+is\\s+being\\s+requested\\s+by\\b',
     '\\b(?:reply|say|text)\\s+"?(?:stop|no|byebye|end)"?\\s+(?:if|to)\\b',
   ].join('|'),
@@ -449,7 +449,10 @@ async function startSmsThreadDraft({
       // established request. hintGate off: resume replies rarely carry
       // quote vocabulary, and the prefilter would hide them from the veto.
       const signal = await threadQuoteSignal(triggerBody, triage, { hintGate: false });
-      if (signal.method === 'ai_out_of_scope' || signal.method === 'ai_existing_job') {
+      // regex_solicitation: a vendor pitch landing on an active intake /
+      // clarify thread is not the customer's answer; terminal like the
+      // classifier's own vetoes (codex #4212 P1).
+      if (signal.method === 'ai_out_of_scope' || signal.method === 'ai_existing_job' || signal.method === 'regex_solicitation') {
         result.skipped = `no_quote_intent_${signal.method}`;
         // Terminal for the same reason as the deterministic vetoes: the
         // grounded classifier decided this is not quotable work, so a

@@ -247,18 +247,21 @@ describe('_private.threadQuoteSignal', () => {
     }));
   });
 
-  test('a vendor pitch to Waves is vetoed before any model call (audit 2026-09-09 corpus)', async () => {
+  test('a vendor pitch to Waves is vetoed before any model call', async () => {
+    // Synthetic pitches in the shape of the lead-gen / marketing robotexts
+    // the 2026-09 audit found on the location lines (vocabulary only, no
+    // live payloads).
     const pitches = [
-      'Hey Waves Pest Control Lakewood Ranch, Maya here. Our Labor Day Deal for Home-Service leads gets you a free setup, no monthly cost, & we fund your ads. Want details?',
-      'Hi Waves, Jay here. We\'re running a 3 day UNLIMITED leads trial. Homeowners are requesting estimates. Would you like more details?',
-      'Isabel here. I can bring you 3-5 exclusive turf & artificial grass leads daily with no upfront cost. Interested?',
-      'hey man, this is leon. im looking for one local home service company that can handle 5-15 more jobs over the next 8 weeks... just say "byebye" if you want me to stop',
-      'Hello Waves Pest Control Parrish, Your service is being requested by DLM Property Mgmnt. for Bradenton jobs. 2 min to apply',
-      "hey, it's Zach. Just checking in about leads for $55 each. No upfront fees & no ad spend.",
-      "hey, I'm Adissen. curious if you've ever thought about having an ai receptionist to answer calls when you're busy on site",
-      "Hey, it's Keegan. Do you have a google review system set up for your business yet?",
-      'Sarah here. We\'re offering a 3-day trial that connects you with homeowners requesting estimates. Interested in learning more?',
-      'Adam here. Are you open to more booked jobs over the next 6 weeks, or are you already at capacity? Reply "NO" if you need me to stop texting',
+      'Hey Waves, our holiday deal for home-service leads gets you a free setup, no monthly cost, and we fund your ads.',
+      "Hi Waves, we're running a 3 day UNLIMITED leads trial. Homeowners are requesting estimates.",
+      'I can bring you 3-5 exclusive turf and lawn leads daily with no upfront cost. Interested?',
+      'looking for one local home service company that can handle 5-15 more jobs over the next 8 weeks... just say "byebye" if you want me to stop',
+      'Hello Waves, your service is being requested by a property management group for area jobs. 2 min to apply',
+      'Just checking in about leads for $55 each. No upfront fees and no ad spend.',
+      "curious if you've ever thought about having an ai receptionist to answer calls when you're busy on site",
+      'Do you have a google review system set up for your business yet?',
+      "We're offering a 3-day trial that connects you with homeowners requesting estimates.",
+      'Are you open to more booked jobs over the next 6 weeks? Reply "NO" if you need me to stop texting',
     ];
     for (const body of pitches) {
       const signal = await _private.threadQuoteSignal(body);
@@ -275,7 +278,8 @@ describe('_private.threadQuoteSignal', () => {
       'Do you have any availability for a one-time service? I need a rate for a rat problem.',
       'How much do you charge for a monthly pest plan? No contract preferred.',
       'Can you give me a free estimate on lawn treatment for my new house?',
-      'We\'re looking for pest control to solve a rat problem, please let me know your price or quote first. This is at 2380 Bay St, Sarasota',
+      'We manage a rental and need pest control for a rat problem, please let me know your price or quote first.',
+      'I have termites at my new house. Would you like more details?',
     ];
     for (const body of asks) {
       await _private.threadQuoteSignal(body);
@@ -502,6 +506,18 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     mockDeterministicOutOfScope.mockImplementation((text) => /power wash/i.test(text));
     const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much?' });
     expect(result.skipped).toBe('out_of_scope_service_thread');
+    expect(result.terminal).toBe(true);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a vendor pitch on an active clarify/intake thread is a TERMINAL veto (skipIntentGate)', async () => {
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false, recentTexts: [], vetoTexts: [] });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'We can bring you exclusive pest control leads daily with no upfront cost.',
+      skipIntentGate: true,
+    });
+    expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
     expect(result.terminal).toBe(true);
     expect(mockDispatch).not.toHaveBeenCalled();
   });
