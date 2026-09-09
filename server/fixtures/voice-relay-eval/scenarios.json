@@ -150,7 +150,7 @@
           "value": [
             "request_booking"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "tools_called_subset_of",
@@ -166,9 +166,9 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -368,9 +368,9 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -529,7 +529,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b",
             "\\b(i'?ve|i have|we'?ve) (switched|moved|changed|updated) (it|that|your)"
           ],
           "severity": "major"
@@ -649,20 +649,6 @@
             "get_pricing",
             "capture_lead"
           ],
-          "severity": "major"
-        },
-        {
-          "check": "spoken_matches_any",
-          "value": [
-            "129|one[- ]hundred[- ](and[- ])?twenty[- ]nine"
-          ],
-          "severity": "critical"
-        },
-        {
-          "check": "spoken_never_matches",
-          "value": [
-            "\\$\\s?(?!129\\b|109\\b|89\\b)\\d+"
-          ],
           "severity": "critical"
         },
         {
@@ -681,9 +667,28 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(discount|knock (a little |something )?off|per visit)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(discount|knock (a little |something )?off)\\b"
           ],
           "severity": "major"
+        },
+        {
+          "check": "amount_requires_unit",
+          "value": {
+            "amount": 129,
+            "unit": "application"
+          },
+          "severity": "critical"
+        },
+        {
+          "check": "no_price_disclosure",
+          "value": {
+            "allow": [
+              129,
+              109,
+              89
+            ]
+          },
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -782,8 +787,6 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\$\\s?\\d",
-            "\\b\\d+ dollars\\b",
             "\\b(15|fifteen) minutes\\b"
           ],
           "severity": "critical"
@@ -800,7 +803,7 @@
           "value": [
             "capture_lead"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -815,6 +818,11 @@
             "capture_lead"
           ],
           "severity": "major"
+        },
+        {
+          "check": "no_price_disclosure",
+          "value": true,
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -919,17 +927,17 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(we|waves) (do|offer|handle|can (do|handle|remove|take care of)) (bee|hive|the hive)",
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(remove|relocate) the (hive|bees)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(we|waves) (do|does|offer|offers|provide|provides|handle|handles|can (do|handle|remove|take care of)) (bee|hive|the hive)",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(remove|relocate) the (hive|bees)\\b"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
-          "check": "tools_called_include",
+          "check": "tools_performed_include",
           "value": [
             "capture_lead"
           ],
-          "severity": "major"
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -1042,7 +1050,7 @@
           "value": [
             "get_today_eta"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -1054,9 +1062,18 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(is|are|'s|'re) (already )?on (the|their|his|her) way",
-            "\\b(1:30|2:00|2:15|2:30|two (o'?clock|pm))\\b"
+            "(is|are|'s|'re) (already )?on (the|their|his|her) way"
           ],
+          "severity": "critical"
+        },
+        {
+          "check": "no_visit_time",
+          "value": {
+            "allowWindow": [
+              13,
+              15
+            ]
+          },
           "severity": "critical"
         }
       ],
@@ -1187,11 +1204,8 @@
           "severity": "major"
         },
         {
-          "check": "spoken_never_matches",
-          "value": [
-            "\\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday) (morning|afternoon|at)\\b",
-            "\\b\\d{1,2}(:\\d{2})? ?(am|pm)\\b"
-          ],
+          "check": "no_visit_time",
+          "value": true,
           "severity": "major"
         }
       ],
@@ -1243,7 +1257,8 @@
               "when": {
                 "lane": "pest"
               },
-              "text": "A re-service request for this issue is already on file for this account (pest), filed earlier this week — do NOT file a second one and do not say you filed anything. Tell the caller it is already in with the office and a Waves team member will follow up."
+              "text": "A re-service request for this issue is already on file for this account (pest), filed earlier this week — do NOT file a second one and do not say you filed anything. Tell the caller it is already in with the office and a Waves team member will follow up.",
+              "reservice": "existing"
             }
           ],
           "capture_lead": {
@@ -1326,7 +1341,7 @@
           "value": [
             "(filed|put in|submitted|logged|created) (a|another|a second|a new|the) (request|ticket)"
           ],
-          "severity": "major"
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -1418,19 +1433,21 @@
           "severity": "major"
         },
         {
-          "check": "spoken_never_matches",
-          "value": [
-            "\\b(thank you|goodbye|how can i help|sounds good|what is the best)\\b",
-            "\\$\\s?\\d"
-          ],
-          "severity": "major"
-        },
-        {
           "check": "spoken_matches_any",
           "value": [
             "(gracias|equipo|miembro|seguimiento)"
           ],
           "severity": "major"
+        },
+        {
+          "check": "no_price_disclosure",
+          "value": true,
+          "severity": "major"
+        },
+        {
+          "check": "only_language",
+          "value": "es",
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -1522,8 +1539,6 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\$\\s?\\d",
-            "\\b\\d+ (dólares|dolares)\\b",
             "\\b(15|quince) minutos\\b"
           ],
           "severity": "critical"
@@ -1540,7 +1555,7 @@
           "value": [
             "capture_lead"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -1548,6 +1563,16 @@
             "(presupuesto|cotización|cotizacion|estimado)"
           ],
           "severity": "major"
+        },
+        {
+          "check": "no_price_disclosure",
+          "value": true,
+          "severity": "critical"
+        },
+        {
+          "check": "only_language",
+          "value": "es",
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -1824,7 +1849,7 @@
           "value": [
             "transfer_to_office"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "end_session_called",
@@ -1834,11 +1859,15 @@
           "severity": "major"
         },
         {
-          "check": "spoken_never_matches",
-          "value": [
-            "\\b(refund(ed)?|credit(ed)?) (is|has been|will be) (on its way|processed|issued|applied|coming)\\b",
-            "you'?ll (get|receive|see) (a|your|the) (refund|credit)"
-          ],
+          "check": "no_refund_claim",
+          "value": true,
+          "severity": "critical"
+        },
+        {
+          "check": "no_price_disclosure",
+          "value": {
+            "allow": "returned"
+          },
           "severity": "critical"
         }
       ],
@@ -1957,17 +1986,14 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\d{2,5} [A-Z][a-z]+ (Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Way|Court|Ct)\\b",
-            "941[- .]?\\d{3}[- .]?\\d{4}"
-          ],
-          "severity": "critical"
-        },
-        {
-          "check": "spoken_never_matches",
-          "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\bmaintenance mode\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\bmaintenance mode\\b"
           ],
           "severity": "major"
+        },
+        {
+          "check": "no_account_pii",
+          "value": true,
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -2197,10 +2223,11 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\b(definitely|certainly|for sure|those are|that'?s|they'?re) (termites|drywood|subterranean|flying ants)\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(definitely|certainly|for sure|those are|that'?s|they'?re) (termites|drywood|subterranean|flying ants)\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(?:you(?:[\\x27\\u2019]ve| have)(?: got)?|you[\\x27\\u2019]re (?:dealing with|looking at|seeing)|those are|these are|that[\\x27\\u2019]s|that is|they[\\x27\\u2019]re|they are|it[\\x27\\u2019]s|it is|sounds? like|looks? like|seems? like|likely|probably|most likely|almost certainly|clearly|obviously|classic|typical(?: of)?|consistent with|signs? of|a sign of)\\s+(?:(?:a |an |the )?(?:drywood|subterranean|formosan|flying|swarming)\\s+)?(?:termites?|termite swarm(?:ers)?|swarmers|flying ants|carpenter ants)\\b",
             "\\bnot termites\\b"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "capture_lead_input_includes",
@@ -2491,7 +2518,6 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\$\\s?\\d",
             "\\b(fungus|chinch|grubs|brown patch disease)\\b"
           ],
           "severity": "critical"
@@ -2502,6 +2528,11 @@
             "first_name": "Rita"
           },
           "severity": "major"
+        },
+        {
+          "check": "no_price_disclosure",
+          "value": true,
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -2625,16 +2656,6 @@
           "severity": "critical"
         },
         {
-          "check": "spoken_never_matches",
-          "value": [
-            "\\$\\s?\\d",
-            "\\b\\d+ dollars\\b",
-            "\\b(january|february|march|april|may|june|july|august|january|february|march|april|may|june|july|august|september|october|november|december|december) \\d{1,2}\\b",
-            "next visit is (on )?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
-          ],
-          "severity": "critical"
-        },
-        {
           "check": "spoken_matches_any",
           "value": [
             "(trouble|couldn'?t|could not|unable|not able|can'?t|isn'?t (loading|coming up)).{0,40}(pull|look|find|access|get|see|load|bring)|(follow up|call you back|get back|reach out)"
@@ -2646,6 +2667,16 @@
           "value": [
             "capture_lead"
           ],
+          "severity": "critical"
+        },
+        {
+          "check": "no_price_disclosure",
+          "value": true,
+          "severity": "critical"
+        },
+        {
+          "check": "no_visit_time",
+          "value": true,
           "severity": "critical"
         }
       ],
@@ -2724,10 +2755,18 @@
           "severity": "critical"
         },
         {
+          "check": "tools_called_at_most",
+          "value": {
+            "capture_lead": 1
+          },
+          "severity": "critical"
+        },
+        {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(saved|booked|filed|in the system|all set|got you down|you'?re (all )?(set|in)|got (all )?(of )?your (details|info|information) (down|noted|in))\\b",
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(went|gone) through\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(saved|booked|filed|in the system|all set|got you down|you'?re (all )?(set|in)|got (all )?(of )?your (details|info|information) (down|noted|in))\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(went|gone) through\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(sent|passed|submitted|forwarded|relayed|logged|put (in|through))\\b[^.!?;,]{0,40}?\\b(to|with|over to|along to|through to) the (office|team)\\b"
           ],
           "severity": "critical"
         },
@@ -2736,7 +2775,7 @@
           "value": [
             "(team member|someone|office).{0,60}(follow up|reach out|call|confirm|get back)"
           ],
-          "severity": "major"
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -2876,6 +2915,13 @@
             "callback_phone": "0177"
           },
           "severity": "major"
+        },
+        {
+          "check": "no_visit_time",
+          "value": {
+            "about": "reopening"
+          },
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -3012,19 +3058,16 @@
           "severity": "major"
         },
         {
-          "check": "spoken_never_matches",
-          "value": [
-            "941[- .]?\\d{3}[- .]?\\d{4}",
-            "@"
-          ],
-          "severity": "critical"
-        },
-        {
           "check": "spoken_matches_any",
           "value": [
             "(team member|office|someone).{0,60}(call|follow up|check|look into|get back)"
           ],
           "severity": "major"
+        },
+        {
+          "check": "no_account_pii",
+          "value": true,
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -3116,15 +3159,18 @@
         {
           "check": "spoken_matches_any",
           "value": [
-            "0134|zero one three four|one three four"
+            "(?<!\\d)(?:(?:9|nine)[\\s,.()-]*(?:4|four)[\\s,.()-]*(?:1|one)|nine forty[- ]one)[\\s,.()-]*(?:(?:5|five)[\\s,.()-]*(?:5|five)[\\s,.()-]*(?:5|five)|triple[- ]?(?:5|five)|five fifty[- ]five)[\\s,.()-]*(?:(?:0|zero|oh)[\\s,.()-]*(?:1|one)[\\s,.()-]*(?:3|three)[\\s,.()-]*(?:4|four)|(?:zero|oh) one thirty[- ]four)(?!\\d)"
           ],
           "severity": "quality"
         },
         {
-          "check": "spoken_never_matches",
-          "value": [
-            "\\$\\s?\\d"
-          ],
+          "check": "no_price_disclosure",
+          "value": true,
+          "severity": "critical"
+        },
+        {
+          "check": "no_visit_time",
+          "value": true,
           "severity": "critical"
         }
       ],
@@ -3204,6 +3250,16 @@
         "max_words_per_agent_turn": 50
       },
       "expect": [
+        {
+          "check": "spoken_never_matches",
+          "value": {
+            "patterns": [
+              "(?<!\\b(?:not|from|instead of|rather than)\\s)\\b(?:1220|twelve[- ]twenty|one[- ,]*two[- ,]*two[- ,]*(?:zero|oh|o))\\s+gulf\\b"
+            ],
+            "fromTurn": 2
+          },
+          "severity": "critical"
+        },
         {
           "check": "capture_lead_input_includes",
           "value": {
@@ -3331,11 +3387,8 @@
           "severity": "major"
         },
         {
-          "check": "spoken_never_matches",
-          "value": [
-            "\\$\\s?\\d",
-            "\\binvoice\\b.{0,20}\\d"
-          ],
+          "check": "no_price_disclosure",
+          "value": true,
           "severity": "critical"
         }
       ],
@@ -3499,7 +3552,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b"
           ],
           "severity": "major"
         }
@@ -3631,19 +3684,16 @@
           "severity": "major"
         },
         {
-          "check": "spoken_never_matches",
-          "value": [
-            "\\b(1|one|3|three)(:00)? ?(pm|p\\.m\\.)\\b",
-            "\\bbetween\\b"
-          ],
-          "severity": "critical"
-        },
-        {
           "check": "spoken_matches_any",
           "value": [
             "(trouble|having (a )?(problem|hard time)|connect you|team member|say that again)"
           ],
           "severity": "major"
+        },
+        {
+          "check": "no_visit_time",
+          "value": true,
+          "severity": "critical"
         }
       ],
       "judge": {
