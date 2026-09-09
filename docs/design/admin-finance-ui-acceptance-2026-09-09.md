@@ -98,3 +98,21 @@ the production build, brand and request-census checks pass. A focused
 Chromium/WebKit run verifies 42 layout cases over pending, failed and recovered
 zero states, with six screenshots and no page errors or unmatched requests
 (`.tmp/admin-finance-matched-states/report.json`).
+
+### Width, numeric typography and credit label follow-up
+
+Banking and Taxes retain the shared centered 1300px workspace cap and use
+Roboto with tabular numerals through `u-nums`. Credit matching is labeled
+“Match payout or refund”; the debit expense label is preserved. The current
+request census validates all 63 present Banking/Taxes references; only 62
+owned `ui.line` values changed in the manifest, with all other fields intact.
+
+The production build, all 37 finance/layout tests, all eight census tests,
+brand and zero-drift coverage checks pass. The expanded synthetic Chromium
+and WebKit run passes 384 layout cases across eight widths (including
+1920px), checking the width cap and numeric font rules. A focused credit
+selector run passes 32 additional layout cases, enables the payout and refund
+actions for their respective selections, and supplies four desktop/phone
+screenshots. No page errors or unmatched API requests occurred. Evidence:
+`.tmp/admin-finance-foundation/report.json` and
+`.tmp/admin-finance-credit-picker/report.json`.

@@ -50,7 +50,6 @@ import { reportError } from "../../lib/reportError";
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 
-const MONO = "'JetBrains Mono', monospace";
 function adminFetch(path, options = {}) {
   return fetch(`${API}${path}`, {
     headers: {
@@ -547,12 +546,11 @@ function PayoutsTab() {
         >
           Previous
         </Button>{" "}
-        <span
+        <span className="u-nums"
           style={{
             color: "#71717A",
             fontSize: 14,
             alignSelf: "center",
-            fontFamily: MONO,
           }}
         >
           Page {page}
@@ -718,11 +716,10 @@ function CashFlowTab() {
                   stroke: "#E4E4E7",
                 }}
               />{" "}
-              <YAxis
+              <YAxis className="u-nums"
                 tick={{
                   fill: "#71717A",
                   fontSize: 14,
-                  fontFamily: MONO,
                 }}
                 axisLine={{
                   stroke: "#E4E4E7",
@@ -833,11 +830,10 @@ function CashFlowTooltip({ active, payload, label }) {
         {label}
       </div>
       {payload.map((p, i) => (
-        <div
+        <div className="u-nums"
           key={i}
           style={{
             color: p.color,
-            fontFamily: MONO,
           }}
         >
           {fmtM(p.value)} {p.name}
@@ -863,9 +859,8 @@ function SummaryCard({ label, value, color }) {
       >
         {label}
       </div>{" "}
-      <div
+      <div className="u-nums"
         style={{
-          fontFamily: MONO,
           fontSize: 22,
           fontWeight: 500,
           color: color || "#09090B",
@@ -1048,9 +1043,8 @@ function ReconciliationTab() {
                   }}
                 >
                   Expected:{" "}
-                  <span
+                  <span className="u-nums"
                     style={{
-                      fontFamily: MONO,
                       color: "#27272A",
                     }}
                   >
@@ -1082,9 +1076,8 @@ function ReconciliationTab() {
                   >
                     <div>
                       Actual:{" "}
-                      <span
+                      <span className="u-nums"
                         style={{
-                          fontFamily: MONO,
                           color: "#18181B",
                         }}
                       >
@@ -1130,10 +1123,9 @@ function ReconciliationTab() {
                     </Field>{" "}
                   </div>
                   {discrepancy != null && parseFloat(discrepancy) !== 0 && (
-                    <div
+                    <div className="u-nums"
                       style={{
                         fontSize: 14,
-                        fontFamily: MONO,
                         color:
                           parseFloat(discrepancy) > 0 ? "#18181B" : "#C8312F",
                         alignSelf: "flex-end",
@@ -1741,9 +1733,8 @@ function PayoutModal({
             }}
           >
             {isInstant ? "Instant available" : "Available"}:{" "}
-            <span
+            <span className="u-nums"
               style={{
-                fontFamily: MONO,
                 color: methodLimit > 0 ? "#18181B" : "#C8312F",
               }}
             >
@@ -1774,9 +1765,8 @@ function PayoutModal({
             >
               Amount
             </span>{" "}
-            <span
+            <span className="u-nums"
               style={{
-                fontFamily: MONO,
                 fontSize: 14,
                 color: "#27272A",
               }}
@@ -1799,9 +1789,8 @@ function PayoutModal({
             >
               {isInstant ? "Instant fee estimate" : "Instant fee"}
             </span>{" "}
-            <span
+            <span className="u-nums"
               style={{
-                fontFamily: MONO,
                 fontSize: 14,
                 color: isInstant ? "#52525B" : "#18181B",
               }}
@@ -1826,9 +1815,8 @@ function PayoutModal({
             >
               Net Transfer
             </span>{" "}
-            <span
+            <span className="u-nums"
               style={{
-                fontFamily: MONO,
                 fontSize: 15,
                 fontWeight: 500,
                 color: "#18181B",
@@ -1934,7 +1922,7 @@ export default function BankingPage() {
   return (
     <UiSurface
       density="comfortable"
-      className="ui-workspace text-ui-body text-zinc-900"
+      className="ui-workspace mx-auto max-w-[1300px] text-ui-body text-zinc-900"
     >
       <AdminCommandHeader
         title="Banking"
@@ -2095,9 +2083,8 @@ export default function BankingPage() {
           >
             Pending
           </div>{" "}
-          <div
+          <div className="u-nums"
             style={{
-              fontFamily: MONO,
               fontSize: 22,
               fontWeight: 500,
               color: "#52525B",
@@ -2129,9 +2116,8 @@ export default function BankingPage() {
           >
             Next Payout
           </div>{" "}
-          <div
+          <div className="u-nums"
             style={{
-              fontFamily: MONO,
               fontSize: 22,
               fontWeight: 500,
               color: "#09090B",
@@ -2169,9 +2155,8 @@ export default function BankingPage() {
           >
             MTD Deposited
           </div>{" "}
-          <div
+          <div className="u-nums"
             style={{
-              fontFamily: MONO,
               fontSize: 22,
               fontWeight: 500,
               color: "#09090B",

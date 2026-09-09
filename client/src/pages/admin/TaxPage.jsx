@@ -82,7 +82,6 @@ function TaxReadFeedback({ read, label }) {
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple/orange fold to zinc-900. Semantic accents preserved.
 
-const MONO = "'JetBrains Mono', monospace";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -137,9 +136,8 @@ function StatCard({ label, value, color, sub, onClick }) {
       >
         {label}
       </div>{" "}
-      <div
+      <div className="u-nums"
         style={{
-          fontFamily: MONO,
           fontSize: 22,
           fontWeight: 500,
           color: color || "#09090B",
@@ -386,9 +384,8 @@ function TaxRatesTab() {
                 >
                   {r.county} County
                 </span>{" "}
-                <span
+                <span className="u-nums"
                   style={{
-                    fontFamily: MONO,
                     fontSize: 18,
                     fontWeight: 500,
                     color: "#18181B",
@@ -471,9 +468,8 @@ function TaxRatesTab() {
               >
                 {" "}
                 <span>{r.county}</span>
-                <span
+                <span className="u-nums"
                   style={{
-                    fontFamily: MONO,
                   }}
                 >
                   {fmtPct(r.combinedRate)}
@@ -1143,9 +1139,8 @@ function EquipmentTab() {
               {e.makeModel && <span>{e.makeModel}</span>}
               <span>
                 Cost:{" "}
-                <span
+                <span className="u-nums"
                   style={{
-                    fontFamily: MONO,
                     color: "#27272A",
                   }}
                 >
@@ -1154,9 +1149,8 @@ function EquipmentTab() {
               </span>{" "}
               <span>
                 Book:{" "}
-                <span
+                <span className="u-nums"
                   style={{
-                    fontFamily: MONO,
                     color: "#18181B",
                   }}
                 >
@@ -1165,9 +1159,8 @@ function EquipmentTab() {
               </span>{" "}
               <span>
                 Depr:{" "}
-                <span
+                <span className="u-nums"
                   style={{
-                    fontFamily: MONO,
                     color: "#52525B",
                   }}
                 >
@@ -1589,18 +1582,16 @@ function ExpensesTab() {
               >
                 {c.category || "Uncategorized"}
               </span>{" "}
-              <span
+              <span className="u-nums"
                 style={{
-                  fontFamily: MONO,
                   fontSize: 14,
                   color: "#27272A",
                 }}
               >
                 {fmtM(c.total)}
               </span>{" "}
-              <span
+              <span className="u-nums"
                 style={{
-                  fontFamily: MONO,
                   fontSize: 14,
                   color: "#18181B",
                 }}
@@ -1661,9 +1652,8 @@ function ExpensesTab() {
               {e.vendorName}
             </span>
           )}
-          <span
+          <span className="u-nums"
             style={{
-              fontFamily: MONO,
               fontSize: 14,
               fontWeight: 500,
               color: "#27272A",
@@ -1834,9 +1824,8 @@ function FilingCalendarTab() {
               >
                 {f.status}
               </Badge>{" "}
-              <span
+              <span className="u-nums"
                 style={{
-                  fontFamily: MONO,
                   fontSize: 14,
                   fontWeight: 500,
                   color: urgentColor,
@@ -1866,9 +1855,8 @@ function FilingCalendarTab() {
               {f.amountDue && (
                 <span>
                   Amount:{" "}
-                  <span
+                  <span className="u-nums"
                     style={{
-                      fontFamily: MONO,
                       color: "#27272A",
                     }}
                   >
@@ -1955,9 +1943,8 @@ function FilingCalendarTab() {
                 </span>
               )}
               {f.amountPaid && (
-                <span
+                <span className="u-nums"
                   style={{
-                    fontFamily: MONO,
                     fontSize: 14,
                     color: "#18181B",
                   }}
@@ -2198,9 +2185,8 @@ function AdvisorTab() {
                   {a.title}
                 </span>
                 {a.estimatedSavings && (
-                  <span
+                  <span className="u-nums"
                     style={{
-                      fontFamily: MONO,
                       fontSize: 14,
                       fontWeight: 500,
                       color: "#18181B",
@@ -2323,9 +2309,8 @@ function AdvisorTab() {
               }}
             >
               {" "}
-              <span
+              <span className="u-nums"
                 style={{
-                  fontFamily: MONO,
                   fontSize: 32,
                   fontWeight: 500,
                   color: gradeColor,
@@ -2489,9 +2474,8 @@ function AdvisorTab() {
                       {s.title}
                     </span>
                     {s.estimated_annual_savings && (
-                      <span
+                      <span className="u-nums"
                         style={{
-                          fontFamily: MONO,
                           fontSize: 14,
                           fontWeight: 500,
                           color: "#18181B",
@@ -2554,9 +2538,8 @@ function AdvisorTab() {
                     {d.deduction}
                   </span>
                   {d.estimated_value && (
-                    <span
+                    <span className="u-nums"
                       style={{
-                        fontFamily: MONO,
                         fontSize: 14,
                         color: "#18181B",
                       }}
@@ -3558,10 +3541,9 @@ function RevenueTab() {
                 >
                   {l}
                 </span>{" "}
-                <span
+                <span className="u-nums"
                   style={{
                     color: "#09090B",
-                    fontFamily: MONO,
                   }}
                 >
                   {v}
@@ -3763,9 +3745,8 @@ function PnlTab() {
       >
         {label}
       </span>{" "}
-      <span
+      <span className="u-nums"
         style={{
-          fontFamily: MONO,
           fontSize: 14,
           fontWeight: bold ? 700 : 400,
           color: color || (bold ? "#09090B" : "#27272A"),
@@ -3977,9 +3958,8 @@ function PnlTab() {
             >
               Gross Margin
             </span>{" "}
-            <span
+            <span className="u-nums"
               style={{
-                fontFamily: MONO,
                 fontSize: 14,
                 color: "#27272A",
               }}
@@ -4129,9 +4109,8 @@ function PnlTab() {
             >
               NET INCOME
             </span>{" "}
-            <span
+            <span className="u-nums"
               style={{
-                fontFamily: MONO,
                 fontSize: 18,
                 fontWeight: 500,
                 color: pnl.netIncome >= 0 ? "#18181B" : "#C8312F",
@@ -4156,9 +4135,8 @@ function PnlTab() {
             >
               Net Margin
             </span>{" "}
-            <span
+            <span className="u-nums"
               style={{
-                fontFamily: MONO,
                 fontSize: 14,
                 color: pnl.netIncome >= 0 ? "#18181B" : "#C8312F",
               }}
@@ -4442,7 +4420,7 @@ function ExportsTab() {
               }}
             >
               {" "}
-              <div
+              <div className="u-nums"
                 style={{
                   width: 32,
                   height: 32,
@@ -4451,7 +4429,6 @@ function ExportsTab() {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  fontFamily: MONO,
                   fontSize: 14,
                   fontWeight: 500,
                   color: exp.color,
@@ -5642,7 +5619,7 @@ function BankImportTab() {
               same-amount payout must not hide a legitimate refund) —
               one select, values prefixed p:/r: so the button knows
               which route the pick belongs to */
-                    <Field label="Match expense" className="min-w-0">
+                    <Field label="Match payout or refund" className="min-w-0">
                       <Select
                         style={{
                           maxWidth: 240,
@@ -6106,7 +6083,7 @@ export default function TaxPage() {
   return (
     <UiSurface
       density="comfortable"
-      className="ui-workspace text-ui-body text-zinc-900"
+      className="ui-workspace mx-auto max-w-[1300px] text-ui-body text-zinc-900"
     >
       {" "}
       <AdminCommandHeader
@@ -6287,9 +6264,8 @@ export default function TaxPage() {
                 >
                   AI Tax Advisor
                 </span>{" "}
-                <span
+                <span className="u-nums"
                   style={{
-                    fontFamily: MONO,
                     fontSize: 16,
                     fontWeight: 500,
                     color:
@@ -6381,9 +6357,8 @@ export default function TaxPage() {
                     >
                       {fmtD(dl.dueDate)}
                     </span>{" "}
-                    <span
+                    <span className="u-nums"
                       style={{
-                        fontFamily: MONO,
                         fontSize: 14,
                         fontWeight: 500,
                         color:
@@ -6468,9 +6443,8 @@ export default function TaxPage() {
                       >
                         {label}
                       </span>{" "}
-                      <span
+                      <span className="u-nums"
                         style={{
-                          fontFamily: MONO,
                           color,
                           fontWeight: label === "Net Income" ? 700 : 400,
                         }}
@@ -6515,9 +6489,8 @@ export default function TaxPage() {
               {arSummary ? (
                 <>
                   {" "}
-                  <div
+                  <div className="u-nums"
                     style={{
-                      fontFamily: MONO,
                       fontSize: 22,
                       fontWeight: 500,
                       color: arSummary.total > 500 ? "#C8312F" : "#09090B",
@@ -6550,9 +6523,8 @@ export default function TaxPage() {
               ) : (
                 <>
                   {/* Not-yet-loaded / failed ≠ zero owed — never a green $0. */}
-                  <div
+                  <div className="u-nums"
                     style={{
-                      fontFamily: MONO,
                       fontSize: 22,
                       fontWeight: 500,
                       color: "#71717A",

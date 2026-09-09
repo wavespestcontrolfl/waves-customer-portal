@@ -581,6 +581,11 @@ async function geometry(page, state, surface) {
     return {
       controls,
       smallText,
+      pageWidth: document.querySelector("main .ui-surface").getBoundingClientRect().width,
+      numbers: [...root.querySelectorAll(".u-nums")].filter(visible).map((node) => ({
+        font: getComputedStyle(node).fontFamily,
+        numerals: getComputedStyle(node).fontVariantNumeric,
+      })),
       overflow: document.documentElement.scrollWidth > innerWidth + 1,
       title: parseFloat(
         getComputedStyle(document.querySelector("main h1")).fontSize,
@@ -589,6 +594,11 @@ async function geometry(page, state, surface) {
   });
   state.geometry.push({ surface, viewport: page.viewportSize(), ...data });
   assert.equal(data.overflow, false, `${surface}: document overflow`);
+  assert.ok(data.pageWidth <= 1300.5, `${surface}: page width ${data.pageWidth}`);
+  for (const numeric of data.numbers) {
+    assert.ok(numeric.font.includes("Roboto"), `${surface}: numeric font ${numeric.font}`);
+    assert.ok(numeric.numerals.includes("tabular-nums"), `${surface}: numeric alignment ${numeric.numerals}`);
+  }
   assert.deepEqual(data.smallText, [], `${surface}: small text`);
   assert.equal(data.title, 22, `${surface}: title`);
   for (const c of data.controls) {
@@ -610,6 +620,7 @@ async function widths(page, state, surface) {
     { width: 820, height: 1000 },
     { width: 1024, height: 1000 },
     { width: 1440, height: 1000 },
+    { width: 1920, height: 1080 },
     { width: 844, height: 390 },
     { width: 390, height: 420 },
   ]) {
