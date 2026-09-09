@@ -1254,7 +1254,8 @@ async function groupRowOn(database, rowId, createdBy) {
     .where('svc.groupable', true)
     .where('svc.group_family', row.group_family)
     .whereNotNull('ss.window_start')
-    .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
+    .where((q) => q.whereNull('ss.visit_id').orWhere((attached) => attached
+      .where('sv.status', 'open').where('sv.behavior_version', closeoutEnabled ? 2 : 1)))
     .select('ss.id', 'ss.visit_id');
   if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
   else partnersQ.whereNull('ss.property_id');
