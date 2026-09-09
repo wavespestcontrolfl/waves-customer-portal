@@ -44,6 +44,45 @@ describe('combined visit booking capacity', () => {
     expect(profile.reservationServiceMix).toBeUndefined();
   });
 
+  test.each([['lawn_care', 'pest_control'], ['pest_control', 'lawn_care']])(
+    'catalog sizing only uses the primary appointment when combined creation is off: %s then %s', async (first, second) => {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const reservation = require('../services/slot-reservation');
+      const link = jest.spyOn(reservation, 'catalogLinkForProfile').mockImplementation(async (_conn, profile) => ({
+        default_duration_minutes: profile.services[0].service === 'pest_control' ? 30 : 40,
+      }));
+      try {
+        const profile = await require('../services/estimate-slot-availability').resolveCatalogSlotProfile(estimateFor([first, second]));
+        expect(profile.durationMinutes).toBe(30);
+        expect(profile.services.map(service => service.service)).toEqual(['pest_control']);
+        expect(profile.reservationServiceMix).toBeUndefined();
+        process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+        const combined = await require('../services/estimate-slot-availability').resolveCatalogSlotProfile(estimateFor([first, second]));
+        expect(combined.durationMinutes).toBe(70);
+        expect(combined.reservationServiceMix.version).toBe(2);
+      } finally { link.mockRestore(); }
+    },
+  );
+
+  test('one-time paid add-ons still contribute work to their shared appointment', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const reservation = require('../services/slot-reservation');
+    const link = jest.spyOn(reservation, 'catalogLinkForProfile').mockImplementation(async (_conn, profile) => ({
+      default_duration_minutes: profile.services[0].service === 'pest_control' ? 30 : 90,
+    }));
+    try {
+      const estimate = { show_one_time_option: true, service_interest: 'Pest Control', estimate_data: { result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 50 }] },
+        oneTime: { total: 1051, items: [{ service: 'bora_care', name: 'Bora-Care', price: 1051 }] },
+      } } };
+      const profile = await require('../services/estimate-slot-availability').resolveCatalogSlotProfile(estimate, { serviceMode: 'one_time' });
+      expect(profile.services).toHaveLength(2);
+      expect(profile.durationMinutes).toBe(120);
+      expect(profile.serviceLabel).toContain('Bora-Care');
+      expect(profile.reservationServiceMix).toBeUndefined();
+    } finally { link.mockRestore(); }
+  });
+
   test('dark creation keeps the existing single-block policy', () => {
     expect(resolveEstimateSlotProfile(estimateFor(services)).durationMinutes).toBe(60);
     expect(resolveEstimateSlotProfile(estimateFor(services), { durationMinutes: 90 }).durationMinutes).toBe(90);

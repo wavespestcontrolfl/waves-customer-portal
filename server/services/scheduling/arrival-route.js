@@ -286,7 +286,8 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     ...(capacity ? {
       finishMinute: simulation.returnFinishMin,
       occupiedMinutes: simulation.returnFinishMin - startMin,
-      routeOrder: order.flatMap(row => row.memberIds || [row.id]),
+      routeOrder: [...currentOrder(own.filter(row => row.status === 'completed')).map(row => row.id),
+        ...order.flatMap(row => row.memberIds || [row.id])],
       travelSource: usedLegs.every(leg => leg.source === 'google_traffic') ? 'google_traffic' : 'conservative_model',
       travelReasons: [...new Set(usedLegs.map(leg => leg.reason).filter(Boolean))],
     } : {}),
@@ -395,6 +396,11 @@ async function persistArrivalOrder(conn, fit, targetId) {
 
 // Conversion expands a certified combined anchor without changing its route position.
 async function persistCapacityAllocation(conn, anchor, memberIds) {
+  // Accept callers pre-acquire this fence before their first row lock.
+  // Other converter callers may already hold rows: never wait in reverse
+  // order. A busy reorder rolls this allocation back for a recoverable retry.
+  if (!await require('./tech-day-lock').lockTechDays(conn,
+    [{ techId: anchor.technician_id, date: dateOnly(anchor.scheduled_date) }], { wait: false })) throw capacityError();
   const rows = await conn('scheduled_services').where({ scheduled_date: dateOnly(anchor.scheduled_date),
     technician_id: anchor.technician_id }).select('id', 'route_order', 'window_start', 'created_at');
   const order = currentOrder(rows).filter(row => row.id === anchor.id || !memberIds.includes(row.id))

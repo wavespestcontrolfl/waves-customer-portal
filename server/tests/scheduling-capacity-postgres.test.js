@@ -217,4 +217,92 @@ describeDb('scheduling capacity on PostgreSQL', () => {
     expect(await mockPg('audit_log').where({ action: 'schedule.capacity_allocated' })).toHaveLength(1);
   });
 
+  test('a multi-program estimate with combined capacity off holds only the primary allowance', async () => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'false';
+    await mockPg('estimates').where({ id: estimateIds[0] }).update({ estimate_data: estimateData(['lawn_care', 'pest_control']) });
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0], 30) });
+    const booked = await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId });
+    expect(booked.estimated_duration_minutes).toBe(30);
+    expect(booked.reservation_service_mix).toBeNull();
+    expect(booked.service_type).toContain('Pest');
+  });
+
+  test('commit waits for the tech-day fence before row locks and rejects a reorder that wins first', async () => {
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
+    const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
+    const reorder = await mockPg.transaction();
+    let outcome;
+    try {
+      await lockTechDays(reorder, [{ techId: technicianId, date }]);
+      outcome = commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId, preparedCapacity })
+        .then(value => ({ value }), error => ({ error }));
+      let waiting = false;
+      for (let attempt = 0; attempt < 50 && !waiting; attempt++) {
+        const result = await admin.raw(`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+          AND NOT granted AND classid = hashtext('slot-reserve')::oid AND objid = hashtext(?::text)::oid) AS waiting`, [`${technicianId}:${date}`]);
+        waiting = result.rows[0].waiting;
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+      // A row-first acceptance would make this NOWAIT lock fail.
+      await reorder('scheduled_services').where({ id: held.scheduledServiceId }).forUpdate().noWait().first();
+      await reorder('scheduled_services').where({ id: held.scheduledServiceId }).update({ route_order: 9 });
+      await reorder.commit();
+      expect((await outcome).error).toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_changed' });
+      expect((await mockPg('scheduled_services').where({ id: held.scheduledServiceId }).first()).customer_id).toBeNull();
+    } finally {
+      if (!reorder.isCompleted()) await reorder.rollback();
+      if (outcome) await outcome;
+    }
+  });
+
+  test('allocation refuses a busy tech-day fence without waiting behind its row locks', async () => {
+    const { persistCapacityAllocation } = require('../services/scheduling/arrival-route');
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    const anchor = baseStop({ route_order: 1 });
+    const companion = baseStop({ service_type: 'Lawn Care', route_order: null });
+    await mockPg('scheduled_services').insert([anchor, companion]);
+    const reorder = await mockPg.transaction();
+    try {
+      await lockTechDays(reorder, [{ techId: technicianId, date }]);
+      await expect(mockPg.transaction(trx => persistCapacityAllocation(trx, anchor, [anchor.id, companion.id])))
+        .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect((await mockPg('scheduled_services').where({ id: companion.id }).first()).route_order).toBeNull();
+    } finally { await reorder.rollback(); }
+  });
+
+  test('same-day insertion persists the completed prefix before pending work', async () => {
+    const { evaluateArrivalPlacement, persistArrivalOrder } = require('../services/scheduling/arrival-route');
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    const { parseETDateTime } = require('../utils/datetime-et');
+    const first = baseStop({ status: 'completed', route_order: 1, actual_end_time: parseETDateTime(`${date}T08:30`) });
+    const second = baseStop({ status: 'completed', window_start: '09:00', window_end: '09:30', route_order: 2,
+      actual_end_time: parseETDateTime(`${date}T09:30`) });
+    const pending = baseStop({ window_start: '13:00', window_end: '13:30', route_order: 3 });
+    const candidate = baseStop({ window_start: '12:00', window_end: '12:30', route_order: null });
+    const fit = evaluateArrivalPlacement({ date, now: parseETDateTime(`${date}T11:00`),
+      target: { ...candidate, id: '__candidate__' }, rows: [first, second, pending], prospective: true },
+    { windowStart: '12:00', windowEnd: '12:30', durationMinutes: 30 });
+    expect(fit.feasible).toBe(true);
+    expect(fit.routeOrder).toEqual([first.id, second.id, '__candidate__', pending.id]);
+    await mockPg('scheduled_services').insert([first, second, pending, candidate]);
+    await mockPg.transaction(async trx => {
+      await lockTechDays(trx, [{ techId: technicianId, date }]);
+      await persistArrivalOrder(trx, fit, candidate.id);
+    });
+    const rows = await mockPg('scheduled_services').orderBy('route_order');
+    expect(rows.map(row => row.id)).toEqual([first.id, second.id, candidate.id, pending.id]);
+    expect(rows.map(row => row.route_order)).toEqual([1, 2, 3, 4]);
+  });
+
+  test('a hold moved to another technician cannot reuse the old route certification', async () => {
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
+    const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
+    await mockPg('scheduled_services').where({ id: held.scheduledServiceId }).update({ technician_id: otherTechId, route_order: null });
+    await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId, preparedCapacity }))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_changed' });
+    expect((await mockPg('scheduled_services').where({ id: held.scheduledServiceId }).first()).customer_id).toBeNull();
+  });
+
 });

@@ -93,8 +93,13 @@ coordinates, full route, provider legs or reservation allocation.
 Routine durations resolve through the catalog's additive scheduling policy;
 new arrival labels start on the hour within 08:00–18:00 ET, last start 16:00.
 Reserve and accept recheck the full live route and eligibility under the shared
-date lock; a stale route or changed service allowance returns the existing
-409 `SLOT_UNAVAILABLE`. When the combined-capacity gate and its prerequisite
+date lock and, for capacity route-order writes, the technician-day fence
+acquired before row locks. Completed stops retain their route prefix. A stale
+route or changed service allowance returns the existing 409 `SLOT_UNAVAILABLE`.
+Without a combined recurring allocation, catalog sizing and capability checks use only
+the primary appointment (pest when selected, otherwise the first program);
+independently scheduled companion programs do not enlarge its allowance.
+One-time paid add-ons retain their work on the same appointment. When the combined-capacity gate and its prerequisite
 below are also enabled, new combined allocations use version 2, per-service
 work allowances and one shared arrival anchor. Version-1 holds retain their
 60-minute member contract through expiry or completion; existing appointments

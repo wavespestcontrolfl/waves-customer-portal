@@ -42,6 +42,7 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const { prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, capacityError } = require('./scheduling/arrival-route');
 
@@ -717,6 +718,9 @@ async function reserveSlot({
       // holds, so this path is a real occupancy writer and owes the date
       // lock regardless.
       await acquireOccupancyLock(trx, date);
+      // Reorder writers take the same tech-day fence before reading rows.
+      // Take it before the estimate/technician row locks and fingerprint check.
+      await lockTechDays(trx, [{ techId, date }]);
 
       // SELECT … FOR UPDATE on the estimate row serializes concurrent
       // reserves/accepts/declines for this estimate. Without this lock,
@@ -939,19 +943,7 @@ async function reserveSlot({
         }
       }
 
-      // RUNGS 3 + 4 (tech, then zone) — rung 1 was taken at the top of this
-      // txn. These stay REQUIRED even under the date lock: rung 1 alone only
-      // serializes writers that take it, while the narrow tech/zone conflict
-      // checks below also arbitrate hold-vs-hold coexistence, which the
-      // global probe deliberately leaves to them (includeHolds:false). The
-      // estimate FOR UPDATE above only serializes THIS estimate — two
-      // different customers' estimates reserving the same tech/date meet
-      // HERE. Serialize all reserves per tech+day (coarse but reserves are
-      // quick), released on commit/rollback.
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['slot-reserve', `${techId || 'unassigned'}:${date}`],
-      );
+      // The tech-day fence was acquired before all row locks above.
       // Also take the zone+day lock the self-booking writers
       // (availability.confirmBooking, /api/booking/confirm) use — without
       // it, a self-book confirm and an estimate hold for the same window
@@ -1266,7 +1258,7 @@ async function reserveSlot({
  * the acquisition below is a reentrant no-op (pg advisory xact locks are
  * re-acquirable by the owning transaction).
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, trx? }
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -1280,6 +1272,7 @@ async function commitReservation({
   serviceCadences = null,
   durationMinutes,
   preLockedDate = null,
+  preLockedTechId = null,
   preparedCapacity = null,
   trx,
 }) {
@@ -1298,9 +1291,9 @@ async function commitReservation({
     // the commit-time duration is resolved from the accepted service profile
     // and may exceed the held one. The conflict check below is tech-scoped
     // ONLY when the row carries a technician — an unassigned hold makes it
-    // date-wide/tech-blind outright — and this path takes no tech or zone
-    // lock at all, so rung 1 is the only thing serializing it against the
-    // rebooker and the self-booking confirms.
+    // date-wide/tech-blind outright. Capacity commits additionally take the
+    // tech-day fence before row locks to serialize route-order rewrites
+    // against manual and nightly reorders.
     //
     // Taken BEFORE the FOR UPDATE row lock on purpose: a writer already
     // holding the date lock may need this row, so grabbing the row first and
@@ -1317,7 +1310,7 @@ async function commitReservation({
     // locked key down as preLockedDate (checked against the pre-read below).
     const preRow = await client('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('scheduled_date');
+      .first('scheduled_date', 'technician_id');
     if (!preRow) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
@@ -1332,14 +1325,20 @@ async function commitReservation({
     // pattern exists to prevent. Fail into the same RESERVATION_EXPIRED
     // recovery the accept flow already handles (the customer re-picks a
     // time) WITHOUT taking any lock.
-    if (preLockedDate && lockedDate !== dateOnly(preLockedDate)) {
+    if (preLockedDate && (lockedDate !== dateOnly(preLockedDate)
+      || (preparedCapacity && (preRow.technician_id || null) !== preLockedTechId))) {
       const err = new Error('reservation moved off the pre-locked date');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
+    if (preparedCapacity && (preparedCapacity.options.date !== lockedDate
+      || (preparedCapacity.options.technicianId || null) !== (preRow.technician_id || null))) throw capacityError();
     // Reentrant no-op when the caller pre-locked this same key; kept
     // unconditional so the standalone path still takes rung 1 first.
     if (lockedDate) await acquireOccupancyLock(client, lockedDate);
+    // The public accept/one-tap caller already acquired this exact pair
+    // before its own row locks. Standalone commits acquire it here.
+    if (preparedCapacity) await lockTechDays(client, [{ techId: preRow.technician_id, date: lockedDate }]);
 
     // Canonical order with the scheduled-invoice writers (PR #3476 r21
     // P1): the shared advisory mint lock comes BEFORE this row FOR
@@ -1362,7 +1361,8 @@ async function commitReservation({
       err.code = 'RESERVATION_NOT_FOUND';
       throw err;
     }
-    if (dateOnly(row.scheduled_date) !== lockedDate) {
+    if (dateOnly(row.scheduled_date) !== lockedDate
+      || (preparedCapacity && (row.technician_id || null) !== (preRow.technician_id || null))) {
       const err = new Error('reservation moved to another date');
       err.code = 'RESERVATION_EXPIRED';
       throw err;

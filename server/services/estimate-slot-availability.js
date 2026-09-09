@@ -859,15 +859,21 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
   if (!capacityEnabled()) return profile;
   const { catalogLinkForProfile } = require('./slot-reservation');
   const { serviceDurationMinutes } = require('./service-library');
+  // Without a combined recurring allocation, the held appointment belongs
+  // to the converter's primary service; companion programs book separately.
+  // One-time paid add-ons remain work on this same appointment.
+  const appointmentServices = profile.reservationServiceMix || profile.serviceMode === 'one_time' ? profile.services
+    : [profile.services.find(service => service.service === 'pest_control') || profile.services[0]].filter(Boolean);
   const services = [];
-  for (const service of profile.services) {
+  for (const service of appointmentServices) {
     const catalog = await catalogLinkForProfile(conn, { ...profile, services: [service] });
     const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes);
     services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0) });
   }
   const capacity = profile.reservationServiceMix
     ? require('./combined-visit-capacity').capacityForServices(services, services.map(service => service.durationMinutes)) : null;
-  return { ...profile, services, durationMinutes: capacity?.durationMinutes
+  return { ...profile, services, serviceLabel: formatServiceProfileLabel(services) || profile.serviceLabel,
+    durationMinutes: capacity?.durationMinutes
     || Math.max(services.reduce((total, service) => total + service.durationMinutes, 0) || DEFAULT_OPTS.durationMinutes,
       Number(userOpts.durationMinutes) > 0 ? clampDuration(userOpts.durationMinutes) : 0),
   ...(capacity ? { reservationServiceMix: capacity } : {}) };
