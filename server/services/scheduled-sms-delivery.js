@@ -17,7 +17,7 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   // Preserve the queue time while ordering the conversation by delivery.
   // Finalization evidence rides the same atomic update so a crash cannot
   // lose the owed replay hooks or the accepted SID they need.
-  let metadataSql = "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)";
+  let metadataSql = "(COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation') || jsonb_build_object('queued_at', created_at)";
   const bindings = [];
   if (requiresDurableFinalize(meta.entry_point)) {
     metadataSql += " || jsonb_build_object('finalize_pending', true, 'provider_message_id', ?::text)";
@@ -36,10 +36,19 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
 }
 
 async function dispatchScheduledSms(msg, meta, send, purpose) {
-  const reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id || looksLikeReviewAsk(msg.message_body);
+  let reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id || looksLikeReviewAsk(msg.message_body);
   const dispatch = async () => {
     let result;
     try {
+      if (reviewAsk) {
+        // Persist conservative evidence BEFORE the provider boundary. If
+        // provider logging and every settlement write fail, other dispatchers
+        // still see this attempt while outer recovery finishes the row.
+        const reserved = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('review_ask_reservation', true)"),
+        });
+        if (!reserved) throw new Error('Scheduled review claim lost before provider dispatch');
+      }
       result = await send();
       if (result.sent) await markScheduledSmsSent(msg, meta, result, reviewAsk);
       return result;
@@ -63,6 +72,25 @@ async function dispatchScheduledSms(msg, meta, send, purpose) {
   if (!reviewAsk) return dispatch();
   const result = await dispatchReviewAsk(msg.customer_id, dispatch);
   if (!['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'].includes(result?.code)) return result;
+  // Completion delivery must not wait behind its optional review invitation.
+  // Remove only the exact suffix we generated, preserving every receipt,
+  // invoice and report link. Persist body and linkage together before send.
+  if (meta.entry_point === 'dispatch_completion_deferred' && meta.bundled_review_request_id) {
+    const body = msg.message_body.replace(/\n\nEnjoyed the service\? A quick review means the world: (?:https?:\/\/)?[^\s]+(?=\s*(?:Reply STOP to (?:unsubscribe|opt out)\.?)?\s*$)/i, '').trim();
+    if (body && body !== msg.message_body && !looksLikeReviewAsk(body)) {
+      const changed = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+        message_body: body,
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'bundled_review_request_id' - 'review_ask_reservation'"),
+        updated_at: new Date(),
+      });
+      if (!changed) throw new Error('Scheduled completion claim lost before removing review invitation');
+      msg.message_body = body;
+      delete meta.bundled_review_request_id;
+      delete meta.review_ask_reservation;
+      reviewAsk = false;
+      return dispatch();
+    }
+  }
   // These are pre-provider holds, not failed delivery attempts. Refund the
   // claim's attempt and retain the existing metadata/finalization contract.
   await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
