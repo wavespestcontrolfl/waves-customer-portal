@@ -70,6 +70,13 @@ const STATIONS_ARG = argValue('--stations');
 // under jest's own argv.
 const KNOWN_FLAGS = new Map([['--db', 0], ['--json', 1], ['--md', 1], ['--termite-plan', 0], ['--stations', 1]]);
 if (require.main === module) {
+  // --stations only pins the --termite-plan table; alone it would silently
+  // run the default matrix with the flag ignored — the exact fallthrough the
+  // unknown-flag guard exists to prevent.
+  if (args.includes('--stations') && !args.includes('--termite-plan')) {
+    console.error('--stations requires --termite-plan');
+    process.exit(2);
+  }
   for (let i = 0; i < args.length; i += 1) {
     if (!KNOWN_FLAGS.has(args[i])) {
       console.error(`Unknown argument ${JSON.stringify(args[i])}. Known flags: ${[...KNOWN_FLAGS.keys()].join(' ')}`);
@@ -91,21 +98,29 @@ const { visitsPerYearForCadence, prepayCoverageCadenceForPattern } = require(pat
 // Termite station economics are the owner-reviewed cartridge model in
 // docs/estimator-pricing-plan-2026-09-03.md §A1 (BASF Trelona ATBS: two
 // cartridges per station, label-driven replacement, 25-pack cartridge rate,
-// an ASSUMED activity follow-up reserve). Since PR A1 the inputs live on
-// constants.TERMITE.cartridges (DB-tunable via pricing_config.termite_install
-// and catalog-linkable), so this audit reads the same numbers the engine's
-// costs block reports; the literals are the fresh-env fallback only. The
-// termite pricer defines no other per-station monitoring cost; the rodent
-// bait / amortization rates are rodent inputs and must never stand in for it
-// (codex r6 P1).
-const TERMITE_CARTRIDGE_MODEL = Object.freeze({
-  cartridgesPerStation: Number(constants.TERMITE.cartridges?.cartridgesPerStation ?? 2),
-  replacementRate: Number(constants.TERMITE.cartridges?.replacementRate ?? 0.33),
-  cartridgeCost: Number(constants.TERMITE.cartridges?.cartridgeCost ?? 6.83),
-  followUpVisitsPerYear: Number(constants.TERMITE.cartridges?.followUpVisitReserve ?? 0.25),
-  followUpVisitCost: 55,
-});
-const termiteAnnualCost = (stations) => round2(stations * TERMITE_CARTRIDGE_MODEL.cartridgesPerStation * TERMITE_CARTRIDGE_MODEL.replacementRate * TERMITE_CARTRIDGE_MODEL.cartridgeCost + TERMITE_CARTRIDGE_MODEL.followUpVisitsPerYear * TERMITE_CARTRIDGE_MODEL.followUpVisitCost);
+// an ASSUMED activity follow-up reserve). The inputs live on
+// constants.TERMITE.cartridges (DB-tunable via pricing_config.termite_install,
+// catalog-linkable) and are read AT CALL TIME — after the optional --db
+// overlay has mutated the constants — so this audit reports the same numbers
+// the engine's costs block does. The termite pricer defines no other
+// per-station monitoring cost; the rodent bait / amortization rates are
+// rodent inputs and must never stand in for it (codex r6 P1).
+function termiteCartridgeModel() {
+  const c = constants.TERMITE.cartridges || {};
+  return {
+    cartridgesPerStation: Number(c.cartridgesPerStation ?? 2),
+    replacementRate: Number(c.replacementRate ?? 0.33),
+    cartridgeCost: Number(c.cartridgeCost ?? 6.83),
+    followUpVisitsPerYear: Number(c.followUpVisitReserve ?? 0.25),
+  };
+}
+// Service visit labor the engine books for a station check: 5 min/station +
+// the shared drive time at the loaded rate (service-pricing laborCost).
+const termiteServiceVisitLabor = (stations) => constants.GLOBAL.LABOR_RATE * (constants.GLOBAL.DRIVE_TIME + stations * 5) / 60;
+const termiteAnnualCost = (stations) => {
+  const m = termiteCartridgeModel();
+  return round2(stations * m.cartridgesPerStation * m.replacementRate * m.cartridgeCost + m.followUpVisitsPerYear * termiteServiceVisitLabor(stations));
+};
 
 // ── Money helpers (kept local on purpose — this file must not import engine helpers) ──
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -1784,7 +1799,7 @@ function hardCodedRateInventory() {
   const G = constants.GLOBAL;
   return {
     labor: { LABOR_RATE: G.LABOR_RATE, DRIVE_TIME_MIN: G.DRIVE_TIME, ADMIN_ANNUAL: G.ADMIN_ANNUAL, MARGIN_FLOOR: G.MARGIN_FLOOR, MARGIN_TARGET_TS: G.MARGIN_TARGET_TS, lawnLaborMinutesBase: constants.LAWN_PRICING_V2.laborMinutesBase, lawnLaborMinutesPer1000: constants.LAWN_PRICING_V2.laborMinutesPer1000Sqft, lawnRouteDrive: constants.LAWN_PRICING_V2.routeDensityMinutes, pestOnSiteMinutes: { quarterly: 25, bimonthly: 25, monthly: 20 }, mosquitoOnSiteMinutes: 30, rodentBaitMinutesPerStation: 5, termiteInstallMinutesPerStation: 5, tsOnSiteFloorMinutes: 25, tsOverheadMinutesPerVisit: 10 },
-    materials: { pestChemPerVisit: { talak: 1.3, taurus: 4.87, surfactant: 0.5 }, mosquito: constants.MOSQUITO.productCosts, mosquitoUsage: constants.MOSQUITO.productUsage, tsMaterialModel: constants.TREE_SHRUB.materialModel, termiteSystems: constants.TERMITE.systems, boraCare: { galCost: constants.SPECIALTY.boraCare.galCost, coverage: constants.SPECIALTY.boraCare.coverage }, preSlab: Object.fromEntries(Object.entries(constants.SPECIALTY.preSlabTermiticide.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz, ozPer10SqFt: v.productOzPer10SqFt }])), trenching: Object.fromEntries(Object.entries(constants.SPECIALTY.trenching.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz }])), foamCan: constants.SPECIALTY.foamDrill.canCost, plugCost: constants.SPECIALTY.plugging.costPerPlug, topDressSand: constants.SPECIALTY.topDressing.eighth.sandRate, dethatchPer1K: constants.SPECIALTY.dethatching.materialPer1K, bedBugPerRoom: constants.BED_BUG.chemical.materialPerRoomVisit1, palmInternalCost: constants.PALM.internalCostBasis, termiteCartridgeModel: TERMITE_CARTRIDGE_MODEL },
+    materials: { pestChemPerVisit: { talak: 1.3, taurus: 4.87, surfactant: 0.5 }, mosquito: constants.MOSQUITO.productCosts, mosquitoUsage: constants.MOSQUITO.productUsage, tsMaterialModel: constants.TREE_SHRUB.materialModel, termiteSystems: constants.TERMITE.systems, boraCare: { galCost: constants.SPECIALTY.boraCare.galCost, coverage: constants.SPECIALTY.boraCare.coverage }, preSlab: Object.fromEntries(Object.entries(constants.SPECIALTY.preSlabTermiticide.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz, ozPer10SqFt: v.productOzPer10SqFt }])), trenching: Object.fromEntries(Object.entries(constants.SPECIALTY.trenching.products).map(([k, v]) => [k, { containerCost: v.containerCost, containerOz: v.containerOz }])), foamCan: constants.SPECIALTY.foamDrill.canCost, plugCost: constants.SPECIALTY.plugging.costPerPlug, topDressSand: constants.SPECIALTY.topDressing.eighth.sandRate, dethatchPer1K: constants.SPECIALTY.dethatching.materialPer1K, bedBugPerRoom: constants.BED_BUG.chemical.materialPerRoomVisit1, palmInternalCost: constants.PALM.internalCostBasis, termiteCartridgeModel: termiteCartridgeModel() },
     prices: { pest: constants.PEST, oneTime: constants.ONE_TIME, // the whole mosquito family: pressure factors/cap, lot buckets, the 500-sf interpolation step and tier visit counts all move the price (codex r7 P2)
       mosquito: { basePrices: constants.MOSQUITO.basePrices, tierVisits: constants.MOSQUITO.tierVisits, priceStepSqFt: constants.MOSQUITO.priceStepSqFt, lotCategories: constants.MOSQUITO.lotCategories.map((c) => ({ ...c, maxSqFt: Number.isFinite(c.maxSqFt) ? c.maxSqFt : 'Infinity' })), grossLotGuardrailMaxDrop: constants.MOSQUITO.grossLotGuardrailMaxDrop, pressureFactors: constants.MOSQUITO.pressureFactors, pressureCap: constants.MOSQUITO.pressureCap, addOns: constants.MOSQUITO.addOns },
       // treatable-area derivation: HARDSCAPE is a per-property-type function family, recorded as source text so a slope change is visible;
@@ -1864,19 +1879,23 @@ function termitePlanRow(stations) {
     shapes,
   };
 }
-function runTermitePlan() {
-  const counts = STATIONS_ARG ? [Number(STATIONS_ARG)] : Array.from({ length: 23 }, (_, i) => i + 8);
-  if (counts.some((n) => !Number.isInteger(n) || n < 1 || n > 200)) {
-    console.error(`--stations must be a whole number between 1 and 200 (got ${JSON.stringify(STATIONS_ARG)})`);
+function runTermitePlan(dbInfo) {
+  // Validated AFTER the optional --db overlay: the engine floors every quote
+  // at TERMITE.minStations (DB-tunable), so a smaller pin can never be priced.
+  const minStations = Math.max(1, Number(constants.TERMITE.minStations) || 1);
+  const counts = STATIONS_ARG ? [Number(STATIONS_ARG)] : Array.from({ length: Math.max(0, 31 - minStations) }, (_, i) => i + minStations);
+  if (counts.some((n) => !Number.isInteger(n) || n < minStations || n > 200)) {
+    console.error(`--stations must be a whole number between ${minStations} (TERMITE.minStations) and 200 (got ${JSON.stringify(STATIONS_ARG)})`);
     process.exit(2);
   }
+  const model = termiteCartridgeModel();
   const rows = counts.map(termitePlanRow);
-  const out = { generatedAt: new Date().toISOString(), engineConstantsSource: 'constants.js (in-code defaults)', cartridgeModel: TERMITE_CARTRIDGE_MODEL, shapes: TERMITE_PLAN_SHAPES, rows };
+  const out = { generatedAt: new Date().toISOString(), engineConstantsSource: dbInfo?.synced ? 'pricing_config (DB overlay, read-only)' : 'constants.js (in-code defaults)', dbInfo: dbInfo || null, cartridgeModel: model, shapes: TERMITE_PLAN_SHAPES, rows };
   if (JSON_OUT) fs.writeFileSync(JSON_OUT, JSON.stringify(out, null, 2));
   const md = [];
   md.push('# Termite station economics (plan 2026-09-03 §A1)');
   md.push('');
-  md.push(`Station cost ${money(rows[0]?.stationCost)} (${rows[0]?.materialCostSource?.station ?? 'n/a'}), cartridge ${money(rows[0]?.cartridgeCost)} (${rows[0]?.materialCostSource?.cartridge ?? 'n/a'}), ${TERMITE_CARTRIDGE_MODEL.cartridgesPerStation}/station × ${pct(TERMITE_CARTRIDGE_MODEL.replacementRate)} replacement, follow-up reserve ${TERMITE_CARTRIDGE_MODEL.followUpVisitsPerYear} visit/yr. Report only.`);
+  md.push(`Source: ${out.engineConstantsSource}. Station cost ${money(rows[0]?.stationCost)} (${rows[0]?.materialCostSource?.station ?? 'n/a'}), cartridge ${money(rows[0]?.cartridgeCost)} (${rows[0]?.materialCostSource?.cartridge ?? 'n/a'}), ${model.cartridgesPerStation}/station × ${pct(model.replacementRate)} replacement, follow-up reserve ${model.followUpVisitsPerYear} visit/yr. Report only.`);
   md.push('');
   md.push('| Stations | Setup cost | Annual cost (1 visit) | Today install + qtrly | Today mon. margin | P1 setup + annual | P1 setup / annual margin | P2 setup + annual | P2 setup / annual margin |');
   md.push('|---|---|---|---|---|---|---|---|---|');
@@ -1892,14 +1911,12 @@ function runTermitePlan() {
 
 async function main() {
   if (WANT_TERMITE_PLAN) {
-    if (WANT_DB) {
-      const dbInfo = await maybeSyncFromDb();
-      if (!dbInfo.synced) {
-        console.error(`--db requested but the pricing_config overlay did not run: ${dbInfo.reason || 'sync returned false'}`);
-        process.exit(3);
-      }
+    const dbInfo = WANT_DB ? await maybeSyncFromDb() : { synced: false, reason: '--db not requested' };
+    if (WANT_DB && !dbInfo.synced) {
+      console.error(`--db requested but the pricing_config overlay did not run: ${dbInfo.reason || 'sync returned false'}`);
+      process.exit(3);
     }
-    runTermitePlan();
+    runTermitePlan(dbInfo);
     return;
   }
   const dbInfo = await maybeSyncFromDb();

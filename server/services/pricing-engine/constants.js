@@ -1034,13 +1034,16 @@ const TERMITE = {
   // than 1/3 of its matrix is consumed or missing, and the 33% planning
   // rate stands until the tech /complete product ledger measures real
   // swaps. cartridgeCost is the 25-pack rate ($170.75 / 25) and links to
-  // the catalog row named catalogProductName the same way the station does.
+  // the EXISTING catalog row named catalogProductName the same way the
+  // station does — that row carried the station box price ($384 / 16) when
+  // this shipped, which the sanity band refuses (the owner corrects the row
+  // in the inventory UI; until then the link reports 'config').
   // followUpVisitReserve = ASSUMED extra activity-directed visits per year
   // (fraction of one service visit's labor). None of these change a price.
   cartridges: {
     cartridgeCost: 6.83,
     cartridgeCostSource: 'config',
-    catalogProductName: 'Trelona Compressed Termite Bait (25-pack)',
+    catalogProductName: 'Trelona Compressed Termite Bait Cartridges',
     cartridgesPerStation: 2,
     replacementRate: 0.33,
     followUpVisitReserve: 0.25,

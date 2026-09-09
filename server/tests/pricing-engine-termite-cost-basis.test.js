@@ -12,7 +12,10 @@
 const constants = require('../services/pricing-engine/constants');
 const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
 const { priceTermiteBait } = require('../services/pricing-engine/service-pricing');
+const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+const replay = require('../services/estimate-tree-shrub-knob-replay');
 
 const snapshot = JSON.parse(JSON.stringify(constants.TERMITE));
 function restoreTermite() {
@@ -44,7 +47,7 @@ function linkDb({ termiteInstall = {}, catalogRows = [], approvedVendorPricingRo
 }
 
 const STATION_ROW = { name: 'Trelona ATBS Bait Station', best_price: '384.00', container_size: '16 stations', best_vendor_pricing_id: 'vp-station' };
-const CARTRIDGE_ROW = { name: 'Trelona Compressed Termite Bait (25-pack)', best_price: '170.75', container_size: '25 cartridges', best_vendor_pricing_id: 'vp-cartridge' };
+const CARTRIDGE_ROW = { name: 'Trelona Compressed Termite Bait Cartridges', best_price: '170.75', container_size: '25 cartridges', best_vendor_pricing_id: 'vp-cartridge' };
 
 describe('termite station cost basis (plan §A1)', () => {
   afterEach(restoreTermite);
@@ -175,6 +178,155 @@ describe('termite_install admin validation', () => {
     [{ link_station_costs_to_catalog: 'yes' }, 'link_station_costs_to_catalog'],
   ])('rejects %j', (patch, key) => {
     const verdict = validatePricingConfigData('termite_install', { ...base, ...patch }, null);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.error).toContain(`termite_install.${key}`);
+  });
+});
+
+describe('termite station cost replay (plan §A1 replay rule)', () => {
+  const HOME = { footprint: 2000, features: { complexity: 'standard' } };
+  afterEach(restoreTermite);
+
+  test('every quote stamps the station cost it priced under', () => {
+    const li = priceTermiteBait(HOME, { system: 'trelona' });
+    expect(li.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config' });
+    constants.TERMITE.systems.trelona.stationCost = 25.5;
+    constants.TERMITE.systems.trelona.stationCostSource = 'catalog';
+    expect(priceTermiteBait(HOME, { system: 'trelona' }).pricingKnobs).toEqual({ system: 'trelona', stationCost: 25.5, stationCostSource: 'catalog' });
+  });
+
+  test('a replayed snapshot beats a later cost move — the sent install survives, the rental uplift with it', () => {
+    constants.TERMITE.systems.trelona.stationCost = 22.05; // the pre-A1 world
+    const sent = priceTermiteBait(HOME, { system: 'trelona' });
+    expect(sent.installation.price).toBe(610);
+    constants.TERMITE.systems.trelona.stationCost = 24; // A1 ships (or the catalog moves)
+    expect(priceTermiteBait(HOME, { system: 'trelona' }).installation.price).toBe(653);
+    const replayed = priceTermiteBait(HOME, { system: 'trelona', knobs: sent.pricingKnobs });
+    expect(replayed.installation.price).toBe(610);
+    expect(replayed.installation.retailValue).toBe(610);
+    expect(replayed.materialCostSource.station).toBe('replay');
+    expect(replayed.pricingKnobs).toEqual({ system: 'trelona', stationCost: 22.05, stationCostSource: 'replay' });
+    // A stamp for another system never lends its hardware cost.
+    const advance = priceTermiteBait(HOME, { system: 'advance', knobs: sent.pricingKnobs });
+    expect(advance.installation.price).toBe(639);
+    expect(advance.materialCostSource.station).toBe('config');
+  });
+
+  test('the engine injects termitePricingKnobs server-side; a service-line knobs value is ignored', () => {
+    const input = { homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family', services: { termite: { system: 'trelona' } } };
+    expect(generateEstimate(input).lineItems.find((l) => l.service === 'termite_bait').installation.price).toBe(653);
+    const replayed = generateEstimate({ ...input, termitePricingKnobs: { system: 'trelona', stationCost: 22.05 } });
+    expect(replayed.lineItems.find((l) => l.service === 'termite_bait').installation.price).toBe(610);
+    const forged = generateEstimate({ ...input, services: { termite: { system: 'trelona', knobs: { stationCost: 1 } } } });
+    expect(forged.lineItems.find((l) => l.service === 'termite_bait').installation.price).toBe(653);
+  });
+
+  test('the replay signal: stamped replays verbatim, unstamped termite replays the pre-stamp constant, no termite injects nothing', () => {
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait', system: 'trelona', pricingKnobs: { system: 'trelona', stationCost: 25.5 } }] } }))
+      .toEqual({ system: 'trelona', stationCost: 25.5 });
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait', selectedSystem: 'trelona', installation: { price: 610 } }] } }))
+      .toEqual({ system: 'trelona', stationCost: 22.05 });
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait', system: 'advance' }] } }))
+      .toEqual({ system: 'advance', stationCost: 13.16 });
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'pest_control' }] } })).toBeNull();
+    expect(replay.termiteKnobSignalForReplay({})).toBeNull();
+    // The no-stamp default is the module's own constant, never the live one.
+    constants.TERMITE.systems.trelona.stationCost = 99;
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ service: 'termite_bait' }] } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+  });
+
+  test('the mapped admin envelope carries the stamp and the signal prefers it over a stale raw engineResult', () => {
+    const estimate = generateEstimate({ homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family', services: { termite: { system: 'trelona' } } });
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config' });
+    expect(mapped.results.tmBait.materialCostSource).toEqual({ station: 'config', cartridge: 'config' });
+    expect(replay.termiteKnobSignalForReplay({ result: mapped })).toEqual({ system: 'trelona', stationCost: 24 });
+    // Mapped envelope with no stamp (saved before A1) → pre-stamp constant.
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', ti: 610 } } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    // Mapped stamp wins over an older raw line.
+    expect(replay.termiteKnobSignalForReplay({
+      result: { results: { tmBait: { selectedSystem: 'trelona', pricingKnobs: { system: 'trelona', stationCost: 24 } } } },
+      engineResult: { lineItems: [{ service: 'termite_bait', pricingKnobs: { system: 'trelona', stationCost: 22.05 } }] },
+    })).toEqual({ system: 'trelona', stationCost: 24 });
+  });
+
+  test('the replay signal has ONE home shared by both authoritative paths', () => {
+    const { estimateTermiteKnobSignal } = require('../routes/estimate-public');
+    expect(estimateTermiteKnobSignal).toBe(replay.termiteKnobSignalForReplay);
+    const persistence = require('fs').readFileSync(require.resolve('../services/admin-estimate-persistence'), 'utf8');
+    expect(persistence).toMatch(/termiteKnobSignalForReplay\(estimateData\)/);
+    expect(persistence).toMatch(/'termitePricingKnobs'/); // stripped from browser-supplied inputs
+  });
+});
+
+describe('termite catalog link — self-heal and refusals', () => {
+  afterEach(restoreTermite);
+
+  test('a config row without a station cost still re-applies the in-code default after a catalog value (no stale carry-over)', async () => {
+    const linked = linkDb({ termiteInstall: { trelona_bait: 22.05 }, catalogRows: [{ ...STATION_ROW, best_price: '352.00' }], approvedVendorPricingRows: [{ id: 'vp-station' }] });
+    await expect(syncConstantsFromDB(linked)).resolves.toBe(true);
+    expect(constants.TERMITE.systems.trelona.stationCost).toBe(22);
+    expect(constants.TERMITE.systems.trelona.stationCostSource).toBe('catalog');
+    // Next sync: the row lost its station cost AND the link is off — the
+    // default ($24.00) must reassert, not the last catalog value.
+    const bare = (table) => {
+      if (table === 'products_catalog') throw new Error('link is off');
+      const query = {
+        select: jest.fn(async () => (table === 'pricing_config' ? [{ config_key: 'termite_install', data: { link_station_costs_to_catalog: false } }] : [])),
+        orderBy: jest.fn(() => query),
+        then: (resolve) => resolve([]),
+      };
+      return query;
+    };
+    bare.schema = { hasTable: jest.fn(async () => true) };
+    await expect(syncConstantsFromDB(bare)).resolves.toBe(true);
+    expect(constants.TERMITE.systems.trelona.stationCost).toBe(24);
+    expect(constants.TERMITE.systems.trelona.stationCostSource).toBe('config');
+    expect(constants.TERMITE.linkStationCostsToCatalog).toBe(false);
+  });
+
+  test('an unparseable container_size is refused (never divided by 1) and the refusal is logged once', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const db = linkDb({ catalogRows: [{ ...CARTRIDGE_ROW, best_price: '384.00', container_size: '16 cartridges/box' }], approvedVendorPricingRows: [{ id: 'vp-cartridge' }] });
+      await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+      await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+      expect(constants.TERMITE.cartridges.cartridgeCost).toBe(6.83);
+      expect(constants.TERMITE.cartridges.cartridgeCostSource).toBe('config');
+      const refusals = warn.mock.calls.filter(([m]) => String(m).includes('not a pack count'));
+      expect(refusals).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('the sanity band anchors on the CONFIG value, so a walk through the band cannot ratchet', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const first = linkDb({ catalogRows: [{ ...STATION_ROW, best_price: '720.00' }], approvedVendorPricingRows: [{ id: 'vp-station' }] }); // $45 — inside 2x of $24
+      await expect(syncConstantsFromDB(first)).resolves.toBe(true);
+      expect(constants.TERMITE.systems.trelona.stationCost).toBe(45);
+      const second = linkDb({ catalogRows: [{ ...STATION_ROW, best_price: '1360.00' }], approvedVendorPricingRows: [{ id: 'vp-station' }] }); // $85 — inside 2x of $45, outside 2x of $24
+      await expect(syncConstantsFromDB(second)).resolves.toBe(true);
+      expect(constants.TERMITE.systems.trelona.stationCost).toBe(24);
+      expect(constants.TERMITE.systems.trelona.stationCostSource).toBe('config');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('termite_install admin validation — aliases', () => {
+  test.each([
+    [{ install_multiplier: 0 }, 'install_multiplier'],
+    [{ trelona_bait: 0 }, 'trelona_bait'],
+    [{ trelona_station_cost: -1 }, 'trelona_station_cost'],
+    [{ cartridgeCost: -9 }, 'cartridgeCost'],
+    [{ cartridgeReplacementRate: 2 }, 'cartridgeReplacementRate'],
+    [{ linkStationCostsToCatalog: 'true' }, 'linkStationCostsToCatalog'],
+    [{ min_stations: 0 }, 'min_stations'],
+  ])('rejects %j through the alias the bridge reads', (patch, key) => {
+    const verdict = validatePricingConfigData('termite_install', { multiplier: 1.45, trelona_bait: 24, ...patch }, null);
     expect(verdict.ok).toBe(false);
     expect(verdict.error).toContain(`termite_install.${key}`);
   });

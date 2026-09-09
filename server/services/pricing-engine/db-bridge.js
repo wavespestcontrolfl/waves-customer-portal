@@ -767,39 +767,21 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   );
   if (!entries.length) return;
   try {
-    if (!(await db.schema.hasTable('products_catalog'))) return;
-    const rows = await db('products_catalog')
-      .whereIn('name', entries.map(([, product]) => product.catalogProductName.trim()))
-      .where({ active: true, needs_pricing: false })
-      .select('name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id');
-    // Only trust a best_price backed by an ACTIVE, APPROVED vendor price.
-    // Some inventory recalc paths cache the lowest vendor_pricing.price
-    // without filtering approval_status/is_active, and a pending scrape must
-    // never reprice customer quotes (codex r1).
-    const backingIds = rows.map((row) => row.best_vendor_pricing_id).filter(Boolean);
-    const approvedBackingIds = new Set();
-    if (backingIds.length) {
-      const backing = await db('vendor_pricing')
-        .whereIn('id', backingIds)
-        .where({ is_active: true })
-        .whereIn('approval_status', ['approved', 'auto_approved'])
-        .select('id');
-      for (const row of backing) approvedBackingIds.add(row.id);
-    }
-    const byName = new Map(rows.map((row) => [row.name, row]));
+    const byName = await loadApprovedCatalogRows(
+      db,
+      entries.map(([, product]) => product.catalogProductName.trim()),
+      ['name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'],
+    );
     for (const [key, product] of entries) {
       const row = byName.get(product.catalogProductName.trim());
-      if (!row?.best_vendor_pricing_id || !approvedBackingIds.has(row.best_vendor_pricing_id)) continue;
-      const price = Number(row?.best_price);
-      const oz = Number(row?.unit_size_oz);
+      if (!row) continue;
+      const price = Number(row.best_price);
+      const oz = Number(row.unit_size_oz);
       if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(oz) || oz <= 0) continue;
       const configPerOz = Number(product.containerCost) / Number(product.containerOz);
-      if (!Number.isFinite(configPerOz) || configPerOz <= 0) continue;
       const catalogPerOz = price / oz;
-      if (catalogPerOz > configPerOz * 2 || catalogPerOz < configPerOz * 0.5) {
-        console.warn(
-          `[pricing-engine] pre-slab ${key}: catalog $${catalogPerOz.toFixed(4)}/oz outside sanity band of config $${configPerOz.toFixed(4)}/oz — keeping config value`
-        );
+      if (!withinCatalogSanityBand(catalogPerOz, configPerOz)) {
+        warnCatalogRefusalOnce(`preslab.${key}.band`, `[pricing-engine] pre-slab ${key}: catalog $${catalogPerOz.toFixed(4)}/oz outside sanity band of config $${configPerOz.toFixed(4)}/oz — keeping config value`);
         continue;
       }
       product.containerCost = price;
@@ -810,26 +792,90 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   }
 }
 
+// Catalog rows the pricing engine may price from: ACTIVE, priced rows whose
+// best_price is backed by an ACTIVE, APPROVED/auto-approved vendor_pricing
+// row. Some inventory recalc paths cache the lowest vendor_pricing.price
+// without filtering approval_status/is_active, and a pending scrape must
+// never reprice customer quotes (codex r1). Shared by the pre-slab and the
+// termite links — one trust rule, one round trip each.
+async function loadApprovedCatalogRows(db, names, columns) {
+  if (!names.length || !(await db.schema.hasTable('products_catalog'))) return new Map();
+  const rows = await db('products_catalog')
+    .whereIn('name', names)
+    .where({ active: true, needs_pricing: false })
+    .select(...columns);
+  const backingIds = rows.map((row) => row.best_vendor_pricing_id).filter(Boolean);
+  const approvedBackingIds = new Set();
+  if (backingIds.length) {
+    const backing = await db('vendor_pricing')
+      .whereIn('id', backingIds)
+      .where({ is_active: true })
+      .whereIn('approval_status', ['approved', 'auto_approved'])
+      .select('id');
+    for (const row of backing) approvedBackingIds.add(row.id);
+  }
+  return new Map(rows
+    .filter((row) => row?.best_vendor_pricing_id && approvedBackingIds.has(row.best_vendor_pricing_id))
+    .map((row) => [row.name, row]));
+}
+
+// Fat-finger / bad-scrape guard shared by every catalog link: a per-unit
+// catalog price outside [0.5x, 2x] of the CONFIG value keeps the config value.
+function withinCatalogSanityBand(catalogPerUnit, configPerUnit) {
+  return Number.isFinite(catalogPerUnit) && Number.isFinite(configPerUnit) && configPerUnit > 0
+    && catalogPerUnit <= configPerUnit * 2 && catalogPerUnit >= configPerUnit * 0.5;
+}
+
+// A refused catalog price is refused on EVERY sync (≥ once a minute); warn
+// once per (key, value) so the log carries the fact, not a flood.
+const catalogRefusalsLogged = new Map();
+function warnCatalogRefusalOnce(key, message) {
+  if (catalogRefusalsLogged.get(key) === message) return;
+  catalogRefusalsLogged.set(key, message);
+  console.warn(message);
+}
+
+// In-code termite cost-basis defaults, captured ONCE at load (before any
+// sync mutates the constants) so every sync can restore them before the DB
+// row and the catalog link re-apply — see the termite branch of the sync.
+const TERMITE_COST_BASIS_DEFAULTS = Object.freeze({
+  linkStationCostsToCatalog: constants.TERMITE.linkStationCostsToCatalog === true,
+  trelonaStationCost: Number(constants.TERMITE.systems?.trelona?.stationCost),
+  cartridgeCost: Number(constants.TERMITE.cartridges?.cartridgeCost),
+});
+function resetTermiteCostBasisDefaults() {
+  const termite = constants.TERMITE;
+  termite.linkStationCostsToCatalog = TERMITE_COST_BASIS_DEFAULTS.linkStationCostsToCatalog;
+  if (termite.systems?.trelona) {
+    if (Number.isFinite(TERMITE_COST_BASIS_DEFAULTS.trelonaStationCost)) {
+      termite.systems.trelona.stationCost = TERMITE_COST_BASIS_DEFAULTS.trelonaStationCost;
+    }
+    termite.systems.trelona.stationCostSource = 'config';
+  }
+  if (termite.cartridges) {
+    if (Number.isFinite(TERMITE_COST_BASIS_DEFAULTS.cartridgeCost)) {
+      termite.cartridges.cartridgeCost = TERMITE_COST_BASIS_DEFAULTS.cartridgeCost;
+    }
+    termite.cartridges.cartridgeCostSource = 'config';
+  }
+}
+
 // Termite station + cartridge cost from the inventory catalog (owner
 // 2026-09-03: "termite bait stations should be linked to inventory for
 // price changes"). Same trust rules as the pre-slab link above: the catalog
 // row named TERMITE.systems.trelona.catalogProductName (station) and
 // TERMITE.cartridges.catalogProductName (cartridge) is used ONLY when its
-// best_price is backed by an ACTIVE, APPROVED/auto-approved vendor price and
-// the per-unit figure sits inside [0.5x, 2x] of the config value. The
-// per-unit cost is best_price ÷ the leading count in container_size
-// ("1 station" → 1, "16 stations" → 16, "25 cartridges" → 25; missing → 1),
-// because bait hardware is counted, not measured in ounces. Fail-open: any
-// miss keeps the config value. The winning source is stamped on the
-// constants (stationCostSource / cartridgeCostSource) so the priced line can
-// carry materialCostSource — a stale or missing catalog price is never
-// silent. Runs every sync AFTER config re-applies the base costs.
-function unitsPerContainer(containerSize) {
-  const m = String(containerSize || '').trim().match(/^(\d+(?:\.\d+)?)\s*(?:x\s*)?/i);
-  const n = m ? Number(m[1]) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 1;
-}
-
+// best_price is backed by an ACTIVE, APPROVED vendor price and the per-unit
+// figure sits inside the sanity band of the config value. Bait hardware is
+// counted, not measured in ounces, so the per-unit cost is best_price ÷ the
+// pack count the inventory module parses from container_size ("1 station",
+// "16 stations", "25 cartridges"; an unparseable label such as
+// "16 cartridges/box" or "Box of 16" is refused, never guessed at 1).
+// Fail-open: any miss keeps the config value. The winning source is stamped
+// on the constants (stationCostSource / cartridgeCostSource) so the priced
+// line can carry materialCostSource — a stale or missing catalog price is
+// never silent. Runs every sync AFTER the defaults reset and the config
+// row re-apply the base costs.
 async function syncTermiteStationCostsFromCatalog(db) {
   const termite = constants.TERMITE;
   if (termite?.linkStationCostsToCatalog !== true) return;
@@ -839,34 +885,26 @@ async function syncTermiteStationCostsFromCatalog(db) {
   ].filter(({ target }) => typeof target?.catalogProductName === 'string' && target.catalogProductName.trim());
   if (!targets.length) return;
   try {
-    if (!(await db.schema.hasTable('products_catalog'))) return;
-    const rows = await db('products_catalog')
-      .whereIn('name', targets.map(({ target }) => target.catalogProductName.trim()))
-      .where({ active: true, needs_pricing: false })
-      .select('name', 'best_price', 'container_size', 'best_vendor_pricing_id');
-    const backingIds = rows.map((row) => row.best_vendor_pricing_id).filter(Boolean);
-    const approvedBackingIds = new Set();
-    if (backingIds.length) {
-      const backing = await db('vendor_pricing')
-        .whereIn('id', backingIds)
-        .where({ is_active: true })
-        .whereIn('approval_status', ['approved', 'auto_approved'])
-        .select('id');
-      for (const row of backing) approvedBackingIds.add(row.id);
-    }
-    const byName = new Map(rows.map((row) => [row.name, row]));
+    const { parsePackCount } = require('../product-costing');
+    const byName = await loadApprovedCatalogRows(
+      db,
+      targets.map(({ target }) => target.catalogProductName.trim()),
+      ['name', 'best_price', 'container_size', 'best_vendor_pricing_id'],
+    );
     for (const { key, target, costKey, sourceKey } of targets) {
       const row = byName.get(target.catalogProductName.trim());
-      if (!row?.best_vendor_pricing_id || !approvedBackingIds.has(row.best_vendor_pricing_id)) continue;
+      if (!row) continue;
       const price = Number(row.best_price);
+      const pack = parsePackCount(row.container_size);
       if (!Number.isFinite(price) || price <= 0) continue;
-      const perUnit = Math.round((price / unitsPerContainer(row.container_size)) * 100) / 100;
+      if (!pack) {
+        warnCatalogRefusalOnce(`termite.${key}.pack`, `[pricing-engine] termite ${key}: catalog container_size ${JSON.stringify(row.container_size)} is not a pack count — keeping config value`);
+        continue;
+      }
+      const perUnit = Math.round((price / pack.count) * 100) / 100;
       const configPerUnit = Number(target[costKey]);
-      if (!Number.isFinite(configPerUnit) || configPerUnit <= 0) continue;
-      if (perUnit > configPerUnit * 2 || perUnit < configPerUnit * 0.5) {
-        console.warn(
-          `[pricing-engine] termite ${key}: catalog $${perUnit.toFixed(2)}/unit outside sanity band of config $${configPerUnit.toFixed(2)}/unit — keeping config value`
-        );
+      if (!withinCatalogSanityBand(perUnit, configPerUnit)) {
+        warnCatalogRefusalOnce(`termite.${key}.band`, `[pricing-engine] termite ${key}: catalog $${perUnit.toFixed(2)}/unit outside sanity band of config $${configPerUnit.toFixed(2)}/unit — keeping config value`);
         continue;
       }
       target[costKey] = perUnit;
@@ -1232,6 +1270,13 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     // ── Termite ──────────────────────────────────────────────
+    // The station/cartridge cost basis and the catalog-link switch mutate in
+    // place across syncs (the catalog link below writes over them), so
+    // EVERY sync restores the in-code defaults before the row (if any) is
+    // applied — a removed key or a link turned off must fall back to the
+    // default, not to the last catalog value (same pattern as the pre-slab
+    // link switch). The sanity band then anchors on the config value.
+    resetTermiteCostBasisDefaults();
     if (config.termite_install) {
       const t = config.termite_install;
       setNumber(constants.TERMITE, 'installMultiplier', t.multiplier ?? t.install_multiplier, Number);
@@ -1253,10 +1298,6 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         constants.TERMITE.systems.advance.misc = Number(t.misc_per_station);
         constants.TERMITE.systems.trelona.misc = Number(t.misc_per_station);
       }
-      // Config re-applies the base station/cartridge costs every sync, so
-      // the catalog link below (or its kill switch) self-heals within one
-      // sync — the source stamps must reset with the values they describe.
-      constants.TERMITE.systems.trelona.stationCostSource = 'config';
       setBoolean(constants.TERMITE, 'linkStationCostsToCatalog', t.link_station_costs_to_catalog ?? t.linkStationCostsToCatalog);
       const cartridges = constants.TERMITE.cartridges;
       if (cartridges) {
@@ -1266,7 +1307,6 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         setNumber(cartridges, 'cartridgesPerStation', t.cartridges_per_station ?? t.cartridgesPerStation, Number);
         setNumber(cartridges, 'replacementRate', t.cartridge_replacement_rate ?? t.cartridgeReplacementRate, Number);
         setNumber(cartridges, 'followUpVisitReserve', t.follow_up_visit_reserve ?? t.followUpVisitReserve, Number);
-        cartridges.cartridgeCostSource = 'config';
       }
     }
     if (config.termite_monitoring) {

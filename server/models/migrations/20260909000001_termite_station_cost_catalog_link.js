@@ -26,16 +26,27 @@
  * service_product_usage "Termite Bait" (Trelona ATBS Bait Station): the note
  * said 1 station per 10 LF — the engine and the label default is 15 ft
  * (owner 2026-07-28). A second BOM row records replacement cartridges
- * (2 per station × 33% = 0.67 per station per year) against the cartridge
- * catalog row, which this migration seeds with needs_pricing = true when it
- * does not exist — the owner enters the vendor price in the inventory UI,
- * and the catalog link picks it up once that price is approved.
+ * (2 per station × 33% = 0.67 per station per year) against the EXISTING
+ * cartridge catalog row "Trelona Compressed Termite Bait Cartridges" (no new
+ * SKU — the repo already carries a dedupe migration for twin catalog rows).
+ * That row holds the station box price today; the owner corrects it in the
+ * inventory UI (25-pack, $170.75) and the engine's catalog link picks it up.
+ * When the row is absent (an environment seeded without it) the BOM row is
+ * skipped and logged — never fabricated against a guessed product.
  *
- * down() restores the audited pre-migration termite_install data only if the
- * row still carries exactly what up() wrote (an admin-tuned row survives a
- * rollback/re-apply cycle), reverts the usage notes, and removes the BOM row
- * it added. The seeded catalog product is left in place (it may have been
- * priced by hand since).
+ * The termite_install read-modify-write locks the row (FOR UPDATE) so the
+ * admin PUT handler, which relies on migrations serializing against it,
+ * cannot interleave a save between the read and the write while the previous
+ * deploy still serves traffic.
+ *
+ * down(): restores the audited pre-migration termite_install data only if
+ * the row still carries exactly what up() wrote (an admin-tuned row survives
+ * a rollback/re-apply cycle). The service_product_usage half is a DOCUMENTED
+ * NO-OP on rollback: up() preserves admin edits there, and the rows it wrote
+ * are admin-editable data (usage_amount / usage_unit / is_primary can be
+ * tuned in the inventory UI without touching notes), so a blanket revert or
+ * delete would erase exactly the edits up() preserved. Seed rollbacks are
+ * never destructive (waves-db skill).
  */
 const MIGRATION_TAG = 'migration:20260909000001';
 const OLD_STATION_COST = 22.05;
@@ -57,7 +68,7 @@ const CHANGELOG_IDENTITY = {
 };
 
 const STATION_PRODUCT = 'Trelona ATBS Bait Station';
-const CARTRIDGE_PRODUCT = 'Trelona Compressed Termite Bait (25-pack)';
+const CARTRIDGE_PRODUCT = 'Trelona Compressed Termite Bait Cartridges';
 const USAGE_SERVICE_TYPE = 'Termite Bait';
 const OLD_STATION_NOTE = 'Bait station — 1 per 10 linear ft perimeter';
 const NEW_STATION_NOTE = 'Loaded station (2 cartridges included) — 1 per 15 linear ft perimeter (Trelona label default; engine spacingFt)';
@@ -73,7 +84,7 @@ function near(a, b) {
 
 exports.up = async function up(knex) {
   if (await knex.schema.hasTable('pricing_config')) {
-    const row = await knex('pricing_config').where({ config_key: 'termite_install' }).first();
+    const row = await knex('pricing_config').where({ config_key: 'termite_install' }).forUpdate().first();
     if (row) {
       const oldData = parseData(row);
       const newData = { ...oldData };
@@ -125,20 +136,11 @@ exports.up = async function up(knex) {
       .update({ notes: NEW_STATION_NOTE, updated_at: knex.fn.now() });
   }
 
-  let cartridge = await knex('products_catalog').where({ name: CARTRIDGE_PRODUCT }).first('id');
+  const cartridge = await knex('products_catalog').where({ name: CARTRIDGE_PRODUCT }).first('id');
   if (!cartridge) {
-    const [inserted] = await knex('products_catalog')
-      .insert({
-        name: CARTRIDGE_PRODUCT,
-        category: 'termite bait',
-        subcategory: 'Bait cartridge',
-        formulation: 'bait',
-        container_size: '25 cartridges',
-        needs_pricing: true,
-        active: true,
-      })
-      .returning('id');
-    cartridge = { id: typeof inserted === 'object' ? inserted.id : inserted };
+     
+    console.log(`[20260909000001] catalog row ${JSON.stringify(CARTRIDGE_PRODUCT)} not present — replacement-cartridge BOM row skipped`);
+    return;
   }
   const existingBom = await knex('service_product_usage')
     .where({ service_type: USAGE_SERVICE_TYPE, product_id: cartridge.id })
@@ -162,7 +164,7 @@ exports.down = async function down(knex) {
       .where({ config_key: 'termite_install', changed_by: MIGRATION_TAG })
       .orderBy('id', 'desc')
       .first();
-    const row = audit ? await knex('pricing_config').where({ config_key: 'termite_install' }).first() : null;
+    const row = audit ? await knex('pricing_config').where({ config_key: 'termite_install' }).forUpdate().first() : null;
     if (audit && row) {
       const current = parseData(row);
       const written = typeof audit.new_value === 'string' ? JSON.parse(audit.new_value) : (audit.new_value || {});
@@ -186,17 +188,6 @@ exports.down = async function down(knex) {
     }
   }
 
-  if (!(await knex.schema.hasTable('service_product_usage')) || !(await knex.schema.hasTable('products_catalog'))) return;
-  const station = await knex('products_catalog').where({ name: STATION_PRODUCT }).first('id');
-  if (station) {
-    await knex('service_product_usage')
-      .where({ service_type: USAGE_SERVICE_TYPE, product_id: station.id, notes: NEW_STATION_NOTE })
-      .update({ notes: OLD_STATION_NOTE, updated_at: knex.fn.now() });
-  }
-  const cartridge = await knex('products_catalog').where({ name: CARTRIDGE_PRODUCT }).first('id');
-  if (cartridge) {
-    await knex('service_product_usage')
-      .where({ service_type: USAGE_SERVICE_TYPE, product_id: cartridge.id, notes: CARTRIDGE_NOTE })
-      .del();
-  }
+  // service_product_usage: documented NO-OP (see header) — admin-editable
+  // seed data is never reverted or deleted on rollback.
 };

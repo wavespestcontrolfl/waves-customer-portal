@@ -4700,39 +4700,36 @@ function priceTermiteStationRental(installPrice) {
 // are DB-tunable via pricing_config.termite_install; the station and
 // cartridge costs may come from the inventory catalog (db-bridge link),
 // which is what materialCostSource reports.
-function termiteProgramCostModel({ stations, installMaterialCost, installLabor, visitsPerYear, system }) {
+const TERMITE_SERVICE_MINUTES_PER_STATION = 5;
+function termiteProgramCostModel({ stations, installMaterialCost, installLabor, visitsPerYear, stationCost }) {
   const c = TERMITE.cartridges || {};
-  const cartridgesPerStation = Number.isFinite(Number(c.cartridgesPerStation)) ? Number(c.cartridgesPerStation) : 0;
-  const replacementRate = Number.isFinite(Number(c.replacementRate)) ? Number(c.replacementRate) : 0;
-  const cartridgeCost = Number.isFinite(Number(c.cartridgeCost)) ? Number(c.cartridgeCost) : 0;
-  const followUpVisitReserve = Number.isFinite(Number(c.followUpVisitReserve)) ? Number(c.followUpVisitReserve) : 0;
-  const visits = Number(visitsPerYear) > 0 ? Number(visitsPerYear) : 0;
-  const serviceLaborPerVisit = laborCost(stations * 5);
+  const nonNegative = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0);
+  const cartridgesPerStation = nonNegative(c.cartridgesPerStation);
+  const replacementRate = nonNegative(c.replacementRate);
+  const cartridgeCost = nonNegative(c.cartridgeCost);
+  const followUpVisitReserve = nonNegative(c.followUpVisitReserve);
+  const visits = nonNegative(visitsPerYear);
+  const onSiteMinutes = stations * TERMITE_SERVICE_MINUTES_PER_STATION;
+  const serviceLaborPerVisit = laborCost(onSiteMinutes);
   const serviceLaborAnnual = serviceLaborPerVisit * visits;
   const cartridgeReplacementAnnual = stations * cartridgesPerStation * replacementRate * cartridgeCost;
   const followUpReserveAnnual = followUpVisitReserve * serviceLaborPerVisit;
-  const annualTotal = serviceLaborAnnual + cartridgeReplacementAnnual + followUpReserveAnnual;
-  const r2 = (n) => Math.round(n * 100) / 100;
   return {
-    installMaterial: r2(installMaterialCost),
-    installLabor: r2(installLabor),
-    installTotal: r2(installMaterialCost + installLabor),
-    stationCost: r2(Number(system?.stationCost) || 0),
-    cartridgeCost: r2(cartridgeCost),
+    installMaterial: roundMoney(installMaterialCost),
+    installLabor: roundMoney(installLabor),
+    installTotal: roundMoney(installMaterialCost + installLabor),
+    stationCost: roundMoney(nonNegative(stationCost)),
+    cartridgeCost: roundMoney(cartridgeCost),
     cartridgesPerStation,
     cartridgeReplacementRate: replacementRate,
     followUpVisitReserve,
-    serviceMinutesPerVisit: stations * 5 + GLOBAL.DRIVE_TIME,
-    serviceLaborPerVisit: r2(serviceLaborPerVisit),
+    serviceMinutesPerVisit: onSiteMinutes + GLOBAL.DRIVE_TIME,
+    serviceLaborPerVisit: roundMoney(serviceLaborPerVisit),
     serviceVisitsPerYear: visits,
-    serviceLaborAnnual: r2(serviceLaborAnnual),
-    cartridgeReplacementAnnual: r2(cartridgeReplacementAnnual),
-    followUpReserveAnnual: r2(followUpReserveAnnual),
-    annualTotal: r2(annualTotal),
-    materialCostSource: {
-      station: system?.stationCostSource === 'catalog' ? 'catalog' : 'config',
-      cartridge: c.cartridgeCostSource === 'catalog' ? 'catalog' : 'config',
-    },
+    serviceLaborAnnual: roundMoney(serviceLaborAnnual),
+    cartridgeReplacementAnnual: roundMoney(cartridgeReplacementAnnual),
+    followUpReserveAnnual: roundMoney(followUpReserveAnnual),
+    annualTotal: roundMoney(serviceLaborAnnual + cartridgeReplacementAnnual + followUpReserveAnnual),
   };
 }
 
@@ -4743,6 +4740,11 @@ function priceTermiteBait(property, options = {}) {
     // (Trelona-only menu, owner 2026-07-28) — a literal here would shadow
     // it and quote 10-ft Advance for direct callers.
     system,
+    // Quote-time cost-basis snapshot replayed from a stored estimate
+    // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay, injected
+    // by both authoritative replay paths). Absent on fresh quotes, which
+    // resolve the live constant / catalog-linked station cost.
+    knobs = null,
     monitoringTier = 'basic',
     // 'own' (customer buys the stations, one-time install charge) or 'rent'
     // (Waves retains ownership, $0 install, recovery rides the quarterly).
@@ -4866,7 +4868,18 @@ function priceTermiteBait(property, options = {}) {
 
   const conMult = constructionMult.value;
   const foundAdj = foundationAdj.value;
-  const installMaterialCost = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
+  // The station cost this quote prices under. A replayed snapshot wins
+  // (only when it was stamped for THIS system — a stored Trelona quote must
+  // never lend its hardware cost to an Advance replay); otherwise the live
+  // value, which the db-bridge may have taken from the inventory catalog.
+  const replayedStationCost = knobs && typeof knobs === 'object'
+    && (!knobs.system || knobs.system === selectedSystem)
+    && Number.isFinite(Number(knobs.stationCost)) && Number(knobs.stationCost) > 0
+    ? Number(knobs.stationCost)
+    : null;
+  const stationCost = replayedStationCost ?? sys.stationCost;
+  const stationCostSource = replayedStationCost != null ? 'replay' : (sys.stationCostSource === 'catalog' ? 'catalog' : 'config');
+  const installMaterialCost = stations * (stationCost + sys.laborMaterial + sys.misc);
   // 5 min per station — calibrated Apr 2026 against All U Need invoice
   // (21 Sentricon stations installed in 78 min by one tech = 3.7 min/sta).
   // Prior value was 0.25 hr (15 min/sta), ~4x the observed pace, which made
@@ -4893,7 +4906,7 @@ function priceTermiteBait(property, options = {}) {
     installMaterialCost,
     installLabor,
     visitsPerYear: TERMITE.monitoringVisitsPerYear,
-    system: sys,
+    stationCost,
   });
 
   return {
@@ -4951,8 +4964,22 @@ function priceTermiteBait(property, options = {}) {
     // Where the hardware cost behind installation.price came from (plan
     // 2026-09-03 §A1): 'catalog' = the inventory catalog's approved vendor
     // price on the last pricing sync, 'config' = pricing_config /
-    // constants fallback. Never silent — a stale catalog prices as 'config'.
-    materialCostSource: costs.materialCostSource,
+    // constants fallback, 'replay' = the stamped cost of an already-sent
+    // quote. Never silent — a stale catalog prices as 'config'.
+    materialCostSource: {
+      station: stationCostSource,
+      cartridge: TERMITE.cartridges?.cartridgeCostSource === 'catalog' ? 'catalog' : 'config',
+    },
+    // Quote-time cost-basis snapshot (plan §A1 replay rule — the T&S
+    // pricingKnobs shape). Persisted with the estimate so a later constant,
+    // pricing_config or catalog change cannot re-price an already-sent
+    // install on replay; the knob-replay module reads it back and both
+    // authoritative replay paths inject it as options.knobs.
+    pricingKnobs: {
+      system: selectedSystem,
+      stationCost: roundMoney(stationCost),
+      stationCostSource,
+    },
     // Report-only program cost model (LAB-006): install cost plus the
     // steady-state annual cost of servicing the stations — service labor per
     // visit, label-driven cartridge replacement, and the activity follow-up

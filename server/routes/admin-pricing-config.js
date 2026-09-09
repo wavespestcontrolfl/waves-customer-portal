@@ -327,31 +327,33 @@ function validatePricingConfigData(configKey, data, oldConfig) {
       return fail('estimate_card_hold.cancelWindowHours must be a whole number of hours between 1 and 168');
     }
   } else if (configKey === 'termite_install') {
-    // Station hardware costs feed installation.price through the 1.45x
-    // multiplier, so a typo here is a doorstep price move; the cartridge
-    // keys are report-only cost inputs (plan 2026-09-03 §A1) but a bad
-    // rate still corrupts every margin report. Optional keys: absent keeps
-    // the constant; present must be sane.
-    const nonNegativeOptional = (key, label) => {
-      if (data?.[key] == null) return null;
-      return isNonNegative(data[key]) ? null : fail(`termite_install.${key} must be a non-negative ${label}`);
+    // Station hardware costs feed installation.price through the install
+    // multiplier, so a typo here is a doorstep price move — and db-bridge
+    // applies BOTH key spellings (`trelona_bait ?? trelona_station_cost`,
+    // `multiplier ?? install_multiplier`, snake_case ?? camelCase for the
+    // cartridge inputs), so every alias is bounded the same way its primary
+    // is. Station costs and multipliers must be strictly positive: a stored
+    // 0 prices a 15-station install at ~$131 and disables the catalog link
+    // (the sanity band anchors on the config value). Cartridge keys are
+    // report-only (plan 2026-09-03 §A1) but a bad rate corrupts every
+    // margin report. Optional keys: absent keeps the constant.
+    const check = (keys, predicate, label) => {
+      for (const key of keys) {
+        if (data?.[key] == null) continue;
+        if (!predicate(data[key])) return fail(`termite_install.${key} must be ${label}`);
+      }
+      return null;
     };
-    for (const [key, label] of [['trelona_bait', '$/station'], ['advance_bait', '$/station'], ['trelona_station_cost', '$/station'], ['advance_station_cost', '$/station'], ['labor_per_station', '$/station'], ['misc_per_station', '$/station'], ['cartridge_cost', '$/cartridge'], ['follow_up_visit_reserve', 'visits per year']]) {
-      const failed = nonNegativeOptional(key, label);
-      if (failed) return failed;
-    }
-    if (data?.multiplier != null && !isPositive(data.multiplier)) return fail('termite_install.multiplier must be positive');
-    if (data?.cartridges_per_station != null) {
-      const n = num(data.cartridges_per_station);
-      if (!Number.isInteger(n) || n < 1 || n > 4) return fail('termite_install.cartridges_per_station must be a whole number between 1 and 4');
-    }
-    if (data?.cartridge_replacement_rate != null) {
-      const rate = num(data.cartridge_replacement_rate);
-      if (!Number.isFinite(rate) || rate < 0 || rate > 1) return fail('termite_install.cartridge_replacement_rate must be a fraction between 0 and 1');
-    }
-    if (data?.link_station_costs_to_catalog != null && typeof data.link_station_costs_to_catalog !== 'boolean') {
-      return fail('termite_install.link_station_costs_to_catalog must be a boolean');
-    }
+    const failed = check(['trelona_bait', 'trelona_station_cost', 'advance_bait', 'advance_station_cost', 'hexpro_bait'], isPositive, 'a positive $/station cost')
+      || check(['multiplier', 'install_multiplier'], isPositive, 'a positive multiplier')
+      || check(['labor_per_station', 'labor_material_per_station', 'misc_per_station'], isNonNegative, 'a non-negative $/station amount')
+      || check(['cartridge_cost', 'cartridgeCost'], isNonNegative, 'a non-negative $/cartridge cost')
+      || check(['follow_up_visit_reserve', 'followUpVisitReserve'], isNonNegative, 'a non-negative number of visits per year')
+      || check(['min_stations', 'minStations'], (v) => Number.isInteger(num(v)) && num(v) >= 1 && num(v) <= 50, 'a whole number of stations between 1 and 50')
+      || check(['cartridges_per_station', 'cartridgesPerStation'], (v) => Number.isInteger(num(v)) && num(v) >= 1 && num(v) <= 4, 'a whole number between 1 and 4')
+      || check(['cartridge_replacement_rate', 'cartridgeReplacementRate'], (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) <= 1, 'a fraction between 0 and 1')
+      || check(['link_station_costs_to_catalog', 'linkStationCostsToCatalog'], (v) => typeof v === 'boolean', 'a boolean');
+    if (failed) return failed;
   } else if (configKey === 'termite_bond') {
     // Warranty-bond quarterly rates by term (owner 2026-07-20). Strictly
     // positive dollars — the db-bridge sync coerces and overwrites runtime

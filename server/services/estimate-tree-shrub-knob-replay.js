@@ -64,6 +64,56 @@ function treeShrubKnobSignalForReplay(estData = {}) {
   };
 }
 
+// ── Termite station cost (plan 2026-09-03 §A1) ───────────────────────────
+// The Trelona station cost moved 22.05 → 24.00 on 2026-09-09 and, once
+// catalog-linked, moves whenever the approved vendor price does. Every
+// replay path re-runs generateEstimate under the LIVE value, so without an
+// input-level override a sent $610 install would re-price to $653 on
+// revisit / accept and the options sheet would fail closed on the drift.
+// Same contract as the T&S knobs above, one home for both replay paths:
+//  - a stamped line (pricingKnobs.stationCost) replays verbatim;
+//  - a stored termite line with NO stamp predates the stamp, so it could
+//    only have been priced at the pre-A1 constant for its system — that
+//    constant is kept HERE as the no-stamp default (never read from the
+//    live constants, which have moved on);
+//  - no termite line anywhere → null (fresh quotes resolve the live value).
+const PRE_STAMP_TERMITE_STATION_COST = Object.freeze({
+  trelona: 22.05, // Apr 2026 wholesale ($352.80 / 16), the value every unstamped quote priced under
+  advance: 13.16,
+});
+
+function termiteKnobSignalForReplay(estData = {}) {
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const lineItems = [
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+  ];
+  const termiteLine = lineItems.find((li) => (li?.service || '') === 'termite_bait');
+  // Admin V2 persists ONLY the mapped legacy envelope (result.results.tmBait)
+  // with no raw lineItems — the mapped stamp is a first-class source, and
+  // it WINS over a stale raw engineResult for the same reason as tsMeta.
+  const tmBait = result?.results?.tmBait && typeof result.results.tmBait === 'object'
+    ? result.results.tmBait
+    : (estData?.result?.results?.tmBait || null);
+  if (!termiteLine && !tmBait) return null;
+  const stamped = (tmBait && tmBait.pricingKnobs) || (termiteLine && termiteLine.pricingKnobs);
+  const storedSystem = String(
+    (tmBait && (tmBait.selectedSystem || tmBait.system))
+    || (termiteLine && (termiteLine.selectedSystem || termiteLine.system))
+    || 'trelona',
+  ).toLowerCase();
+  const stampedCost = stamped && typeof stamped === 'object' ? Number(stamped.stationCost) : NaN;
+  if (Number.isFinite(stampedCost) && stampedCost > 0) {
+    return {
+      system: String(stamped.system || storedSystem).toLowerCase(),
+      stationCost: stampedCost,
+    };
+  }
+  const fallback = PRE_STAMP_TERMITE_STATION_COST[storedSystem];
+  if (!Number.isFinite(fallback)) return null;
+  return { system: storedSystem, stationCost: fallback };
+}
+
 // Stored-result palm provenance for translator-based replays (v4.8, pre-push
 // r2 P0). translateV2CallToV1Input now promotes a property-level palm count
 // (typed inventory, else a trusted vision estimate) onto services.treeShrub
@@ -115,6 +165,8 @@ function applyTreeShrubPalmReplay(v1Input, estData = {}) {
 }
 
 module.exports = {
+  termiteKnobSignalForReplay,
+  PRE_STAMP_TERMITE_STATION_COST,
   treeShrubKnobSignalForReplay,
   NEUTRAL_TREE_SHRUB_KNOBS,
   treeShrubPalmProvenanceForReplay,
