@@ -15,7 +15,7 @@ const answer = (overrides = {}) => ({
     fungal_activity: sig('minor'), insect_damage: sig('unknown', 'unknown', ''), drought_stress: sig('moderate'),
     mechanical_damage: sig('none'), thatch_visibility: sig('moderate'), overwatering_signal: sig('yes', 'high', 'mushrooms photo 2'),
   },
-  scores: { turf_density: { determinable: true, value: 72 }, weed_coverage: { determinable: true, value: 15 }, color_health: { determinable: false, value: 0 } },
+  scores: { turf_density: { determinable: true, value: 72 }, weed_coverage: { determinable: true, value: 15 }, color_health: { determinable: false, value: 1 } },
   observations: 'Dense turf with one dry edge; photos were adequate.',
   ...overrides,
 });
