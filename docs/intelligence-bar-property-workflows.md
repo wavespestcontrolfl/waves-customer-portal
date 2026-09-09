@@ -66,6 +66,10 @@ does not refresh B. Escape closes the topmost bar without closing Customer 360.
 The primary impact dialog uses the shared Dialog and sits above the record drawer.
 The server returns primary eligibility from the same guard used by the preview;
 ineligible rows show a disabled control with a reason, refreshed after occupancy edits.
+That guard also checks the account's tenant role. Restoring an unclassified
+legacy account row runs the normal promotion writer, including owner occupancy
+and the disclosed profile effects. Settled visits preserve a legacy estimate's
+contradicting street or unit even when its property linkage is missing.
 Initial loads and refreshes share request sequencing and customer guards, so
 an older read or an A save finishing after navigation cannot replace B's profile.
 
@@ -179,3 +183,12 @@ layer prop so it stays above the Customer 360 overlay. Verification passes all
 15 isolated PostgreSQL cases, 28 property unit tests and 16 panel tests. Chrome
 at 1440 and 390 pixels confirms the dialog is visible and clickable over the
 profile, with loaded fonts, no JavaScript exceptions and no horizontal overflow.
+
+The latest local corrections pass all 16 PostgreSQL property scenarios and 73
+property/role/route unit tests. They cover tenant list/preview/confirmation
+refusal (including a role change after approval), complete occupancy on both
+legacy primary choices, and settled visits with missing estimate linkage and
+matching, conflicting or absent address evidence. Domain and coverage gates
+pass; lint has no errors. The published head remains `30e6687302`; these
+corrections are held for the review split in
+`docs/intelligence-bar-property-split-proposal.md`.
