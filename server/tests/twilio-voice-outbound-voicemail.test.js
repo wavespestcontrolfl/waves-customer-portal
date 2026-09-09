@@ -152,6 +152,15 @@ describe('POST /outbound-connect', () => {
     expect(res.body.includes('machineDetection="Enable"')).toBe(voicemail);
   });
 
+  test('a persisted callback bridge keeps completion when both gates roll back before press 1', async () => {
+    installDb({ call_log: { metadata: { relatedCommitmentId: 'callback-1' } } });
+    const res = mockRes();
+    await connect()(req(), res);
+    expect(res.body.match(/ action=/g)).toHaveLength(1);
+    expect(res.body).toContain(`/outbound-dial-complete?callLogId=${CALL_LOG_ID}`);
+    expect(res.body).not.toContain('machineDetection');
+  });
+
   test('gate off → TwiML is the pre-lane shape: no machineDetection, no action', async () => {
     const res = mockRes();
     await connect()(req(), res);

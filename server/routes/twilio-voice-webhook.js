@@ -3120,7 +3120,6 @@ router.post('/outbound-admin-prompt', async (req, res) => {
 // =========================================================================
 router.post('/outbound-connect', async (req, res) => {
   try {
-    const { isEnabled } = require('../config/feature-gates');
     const customerNumber = req.query.customerNumber || req.body.customerNumber;
     const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber || TWILIO_NUMBERS.mainLine.number;
     const rawCallLogId = req.query.callLogId || req.body.callLogId;
@@ -3159,14 +3158,18 @@ router.post('/outbound-connect', async (req, res) => {
     const voicemailText = outboundVoicemailTextDialOptions({
       callLogId: rawCallLogId, customerNumber, callerIdNumber,
     });
+    // A bridge already placed by a card keeps its completion evidence after rollback.
+    const callbackRow = CALL_LOG_ID_SHAPE.test(String(rawCallLogId || '')) && !require('../services/callback-cards').enabled()
+      ? await db('call_log').where({ id: rawCallLogId }).first('metadata') : null;
+    const callbackCompletion = require('../services/callback-cards').enabled()
+      || !!foldVoiceMetadata(callbackRow?.metadata, {}).relatedCommitmentId;
     const dial = twiml.dial({
       callerId: callerIdNumber,
       record: 'record-from-answer-dual',
       recordingStatusCallback: '/api/webhooks/twilio/recording-status',
       recordingStatusCallbackEvent: 'completed',
       ...voicemailText.dial,
-      ...(!voicemailText.dial.action && rawCallLogId && isEnabled('callCommitments')
-        && require('../services/callback-cards').enabled()
+      ...(!voicemailText.dial.action && rawCallLogId && callbackCompletion
         ? { action: `/api/webhooks/twilio/outbound-dial-complete?callLogId=${encodeURIComponent(rawCallLogId)}` } : {}),
     });
     dial.number(voicemailText.number, customerNumber);
