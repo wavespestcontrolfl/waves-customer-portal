@@ -46,6 +46,7 @@ function makeInner({
       whereNull: jest.fn(() => b),
       orWhere: jest.fn(() => b),
       whereNotIn: jest.fn(() => b),
+      forNoKeyUpdate: jest.fn(() => b),
       first: jest.fn(async () => {
         if (failOn === 'first') throw new Error('boom');
         if (table === 'leads') return convertible;
@@ -113,6 +114,8 @@ describe('convertCallLeadOnPhoneBooking', () => {
 
     expect(converted).toBe(true);
     expect(trx.transaction).toHaveBeenCalledTimes(1); // savepoint, not the outer txn raw
+    expect(inner._chains[0]._table).toBe('customers');
+    expect(inner._chains[0].forNoKeyUpdate).toHaveBeenCalled();
     const update = inner._writes.updates.find((w) => w.table === 'leads');
     expect(update.payload).toMatchObject({
       status: 'won',
@@ -153,7 +156,7 @@ describe('convertCallLeadOnPhoneBooking', () => {
     expect(inner._writes.updates).toHaveLength(0);
     expect(inner._writes.inserts).toHaveLength(0);
     // The open-status filter is the idempotency/duplicate guard.
-    const b = inner.mock.results[0].value;
+    const b = inner._chains.find(chain => chain._table === 'leads');
     expect(b.whereNotIn).toHaveBeenCalledWith('status', ['won', 'duplicate']);
   });
 

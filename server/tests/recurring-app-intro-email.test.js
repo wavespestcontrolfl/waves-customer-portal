@@ -2,20 +2,22 @@
 // (app_intro:<customerId>); these tests cover the upstream guards that decide
 // whether sendAppIntro is even called from the en-route hook.
 //
-// NOTE: waveguard_tier is read from the customers table (loadService doesn't
-// join customers), so the db mock is table-aware: customers -> tier,
-// service_records -> completed-visit count.
 const mockFirstServiceVisit = jest.fn(async () => true);
 jest.mock('../services/customer-visit-history', () => ({
   isFirstServiceVisit: (...args) => mockFirstServiceVisit(...args),
 }));
-let mockTier = 'Bronze';
-jest.mock('../models/db', () => jest.fn((table) => {
-  if (table === 'customers') {
-    return { where: () => ({ first: async () => ({ waveguard_tier: mockTier }) }) };
-  }
-  throw new Error('Unexpected table: ' + table);
-}));
+// notification_prefs reader: resolves to the row set by mockPrefs (null =
+// no row = allowed), or rejects when mockPrefsError is set (fail closed).
+let mockPrefs = null;
+let mockPrefsError = null;
+jest.mock('../models/db', () => jest.fn(() => ({
+  where: () => ({
+    first: async () => {
+      if (mockPrefsError) throw mockPrefsError;
+      return mockPrefs;
+    },
+  }),
+})));
 jest.mock('../services/account-membership-email', () => ({
   sendAppIntro: jest.fn(async () => ({ ok: true, messageId: 'm1' })),
 }));
@@ -39,7 +41,8 @@ describe('recurring-app-intro-email gating', () => {
     jest.clearAllMocks();
     mockFirstServiceVisit.mockResolvedValue(true);
     mockTierLabelStatus.mockResolvedValue('not_label');
-    mockTier = 'Bronze';
+    mockPrefs = null;
+    mockPrefsError = null;
     process.env.GATE_APP_INTRO_EMAIL = 'true';
   });
   afterAll(() => { delete process.env.GATE_APP_INTRO_EMAIL; });
@@ -51,17 +54,35 @@ describe('recurring-app-intro-email gating', () => {
     expect(AccountMembershipEmail.sendAppIntro).not.toHaveBeenCalled();
   });
 
-  test('skips a non-recurring service', async () => {
-    const r = await RecurringAppIntro.maybeSendOnEnRoute({ ...recurringSvc, is_recurring: false });
-    expect(r).toMatchObject({ sent: false, reason: 'not_recurring' });
+  test.each([false, true])('includes first visits without membership (recurring: %s)', async isRecurring => {
+    const r = await RecurringAppIntro.maybeSendOnEnRoute({ ...recurringSvc, is_recurring: isRecurring });
+    expect(r).toMatchObject({ ok: true });
+    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['label', 'unknown'])('excludes unverifiable or label-only tiers: %s', async label => {
+    mockTierLabelStatus.mockResolvedValue(label);
+    const r = await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
+    expect(r).toMatchObject({ sent: false, reason: 'label_only_tier' });
     expect(AccountMembershipEmail.sendAppIntro).not.toHaveBeenCalled();
   });
 
-  test('skips a recurring customer with no membership tier (tier read from customers)', async () => {
-    mockTier = null;
-    const r = await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
-    expect(r).toMatchObject({ sent: false, reason: 'not_member' });
+  test.each([false, true])('honors the portal-wide email opt-out for the expanded audience (recurring: %s)', async isRecurring => {
+    mockPrefs = { email_enabled: false };
+    const r = await RecurringAppIntro.maybeSendOnEnRoute({ ...recurringSvc, is_recurring: isRecurring });
+    expect(r).toMatchObject({ sent: false, skipped: true, reason: 'email_opted_out' });
     expect(AccountMembershipEmail.sendAppIntro).not.toHaveBeenCalled();
+    expect(await RecurringAppIntro.appIntroEligibility(recurringSvc)).toEqual({ eligible: false, reason: 'email_opted_out' });
+  });
+
+  test('a missing prefs row or email_enabled=true still sends; an unreadable pref fails CLOSED', async () => {
+    mockPrefs = { email_enabled: true };
+    await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
+    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledTimes(1);
+    mockPrefsError = new Error('db down');
+    const r = await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
+    expect(r).toMatchObject({ sent: false, skipped: true, reason: 'prefs_unavailable' });
+    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledTimes(1);
   });
 
   test('skips when the customer already has a completed visit (not their first)', async () => {
