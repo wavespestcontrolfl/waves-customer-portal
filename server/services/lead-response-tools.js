@@ -423,7 +423,7 @@ async function executeLeadTool(toolName, input, context) {
             reason: input.reason,
             urgency: input.urgency,
           }),
-        }).catch(() => {});
+        });
       }
 
       // SMS Adam with the lead details + suggested reply

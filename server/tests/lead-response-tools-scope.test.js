@@ -9,6 +9,7 @@ const mockDb = jest.fn(table => {
   const builder = {
     where: jest.fn((key, value) => { Object.assign(filters, typeof key === 'object' ? key : { [key]: value }); return builder; }),
     whereNull: jest.fn(key => { filters[key] = null; return builder; }),
+    insert: jest.fn(async () => { throw new Error('storage unavailable'); }),
     first: jest.fn(async () => {
       const row = table === 'leads' ? mockState.lead : mockState.customer;
       return row && Object.entries(filters).every(([key, value]) => (row[key] ?? null) === value) ? row : undefined;
@@ -53,3 +54,8 @@ test.each(['send_lead_response', 'queue_for_adam', 'update_lead_pipeline', 'flag
     expect(mockDb).not.toHaveBeenCalled();
   },
 );
+
+test('queue persistence failure propagates before reporting queued', async () => {
+  await expect(executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Synthetic draft' }, context))
+    .rejects.toThrow('storage unavailable');
+});
