@@ -131,21 +131,24 @@ describe('authenticated portal partial failures', () => {
     expect(screen.getByText(/no upcoming services scheduled/i)).toBeInTheDocument();
   });
 
-  it('describes reminder delivery using the customer saved channels', async () => {
+  it.each([
+    ['email', 'both', 'email', 'text + email'],
+    ['push', 'push', 'app', 'app'],
+  ])('describes saved %s/%s reminder channels', async (channel72, channel24, label72, label24) => {
     const futureDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     api.getSchedule.mockResolvedValue({
       upcoming: [{ id: 'svc-1', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', windowStart: '09:00' }],
     });
     api.getNotificationPrefs.mockResolvedValue({
-      serviceReminder72hChannel: 'email',
-      serviceReminder24hChannel: 'both',
+      serviceReminder72hChannel: channel72,
+      serviceReminder24hChannel: channel24,
     });
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [] });
 
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
-    expect(await screen.findByText('72-hour email reminder')).toBeInTheDocument();
-    expect(screen.getByText('24-hour text + email reminder')).toBeInTheDocument();
+    expect(await screen.findByText(`72-hour ${label72} reminder`)).toBeInTheDocument();
+    expect(screen.getByText(`24-hour ${label24} reminder`)).toBeInTheDocument();
     expect(screen.queryByText('72-hour SMS reminder')).not.toBeInTheDocument();
   });
 

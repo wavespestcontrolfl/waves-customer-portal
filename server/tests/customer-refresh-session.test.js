@@ -139,6 +139,31 @@ describe('durable customer refresh sessions', () => {
       .resolves.toMatchObject({ ok: true, familyId: initial.familyId });
   });
 
+  test('a saved-property claim is minted on the switch, forwarded by plain rotation, and cleared by an explicit null', async () => {
+    installMemoryDb();
+    const initial = await createRefreshSession(customer.id, customer.account_id);
+    expect(jwt.decode(initial.refreshToken)).not.toHaveProperty('propertyId');
+
+    // Same-profile switch naming a saved property → the new family token carries it.
+    const switched = await reissueRefreshSessionForProperty(
+      initial.refreshToken, customer.id, customer.account_id, customer.id, initial.familyId, { propertyId: 'prop-2' },
+    );
+    expect(switched).toMatchObject({ ok: true, propertyId: 'prop-2' });
+    expect(jwt.decode(switched.refreshToken).propertyId).toBe('prop-2');
+
+    // A plain /auth/refresh rotation forwards the claim unchanged.
+    const rotated = await rotateRefreshSession(switched.refreshToken);
+    expect(rotated).toMatchObject({ ok: true, propertyId: 'prop-2' });
+    expect(jwt.decode(rotated.refreshToken).propertyId).toBe('prop-2');
+
+    // Switching back to the profile's primary (propertyId null) clears it — never forwards the old secondary.
+    const cleared = await reissueRefreshSessionForProperty(
+      rotated.refreshToken, customer.id, customer.account_id, customer.id, initial.familyId, { propertyId: null },
+    );
+    expect(cleared).toMatchObject({ ok: true, propertyId: null });
+    expect(jwt.decode(cleared.refreshToken)).not.toHaveProperty('propertyId');
+  });
+
   test('logout revokes a family without requiring an access token', async () => {
     const rows = installMemoryDb();
     const session = await createRefreshSession(customer.id, customer.account_id);
