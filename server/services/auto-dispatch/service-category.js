@@ -85,7 +85,6 @@ function serviceFamilyPreference(rows, serviceType, { before, after } = {}) {
  * preferred_time. Lawn-family → mid/late morning; everything pest-family → early.
  */
 function defaultTimeWindow(serviceType) {
-  if (require('../scheduling/policy').capacityEnabled()) return null;
   const category = classifyServiceCategory(serviceType);
   return LAWN_FAMILY.has(category) ? TIME_WINDOWS.late_morning : TIME_WINDOWS.early_morning;
 }

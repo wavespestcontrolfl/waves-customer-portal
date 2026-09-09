@@ -38,7 +38,8 @@ test('service-family preference is finite, weighted by work, and unknown work st
   expect(serviceFamilyPreference(lawn, 'Pest Control')).toBeLessThan(0);
   expect(serviceFamilyPreference(lawn, 'Consultation')).toBe(0);
   expect(serviceFamilyPreference([], 'Lawn Care')).toBe(0);
-  expect(defaultTimeWindow('Lawn Care')).toBeNull();
+  expect(defaultTimeWindow('Lawn Care')).toMatchObject({ startMin: 600, endMin: 720 });
+  expect(defaultTimeWindow('Pest Control')).toMatchObject({ startMin: 480, endMin: 600 });
 });
 
 test('every afternoon anchor leaves room for the two-hour arrival promise', () => {

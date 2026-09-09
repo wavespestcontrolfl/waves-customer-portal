@@ -366,18 +366,6 @@ async function findConflictingVisits({
   if (arrivalWindow) {
     const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./arrival-route');
     if (arrivalWindowRoutingEnabled()) {
-      if (require('./policy').capacityEnabled() && arrivalWindow.commitPlacement === true) {
-        const { enforceArrivalCapacity, persistArrivalOrder } = require('./arrival-route');
-        const fit = await enforceArrivalCapacity({ conn: db, ...arrivalWindow,
-          date: String(date).split('T')[0], windowStart, windowEnd, excludeServiceIds: excludeIds });
-        // Existing rows can be renumbered now. A pending date/tech move puts
-        // its new order on the same update object the writer will commit.
-        if (!arrivalWindow.prospective) {
-          await persistArrivalOrder(db, fit, arrivalWindow.serviceId);
-          if (arrivalWindow.changes) arrivalWindow.changes.route_order = fit.routeOrder.indexOf(arrivalWindow.serviceId) + 1;
-        }
-        return [];
-      }
       const fit = await checkArrivalPlacement({
         conn: db, ...arrivalWindow, date: String(date).split('T')[0],
         windowStart, windowEnd, excludeServiceIds: excludeIds,
@@ -408,10 +396,10 @@ async function findConflictingVisits({
     // COALESCE the nullable window_end (admin edits can leave a start with
     // no end) — same predicate as slot-reservation/rebooker/createSelfBooking.
     // window_start-NULL placeholder rows evaluate NULL here and stay inert.
-    .where(q => q.whereRaw(
-      "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time",
+    .whereRaw(
+      "((window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time) OR reservation_service_mix->>'version' = '2')",
       [windowEnd, DEFAULT_DURATION_MINUTES, windowStart],
-    ).orWhereRaw("reservation_service_mix->>'version' = '2'"));
+    );
   if (excludeIds.length) query.whereNotIn('id', excludeIds);
   if (excludeCustomerId) {
     // customer_id <> ? is NULL (not true) for customer-NULL hold rows, so a
@@ -428,8 +416,13 @@ async function findConflictingVisits({
     });
   }
   const rows = await query.select(CONFLICT_COLUMNS).orderBy('window_start', 'asc');
-  return Array.isArray(rows) ? occupiedRows(rows).filter(row => row.startMin != null
-    && windowsOverlap(timeToMinutes(windowStart), timeToMinutes(windowEnd), row.startMin, row.endMin)) : [];
+  if (!Array.isArray(rows)) return [];
+  // SQL already filters ordinary visits. Combined members need the full
+  // allocation span, while callers still receive the original database rows.
+  const occupied = occupiedRows(rows);
+  return rows.filter((row, index) => row.reservation_service_mix?.version !== 2
+    || (occupied[index].startMin != null && windowsOverlap(timeToMinutes(windowStart), timeToMinutes(windowEnd),
+      occupied[index].startMin, occupied[index].endMin)));
 }
 
 /**
