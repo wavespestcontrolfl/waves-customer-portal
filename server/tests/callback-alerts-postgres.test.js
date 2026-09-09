@@ -121,14 +121,30 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect(active).toHaveLength(1); expect(active[0].id).toBe(first.id);
   });
 
-  test('a failed fulfillment scan preserves the full prior backlog', async () => {
-    for (let i = 0; i < 6; i += 1) await seed();
+  test('a failed fulfillment lookup preserves prior work while verified new work alerts', async () => {
+    const failed = await seed();
+    for (let i = 0; i < 5; i += 1) await seed();
     await runSweep(); const [first] = await unread();
-    jest.spyOn(ledger, 'refreshFulfillment').mockResolvedValueOnce({ failed: 1 });
+    const refresh = ledger.refreshFulfillment;
+    jest.spyOn(ledger, 'refreshFulfillment').mockImplementation((c, id) => id === failed.call_log_id ? Promise.resolve({ failed: 1 }) : refresh(c, id));
     await seed();
-    expect(await runSweep()).toMatchObject({ alerted: 0 });
+    expect(await runSweep()).toMatchObject({ alerted: 1, overdue: 7, unverified: 1 });
     const active = await unread();
-    expect(active).toHaveLength(1); expect(active[0]).toEqual(first);
+    expect(active).toHaveLength(1); expect(active[0].id).toBe(first.id);
+    expect(active[0].metadata.overdue_count).toBe(7);
+    expect(active[0].metadata.overdue_commitment_ids).toEqual(expect.arrayContaining(first.metadata.overdue_commitment_ids));
+  });
+
+  test.each([false, true])('failed proof does not suppress verified work (previous reminder: %s)', async (previous) => {
+    const failed = await seed();
+    if (previous) { await runSweep(); await unread().update({ read_at: now }); }
+    const healthy = await seed();
+    const refresh = ledger.refreshFulfillment;
+    jest.spyOn(ledger, 'refreshFulfillment').mockImplementation((c, id) => id === failed.call_log_id ? Promise.resolve({ failed: 1 }) : refresh(c, id));
+    expect(await runSweep()).toMatchObject({ unverified: 1 });
+    expect((await unread()).map((n) => n.metadata.commitment_id)).toEqual([healthy.id]);
+    await runSweep();
+    expect((await unread()).map((n) => n.metadata.commitment_id)).toEqual([healthy.id]);
   });
 
   test('real customer conversation evidence closes a callback and retires its reminder', async () => {

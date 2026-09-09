@@ -122,18 +122,18 @@ test('fulfillment is refreshed for every candidate call before paging; a promise
 test('a call whose fulfillment refresh FAILED is left out of the bell — its promise may already be kept — and reported as unverified', async () => {
   listOpenCommitments.mockResolvedValue([row('a'), row('b')]);
   refreshFulfillment.mockRejectedValueOnce(new Error('connection reset'));
-  const out = await runCallCommitmentsWatchdog({ now: NOW });
+  await expect(runCallCommitmentsWatchdog({ now: NOW })).rejects.toThrow('verification incomplete');
   expect(refreshFulfillment).toHaveBeenCalledTimes(2);
-  expect(out).toMatchObject({ overdue: 0, alerted: 0, unverified: 1 });
-  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.commitment_id).toBe('b');
 });
 
 test('a refresh whose lookups failed (failed > 0 in the summary) also leaves that call out of the bell', async () => {
   listOpenCommitments.mockResolvedValue([row('a'), row('b')]);
   refreshFulfillment.mockResolvedValueOnce({ checked: 1, fulfilled: 0, hinted: 0, cleared: 0, failed: 1 });
-  const out = await runCallCommitmentsWatchdog({ now: NOW });
-  expect(out).toMatchObject({ overdue: 0, alerted: 0, unverified: 1 });
-  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  await expect(runCallCommitmentsWatchdog({ now: NOW })).rejects.toThrow('verification incomplete');
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.commitment_id).toBe('b');
 });
 
 test('a promise the office settled after the snapshot was taken never rings: rows are re-checked as still open right before paging; the bells carry the tech-visible trigger key', async () => {

@@ -79,7 +79,13 @@ async function runCallCommitmentsWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('callCommitments')) return { skipped: true, reason: 'gated_off' };
   const { runExclusive } = require('../utils/cron-lock');
-  return runExclusive('call-commitments-watchdog', () => runInner({ now }));
+  return runExclusive('call-commitments-watchdog', async () => {
+    const result = await runInner({ now });
+    // Reconciliation already committed verified work. Report partial proof
+    // failures to job health without rolling those notifications back.
+    if (result.unverified) throw new Error(`Fulfillment verification incomplete for ${result.unverified} call(s)`);
+    return result;
+  });
 }
 
 async function runInner({ now = new Date() } = {}) {
@@ -90,8 +96,8 @@ async function runInner({ now = new Date() } = {}) {
   // candidate calls here — the same cheap indexed lookups the queue route
   // runs — and re-list before deciding what is overdue.
   // A call whose refresh FAILED — the call threw, or any of its lookups did
-  // (`failed` in the summary) — is not verified either way. Preserve the
-  // existing reminder set until the next tick can verify the entire batch.
+  // (`failed` in the summary) — is not verified either way. Carry forward
+  // its existing reminder version while independently verified work proceeds.
   const callIds = [...new Set(rows.map((r) => r.call_log_id))];
   const unverifiedCalls = new Set();
   let refreshed = 0;
@@ -102,26 +108,42 @@ async function runInner({ now = new Date() } = {}) {
       return {};
     });
     if (r.failed > 0) {
-      logger.warn(`[call-commitments-watchdog] ${r.failed} fulfillment lookup(s) failed for call ${id} — reminder reconciliation deferred`);
+      logger.warn(`[call-commitments-watchdog] ${r.failed} fulfillment lookup(s) failed for call ${id} — retaining prior reminder evidence`);
       unverifiedCalls.add(id);
     }
     refreshed += r.fulfilled || 0;
   }
   if (refreshed > 0) rows = await listAllOpenWaves(now);
-  const candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id) && !unverifiedCalls.has(r.call_log_id));
+  const candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
   const unverified = unverifiedCalls.size;
   // The snapshot is minutes old by now (one refresh per candidate call):
   // a promise the office marked done or dismissed meanwhile must not ring.
-  if (unverified) return { skipped: false, scanned: rows.length, overdue: 0, alerted: 0, unverified };
   const liveIds = await commitments.stillOpenIds(db, candidates.map((r) => r.id), { now });
   return db.transaction(async (trx) => {
     // Fence the notification version against a concurrent staff action.
     const live = await trx('call_commitments as cc').whereIn('cc.id', [...liveIds]).where('cc.status', 'open')
       .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`).orderBy('cc.id').forUpdate('cc').select('cc.*');
     const current = live.map((r) => ({ ...candidates.find((c) => c.id === r.id), ...r }));
-    const overdue = commitments.selectOverdue(current, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
-    const result = { skipped: false, scanned: rows.length, overdue: overdue.length, alerted: 0, unverified };
     const noticeRows = () => trx('notifications').where({ recipient_type: 'admin' });
+    const priorAggregate = await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
+      .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at');
+    const aggregateMeta = typeof priorAggregate?.metadata === 'string' ? JSON.parse(priorAggregate.metadata) : priorAggregate?.metadata;
+    const overdue = [], versions = {};
+    for (const row of commitments.selectOverdue(current, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id))) {
+      let version = reminderVersion(row);
+      if (unverifiedCalls.has(row.call_log_id)) {
+        // Never create a first alert from unverified evidence, but retain
+        // previously announced work and its acknowledgment version.
+        const inAggregate = !aggregateMeta?.retired && aggregateMeta?.overdue_commitment_ids?.includes(row.id);
+        const prior = !inAggregate && await noticeRows().whereRaw("metadata->>'commitment_id' = ?", [row.id])
+          .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'").orderBy('created_at', 'desc').first('metadata');
+        if (!inAggregate && !prior) continue;
+        const meta = typeof prior?.metadata === 'string' ? JSON.parse(prior.metadata) : prior?.metadata;
+        version = (inAggregate ? aggregateMeta.overdue_versions?.[row.id] : meta?.dedupeVersion) || version;
+      }
+      overdue.push(row); versions[row.id] = version;
+    }
+    const result = { skipped: false, scanned: rows.length, overdue: overdue.length, alerted: 0, unverified };
     // Both schedules use the existing identities. A gate change changes the
     // callback deadline policy, never the owner of persisted reminder rows.
     await trx('notifications as n').where({ recipient_type: 'admin' }).whereNull('read_at')
@@ -137,7 +159,6 @@ async function runInner({ now = new Date() } = {}) {
         .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
       return result;
     }
-    const versions = Object.fromEntries(overdue.map((r) => [r.id, reminderVersion(r)]));
     const openSince = (r) => r.source === 'human' ? r.created_at : (r.call_started_at || r.created_at);
     const describe = (r) => `${whoFor(r)} — ${r.description}${r.due_at ? ` (due ${etWhen(r.due_at)} ET)` : ` (open since ${etWhen(openSince(r))} ET)`}`;
     if (overdue.length > AGGREGATE_THRESHOLD) {
@@ -158,9 +179,6 @@ async function runInner({ now = new Date() } = {}) {
         .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
       return { ...result, alerted: 1, aggregate: true };
     }
-    const priorAggregate = await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
-      .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at');
-    const aggregateMeta = typeof priorAggregate?.metadata === 'string' ? JSON.parse(priorAggregate.metadata) : priorAggregate?.metadata;
     let unannounced = 0;
     for (const r of overdue) {
       const notif = await NotificationService.notifyAdmin('alert', 'A promise to a caller is overdue',
