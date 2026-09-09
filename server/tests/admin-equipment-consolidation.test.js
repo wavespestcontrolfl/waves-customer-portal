@@ -13,6 +13,7 @@ jest.mock('../utils/datetime-et', () => ({
   etDateString: jest.fn(() => '2026-05-17'),
 }));
 jest.mock('../middleware/admin-auth', () => ({
+  requireAdmin: jest.requireActual('../middleware/admin-auth').requireAdmin,
   adminAuthenticate: (req, _res, next) => {
     req.technician = { id: 'admin-1', role: 'admin', name: 'Owner' };
     req.technicianId = 'admin-1';

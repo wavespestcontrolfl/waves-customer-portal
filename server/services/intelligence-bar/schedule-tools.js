@@ -358,10 +358,10 @@ async function optimizeAllRoutes(input) {
     ],
   });
 
-  if (!services.length) return { message: 'No services found for this date', date };
+  if (!services.length) return { blocked: true, message: 'No services found for this date', date };
 
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
-  if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops to optimize', geocoded: stopsWithCoords.length, total: services.length };
+  if (stopsWithCoords.length < 2) return { blocked: true, message: 'Need at least 2 geocoded stops to optimize', geocoded: stopsWithCoords.length, total: services.length };
 
   // The card's approved sequence IS the plan (GH r14 P1): a confirmed run
   // with the fingerprint-verified order applies exactly that order under
@@ -488,10 +488,10 @@ async function optimizeTechRoute(input) {
     ],
   });
 
-  if (services.length < 2) return { message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
+  if (services.length < 2) return { blocked: true, message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
 
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
-  if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
+  if (stopsWithCoords.length < 2) return { blocked: true, message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
 
   // Approved-plan application — same contract as optimize_all_routes above
   // (GH r14 P1).
@@ -821,7 +821,7 @@ async function moveStopsToDay(input, actionContext = {}) {
   }
 
   const services = await db('scheduled_services')
-    .whereIn('id', serviceIds)
+    .whereIn('scheduled_services.id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.*',

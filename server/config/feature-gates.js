@@ -1232,6 +1232,13 @@ const gates = {
   // lead path (existing-customer or content-veto'd voicemails with concrete
   // service intent + callback number). Bell only — no customer comms.
   voicemailCallbackAlert: process.env.GATE_VOICEMAIL_CALLBACK_ALERT === 'true',
+  // Missed-call bell for numbers with NO customer on file (new prospects who
+  // hung up at the voicemail greeting). Bell only — no customer comms. Ships
+  // dark; the bell stays customers-only until the owner flips it.
+  missedCallUnknownCallers: process.env.GATE_MISSED_CALL_UNKNOWN_CALLERS === 'true',
+  // Admin bell when one number places 3+ inbound calls inside 3 hours
+  // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.
+  repeatCallerBell: process.env.GATE_REPEAT_CALLER_BELL === 'true',
   // Nightly self-audit: samples recent calls, strong-model re-read, drift
   // metrics to call_audit_findings; alerts ONLY on threshold breach.
   callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
@@ -1301,6 +1308,7 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
@@ -2369,6 +2377,9 @@ const gates = {
   // never changes neighbours' promises or sends notifications. Call-time
   // kill switch in scheduling/arrival-route.js; off in every environment.
   adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
+  // Shared 08:00–18:00 capacity, catalog durations and complete-route booking.
+  // Dark in every environment; callers read at operation time. Owner activation.
+  schedulingCapacity: gateEnvValue('GATE_SCHEDULING_CAPACITY'),
 
   // Call property-role classification (2026-08-15): the extraction classifies
   // each property a call discusses (occupancy + which one is the caller's
@@ -2416,6 +2427,10 @@ const gates = {
   // the listing can never disagree with what /query actually does.
   // (gateEnvValue is a hoisted function declaration, safe to call here.)
   ibThreads: gateEnvValue('GATE_IB_THREADS'),
+
+  // Platform-wide IB discovery/execution. Dark until explicitly enabled;
+  // existing confirmation and role gates remain mandatory on every request.
+  ibPlatform: gateEnvValue('GATE_IB_PLATFORM'),
 
   // Tips from your tech (scope + owner decisions 2026-09-01): the completion
   // screen's searchable tip picker (replacing the free-text Observations /
