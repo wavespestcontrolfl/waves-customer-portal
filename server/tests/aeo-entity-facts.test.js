@@ -1111,3 +1111,20 @@ test('a fronted clause hands back to any Waves alias, research contexts are not 
   expect(score('E6', 'Waves offers fumigation during 2027/2028.').forbidden.fumigation_offered).toBe(false);
   expect(score('E5', 'Waves serves Manatee County for 2030-square-foot homes.').expected.manatee).toBe(true);
 });
+
+test('a quantity qualifier after a year is no date, bare "future" is prospective only in a prospective construction, simulated treatment asserts nothing, and a former-status guard stops at a later transition (#4155 r12)', () => {
+  expect(score('E5', 'Waves serves Manatee County for 2030 or more residents.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves offers fumigation for 2030 and more homes.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County in 2027 or later.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves has a future-ready team serving Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves focuses on the future while serving Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Future plans include serving Manatee County.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves lists Manatee County among its future service areas.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves manages termite infestations in a computer simulation.').expected.termite).toBe(false);
+  expect(score('E6', 'In a computer simulation, Waves manages termite infestations.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves removes rodents in a training exercise.').expected.rodent).toBe(false);
+  expect(score('E6', 'Waves manages termite infestations in homes.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves stopped using old systems before operating as a franchise, which it remains today.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves was previously local before it became a franchise, a status it retains today.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves was formerly a franchise before becoming independent.').forbidden.franchise).toBe(false);
+});
