@@ -3139,7 +3139,7 @@ const AppointmentReminders = {
             // Boundary hold — leave the row UNMARKED, same as the pre-check
             // defer: the 15-minute cron re-selects it and the reminder goes
             // out at 8:00 AM, still days ahead of the visit.
-            if (!reached72 && (smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome72.blockedCode === 'MOVE_HOLD')) {
+            if (!reached72 && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(smsOutcome72.blockedCode)) {
               // Release the visit claim as retryable (effect → failed) so
               // the next tick reclaims immediately instead of waiting out
               // the lease; the row itself stays unmarked, as today.
@@ -3423,7 +3423,7 @@ const AppointmentReminders = {
             // owner's ruling (defer when the window reopens before the
             // visit day, otherwise skip+close), which this mid-flight
             // point must not re-implement.
-            if (!reached24 && (smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome24.blockedCode === 'MOVE_HOLD')) {
+            if (!reached24 && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(smsOutcome24.blockedCode)) {
               // Release the visit claim as retryable — see the 72h twin.
               if (ownsVisit24) await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred to the next scan's window ruling`);

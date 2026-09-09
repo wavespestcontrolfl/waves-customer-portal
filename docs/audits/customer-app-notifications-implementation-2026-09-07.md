@@ -8,7 +8,9 @@ does not establish email-independent watering guidance.
 
 `GATE_CUSTOMER_APP_NOTIFICATIONS` defaults off. When enabled, the existing
 Visits settings expose app connection status, an account push switch, and an
-App first shortcut. Billing settings expose App first for payment receipts.
+App shortcut. Billing settings expose App for payment receipts. The owner
+extended the choice to 72-hour and 24-hour reminders on September 8 and
+requested the shorter customer-facing label, App.
 The shortcut changes delivery choices without enabling muted categories or
 clearing text/email opt-outs.
 
@@ -18,7 +20,8 @@ clearing text/email opt-outs.
 | Technician en-route and arrival | App first when selected; existing event freshness and visit guards apply |
 | Completion/report notice | App first for supported automatic text notices; attachment and bundled review messages retain existing delivery |
 | Payment receipts | App first when selected; emailed receipt copies and third-party payer ownership remain in force |
-| Appointment reminders and important billing notices | Existing app/text policy; no replacement-push choice |
+| 72-hour and 24-hour appointment reminders | App when selected; existing reminder timing, explicit-choice defaults, fallback and recipient rules apply |
+| Important billing notices | Existing app/text policy; no replacement-push choice |
 | Property/weather advisories | Existing bell/push lane, governed by the new account push switch |
 
 App first permits an allowed backup after push failure or unavailable/stale
@@ -76,7 +79,10 @@ promotions, review asks and media delivery remain outside the shortcut.
   attempt-scoped en-route keys, deferred deposit receipts, SMS-compatible
   fallback bodies, JWT refresh, and permission revocation on native foreground.
 
-Installed iPhone/Android delivery and taps still require owner test devices.
-No customer test notification, production gate flip, merge or deployment has
-been performed. Rollout must include those device checks before claiming
-end-to-end handset delivery.
+The September 8 release check verified registration, one owner-authorized push
+and its Visits destination on an iPhone running 1.5 (6). The owner deferred
+additional first-permission/Face ID cases. Android delivery remains unverified.
+The customer App preference gate was enabled after the production deployment
+succeeded. Version 1.5 (6) was submitted to Apple for review with automatic
+release after approval. See the [coverage map](customer-notification-coverage-2026-09-08.md)
+for the reminder extension and remaining notification families.

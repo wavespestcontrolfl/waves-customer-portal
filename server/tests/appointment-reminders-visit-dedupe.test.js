@@ -294,6 +294,27 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
   });
 
+  test.each(['72h', '24h'])('%s pending App delivery leaves the reminder open with no fallback email', async (tier) => {
+    const date = tier === '72h' ? '2026-05-08' : '2026-05-07';
+    const kind = `reminder_${tier}`;
+    const row = reminderRow({ appointment_time: new Date(`${date}T13:00:00Z`),
+      reminder_72h_sent: tier !== '72h', reminder_24h_sent: tier !== '24h' });
+    const state = installDb({ rows: [row], visitIdByService: { 'svc-1': VISIT } });
+    const dedupeKey = `${VISIT}:${kind}:${date}`;
+    VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-app', dedupeKey });
+    sendCustomerMessage.mockResolvedValue({ sent: false, code: 'PUSH_IN_FLIGHT', deferred: true, retryable: true });
+
+    const result = await AppointmentReminders.checkAndSendReminders();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(result[`sent${tier}`]).toBe(0);
+    expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
+      VISIT, kind, 'retry', expect.any(Date), 'tok-app', { dedupeKey },
+    );
+    expect(flagUpdates(state, `${kind}_sent`)).toHaveLength(0);
+  });
+
   test('retryable provider failure on the grouped send, no fallback delivery: claim released as retryable, row unmarked — never suppressed (GH codex r6 P1)', async () => {
     const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
     // Twilio 5xx-shaped outcome; the customer has no email on file, so the

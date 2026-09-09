@@ -110,7 +110,33 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(response.body.preferences).toMatchObject({ enRouteChannel: 'push', paymentConfirmationChannel: 'push', smsEnabled: false, emailEnabled: false });
     expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({ en_route_channel: 'push', payment_receipt_channel: 'sms', sms_enabled: true });
     expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({ payment_receipt_channel: 'push', sms_enabled: false, email_enabled: false });
-    expect((await put({ serviceReminder24hChannel: 'push' })).status).toBe(400);
+    expect((await put({ billingReminderChannel: 'push' })).status).toBe(400);
+  });
+
+  test('both reminder choices persist on the primary and survive legacy saves and rollback', async () => {
+    const choices = { serviceReminder72hChannel: 'push', serviceReminder24hChannel: 'push' };
+    expect((await put(choices)).status).toBe(409);
+    await device();
+    expect((await put(choices)).body.preferences).toMatchObject(choices);
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
+      service_reminder_72h_channel: 'push', service_reminder_24h_channel: 'push', service_reminder_72h_channel_explicit: true,
+    });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+      service_reminder_72h_channel: 'sms', service_reminder_24h_channel: 'sms',
+    });
+    expect((await get()).body).toMatchObject(choices);
+    const legacyUrl = '/api/notifications/preferences';
+    const legacy = await get(legacyUrl);
+    expect(legacy.body).toMatchObject({ serviceReminder72hChannel: 'sms', serviceReminder24hChannel: 'sms' });
+    expect((await put({ serviceReminder72hChannel: legacy.body.serviceReminder72hChannel,
+      serviceReminder24hChannel: legacy.body.serviceReminder24hChannel, weatherAlerts: false }, legacyUrl)).status).toBe(200);
+    expect((await get()).body).toMatchObject(choices);
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
+    expect((await put(choices)).status).toBe(400);
+    expect((await put({ serviceReminder72hChannel: 'sms', serviceReminder24hChannel: 'sms' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
+      service_reminder_72h_channel: 'push', service_reminder_24h_channel: 'push',
+    });
   });
 
   test('older clients and a gate rollback preserve saved App first values', async () => {

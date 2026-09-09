@@ -141,6 +141,51 @@ test('automated app delivery observes the existing ET send window', async () => 
   } finally { jest.useRealTimers(); }
 });
 
+describe.each([
+  ['72h', 'service_reminder_72h_channel', 'service_reminder_72h', 'reminder_72h'],
+  ['24h', 'service_reminder_24h_channel', 'service_reminder_24h', 'appointment_reminder'],
+])('%s reminder App choice', (tier, channelColumn, enabledColumn, messageType) => {
+  const reminder = { ...input, invoiceId: undefined, customerInitiated: false,
+    appointmentId: '22222222-2222-4222-8222-222222222222',
+    purpose: `appointment_reminder_${tier}`, body: 'Your appointment reminder is ready.',
+    metadata: { original_message_type: messageType, useCustomerChannel: true },
+  };
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2035-01-10T15:00:00Z'));
+    prefs[channelColumn] = 'push';
+    prefs[enabledColumn] = true;
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('uses the app when texts are off and keeps a stable event key on retry', async () => {
+    prefs.sms_enabled = false;
+    expect(await sendCustomerMessage(reminder)).toMatchObject({ sent: true, channel: 'push' });
+    expect(await sendCustomerMessage(reminder)).toMatchObject({ sent: true, channel: 'push' });
+    const options = Twilio.sendSMS.mock.calls.map(([, , value]) => value);
+    expect(options[0]).toMatchObject({ explicitPushOnly: true, notificationEventKey: expect.any(String) });
+    expect(options[1].notificationEventKey).toBe(options[0].notificationEventKey);
+    expect(prefs.sms_enabled).toBe(false);
+  });
+
+  test('keeps category opt-outs and quiet hours authoritative', async () => {
+    prefs[enabledColumn] = false;
+    expect(await sendCustomerMessage(reminder)).toMatchObject({ sent: false, code: 'PURPOSE_OPTED_OUT' });
+    prefs[enabledColumn] = true;
+    jest.setSystemTime(new Date('2035-01-10T02:00:00Z'));
+    expect(await sendCustomerMessage(reminder)).toMatchObject({ sent: false, code: 'QUIET_HOURS_HOLD' });
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('falls back once when unavailable and does not replace a property contact text', async () => {
+    Twilio.sendSMS.mockResolvedValueOnce({ success: false, appUnavailable: true, error: 'no_fresh_device' })
+      .mockResolvedValue({ success: true, sid: 'SMreminder' });
+    expect(await sendCustomerMessage(reminder)).toMatchObject({ sent: true, channel: 'sms', requestedChannel: 'push' });
+    expect(Twilio.sendSMS.mock.calls[1][2]).toMatchObject({ explicitPushOnly: false, skipPushRouting: true });
+    await sendCustomerMessage({ ...reminder, to: '+19415550143', identityTrustLevel: 'service_contact_authorized' });
+    expect(Twilio.sendSMS.mock.calls[2][2].explicitPushOnly).toBe(false);
+  });
+});
+
 test('an emoji-bearing supported notice keeps its allowed SMS fallback and records why', async () => {
   Twilio.sendSMS.mockResolvedValue({ success: true, sid: 'SMemoji' });
   expect(await sendCustomerMessage({ ...input, body: 'Your receipt is ready ✅' })).toMatchObject({
