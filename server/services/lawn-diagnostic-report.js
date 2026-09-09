@@ -678,9 +678,10 @@ function classifyReleaseMode(contract = {}) {
 
 // Downgrade any over-confident pest/disease/drought wording to suggestive form.
 // Safety net for LLM-authored copy; deterministic copy never says "confirmed".
-// The predicate pass allows up to three adverb/auxiliary tokens between the verb
-// and "confirmed" ("has just been confirmed", "is currently confirmed") — any
-// -ly word or a short function-word set — rather than a closed adverb list.
+// The predicate passes allow up to three adverb/auxiliary tokens between the verb
+// and "confirmed" / "active" ("has just been confirmed", "is currently confirmed",
+// "are clearly active") — any -ly word or a short function-word set — rather than
+// a closed adverb list.
 function stripConfirmedLanguage(text) {
   if (!text) return text;
   return String(text).replace(/\s+/g, ' ')
@@ -688,6 +689,9 @@ function stripConfirmedLanguage(text) {
       (match, noun) => `suspected ${noun}`)
     .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3}\\s+confirmed\\b`, 'gi'),
       '$1 most consistent with the visible pattern')
+    // Cause-first active predicate ("Chinch bugs are active along the edge").
+    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were)(?:\\s+(?:now|also|already|just|again|still|very|highly|\\w+ly)){0,3}\\s+active\\b`, 'gi'),
+      '$1 may be active')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
 

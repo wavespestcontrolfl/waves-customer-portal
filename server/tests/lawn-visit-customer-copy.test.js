@@ -99,6 +99,24 @@ describe('customer publication', () => {
     },
   );
 
+  test.each(['are active', 'is active', 'are clearly active', 'were still active', 'are now very active'])(
+    'cannot publish a cause-first active claim that chinch bugs %s', (claim) => {
+      const text = `Chinch bugs ${claim} along the edge.`;
+      const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
+      expect(copy.customerObservations(text, [evidence])).not.toMatch(/\b(?:is|are|was|were)\b[^.]*\bactive\b/i);
+      expect(copy.customerObservations(text, [evidence])).toMatch(/chinch bugs may be active/i);
+      expect(copy.safeConfirmationStep(text, evidence)).not.toMatch(/\b(?:is|are|was|were)\b[^.]*\bactive\b/i);
+    },
+  );
+
+  test.each([['Molds are spreading in the shade.', 'Mold activity'], ['Mildews are spreading in the shade.', 'Mildew activity'], ['Molds are spreading in the shade.', 'Fungal activity']])(
+    'plural %s publishes with matching fungal evidence named %s', (text, name) => {
+      const evidence = { name, label: 'fungal activity', confidence: 'moderate' };
+      expect(copy.customerObservations(text, [evidence])).toBe(text);
+      expect(copy.customerObservations(text, [])).toBe(copy.NO_OBSERVATIONS);
+    },
+  );
+
   test('a single cause paired with a symptom still authorizes that cause', () => {
     const evidence = { name: 'Chinch bug damage and thinning', label: 'chinch bug activity', confidence: 'moderate' };
     expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [evidence])).toMatch(/chinch/i);
