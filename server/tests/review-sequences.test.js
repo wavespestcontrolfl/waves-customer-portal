@@ -3778,6 +3778,10 @@ describe('shared ask history foundation', () => {
 
   test.each([
     'Thanks for your Google review',
+    'Please review your invoice: https://portal.test/pay/abc',
+    'Please review and sign your agreement: https://portal.test/contract/abc',
+    'Could you review the service report?',
+    'Please review your invoice: https://portal.test/l/abc123',
     'Your invoice is ready: https://portal.test/l/abc123',
     'We discussed your Google review yesterday.',
   ])('unrelated acknowledgment/support text is not an ask: %s', async body => {

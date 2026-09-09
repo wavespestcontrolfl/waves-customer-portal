@@ -3,14 +3,14 @@ const { ASK_TOUCH_SQL } = require('./review-outreach-templates');
 
 const ASK_SPACING_MS = 72 * 3600000;
 const REVIEW_LINK_RE = /g\.page\/|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b|\/rate\/[A-Za-z0-9]|maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i;
-const REVIEW_INTENT_RE = /\b(?:leave|write|post|submit|share|give|add|update|edit)\b[^.!?\n]{0,60}\breview\b|\breview\s+us\b|\b(?:could|would|can|please)\b[^.!?\n]{0,60}\breview\b/i;
+const REVIEW_INTENT_RE = /\b(?:leave|write|post|submit|share|give|add|update|edit)\s+(?:(?:us|me)\s+)?(?:(?:a|an|your|the)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+us\b|\bshare\s+your\s+experience\s+in\s+a\s+review\b/i;
 
 // Link-library destinations and explicit requests count. Acknowledgments
 // ("Thanks for your Google review") without a link/request do not.
 function looksLikeReviewAsk(body) {
   const text = String(body || '');
   return REVIEW_LINK_RE.test(text) || REVIEW_INTENT_RE.test(text)
-    || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\breview/i.test(text));
+    || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+review\b|\breview\s+link\b/i.test(text));
 }
 
 function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
