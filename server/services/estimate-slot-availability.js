@@ -1582,6 +1582,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   cleanupCache(wrapperCache);
   const cacheKey = [
     estimateId,
+    capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
     cacheHour(),
     opts.windowDays,
     opts.maxResults,

@@ -77,6 +77,16 @@ Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
 The existing pest-only recurring choice on eligible one-time-toggle estimates
 retains its intentional companion exclusion, using the acceptance predicate.
+With default-off `GATE_SCHEDULING_CAPACITY`, these public availability surfaces
+use whole-route feasibility, technician eligibility, existing arrival promises,
+blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
+through 16:00 ET are offered; estimate ASAP and booking open-day expansion
+cannot create additional starts. The estimate cache separates capacity mode
+from legacy mode. Assigned technicians have independent route capacity;
+unassigned work remains a fixed blocker. Public responses expose no full route,
+provider legs or exact route coordinates. Gate-off availability is unchanged.
+Transactional reservation and route-order persistence belong to the following
+writer stage; this gate remains off until those writers are integrated.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
 `GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes

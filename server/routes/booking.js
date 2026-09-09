@@ -9,6 +9,7 @@ const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { capacityEnabled } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
@@ -1104,7 +1105,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
 
   for (const slot of (result.slots || [])) {
     if (fullDays.has(slot.date)) continue;
-    if (expandOpenDays && (slot.stops_that_day || 0) === 0) {
+    if (capacityEnabled()) {
+      // Capacity evaluates each start against the whole route and live blocks.
+      // Never synthesize additional hours from an otherwise empty route.
+      addCandidate(slot, timeToMin(slot.start_time));
+    } else if (expandOpenDays && (slot.stops_that_day || 0) === 0) {
       // Open day (no stops yet for this tech) — offer the whole block of hourly
       // windows so the customer can pick any time, not just the gap's earliest
       // start. These carry the gap's (large) detour, so they read as
