@@ -10507,7 +10507,11 @@ export function CompletionPanel({
   // including the mobile payment handoff — through this callback.
   onCompletionResult,
 }) {
-  const { enabled: completionImprovements } = useFeatureFlagReady("lawn-completion-improvements");
+  // `ready` gates the first plan request and any legacy seeding: with a cold
+  // flag cache a member lawn visit would otherwise fetch the plan without
+  // completion defaults, seed ungoverned rows when the flag flips, and keep
+  // them as "manual" once the governed defaults arrive (Codex r13 P1).
+  const { enabled: completionImprovements, ready: completionFlagReady } = useFeatureFlagReady("lawn-completion-improvements");
   const [notes, setNotes] = useState("");
   const [completionPricing, setCompletionPricing] = useState(null);
   const [pricingReloadKey, setPricingReloadKey] = useState(0);
@@ -11867,7 +11871,7 @@ export function CompletionPanel({
     lawnDefaultMixSnapshotRef.current = null;
   }, [service.id]);
   useEffect(() => {
-    if (!completionImprovements || !isLawn || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
+    if (!completionFlagReady || !completionImprovements || !isLawn || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
     if (!products?.length) return;
     if (lawnDefaultsEnabled) {
       if (!draftReadyRef.current || showDraftPrompt) return;
@@ -11896,7 +11900,7 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     lawnDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts, lawnDefaultsEnabled, lawnCompletionDefaults, currentLawnPlanReady, showDraftPrompt, areasServiced, lawnRemovedDefaultIds, lawnDefaultsSeedSuppressed]);
+  }, [completionFlagReady, completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts, lawnDefaultsEnabled, lawnCompletionDefaults, currentLawnPlanReady, showDraftPrompt, areasServiced, lawnRemovedDefaultIds, lawnDefaultsSeedSuppressed]);
   useEffect(() => {
     if (lawnDefaultsEnabled && lawnAreaOverride === undefined && !LAWN_DEFAULT_AREAS.every(area => areasServiced.includes(area))) {
       // A subset of zones has no known square footage. Do not silently count
@@ -12550,6 +12554,9 @@ export function CompletionPanel({
   ]);
 
   useEffect(() => {
+    // The flag decides whether this request carries completion defaults; a
+    // request issued before the flag is known would be answered without them.
+    if (!completionFlagReady) return;
     if (!calibrationRequired && !(completionImprovements && isLawn)) return;
     let cancelled = false;
     setTreatmentPlanError("");
@@ -12646,7 +12653,7 @@ export function CompletionPanel({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision, lawnPlanArea, lawnPlanReloadKey]);
+  }, [completionFlagReady, calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision, lawnPlanArea, lawnPlanReloadKey]);
 
   useEffect(() => {
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));

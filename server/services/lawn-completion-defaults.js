@@ -56,7 +56,12 @@ async function loadLawnCompletionContext(service, knex) {
 }
 
 function completionMethod(item, protocolProduct) {
-  if (item.scope?.includes('SPOT') || protocolProduct?.applicationMode === 'spot') return 'spot_treatment';
+  // The operating layer's explicit mode wins over the field-reference line
+  // parse: classifyProtocolLine tags every SpeedZone line SPOT_ALLOWANCE, yet
+  // the seeded Bahia March row is application_mode 'broadcast'. Only a row
+  // without an explicit mode lets the parsed scope decide (Codex r13 P1).
+  const mode = protocolProduct?.applicationMode;
+  if (mode === 'spot' || (!mode && item.scope?.includes('SPOT'))) return 'spot_treatment';
   if (item.product?.applicationMethod) return item.product.applicationMethod;
   // Weighed WDG/WG/WSG/WP concentrates are still sprayed. The catalog
   // formulation, never the quantity unit, distinguishes spreader granules
