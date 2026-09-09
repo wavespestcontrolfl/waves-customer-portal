@@ -1064,7 +1064,13 @@ function whereEstimateCustomerOwnership(query, customerId) {
 
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
-  const after = callEndedAt(call);
+  // Evidence counts from the end of the call — or, for a callback card the
+  // office has reviewed (claimed, snoozed, called, or REOPENED), from that
+  // review: the record that kept the promise before staff reopened it is
+  // not proof it was kept again.
+  const reviewed = commitment?.human_state === 'confirmed' && commitment?.reviewed_at ? new Date(commitment.reviewed_at) : null;
+  const ended = callEndedAt(call);
+  const after = ended && reviewed && reviewed.getTime() > ended.getTime() ? reviewed : ended;
   if (!started || Number.isNaN(started.getTime()) || !after) return null;
   const until = windowEnd(after);
   const phone = contactPhoneOf(call);
@@ -1322,10 +1328,24 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
+// The rows fulfillment refresh may still write: no human verdict, or a
+// callback card's confirm while the card policy is on or the card already
+// placed a call (a persisted attempt keeps its proof path after rollback).
+function refreshableVerdictSql() {
+  return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state = 'confirmed' AND (? OR EXISTS ("
+    + "SELECT 1 FROM call_log attempt WHERE attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text))))",
+  [require('./callback-cards').enabled()]];
+}
+
 async function refreshFulfillment(conn, callLogId, call = null) {
   const row = call || await conn("call_log").where({ id: callLogId }).first("id", "twilio_call_sid", "customer_id", "from_phone", "to_phone", "direction", "created_at", "bridged_at", "duration_seconds", "metadata");
   if (!row) return { checked: 0, fulfilled: 0, hinted: 0 };
-  const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereNull("human_state");
+  // A human verdict is the office's call and is never rewritten — except
+  // the review a callback CARD records when staff claim, snooze or start
+  // calling (callback-cards.actOnCallback, the callback bridge): that
+  // confirm protects the promise from a later extraction withdrawing it,
+  // and the card's own conversation evidence must still close it.
+  const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereRaw(...refreshableVerdictSql());
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -1348,7 +1368,11 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       // completed lookup clears it; an error above leaves it alone.
       cleared += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .whereRaw("fulfillment ->> 'strength' = 'association'")
         .update({ fulfillment: null, updated_at: new Date() });
       continue;
@@ -1356,13 +1380,21 @@ async function refreshFulfillment(conn, callLogId, call = null) {
     if (proof.strength === "direct") {
       fulfilled += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .update({ status: "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .whereRaw("(fulfillment IS NULL OR fulfillment ->> 'strength' = 'association')")
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
@@ -1490,7 +1522,12 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
     const lead = await conn('leads').where({ id: leadId }).first('twilio_call_sid');
     leadSid = lead?.twilio_call_sid || null;
   }
-  await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
+  // Preparation happens on the FIRST page only: a deadline installed
+  // between pages re-sorts the queue under a walker's offset (Load more,
+  // the watchdog scan) and would skip rows or repeat them. Later pages read
+  // the snapshot the first page established; the next first-page read
+  // prepares whatever arrived meanwhile.
+  if (!(Number(offset) > 0)) await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')
