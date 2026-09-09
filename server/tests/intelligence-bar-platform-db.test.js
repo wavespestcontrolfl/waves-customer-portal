@@ -203,6 +203,18 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(result).not.toContain(visitB);
     expect(result).not.toContain('Foreign private schedule note');
     expect(result).not.toContain(customerB);
+    // An explicitly named customer who did not resolve leaves no read scope: the schedule read fails closed
+    // instead of listing every appointment.
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(tools('get_schedule_view', {}, 'schedule'))
+      .mockResolvedValueOnce(answer('Correct the customer name first.'));
+    const misspelled = await api('/query', request("Show Jhon Smyth's schedule today"));
+    expect(misspelled.status).toBe(200);
+    expect(misspelled.body.taskTarget).toBeFalsy();
+    const refused = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'schedule').content;
+    expect(JSON.parse(refused)).toMatchObject({ code: 'customer_scope_required' });
+    expect(JSON.stringify(mockModel.mock.calls)).not.toContain(visitA);
+    expect(JSON.stringify(mockModel.mock.calls)).not.toContain('Foreign private schedule note');
     await db('scheduled_services').whereIn('id', [visitA, visitB]).del();
   }, 30000);
 

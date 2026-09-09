@@ -406,6 +406,39 @@ test('route-wide writers are refused inside a customer-scoped task', async () =>
   }
 });
 
+test('scoped customer-row readers fail closed for an explicitly named customer who did not resolve', async () => {
+  const unresolved = { targets: [], namesRequested: true, candidates: [], page: { ids: {} } };
+  const schema = { properties: {} };
+  for (const [toolName, params] of [['get_schedule_view', { date: '2026-09-09' }], ['query_customers', { search: 'Jhon' }], ['query_leads', { search: 'Jhon' }],
+    ['get_stale_leads', { days: 14 }], ['search_emails', { search: 'Jhon' }], ['get_email_thread', { subject_search: 'quote' }],
+    ['draft_email_reply', { instructions: 'Reply politely' }], ['match_existing_customer', { phone: '5550001234' }]]) {
+    expect(await Context.prepareReadInput(params, unresolved, { toolName, schema })).toMatchObject({ code: 'customer_scope_required' });
+    // The same reader stays open for a request that names nobody, and scoped for a resolved task customer.
+    expect(await Context.prepareReadInput(params, { ...unresolved, namesRequested: false }, { toolName, schema })).toEqual({ input: params });
+    expect(await Context.prepareReadInput(params, { ...context(), namesRequested: true }, { toolName, schema })).toEqual({ input: params });
+  }
+  // Readers outside the scoped list keep their own target checks.
+  expect(await Context.prepareReadInput({ date: '2026-09-09' }, unresolved, { toolName: 'get_zone_capacity', schema })).toEqual({ input: { date: '2026-09-09' } });
+});
+
+test('calendar words after a selector are date filters, not customer names', async () => {
+  for (const prompt of ['Show the day summary for Monday', 'Show overdue customers for September', 'Reschedule this stop for May 12',
+    'Move this appointment to June 2026', 'Cancel this visit for Friday', "Show Monday's route", 'Schedule for tonight']) {
+    expect(Context.namesRequested(prompt)).toBe(false);
+  }
+  const appointment = '40000000-0000-4000-8000-000000000007';
+  rows.scheduled_services = [{ id: appointment, customer_id: B }];
+  const task = await Context.resolve({ prompt: 'Reschedule this stop for May 12', pageData: { appointment_id: appointment } });
+  expect(task.target.customer_id).toBe(B);
+  // Months that are also given names stay person evidence without a day or year after them.
+  for (const prompt of ['Text May her invoice', 'Send a reminder to June', "Show April's schedule", 'Email August the estimate']) {
+    expect(Context.namesRequested(prompt)).toBe(true);
+  }
+  const named = await Context.resolve({ prompt: 'Text May her invoice', pageData: { customer_id: A } });
+  expect(named.target).toBeNull();
+  expect(named.targets).toEqual([]);
+});
+
 test('a technician name in assignment is not an explicit customer selector', async () => {
   lookupRows = [rows.customers[0]];
   const appointment = '40000000-0000-4000-8000-000000000004';

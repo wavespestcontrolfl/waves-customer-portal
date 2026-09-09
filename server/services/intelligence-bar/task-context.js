@@ -34,7 +34,14 @@ const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'h
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
 const NON_PERSON_NAMES = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using',
-  'account', 'appointment', 'appointments', 'stop', 'stops', 'visit', 'visits', 'property', 'estimate', 'invoice', 'call', 'product', 'thread', 'route', 'schedule', 'week', 'month', 'year', 'yesterday']);
+  'account', 'appointment', 'appointments', 'stop', 'stops', 'visit', 'visits', 'property', 'estimate', 'invoice', 'call', 'product', 'thread', 'route', 'schedule', 'week', 'month', 'year', 'yesterday',
+  // Calendar words after "for"/"to" are date filters, never people.
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'weekday', 'weekdays', 'weekend', 'weekends',
+  'january', 'february', 'march', 'july', 'september', 'october', 'november', 'december', 'tonight', 'morning', 'afternoon', 'evening', 'noon', 'midnight']);
+// Months that are also given names stay person evidence unless a day or year
+// follows them: "text May her invoice" must not fall back to the viewed
+// customer, while "reschedule this stop for May 12" names a date.
+const DATED_MONTH_RE = /\b(april|may|june|august)\s+(?:\d{1,2}(?:st|nd|rd|th)?|\d{4})\b/g;
 // "this stop" / "this visit" on the schedule surfaces are the appointment.
 const RECORD_KIND_ALIASES = { account: 'customer', stop: 'appointment', visit: 'appointment' };
 const recordKind = word => RECORD_KIND_ALIASES[word.toLowerCase()] || word.toLowerCase();
@@ -66,13 +73,14 @@ function targetClause(prompt, retainRecordConstraints = false) {
 function explicitSingleNames(prompt) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(clause);
+  const dated = new Set([...normalized.matchAll(DATED_MONTH_RE)].map(m => m[1]));
   return [...new Set([
     ...[...normalized.matchAll(PERSON_REFERENCE)]
       .filter(m => m[1] !== 'customer' || !/\b(?:this|that|current|selected|viewed|open)\s+$/.test(normalized.slice(0, m.index)))
       .map(m => m[2]),
     ...[...clause.matchAll(/\b([\p{L}-]+)[’']s\b/giu)].map(m => normalizeName(m[1])),
     ...(normalized.match(/^([\p{L}'-]+)\s+(?:needs|wants|has|is|should|would|asked)\b/u)?.slice(1, 2) || []),
-  ])].filter(word => !NON_PERSON_NAMES.has(word));
+  ])].filter(word => !NON_PERSON_NAMES.has(word) && !dated.has(word));
 }
 
 function namesRequested(prompt) {
@@ -443,6 +451,12 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_my_route',
 ]);
 
+// Readers that confine themselves to the task's read scope (readCustomerIds).
+// That scope is empty when an explicitly named customer did not resolve, so
+// they would read every customer's rows; they fail closed until it resolves.
+const SCOPED_CUSTOMER_ROW_READERS = new Set(['query_customers', 'query_leads', 'get_stale_leads', 'get_schedule_view',
+  'search_emails', 'get_email_thread', 'draft_email_reply', 'match_existing_customer']);
+
 const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
 const EMAIL_KEYED_READERS = new Set(['check_email_suppression']);
 
@@ -450,6 +464,9 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   const input = { ...params };
   if ((context.targets?.length || context.namesRequested) && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
     return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
+  }
+  if (context.namesRequested && !context.targets?.length && SCOPED_CUSTOMER_ROW_READERS.has(toolName)) {
+    return { error: 'The named customer did not match anyone on file, so this lookup has no customer scope. Correct the name before reading that customer\'s records.', code: 'customer_scope_required' };
   }
   // Phone-keyed readers without a customer selector: the phone must belong to
   // a task customer, so a model-supplied number cannot read another party.
