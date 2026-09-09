@@ -100,7 +100,8 @@ test('every option carries the protocol row\'s application mode, so an added her
     { productId: 'celsius', defaultInPlan: false, gates: {}, applicationMode: 'spot' },
   );
   plan.mixCalculator.conditionalOptions = [
-    { role: 'conditional', selected: false, product: { id: 'speedzone', name: 'SpeedZone', category: 'herbicide', active: true } },
+    // The line parse tags every SpeedZone line SPOT_ALLOWANCE; the protocol row's explicit broadcast mode wins (Codex r13 P1).
+    { role: 'conditional', selected: false, scope: 'SPOT_ALLOWANCE', product: { id: 'speedzone', name: 'SpeedZone', category: 'herbicide', active: true } },
     { role: 'conditional', selected: false, product: { id: 'celsius', name: 'Celsius WG', category: 'herbicide', formulation: 'Water-dispersible granule (WG)', active: true } },
     { role: 'conditional', selected: false, product: { id: 'unlisted', name: 'Not in this protocol', active: true } },
   ];
@@ -109,6 +110,15 @@ test('every option carries the protocol row\'s application mode, so an added her
     { product: { id: 'speedzone', name: 'SpeedZone' }, applicationMethod: 'broadcast_spray' },
     { product: { id: 'celsius', name: 'Celsius WG' }, applicationMethod: 'spot_treatment' },
   ]);
+});
+
+test('a protocol row without an explicit mode still lets the parsed spot scope decide', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push({ productId: 'celsius', defaultInPlan: false, gates: {} });
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, scope: 'SPOT_ALLOWANCE', product: { id: 'celsius', name: 'Celsius WG', active: true } },
+  ];
+  expect(buildLawnCompletionDefaults(plan, context).options.at(-1)).toEqual({ product: { id: 'celsius', name: 'Celsius WG' }, applicationMethod: 'spot_treatment' });
 });
 
 test('a deactivated catalog product is offered neither as a default nor under "Additional work"', () => {

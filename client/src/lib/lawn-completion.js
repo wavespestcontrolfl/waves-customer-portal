@@ -84,7 +84,16 @@ export function withdrawLawnPlanSuggestions(rows, { planUnverified = false } = {
     totalAmount: row.totalAmountManual ? row.totalAmount : '',
     rate: row.lawnPlanManualFields?.includes('rate') ? row.rate : '',
     areaValue: row.lawnPlanManualFields?.includes('areaValue') ? row.areaValue : '',
-    ...(planUnverified && !row.lawnPlanManualFields?.includes('applicationMethod') ? { applicationMethod: '' } : {}),
+    // A unit the plan chose is withdrawn with the value it labeled: the
+    // recipe or catalog unit may have changed while the draft waited, and an
+    // amount entered under a preselected stale unit would be recorded and
+    // deducted in the wrong dimension (Codex r13 P1). A unit attached to an
+    // entered value or chosen by the tech stays.
+    ...(planUnverified ? Object.fromEntries([
+      ['applicationMethod', ['applicationMethod']], ['rateUnit', ['rate', 'rateUnit']],
+      ['amountUnit', ['totalAmount', 'amountUnit']], ['areaUnit', ['areaValue', 'areaUnit']],
+    ].filter(([unit, owners]) => !(unit === 'amountUnit' && row.totalAmountManual)
+      && !owners.some(owner => row.lawnPlanManualFields?.includes(owner))).map(([unit]) => [unit, ''])) : {}),
     lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON,
   } : row);
 }

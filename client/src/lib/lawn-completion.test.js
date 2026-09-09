@@ -134,13 +134,16 @@ it('a plan outage withdraws every still-derived suggestion and keeps entered val
   // The plan's application mode is withdrawn with its quantities: a recipe
   // the failed request cannot verify does not carry a prior broadcast/spot
   // classification into the completion; a chosen method stays (Codex r12 P1).
+  // An unverified plan's units go with its values (Codex r13 P1); a unit attached to an entered value or chosen by the tech stays.
   expect(withdrawLawnPlanSuggestions([governed, entered, manual], { planUnverified: true })).toEqual([
-    { ...governed, totalAmount: '', rate: '', areaValue: '', applicationMethod: '', lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON },
+    { ...governed, totalAmount: '', rate: '', areaValue: '', applicationMethod: '', rateUnit: '', amountUnit: '', areaUnit: '', lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON },
     { ...entered, lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON },
     manual,
   ]);
-  // A refresh that fails after a successful load keeps the mode that load verified.
-  expect(withdrawLawnPlanSuggestions([governed])[0]).toMatchObject({ totalAmount: '', rate: '', areaValue: '', applicationMethod: 'broadcast_spray' });
+  // A refresh that fails after a successful load keeps the mode and units that load verified.
+  expect(withdrawLawnPlanSuggestions([governed])[0]).toMatchObject({ totalAmount: '', rate: '', areaValue: '', applicationMethod: 'broadcast_spray', rateUnit: 'fl_oz', amountUnit: 'fl_oz', areaUnit: 'sqft' });
+  const unitOnly = { ...governed, amountUnit: 'gal', rateUnit: 'lb', lawnPlanManualFields: ['amountUnit', 'rateUnit'] };
+  expect(withdrawLawnPlanSuggestions([unitOnly], { planUnverified: true })[0]).toMatchObject({ amountUnit: 'gal', rateUnit: 'lb', areaUnit: '', applicationMethod: '' });
 });
 
 it('a chosen rate unit never relabels the plan rate: the still-derived rate and total stay withdrawn while the units differ, return when they agree, and the area still follows the visit', () => {

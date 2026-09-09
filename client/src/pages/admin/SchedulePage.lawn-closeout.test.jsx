@@ -19,7 +19,11 @@ let failPlan;
 let withdrawDefaults;
 let catalog;
 let optionalOptions;
+let delayFlags;
+let flagResolvers;
 beforeEach(async () => {
+  delayFlags = false;
+  flagResolvers = [];
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
   improvementsEnabled = true;
   defaultsEnabled = false;
@@ -38,7 +42,10 @@ beforeEach(async () => {
   submit = vi.fn().mockRejectedValue(new Error('Synthetic submit'));
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     let data = {};
-    if (url.includes('feature-flags')) data = { flags: { 'lawn-completion-improvements': improvementsEnabled } };
+    if (url.includes('feature-flags')) {
+      if (delayFlags) await new Promise((resolve) => { flagResolvers.push(resolve); });
+      data = { flags: { 'lawn-completion-improvements': improvementsEnabled } };
+    }
     if (url.includes('turf-profile')) data = { profile: { lawn_sqft: 5000 } };
     if (url.includes('lawn-assessment/service')) data = { assessment: { id: 'assessment-current', confirmed_by_tech: true, turf_density: 82, weed_suppression: 85, color_health: 85, stress_damage: 80 } };
     if (url.includes('lawn-assessment/history')) data = { history };
@@ -525,6 +532,25 @@ it('a governed draft restored before a delayed initial plan failure withdraws it
   expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
 });
 
+it('a cold feature-flag cache defers the first plan request: no ungoverned legacy rows are seeded before the flag is known', async () => {
+  enableDefaults();
+  delayFlags = true;
+  refetchFlags();
+  mount();
+  await waitFor(() => expect(flagResolvers).toHaveLength(1));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('turf-profile'))).toBe(true));
+  // The member visit would otherwise fetch the plan without completion
+  // defaults and seed legacy rows when the flag flipped (Codex r13 P1).
+  expect(fetch.mock.calls.some(([url]) => String(url).includes('treatment-plans'))).toBe(false);
+  expect(screen.queryAllByPlaceholderText('Total')).toHaveLength(0);
+  await act(async () => { flagResolvers[0](); });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  // Governed rows: the visit-area refresh scales them and the protocol method is on.
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12', '8']));
+  expect(within(totals()[0].parentElement).getAllByRole('combobox')[2].value).toBe('broadcast_spray');
+});
+
 it('changing only the rate unit withdraws a plan-suggested rate and total instead of relabeling them, and returning to the plan unit restores them', async () => {
   enableDefaults();
   mount();
@@ -643,7 +669,9 @@ it('a governed draft restored under an initial plan outage still submits its sav
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
   // The withdrawn rows ask for the method, the actual area and amount; the
   // visit area itself was restored from the draft.
+  // The unverified plan's units went with its values (Codex r13 P1): the tech picks the amount unit too.
   totals().forEach((input) => fireEvent.change(within(input.parentElement).getAllByRole('combobox')[2], { target: { value: 'broadcast_spray' } }));
+  totals().forEach((input) => fireEvent.change(within(input.parentElement).getAllByRole('combobox')[1], { target: { value: 'fl_oz' } }));
   screen.getAllByPlaceholderText('Sq ft').forEach((input) => fireEvent.change(input, { target: { value: '1000' } }));
   fireEvent.change(totals()[0], { target: { value: '3' } });
   fireEvent.change(totals()[1], { target: { value: '2' } });
