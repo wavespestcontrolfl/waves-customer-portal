@@ -8,14 +8,31 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const db = require('../models/db');
 const pushService = require('../services/push-notifications');
-const resolve = pushService._resolveNotificationPropertyId;
+const resolve = pushService.resolveNotificationPropertyId;
+const { qualifyNotificationLink } = pushService;
+const originalGate = process.env.GATE_APP_PROPERTY_SCOPE;
+afterAll(() => { if (originalGate === undefined) delete process.env.GATE_APP_PROPERTY_SCOPE; else process.env.GATE_APP_PROPERTY_SCOPE = originalGate; });
 
 function firstReturning(row) {
   const c = { where: jest.fn(() => c), first: jest.fn(async () => row) };
   return c;
 }
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => { jest.clearAllMocks(); process.env.GATE_APP_PROPERTY_SCOPE = 'true'; });
+
+test('gate off (or rolled back): no house hint at all — a composer hint is dropped and no lookup runs (uncapped codex r1t P1)', async () => {
+  delete process.env.GATE_APP_PROPERTY_SCOPE;
+  await expect(resolve('cust-1', { propertyId: 'prop-b', appointmentId: 'svc-1' })).resolves.toBeNull();
+  expect(db).not.toHaveBeenCalled();
+});
+
+test('qualifyNotificationLink names the profile always and the house when known; absolute URLs pass through', () => {
+  expect(qualifyNotificationLink('/?tab=visits', 'cust-1', null)).toBe('/?tab=visits&notificationProperty=cust-1');
+  expect(qualifyNotificationLink('/?tab=visits', 'cust-1', 'prop-b')).toBe('/?tab=visits&notificationProperty=cust-1&notificationPropertyId=prop-b');
+  expect(qualifyNotificationLink('/', 'cust-1', 'prop-b')).toBe('/?notificationProperty=cust-1&notificationPropertyId=prop-b');
+  expect(qualifyNotificationLink('https://example.com/x', 'cust-1', 'prop-b')).toBe('https://example.com/x');
+  expect(qualifyNotificationLink('//evil.example/x', 'cust-1', 'prop-b')).toBe('//evil.example/x');
+});
 
 test('a composer that knows the house wins, with no lookup', async () => {
   await expect(resolve('cust-1', { propertyId: 'prop-b', appointmentId: 'svc-1' })).resolves.toBe('prop-b');

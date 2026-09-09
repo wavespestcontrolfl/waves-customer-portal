@@ -365,4 +365,16 @@ describe('cross-tab saved-property switch', () => {
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-a');
     expect(screen.getByTestId('labels').textContent).not.toMatch(/prop-b/);
   });
+
+  it('refreshProperties keeps ONE identity across renders — the tabs\' re-read effect keys on it and must not re-fire after every successful refresh (uncapped codex r1t P1)', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    api.getMe.mockResolvedValue({ id: 'cust-1' });
+    api.getAuthProperties.mockResolvedValue(SAVED);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    const before = authApi.refreshProperties;
+    api.getAuthProperties.mockResolvedValue({ ...SAVED, selected: { key: 'cust-1:prop-b', customerId: 'cust-1', propertyId: 'prop-b' } });
+    await act(async () => { await authApi.refreshProperties(); });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b'); // state changed → provider re-rendered
+    expect(authApi.refreshProperties).toBe(before);
+  });
 });

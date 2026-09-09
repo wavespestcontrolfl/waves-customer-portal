@@ -347,12 +347,14 @@ function windowGuardFrom(preSendCheck) {
 // NotificationService.create (not notifyCustomer) on purpose: the message
 // already passed the SMS pipeline's consent checks, and notifyCustomer
 // would fire its own second push.
-async function recordBell(customerId, messageType, body, dedupeKey) {
+async function recordBell(customerId, messageType, body, dedupeKey, appointmentId = null) {
   try {
     const { title, link, category } = pushPresentation(messageType);
     const NotificationService = require('../notification-service');
     const notif = await NotificationService.notifyCustomer(customerId, category, title, body, {
       link, dedupeKey, push: false,
+      // The visit this bell is about — the stored link names its house.
+      ...(appointmentId ? { appointmentId } : {}),
     });
     return notif && notif.id ? String(notif.id) : null;
   } catch (err) {
@@ -472,7 +474,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         }
       }
     }
-    const notificationId = appNotification?.id ? String(appNotification.id) : await recordBell(customerId, messageType, body, notificationEventKey);
+    const notificationId = appNotification?.id ? String(appNotification.id) : await recordBell(customerId, messageType, body, notificationEventKey, appointmentId);
     const sid = notificationId ? `push:${notificationId}` : 'push:delivered';
     if (proofRowId && notificationId) {
       await db('sms_log')
@@ -536,7 +538,7 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
       minUpdatedAt: heartbeatCutoff(),
       appointmentId,
     });
-    if (delivered) await recordBell(customerId, messageType, body);
+    if (delivered) await recordBell(customerId, messageType, body, undefined, appointmentId);
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
   }

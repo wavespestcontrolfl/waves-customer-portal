@@ -166,3 +166,26 @@ test('a PROPERTY-scoped push (Visits) for the same profile with a retired primar
   expect(state.auth.switchProperty).not.toHaveBeenCalled();
 });
 
+test('a house hint on a PROFILE-shaped list (gate off / rolled back) degrades to a profile link: current profile → no switch, no "unavailable" (uncapped codex r1t P1)', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1&notificationPropertyId=prop-b');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: null,
+    properties: [{ id: 'property-1' }, { id: 'property-2' }], propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  expect(await screen.findByText('Authorized property portal')).toBeInTheDocument();
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+  expect(document.body.textContent).not.toMatch(/no longer available/);
+});
+
+test('the same hint on a SAVED-shaped list still switches to the named house', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1&notificationPropertyId=prop-b');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+    properties: [
+      { id: 'property-1:prop-a', key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true },
+      { id: 'property-1:prop-b', key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false },
+    ], propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith({ customerId: 'property-1', propertyId: 'prop-b' }));
+});
+

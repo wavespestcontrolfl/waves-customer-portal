@@ -443,7 +443,18 @@ function ProtectedRoute({ children }) {
   // profile but a different saved property still switches. A profile-only
   // link (every push minted before the notifications PR of the lane) keeps
   // today's rule: switch only when the PROFILE differs.
-  const targetPropertyId = new URLSearchParams(location.search).get('notificationPropertyId');
+  const targetPropertyHint = new URLSearchParams(location.search).get('notificationPropertyId');
+  // The hint means something only against a SAVED-property list. A
+  // PROFILE-shaped list (gate off, or rolled back after the push was
+  // minted) has no houses to match, so the hint degrades to a profile-only
+  // link — today's routing — instead of "Property unavailable" (uncapped
+  // codex r1t P1). An EMPTY list (still loading, or failed) keeps the hint:
+  // the pending / fail-closed paths below own that case.
+  // Saved entries carry a propertyId (null for a row-less profile) and a key;
+  // profile entries carry neither.
+  const listIsProfileShaped = properties.length > 0
+    && !properties.some((property) => property.key || Object.prototype.hasOwnProperty.call(property, 'propertyId'));
+  const targetPropertyId = listIsProfileShaped ? null : targetPropertyHint;
   const profileDiffers = !!targetProperty && String(customer?.id) !== targetProperty;
   // A saved property named by the link wins. A profile-only link (every push
   // minted before the composers carry the property) means that profile's

@@ -2621,6 +2621,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
   const dashboardSavedScope = properties.some((p) => p.key);
+  // A NON-primary saved property is selected: the protection score and the
+  // local alerts describe the PRIMARY address (customer-keyed reads, the
+  // primary's ZIP) — withheld here rather than shown as house B's
+  // (uncapped codex r1t P1). Next visit, tracker and last visit follow the
+  // selection; the plan recommendations are plan-wide.
+  const dashboardSecondarySelection = dashboardSavedScope && !!dashboardEntry && !!dashboardEntry.propertyId && dashboardEntry.isPrimaryProperty !== true;
   const compact = useIsMobile(720);
   const nextRead = usePortalRead('next-visit', () => api.getNextService());
   // A next visit scoped to a different house than Home shows is stale (the
@@ -3015,11 +3021,19 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
         </div>
       </section>
 
-      <PropertyScoreCard data={propertyScore} compact={compact} />
+      {dashboardSecondarySelection ? (
+        <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
+          <div style={{ fontSize: 14, color: muted, lineHeight: 1.5 }}>
+            Your protection score and local alerts are shown for your primary address. Switch to that property to see them.
+          </div>
+        </section>
+      ) : (
+        <PropertyScoreCard data={propertyScore} compact={compact} />
+      )}
 
       <RecommendationsCard data={propertyRecommendations} customer={customer} />
 
-      <PropertyAlertsCard data={propertyAlerts} />
+      {!dashboardSecondarySelection && <PropertyAlertsCard data={propertyAlerts} />}
 
       {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
         <section data-glass="card" style={{ ...card, padding: 20, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>

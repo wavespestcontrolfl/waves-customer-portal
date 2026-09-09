@@ -286,11 +286,25 @@ const NotificationService = {
 
   // Create customer notification
   async notifyCustomer(customerId, category, title, body, opts = {}) {
-    const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOpts } = opts;
+    const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOptsRaw } = opts;
 
     if (!(await customerPreferenceEnabled(customerId, preferenceKey))) {
       return { id: null, suppressed: true, reason: 'preference_disabled' };
     }
+
+    // Saved-property destination (GATE_APP_PROPERTY_SCOPE, uncapped codex r1t
+    // P1): when the visit's house is known (createOpts.propertyId, or
+    // resolved from createOpts.appointmentId) the STORED bell link names it
+    // too, so the same reminder opened from the bell lands on that house —
+    // not on whichever house is selected. No house known: the link is
+    // untouched, today's shape.
+    const PushService = require('./push-notifications');
+    const notifiedPropertyId = await PushService.resolveNotificationPropertyId(customerId, {
+      propertyId: createOptsRaw.propertyId, appointmentId: createOptsRaw.appointmentId,
+    });
+    const createOpts = notifiedPropertyId && createOptsRaw.link
+      ? { ...createOptsRaw, link: PushService.qualifyNotificationLink(createOptsRaw.link, customerId, notifiedPropertyId) }
+      : createOptsRaw;
 
     const metadata = {
       ...createOpts.metadata,
@@ -337,7 +351,6 @@ const NotificationService = {
     if (!push || (deduped && !awaitPush)) return { ...notification, deduped, push: null };
     let pushQueued = false;
     try {
-      const PushService = require('./push-notifications');
       const dispatch = PushService.sendToCustomer(customerId, {
         title,
         body: body || '',

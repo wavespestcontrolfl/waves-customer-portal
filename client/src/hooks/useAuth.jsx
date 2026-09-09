@@ -469,7 +469,12 @@ export function AuthProvider({ children }) {
     });
   };
 
-  const refreshProperties = async () => {
+  // Stable identity (uncapped codex r1t P1): the tabs re-read the list from
+  // an effect keyed on this callback; a new function per provider render
+  // would re-fire that effect after every successful refresh — an endless
+  // loop while the selection stays stale (every property retired). Only
+  // refs and setters inside, so an empty dependency list is exact.
+  const refreshProperties = useCallback(async () => {
     // Same staleness rule as loadCustomer: a response (or failure) that
     // started under a superseded session must not overwrite the new
     // session's property list or surface its error.
@@ -490,7 +495,7 @@ export function AuthProvider({ children }) {
       setPropertiesError('Other service properties are temporarily unavailable.');
       return false;
     }
-  };
+  }, []);
 
   // target: a profile id (string — every shipped caller) or a saved-property
   // pair { customerId, propertyId } (GATE_APP_PROPERTY_SCOPE). A same-profile

@@ -3,7 +3,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const apns = require('./apns');
 const fcm = require('./fcm');
-const { accountPropertyIds, resolvePrimaryProfileId } = require('./account-properties');
+const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled } = require('./account-properties');
 const { gateEnvValue } = require('../config/feature-gates');
 
 const PUSH_HEARTBEAT_HOURS = 72;
@@ -162,15 +162,12 @@ class PushNotificationService {
     }
     if (!context?.enabled) return { ...summarize([], 0), reason: 'push_disabled' };
     if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
-      const target = new URL(notification.url, 'https://portal.wavespestcontrol.com');
-      target.searchParams.set('notificationProperty', String(customerId));
       // Saved-property destination (GATE_APP_PROPERTY_SCOPE): the app opens
       // the visit's HOUSE, not just the profile — from notification.propertyId
       // (a composer that knows it) or resolved here from the visit id every
       // appointment message already carries (see resolveNotificationPropertyId).
       const notifiedPropertyId = await resolveNotificationPropertyId(customerId, notification);
-      if (notifiedPropertyId) target.searchParams.set('notificationPropertyId', notifiedPropertyId);
-      notification = { ...notification, url: `${target.pathname}${target.search}${target.hash}` };
+      notification = { ...notification, url: qualifyNotificationLink(notification.url, customerId, notifiedPropertyId) };
     }
     const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
     if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
@@ -314,6 +311,10 @@ service._sendSubscription = sendSubscription;
 // Best-effort: a lookup failure sends the profile-only link, never blocks
 // the push. The visit must belong to the recipient profile.
 async function resolveNotificationPropertyId(customerId, notification) {
+  // Gate off (or rolled back): the app's list is profile-shaped and cannot
+  // honor a house — a hint would only make the tap read "unavailable"
+  // (uncapped codex r1t P1). Profile-only link, today's behavior.
+  if (!appPropertyScopeEnabled()) return null;
   if (notification?.propertyId) return String(notification.propertyId);
   if (!notification?.appointmentId) return null;
   try {
@@ -326,6 +327,23 @@ async function resolveNotificationPropertyId(customerId, notification) {
     return null;
   }
 }
+// A relative in-app destination qualified with the profile it is about
+// (`notificationProperty`, which the app's route guard needs before it will
+// consider a house) and, when known, the saved property
+// (`notificationPropertyId`). Absolute URLs pass through untouched. Used for
+// the push payload AND, when a house resolved, for the stored bell link —
+// the same reminder opened from the bell must land on the same house
+// (uncapped codex r1t P1).
+function qualifyNotificationLink(url, customerId, propertyId = null) {
+  const raw = String(url || '');
+  if (!raw.startsWith('/') || raw.startsWith('//')) return url;
+  const target = new URL(raw, 'https://portal.wavespestcontrol.com');
+  target.searchParams.set('notificationProperty', String(customerId));
+  if (propertyId) target.searchParams.set('notificationPropertyId', String(propertyId));
+  return `${target.pathname}${target.search}${target.hash}`;
+}
+service.resolveNotificationPropertyId = resolveNotificationPropertyId;
+service.qualifyNotificationLink = qualifyNotificationLink;
 service._resolveNotificationPropertyId = resolveNotificationPropertyId;
 
 module.exports = service;
