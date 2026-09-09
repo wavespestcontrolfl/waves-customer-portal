@@ -85,6 +85,27 @@ postgres('SMS spam guard and digest SQL', () => {
     expect(rows.map((row) => row.message_body)).toEqual(['Synthetic service request']);
   });
 
+  test.each(['reply', 'STOP'])('a blocked domestic %s cannot clear an international thread', async (kind) => {
+    const domestic = '+12079460958';
+    const international = '+442079460958';
+    const ours = '+19415550199';
+    await mockPg('blocked_numbers').insert({ number: domestic });
+    await mockPg('sms_log').insert([
+      { direction: 'inbound', from_phone: international, to_phone: ours,
+        message_body: 'Synthetic service request', created_at: new Date(Date.now() - 3000), message_type: 'inbound', status: 'received' },
+      { direction: kind === 'reply' ? 'outbound' : 'inbound',
+        from_phone: kind === 'reply' ? ours : domestic, to_phone: kind === 'reply' ? domestic : ours,
+        message_body: kind === 'reply' ? 'Synthetic response' : 'STOP', created_at: new Date(Date.now() - 1000),
+        message_type: kind === 'reply' ? 'manual' : 'opt_out', status: kind === 'reply' ? 'sent' : 'received' },
+    ]);
+    expect((await loadUnansweredThreads()).map((row) => row.peer)).toEqual([international]);
+  });
+
+  test.each(['anonymous', '', '123', '+'])('rejects invalid block identity %j', async (number) => {
+    expect((await block(number)).status).toBe(400);
+    expect(await mockPg('blocked_numbers')).toEqual([]);
+  });
+
   test('protects a live open lead but permits its soft-deleted row to be blocked', async () => {
     const id = randomUUID();
     await mockPg('leads').insert({ id, phone: '(941) 555-0100', status: 'new' });

@@ -131,7 +131,7 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
             OR COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '') LIKE '+1%')
           AND RIGHT(regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g'), 10)
             = RIGHT(regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g'), 10))
-        OR regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g')
+        OR NULLIF(regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g'), '')
             = regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g')
       )`);
   });

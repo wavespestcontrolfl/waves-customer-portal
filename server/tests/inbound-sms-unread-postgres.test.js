@@ -95,6 +95,12 @@ postgres('unread SMS inbox count (PostgreSQL)', () => {
     expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
   });
 
+  test('a legacy digitless block does not hide contactless messages', async () => {
+    await seed({ phone: null });
+    await mockPg('blocked_numbers').insert({ id: randomUUID(), number: 'anonymous' });
+    expect(await countUnreadInboundSms()).toEqual({ conversations: 1, messages: 1 });
+  });
+
   test('one remaining unread conversation keeps the shared phone thread counted', async () => {
     const first = await seed();
     const second = await seed({ ours: '+19415550191' });

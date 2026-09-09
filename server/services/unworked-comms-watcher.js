@@ -450,8 +450,15 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
 }
 
 // Lane 3: threads whose last message today is inbound — customer waiting.
-// Peer = normalized last-10 counterpart phone; reactions/opt-flows excluded.
+// Peer preserves international identity; NANP keeps its domestic key.
 async function loadUnansweredThreads(cutoff = new Date()) {
+  const phoneKey = (column) => {
+    const digits = `REGEXP_REPLACE(COALESCE(${column}, ''), '[^0-9]', '', 'g')`;
+    return `(CASE WHEN ${digits} = '' THEN ''
+      WHEN ${digits} ~ '^1[0-9]{10}$' THEN RIGHT(${digits}, 10)
+      WHEN ${digits} ~ '^[0-9]{10}$' AND COALESCE(${column}, '') NOT LIKE '+%' THEN ${digits}
+      ELSE '+' || ${digits} END)`;
+  };
   const { rows } = await db.raw(
     `
     WITH last_inbound AS (
@@ -461,9 +468,8 @@ async function loadUnansweredThreads(cutoff = new Date()) {
       SELECT DISTINCT ON (peer, endpoint) peer, endpoint, message_body, metadata, created_at
       FROM (
         SELECT message_body, metadata, created_at, from_phone,
-               RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer,
-               REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g') AS peer_full,
-               RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) AS endpoint
+               ${phoneKey('from_phone')} AS peer,
+               ${phoneKey('to_phone')} AS endpoint
         FROM sms_log
         -- Rolling 7-day live worklist (codex r15): an unanswered thread
         -- must reappear until answered — the marker window stranded
@@ -480,15 +486,9 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         -- A sender marked spam in the inbox (blocked_numbers) is not
         -- "waiting on a reply" — nobody may answer it and the block drops
         -- its next text before it is logged.
-        -- NANP blocks match the last-10 peer key; other country codes
-        -- must match the sender's full digits (codex #4213).
         AND NOT EXISTS (
           SELECT 1 FROM blocked_numbers b
-          WHERE (REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g') ~ '^1[0-9]{10}$'
-                 AND inbound.peer_full ~ '^1{0,1}[0-9]{10}$'
-                 AND (inbound.from_phone NOT LIKE '+%' OR inbound.from_phone LIKE '+1%')
-                 AND RIGHT(REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g'), 10) = inbound.peer)
-             OR REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g') = inbound.peer_full
+          WHERE ${phoneKey('b.number')} = inbound.peer
         )
       ORDER BY peer, endpoint, created_at DESC
     )
@@ -502,11 +502,11 @@ async function loadUnansweredThreads(cutoff = new Date()) {
       -- number must not link the thread to an arbitrary record (codex r3).
       SELECT c2.id, c2.first_name, c2.last_name FROM customers c2
       WHERE c2.deleted_at IS NULL
-        AND RIGHT(REGEXP_REPLACE(COALESCE(c2.phone, ''), '\\D', '', 'g'), 10) = l.peer
+        AND ${phoneKey("c2.phone")}  = l.peer
         AND NOT EXISTS (
           SELECT 1 FROM customers c3
           WHERE c3.deleted_at IS NULL AND c3.id <> c2.id
-            AND RIGHT(REGEXP_REPLACE(COALESCE(c3.phone, ''), '\\D', '', 'g'), 10) = l.peer
+            AND ${phoneKey("c3.phone")}  = l.peer
         )
       LIMIT 1
     ) cu ON true
@@ -535,16 +535,16 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         AND NOT EXISTS (
           SELECT 1 FROM message_drafts mdx
           WHERE mdx.sms_log_id IS NULL
-            AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))
+            AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND ${phoneKey("COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone')")} = ${phoneKey('os.to_phone')}))
             AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
                                 AND os.created_at + interval '2 minutes'
         )
         AND os.status IN ('queued', 'sent', 'delivered')
         AND os.created_at > l.created_at
-        AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10) = l.peer
+        AND ${phoneKey("os.to_phone")}  = l.peer
         -- Same-endpoint reply (codex r45): the conversation model is
         -- unique per (contact, our number).
-        AND RIGHT(REGEXP_REPLACE(COALESCE(os.from_phone, ''), '\\D', '', 'g'), 10) = l.endpoint
+        AND ${phoneKey("os.from_phone")}  = l.endpoint
     )
     -- A later STOP ends the thread: an opted-out customer must not be
     -- surfaced as waiting for a reply nobody may send (codex r4).
@@ -553,7 +553,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
       WHERE oo.direction = 'inbound'
         AND oo.message_type = 'opt_out'
         AND oo.created_at > l.created_at
-        AND RIGHT(REGEXP_REPLACE(COALESCE(oo.from_phone, ''), '\\D', '', 'g'), 10) = l.peer
+        AND ${phoneKey("oo.from_phone")}  = l.peer
     )
     ORDER BY l.created_at DESC
     LIMIT :cap

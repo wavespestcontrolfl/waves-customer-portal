@@ -3035,7 +3035,7 @@ router.post('/blocked-numbers', async (req, res, next) => {
   try {
     const { blockType, reason } = req.body;
     const number = normalizePhone(req.body.number);
-    if (!number) return res.status(400).json({ error: 'number required' });
+    if (!phoneMatchDigits(req.body.number).length) return res.status(400).json({ error: 'valid number required' });
 
     const owner = await findKnownCallerCustomer(db, number);
     if (owner) {
@@ -3049,7 +3049,7 @@ router.post('/blocked-numbers', async (req, res, next) => {
     // An OPEN lead (a quote requester who has not converted) has no
     // customer row yet, so its thread looks unknown in the inbox; blocking
     // it would silently drop the prospect's next text and call (codex
-    // #4213 P1). Same last-10 identity the inbox threads on.
+    // #4213 P1).
     const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
     // No catch: a failing safety check must refuse the block, not allow it.
     const openLead = await db('leads')
