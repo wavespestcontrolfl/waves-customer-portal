@@ -13911,6 +13911,43 @@ function useSheetViewport(open, dialogRef) {
   return viewport;
 }
 
+// My Property under a SECONDARY saved-property selection (GitHub codex r4
+// P1): the tab's facts, gate codes, pet plan, irrigation settings and access
+// notes are stored per PROFILE (GET/PUT /property/preferences key on the
+// customer, not the saved property) — rendering it under house B would show
+// and overwrite house A's. Until those reads and writes are saved-property
+// aware, the tab is explicitly profile-scoped: it names the address the
+// details belong to and offers the switch, and nothing is read or written.
+function PropertyProfileScopedNotice({ primaryEntry, onSwitch }) {
+  const address = primaryEntry ? formatPropertyAddress(primaryEntry) : '';
+  // Same tokens the tabs build locally (PORTAL_CARD_STYLE / PORTAL_SHELL /
+  // PORTAL_BUTTON_BASE) — this component sits outside any tab.
+  const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
+  const muted = PORTAL_SHELL.muted;
+  const iconTile = { width: 38, height: 38, borderRadius: 8, background: '#F8FCFE', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
+  const secondaryButton = { ...PORTAL_BUTTON_BASE, background: '#fff', color: B.glassNavy, border: '1px solid #D8D0C0', borderRadius: 10, boxShadow: 'none', padding: '10px 14px', fontSize: 14, minHeight: 44 };
+  return (
+    <section data-glass="card" style={{ ...card, padding: 24 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+        <span style={iconTile}><Icon name="house" size={16} strokeWidth={2} /></span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Property details are kept for your primary address</div>
+          <div style={{ fontSize: 14, color: muted, marginTop: 6, lineHeight: 1.5 }}>
+            {address
+              ? <>Gate codes, pet and access notes, and watering settings on file belong to <strong>{address}</strong>. Switch to that property to view or edit them.</>
+              : 'Gate codes, pet and access notes, and watering settings are kept with your primary address, which is not available to switch to right now. Call or text Waves to update them.'}
+          </div>
+          {primaryEntry && typeof onSwitch === 'function' && (
+            <button type="button" onClick={onSwitch} data-glass-accent="" style={{ ...secondaryButton, marginTop: 14, padding: '10px 14px', fontSize: 14 }}>
+              View {primaryEntry.label || 'primary'} property details
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, onSavedScopeUnavailable = null }) {
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
@@ -15781,6 +15818,13 @@ export default function PortalPage() {
   const wateringPlanProperty = portalProperties.find((property) => String(property.customerId || property.id) === wateringPlanCustomerId);
   const canSwitchProperties = portalProperties.length > 1;
   const propertyRenderKey = `${activePropertyId}:${requestRefreshKey}`;
+  // A NON-primary saved property of a profile is selected: My Property is
+  // profile-scoped (see PropertyProfileScopedNotice) — the primary entry of
+  // the same profile is the switch target (absent when the office retired it).
+  const savedSecondarySelection = !!(activeProperty && activeProperty.key && activeProperty.propertyId && activeProperty.isPrimaryProperty !== true);
+  const profilePrimaryEntry = savedSecondarySelection
+    ? (portalProperties.find((p) => String(p.customerId) === String(activeProperty.customerId) && p.isPrimaryProperty === true) || null)
+    : null;
   // Keep the destination explicit for Visits and watering-plan deep links.
   const selectProperty = async (propertyId, { tab = 'dashboard' } = {}) => {
     if (!propertyId || propertyId === activePropertyId || switchingPropertyId) return;
@@ -16381,10 +16425,12 @@ export default function PortalPage() {
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
-          wateringPlanCustomerId={wateringPlanCustomerId}
-          onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
-        />}
+        {activeTab === 'property' && (savedSecondarySelection
+          ? <PropertyProfileScopedNotice key={`property-notice-${propertyRenderKey}`} primaryEntry={profilePrimaryEntry} onSwitch={profilePrimaryEntry ? () => selectProperty(profilePrimaryEntry.id, { tab: 'property' }) : undefined} />
+          : <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
+            wateringPlanCustomerId={wateringPlanCustomerId}
+            onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
+          />)}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
         </PortalRefreshArea>
       </main>

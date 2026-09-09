@@ -224,7 +224,18 @@ async function resolveSessionScope(req, knex = db) {
     || rows.find((r) => r.is_primary === true)
     || rows[0];
   const multi = rows.length > 1;
-  return { customerId, enabled: true, multi, scoped: multi || property.is_primary !== true, closed: false, property };
+  // One active row that IS the primary: today's customer-wide reads —
+  // unless the profile also has a RETIRED row (GitHub codex r4 P1): visits
+  // still stamped to a retired secondary must not surface, actionable,
+  // under the remaining primary. Keep the predicate (primary OR unstamped)
+  // whenever a retired row exists. A profile that never had a second row is
+  // byte-identical to today.
+  let scoped = multi || property.is_primary !== true;
+  if (!scoped) {
+    const retiredRow = await knex('customer_properties').where({ customer_id: customerId, active: false }).first('id');
+    scoped = !!retiredRow;
+  }
+  return { customerId, enabled: true, multi, scoped, closed: false, property };
 }
 
 // The visit rule. A property's visits are the customer's visits stamped with
@@ -274,11 +285,13 @@ function assignVisitsToEntries(entries, visits) {
     const mine = byCustomer.get(String(visit.customer_id)) || [];
     if (!mine.length) continue;
     let target = null;
-    // A lone PRIMARY entry owns everything (single-home customers, today's
-    // reads); a lone SECONDARY owns only its stamped visits (its primary was
-    // retired — those unstamped visits belonged to the retired house).
-    if (mine.length === 1 && mine[0].isPrimaryProperty) target = mine[0];
-    else if (visit.property_id) target = mine.find((e) => String(e.propertyId) === String(visit.property_id)) || null;
+    // A stamped visit belongs to the entry with that property — a stamp to
+    // a property no longer listed (retired) belongs to nobody, even on a
+    // profile with one remaining primary (GitHub codex r4 P1). An unstamped
+    // visit belongs to the primary entry; a profile-keyed entry (no saved
+    // row, propertyId null) is its own primary and can only ever have
+    // unstamped visits.
+    if (visit.property_id) target = mine.find((e) => e.propertyId != null && String(e.propertyId) === String(visit.property_id)) || null;
     else target = mine.find((e) => e.isPrimaryProperty) || null;
     if (target && !next.has(target.key)) next.set(target.key, visit);
   }

@@ -180,7 +180,7 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
   test('gate on, single property → multi=false → no property predicate (single-home customers untouched)', async () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true';
     db.mockImplementation((table) => {
-      if (table === 'customer_properties') return chain([PROPS['cust-1'][0]]);
+      if (table === 'customer_properties') { const c = chain([PROPS['cust-1'][0]]); c.first = jest.fn(async () => undefined); return c; } // no retired row
       throw new Error(`unexpected table ${table}`);
     });
     const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
@@ -188,6 +188,22 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
     const { qb, calls } = recordingQb();
     scopeVisitsToProperty(qb, scope);
     expect(calls).toEqual([['where', 'scheduled_services.customer_id', 'cust-1']]);
+  });
+
+  test('gate on, one active PRIMARY plus a RETIRED row keeps the predicate — the retired house\'s stamped visits stay out (GitHub codex r4 P1)', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    db.mockImplementation((table) => {
+      if (table === 'customer_properties') { const c = chain([PROPS['cust-1'][0]]); c.first = jest.fn(async () => ({ id: 'retired-row' })); return c; }
+      throw new Error(`unexpected table ${table}`);
+    });
+    const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
+    expect(scope).toMatchObject({ enabled: true, multi: false, scoped: true, closed: false, property: { id: 'prop-a', is_primary: true } });
+    const rec = recordingQb();
+    scopeVisitsToProperty(rec.qb, scope);
+    expect(rec.calls).toEqual([
+      ['where', 'scheduled_services.customer_id', 'cust-1'],
+      ['where(fn)', [['where', 'scheduled_services.property_id', 'prop-a'], ['orWhereNull', 'scheduled_services.property_id']]],
+    ]);
   });
 
   test('gate on, a LONE non-primary property (primary retired) is still scoped — no NULL leg, so the retired primary\'s unstamped visits stay out', async () => {
@@ -307,10 +323,11 @@ describe('assignVisitsToEntries — next visit per unified entry', () => {
       { id: 'v2', customer_id: 'c1', property_id: 'pb' },
       { id: 'v3', customer_id: 'c1', property_id: 'pa' }, // later than v1 → primary keeps v1
       { id: 'v4', customer_id: 'c1', property_id: 'retired' },
-      { id: 'v5', customer_id: 'c9', property_id: 'something-else' }, // lone entry owns it regardless of stamp
+      { id: 'v5', customer_id: 'c9', property_id: 'something-else' }, // stamped to a retired house → nobody, even for a lone primary (GitHub codex r4 P1)
+      { id: 'v7', customer_id: 'c9', property_id: null }, // unstamped → the lone primary
       { id: 'v6', customer_id: 'c-unknown', property_id: null },
     ]);
-    expect([...next.entries()].map(([k, v]) => [k, v.id])).toEqual([['c1:pa', 'v1'], ['c1:pb', 'v2'], ['c9:pz', 'v5']]);
+    expect([...next.entries()].map(([k, v]) => [k, v.id])).toEqual([['c1:pa', 'v1'], ['c1:pb', 'v2'], ['c9:pz', 'v7']]);
   });
   test('a lone NON-primary entry owns only its stamped visits (its primary was retired)', () => {
     const next = assignVisitsToEntries([{ key: 'c1:pb', customerId: 'c1', propertyId: 'pb', isPrimaryProperty: false }], [
