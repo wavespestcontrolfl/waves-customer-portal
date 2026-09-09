@@ -1293,6 +1293,7 @@ module.exports = {
   seedFollowUpsForParent,
   serviceKeyFor,
   shiftPastWeekend,
+  etDateDiffDays,
   _internals: {
     dateOnly,
     nextRecurringDate,

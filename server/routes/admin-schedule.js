@@ -99,6 +99,7 @@ const PREPAID_STAMP_REFUSALS = [
 ];
 const {
   auditRecurringScheduleAnomalies,
+  auditRecurringScheduleCoverage,
 } = require('../services/recurring-schedule-audit');
 const {
   detectWaveGuardPlanKeys,
@@ -2492,18 +2493,8 @@ async function resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) {
 // below are the whole contract: nothing outside them is ever propagated or
 // overlaid, so a corrupted jsonb value can't rewrite dates, status, or
 // ownership on spawned rows.
-const PRICE_SERVICE_SERVICE_KEYS = [
-  'service_type', 'service_id', 'service_key_snapshot', 'service_category_snapshot', 'is_callback',
-];
-const PRICE_SERVICE_PRICE_KEYS = [
-  'estimated_price', 'primary_line_price',
-  'discount_type', 'discount_amount', 'discount_dollars',
-  'discount_id', 'discount_name',
-  'discount_service_key_filter', 'discount_service_category_filter', 'discount_max_dollars',
-  'line_discount_id', 'line_discount_name', 'line_discount_type',
-  'line_discount_amount', 'line_discount_dollars',
-];
-const PRICE_SERVICE_OVERRIDE_KEYS = new Set([...PRICE_SERVICE_SERVICE_KEYS, ...PRICE_SERVICE_PRICE_KEYS]);
+const { PRICE_SERVICE_SERVICE_KEYS, PRICE_SERVICE_PRICE_KEYS, PRICE_SERVICE_OVERRIDE_KEYS,
+  parseTemplateOverrides, overlayRecurringTemplateOverrides } = require('../services/recurring-template-overrides');
 
 function normalizePriceServiceScope(scope) {
   return scope === 'following' ? 'following' : 'this_only';
@@ -2576,30 +2567,6 @@ function readProvenanceOverrides(raw) {
   const out = {};
   for (const key of PROVENANCE_OVERRIDE_KEYS) if (value[key] !== undefined) out[key] = value[key];
   return out;
-}
-
-function parseTemplateOverrides(raw) {
-  let value = raw;
-  if (typeof value === 'string') {
-    try { value = JSON.parse(value); } catch { return null; }
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const filtered = {};
-  for (const [key, val] of Object.entries(value)) {
-    if (PRICE_SERVICE_OVERRIDE_KEYS.has(key)) filtered[key] = val;
-  }
-  return Object.keys(filtered).length > 0 ? filtered : null;
-}
-
-// The row every extension writer should COPY from: the parent overlaid with
-// its stamped template overrides. Gate off = the parent verbatim, so the
-// kill switch restores today's copy-the-parent behavior byte-for-byte.
-function overlayRecurringTemplateOverrides(parent, cols) {
-  if (!parent || !cols?.recurring_template_overrides) return parent;
-  if (!isEnabled('editApptPriceServiceScope')) return parent;
-  const overrides = parseTemplateOverrides(parent.recurring_template_overrides);
-  if (!overrides) return parent;
-  return { ...parent, ...overrides };
 }
 
 // Merge (never replace wholesale) so a later price-only edit keeps an
@@ -16896,6 +16863,11 @@ router.get('/recurring-anomalies', requireAdmin, async (req, res, next) => {
       includeCompleted,
       limit: req.query.limit,
     });
+    // Opt-in read-only measurements; the existing anomaly response stays
+    // unchanged unless the caller asks for series coverage.
+    if (req.query.includeCoverage === 'true') {
+      audit.coverage = await auditRecurringScheduleCoverage({ limit: req.query.limit, offset: req.query.coverageOffset });
+    }
     res.json({ success: true, ...audit });
   } catch (err) { next(err); }
 });
