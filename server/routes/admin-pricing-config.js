@@ -1245,7 +1245,13 @@ function configKeySubFeaturesAvailable(key) {
 async function effectiveTermiteInstallBasis() {
   try {
     const bridge = require('../services/pricing-engine/db-bridge');
-    await bridge.syncConstantsFromDB();
+    // syncConstantsFromDB resolves false (never rejects) when the DB read
+    // failed and the previous singleton values stand — that is NOT a fresh
+    // basis, so serve nothing rather than a stale one the client would
+    // stamp (codex #4313 r3 P1). The client blocks termite fallback quotes
+    // when `effective` is absent.
+    const synced = await bridge.syncConstantsFromDB();
+    if (synced !== true) return null;
     const { TERMITE } = require('../services/pricing-engine/constants');
     const trelona = TERMITE.systems?.trelona || {};
     const cartridges = TERMITE.cartridges || {};

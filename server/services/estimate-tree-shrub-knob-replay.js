@@ -93,17 +93,31 @@ const A1_TERMITE_STATION_COST = Object.freeze({ trelona: 24.00, advance: 13.16 }
 // Per-station labor-material + misc buildup and the install multiplier as
 // they have stood since Apr 2026 — the reader must not read live constants.
 const TERMITE_INSTALL_BUILDUP = Object.freeze({ laborMaterial: 5.25, misc: 0.75, multiplier: 1.45 });
-function unstampedTermiteStationCost(system, stations, storedInstall) {
+// A pre-stamp environment may also have carried an ADMIN-TUNED station cost
+// (the migration preserves anything other than the retired 22.05), so a
+// third source of evidence is consulted before the default: the stored
+// line's own materialCost (raw lines persist stations × (cost + buildup)),
+// which pins the cost the quote priced under to within a cent — accepted
+// only when it reproduces the stored install exactly and sits in a
+// plausible hardware band (codex #4313 r3 P1). Mapped envelopes carry no
+// materialCost, so they resolve through the two known costs or the default.
+const PLAUSIBLE_STATION_COST = Object.freeze({ min: 5, max: 80 });
+function unstampedTermiteStationCost(system, stations, storedInstall, storedMaterialCost) {
   const legacy = PRE_STAMP_TERMITE_STATION_COST[system];
   const current = A1_TERMITE_STATION_COST[system];
   if (!Number.isFinite(legacy)) return null;
   const n = Number(stations);
-  const install = Number(storedInstall);
+  const install = Math.round(Number(storedInstall));
   if (!(n > 0) || !(install > 0) || !Number.isFinite(current) || current === legacy) return legacy;
-  const priced = (cost) => Math.round(n * (cost + TERMITE_INSTALL_BUILDUP.laborMaterial + TERMITE_INSTALL_BUILDUP.misc) * TERMITE_INSTALL_BUILDUP.multiplier);
-  const matchesLegacy = priced(legacy) === Math.round(install);
-  const matchesCurrent = priced(current) === Math.round(install);
-  if (matchesCurrent && !matchesLegacy) return current;
+  const buildup = TERMITE_INSTALL_BUILDUP.laborMaterial + TERMITE_INSTALL_BUILDUP.misc;
+  const priced = (cost) => Math.round(n * (cost + buildup) * TERMITE_INSTALL_BUILDUP.multiplier);
+  if (priced(legacy) === install) return legacy;
+  if (priced(current) === install) return current;
+  const material = Number(storedMaterialCost);
+  if (material > 0) {
+    const derived = Math.round((material / n - buildup) * 100) / 100;
+    if (derived >= PLAUSIBLE_STATION_COST.min && derived <= PLAUSIBLE_STATION_COST.max && priced(derived) === install) return derived;
+  }
   return legacy;
 }
 
@@ -142,6 +156,7 @@ function storedTermiteResult(estData = {}) {
     system: String(firstDefined(m.selectedSystem, m.system, r.selectedSystem, r.system, 'trelona')).toLowerCase(),
     stations: firstDefined(m.sta, r.stations),
     install: firstDefined(m.ti, m.ai, install.retailValue, install.price),
+    materialCost: install.materialCost,
   };
 }
 
@@ -154,7 +169,7 @@ function termiteKnobSignalForReplay(estData = {}) {
   if (Number.isFinite(stampedCost) && stampedCost > 0) {
     return { system: String(stored.stamp.system || stored.system).toLowerCase(), stationCost: stampedCost };
   }
-  const fallback = unstampedTermiteStationCost(stored.system, stored.stations, stored.install);
+  const fallback = unstampedTermiteStationCost(stored.system, stored.stations, stored.install, stored.materialCost);
   return Number.isFinite(fallback) ? { system: stored.system, stationCost: fallback } : null;
 }
 

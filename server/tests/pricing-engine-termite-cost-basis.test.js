@@ -391,5 +391,19 @@ describe('termite catalog link — codex round 1', () => {
     // Modifiers in play (neither reproduces) → the pre-stamp default.
     expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 700 } } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
   });
+
+  test('an unstamped raw line from an admin-tuned pre-stamp environment replays at the cost its materialCost pins', () => {
+    // 15 stations at an admin-tuned $23.50: material 15 × 29.50 = 442.5 → 443 (rounded by the pricer), install 15 × 29.50 × 1.45 = 641.6 → 642.
+    const line = { service: 'termite_bait', system: 'trelona', stations: 15, installation: { price: 642, retailValue: 642, materialCost: 443 } };
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [line] } })).toEqual({ system: 'trelona', stationCost: 23.53 });
+    // …and that replays to the stored install to the dollar.
+    constants.TERMITE.systems.trelona.stationCost = 24;
+    const replayed = priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'trelona', knobs: { system: 'trelona', stationCost: 23.53 } });
+    expect(replayed.installation.price).toBe(642);
+    // A mapped envelope has no materialCost → the two known costs or the default.
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 642 } } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    // An implausible derivation (a line whose materialCost is garbage) never wins.
+    expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ ...line, installation: { ...line.installation, materialCost: 9000 } }] } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+  });
 });
 
