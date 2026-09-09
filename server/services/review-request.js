@@ -593,10 +593,6 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
   return { at, kind, bucket, earliestAt, latestAt };
 }
 
-function calculateReviewSendTime(completedAt, serviceType, opts) {
-  return calculateReviewSendPlan(completedAt, serviceType, opts).at;
-}
-
 // processReviewSequences runs at :14 and :44 (scheduler.js — kept in step by
 // review-sequences.test.js). A cadence row's next_run_at is when it becomes
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
@@ -901,7 +897,7 @@ const ReviewService = {
       if (delayMinutes !== undefined && delayMinutes !== null) {
         scheduledFor = new Date(Date.now() + delayMinutes * 60000);
       } else {
-        scheduledFor = calculateReviewSendTime(new Date(), serviceType);
+        scheduledFor = calculateReviewSendPlan(new Date(), serviceType).at;
       }
     } else if (delayMinutes !== undefined && delayMinutes !== null && Number(delayMinutes) > 0) {
       scheduledFor = new Date(Date.now() + Number(delayMinutes) * 60000);
@@ -1521,10 +1517,10 @@ const ReviewService = {
       const explicitTiming = delayMinutes !== undefined && delayMinutes !== null && Number.isFinite(explicitDelay);
       const firstTouchAt = explicitTiming
         ? new Date(Date.now() + Math.max(0, explicitDelay) * 60000)
-        : calculateReviewSendTime(
+        : calculateReviewSendPlan(
           completedAt ? new Date(completedAt) : new Date(),
           svcType,
-        );
+        ).at;
       const result = await this.startReviewSequence({
         customerId,
         serviceRecordId,
@@ -5845,7 +5841,6 @@ const ReviewService = {
 ReviewService.__private = {
   lastDeliveredAskAt,
   retryAtForDeferredSend,
-  calculateReviewSendTime,
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
