@@ -1228,8 +1228,8 @@ router.post('/call', async (req, res, next) => {
         .first();
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
       const normalizedTo = normalizePhone(to);
-      const normalizedCustomerPhone = normalizePhone(customer.phone);
-      if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
+      const contactColumns = relatedCommitmentId ? require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS : ['phone'];
+      if (!normalizedTo || !contactColumns.some((column) => normalizedTo === normalizePhone(customer[column]))) {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
       }
     } else {
