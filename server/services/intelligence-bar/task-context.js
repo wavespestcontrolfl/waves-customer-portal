@@ -505,13 +505,20 @@ function bulkLeadSelection(toolName, records, params) {
 // registry, so no caller can reach an unclassified reader or writer.
 const { scopeOf, UNCLASSIFIED } = require('./scope-policy');
 
+// Street-line comparison for address-keyed readers: case, punctuation and
+// spacing are ignored; a supplied full address may continue past the saved
+// street line (city, state, ZIP) but must start with it.
+const normalizeAddress = value => String(value || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   // A refused cohort or unresolved name stops here too; explicit record IDs
   // inside "both appointment A and appointment B" do not reopen it.
   if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
   const policy = require('./action-policy.json')[toolName];
-  const scope = toolName === undefined ? null : scopeOf(toolName);
-  if (toolName !== undefined && !scope) return UNCLASSIFIED;
+  // Every caller names the tool; a call without one has no reviewed scope
+  // and is refused like an unclassified tool rather than admitted.
+  const scope = scopeOf(toolName);
+  if (!scope) return UNCLASSIFIED;
   // Route-wide writers act on every stop for a date or technician and carry no
   // record identifiers. A customer-scoped task cannot mint an approval for
   // them: the stored action would have no references for the confirm-time
@@ -616,15 +623,19 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   if (customerSpecific && scope === 'actor_wide') {
     return { error: 'Past-conversation search returns verbatim exchanges about any customer and cannot be limited to the task customer, so it is unavailable inside a task for a specific customer.', code: 'customer_scope_required' };
   }
-  if (context.namesRequested && !context.targets?.length
+  // A customer-specific request whose customer did not resolve (a name, or a
+  // phone/email literal that matched nobody) gives the scoped readers an
+  // empty read scope and the record readers no customer to inherit, so a
+  // selector-free call would read every customer's rows. Both fail closed.
+  if (customerSpecific && !context.targets?.length
     && (scope === 'scoped' || ((scope === 'record' || schema.properties?.customer_id) && !hasOwnSelector(params)))) {
-    return { error: 'The named customer did not match anyone on file, so this lookup has no customer scope. Correct the name before reading that customer\'s records.', code: 'customer_scope_required' };
+    return { error: 'The named customer or contact did not match anyone on file, so this lookup has no customer scope. Correct the name or contact before reading that customer\'s records.', code: 'customer_scope_required' };
   }
   // Keyed readers bind their phone or email to a task customer. A request
   // about a customer who did not resolve has nobody to bind the key to, so a
   // model-supplied key cannot read another party's history or suppression.
-  if (customerSpecific && !context.targets?.length && (scope === 'phone_keyed' || scope === 'email_keyed')) {
-    return { error: 'The named customer did not match anyone on file, so this lookup has no customer to verify its phone or email against. Correct the name before reading by contact.', code: 'customer_scope_required' };
+  if (customerSpecific && !context.targets?.length && ['phone_keyed', 'email_keyed', 'address_keyed'].includes(scope)) {
+    return { error: 'The named customer did not match anyone on file, so this lookup has no customer to verify its phone, email or address against. Correct the name before reading by contact or address.', code: 'customer_scope_required' };
   }
   // Phone-keyed readers without a customer selector: the phone must belong to
   // a task customer, so a model-supplied number cannot read another party.
@@ -640,6 +651,22 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('email');
     if (!email || !owners.some(owner => String(owner.email || '').trim().toLowerCase() === email)) {
       return { error: 'Use the task customer\'s own email address for this suppression check', code: 'target_clarification_required' };
+    }
+  }
+  // Address-keyed readers take a model-supplied street address. Inside a
+  // customer-scoped task it must be one of the task customers' own saved
+  // addresses (customer or service property), so a substituted address
+  // cannot expose or price another property.
+  if (context.targets?.length && scope === 'address_keyed') {
+    const supplied = normalizeAddress(params.address);
+    const ids = context.targets.map(target => target.customer_id);
+    const [customers, properties] = await Promise.all([
+      db('customers').whereIn('id', ids).whereNull('deleted_at').select('address_line1'),
+      db('customer_properties').whereIn('customer_id', ids).select('address_line1'),
+    ]);
+    const saved = [...customers, ...properties].map(row => normalizeAddress(row.address_line1)).filter(Boolean);
+    if (!supplied || !saved.some(line => supplied === line || supplied.startsWith(`${line} `))) {
+      return { error: 'Use the task customer\'s own saved address for this property lookup', code: 'target_clarification_required' };
     }
   }
   let readContext = context;

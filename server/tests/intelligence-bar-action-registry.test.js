@@ -202,19 +202,26 @@ const SCOPE_SNAPSHOT = {
     'get_payout_details', 'get_recent_completions', 'get_revenue_breakdown', 'get_stock_movements', 'get_stripe_payment_intents',
     'get_today_briefing', 'get_top_revenue_customers', 'get_twilio_failed_messages', 'get_unanswered_threads',
     'get_unresponded_reviews', 'get_zone_density', 'list_call_partners', 'list_open_closeouts', 'search_reviews',
+    // Provider and operations text that can echo customer identifiers (the
+    // route's PII list): alert bodies, error text, log lines, targeting
+    // predicates, trip traces, redacted call quotes still keyed by call id.
+    'get_growthbook_experiments', 'get_growthbook_features', 'get_managed_agent_runs', 'get_railway_logs', 'get_scheduled_job_health',
+    'get_sentry_issue_detail', 'get_sentry_new_issues', 'get_sentry_top_issues', 'get_truck_trips', 'get_twilio_alerts', 'search_call_research',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],
   phone_keyed: ['get_partner_call_history'],
   email_keyed: ['check_email_suppression'],
+  address_keyed: ['lookup_property'],
   route_wide: ['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments'],
   record: [
     // reads: a customer or record selector confines the rows to one customer
-    'check_customer_status', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'get_call_log',
+    'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'get_call_log',
     'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_open_commitments', 'get_service_history',
     'get_stop_details', 'query_revenue', 'search_messages',
     // writes: specific customer records proven by validateRecordTarget
-    'assign_technician', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan', 'create_agent_estimate_draft',
+    // block_sender carries no record id; validateSenderBlock binds it to the task customer's own address.
+    'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan', 'create_agent_estimate_draft',
     'create_appointment', 'create_customer', 'create_pending_estimate', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
     'send_email_reply', 'send_sms', 'set_estimate_presentation', 'submit_review_reply', 'switch_appointment_property',
     'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer', 'update_lead_status',
@@ -242,7 +249,7 @@ test('the non-trivial scope classes match the frozen snapshot and no tool sits i
   for (const name of Object.keys(policy)) {
     if (!classified.includes(name)) expect({ name, scope: policy[name].scope }).toEqual({ name, scope: 'none' });
   }
-  expect(READ_SCOPES).toEqual(['none', 'record', 'scoped', 'broad', 'actor_wide', 'phone_keyed', 'email_keyed']);
+  expect(READ_SCOPES).toEqual(['none', 'record', 'scoped', 'broad', 'actor_wide', 'phone_keyed', 'email_keyed', 'address_keyed']);
   expect(WRITE_SCOPES).toEqual(['none', 'record', 'route_wide']);
 });
 
@@ -274,4 +281,19 @@ test('a tool with a missing or invalid scope never joins the registry', () => {
       jest.dontMock('../services/intelligence-bar/action-policy.json');
     });
   }
+});
+
+test('a PII-bearing tool is never scope none, and only reviewed kinds have scopes', () => {
+  const { PII_TOOL_NAMES } = require('../services/intelligence-bar/pii-tools');
+  const { scopeOf, scopesFor, validScope } = require('../services/intelligence-bar/scope-policy');
+  for (const name of PII_TOOL_NAMES) {
+    expect({ name, scope: scopeOf(name) }).toEqual({ name, scope: expect.stringMatching(/^(record|scoped|broad|actor_wide|phone_keyed|email_keyed|address_keyed|route_wide)$/) });
+  }
+  for (const kind of [undefined, '', 'write', 'READ', 'internal-write']) {
+    expect(scopesFor(kind)).toEqual([]);
+    expect(validScope({ kind, scope: 'none' })).toBe(false);
+    expect(validScope({ kind, scope: 'record' })).toBe(false);
+  }
+  expect(validScope({ kind: 'read', scope: 'route_wide' })).toBe(false);
+  expect(validScope({ kind: 'external_action', scope: 'broad' })).toBe(false);
 });

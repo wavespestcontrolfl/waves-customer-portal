@@ -24,8 +24,9 @@ const policy = require('./action-policy.json');
 //               refused inside a customer-scoped task
 //   actor_wide  the operator's own history, quoting any customer verbatim; refused
 //               inside a customer-scoped task
-//   phone_keyed / email_keyed
-//               keyed by a contact that must belong to the task customer
+//   phone_keyed / email_keyed / address_keyed
+//               keyed by a contact or street address that must belong to the
+//               task customer (a saved customer or property address)
 // Write classes.
 //   none        touches no customer records
 //   record      acts on customer records; every record it references must belong
@@ -34,11 +35,16 @@ const policy = require('./action-policy.json');
 //               references nothing at proposal time and is admitted on that basis
 //   route_wide  acts on every stop for a date or technician; refused inside a
 //               customer-scoped task
-const READ_SCOPES = Object.freeze(['none', 'record', 'scoped', 'broad', 'actor_wide', 'phone_keyed', 'email_keyed']);
+const READ_SCOPES = Object.freeze(['none', 'record', 'scoped', 'broad', 'actor_wide', 'phone_keyed', 'email_keyed', 'address_keyed']);
 const WRITE_SCOPES = Object.freeze(['none', 'record', 'route_wide']);
 
+const WRITE_KINDS = Object.freeze(['internal_write', 'external_action']);
+
+// Only a reviewed kind has scopes at all: a missing or misspelled kind cannot
+// borrow the write classes and pass as `none` or `record`.
 function scopesFor(kind) {
-  return kind === 'read' ? READ_SCOPES : WRITE_SCOPES;
+  if (kind === 'read') return READ_SCOPES;
+  return WRITE_KINDS.includes(kind) ? WRITE_SCOPES : Object.freeze([]);
 }
 
 function validScope(entry) {
@@ -62,4 +68,4 @@ const UNCLASSIFIED = Object.freeze({
   code: 'scope_unclassified',
 });
 
-module.exports = { READ_SCOPES, WRITE_SCOPES, scopesFor, validScope, scopeOf, toolsWithScope, UNCLASSIFIED };
+module.exports = { READ_SCOPES, WRITE_SCOPES, WRITE_KINDS, scopesFor, validScope, scopeOf, toolsWithScope, UNCLASSIFIED };

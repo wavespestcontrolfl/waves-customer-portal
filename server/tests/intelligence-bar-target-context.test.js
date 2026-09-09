@@ -16,13 +16,15 @@ beforeEach(() => {
     customers: [{ id: A, first_name: 'Synthetic', last_name: 'Person', version: '2026-09-01 12:00:00.123456+00' }, { id: B }],
   };
   db.mockReset().mockImplementation(table => {
-    let id, ids, nameMatch = false, threadProjection = false;
+    let id, ids, ownerIds, nameMatch = false, threadProjection = false;
     const q = { where: (key, value) => { id = typeof key === 'object' ? key.id : value; return q; },
       first: async () => rows[table]?.find(row => row.id === id),
-      whereRaw: () => { nameMatch = true; return q; }, whereNull: () => q, whereIn: (key, values) => { if (key === 'id') ids = values; return q; }, limit: () => q,
+      whereRaw: () => { nameMatch = true; return q; }, whereNull: () => q,
+      whereIn: (key, values) => { if (key === 'id') ids = values; else if (key === 'customer_id') ownerIds = values; return q; }, limit: () => q,
       distinct: () => { threadProjection = true; return q; },
       select: () => q, then: resolve => {
-        const selected = ids ? (rows[table] || []).filter(row => ids.includes(row.id)) : nameMatch ? rows[table] || [] : lookupRows;
+        const selected = ids ? (rows[table] || []).filter(row => ids.includes(row.id))
+          : ownerIds ? (rows[table] || []).filter(row => ownerIds.includes(row.customer_id)) : nameMatch ? rows[table] || [] : lookupRows;
         return Promise.resolve(threadProjection ? [...new Set(selected.map(row => row.gmail_thread_id || row.id))].map(thread_key => ({ thread_key })) : selected).then(resolve);
       } };
     return q;
@@ -245,24 +247,24 @@ test('explicit child identifiers constrain same-customer choices and exclude mes
   rows.estimates = [{ id: one, customer_id: A }, { id: two, customer_id: A }];
   lookupRows = [rows.customers[0]];
   const task = await Context.resolve({ prompt: `Revise estimate ${one.toUpperCase()} for Synthetic Person`, pageData: { estimate_id: two } });
-  expect(await Context.validateRecordTarget({ estimate_id: one }, task)).toBeNull();
-  expect(await Context.validateRecordTarget({ estimate_id: two }, task)).toMatchObject({ code: 'target_clarification_required' });
+  expect(await Context.validateRecordTarget({ estimate_id: one }, task, { toolName: 'update_customer' })).toBeNull();
+  expect(await Context.validateRecordTarget({ estimate_id: two }, task, { toolName: 'update_customer' })).toMatchObject({ code: 'target_clarification_required' });
   const multiple = await Context.resolve({ prompt: `Revise estimate ${one} and estimate ${two} for Synthetic Person`, pageData: {} });
-  expect(await Context.validateRecordTarget({ estimate_id: two }, multiple)).toBeNull();
+  expect(await Context.validateRecordTarget({ estimate_id: two }, multiple, { toolName: 'update_customer' })).toBeNull();
   const note = await Context.resolve({ prompt: `Add a note for Synthetic Person saying estimate ${two} needs attention`, pageData: {} });
   expect(note.requestedRecords).toEqual({});
   for (const noun of [`this estimate`, `estimate ${one}`]) {
     for (const content of ['mentioning', 'referencing', 'containing', 'with', 'reading', 'for the office about']) {
       const inline = await Context.resolve({ prompt: `Revise ${noun} for Synthetic Person and add a note ${content} estimate ${two}`, pageData: { estimate_id: one } });
-      expect(await Context.validateRecordTarget({ estimate_id: one }, inline)).toBeNull();
-      expect(await Context.validateRecordTarget({ estimate_id: two }, inline)).toMatchObject({ code: 'target_clarification_required' });
+      expect(await Context.validateRecordTarget({ estimate_id: one }, inline, { toolName: 'update_customer' })).toBeNull();
+      expect(await Context.validateRecordTarget({ estimate_id: two }, inline, { toolName: 'update_customer' })).toMatchObject({ code: 'target_clarification_required' });
     }
   }
   const conflicting = await Context.resolve({ prompt: `Revise this estimate or estimate ${two} for Synthetic Person`, pageData: { estimate_id: one } });
-  expect(await Context.validateRecordTarget({ estimate_id: two }, conflicting)).toMatchObject({ code: 'target_clarification_required' });
+  expect(await Context.validateRecordTarget({ estimate_id: two }, conflicting, { toolName: 'update_customer' })).toMatchObject({ code: 'target_clarification_required' });
   const attachedNote = await Context.resolve({ prompt: `Revise estimate ${one} for Synthetic Person with a note containing estimate ${two}`, pageData: {} });
-  expect(await Context.validateRecordTarget({ estimate_id: one }, attachedNote)).toBeNull();
-  expect(await Context.validateRecordTarget({ estimate_id: two }, attachedNote)).toMatchObject({ code: 'target_clarification_required' });
+  expect(await Context.validateRecordTarget({ estimate_id: one }, attachedNote, { toolName: 'update_customer' })).toBeNull();
+  expect(await Context.validateRecordTarget({ estimate_id: two }, attachedNote, { toolName: 'update_customer' })).toMatchObject({ code: 'target_clarification_required' });
 });
 
 test('a later that-estimate constraint survives filtering unrelated page hints', async () => {
@@ -270,7 +272,7 @@ test('a later that-estimate constraint survives filtering unrelated page hints',
   rows.estimates = [{ id, customer_id: A }];
   const task = await Context.resolve({ prompt: 'Update this customer and revise that estimate', pageData: { customer_id: A, estimate_id: id } });
   expect(task.requestedRecords.estimate_id).toBe(id);
-  expect(await Context.validateRecordTarget({ estimate_id: id }, task)).toBeNull();
+  expect(await Context.validateRecordTarget({ estimate_id: id }, task, { toolName: 'update_customer' })).toBeNull();
 });
 
 test.each(['reschedule_appointment', 'move_stops_to_day'])('%s cannot attach a customerless reservation to a customer task', async toolName => {
@@ -328,8 +330,8 @@ test('a message step retains explicit estimate constraints from a later independ
   for (const join of ['and', 'then']) {
     const task = await Context.resolve({ prompt: `Send a message to Synthetic Person ${join} revise estimate ${one}`, pageData: { estimate_id: two } });
     expect(task.target.customer_id).toBe(A);
-    expect(await Context.validateRecordTarget({ estimate_id: one }, task)).toBeNull();
-    expect(await Context.validateRecordTarget({ estimate_id: two }, task)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.validateRecordTarget({ estimate_id: one }, task, { toolName: 'update_customer' })).toBeNull();
+    expect(await Context.validateRecordTarget({ estimate_id: two }, task, { toolName: 'update_customer' })).toMatchObject({ code: 'target_clarification_required' });
   }
 });
 
@@ -357,10 +359,10 @@ test.each([['email', 'emails'], ['call', 'call_log'], ['lead', 'leads']])('a %s 
   for (const prompt of [`Add a note: this ${noun} needs attention`, `Add a note saying this ${noun} needs attention`, `Add a note that this ${noun} needs attention`]) {
     const task = await Context.resolve({ prompt, pageData: { [`${noun}_id`]: id } });
     expect(task.targets).toEqual([]);
-    expect((await Context.validateRecordTarget({ customer_id: A }, task)).code).toBe('target_clarification_required');
+    expect((await Context.validateRecordTarget({ customer_id: A }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
   }
   const missing = await Context.resolve({ prompt: `Update this ${noun}`, pageData: {} });
-  expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, missing)).code).toBe('target_clarification_required');
+  expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, missing, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
   rows[table] = [];
   expect((await Context.resolve({ prompt: `Update this ${noun}`, pageData: { [`${noun}_id`]: id } })).code).toBe('record_unavailable');
 });
@@ -373,8 +375,8 @@ test('the native review deep link and explicit review IDs enter the same whiteli
 
 test('a review cannot cross the named customer even when the viewed customer differs', async () => {
   const task = { ...context(B), page: { ids: { customer_id: A, review_id: REVIEW } } };
-  expect((await Context.validateRecordTarget({ review_id: REVIEW }, task)).code).toBe('target_clarification_required');
-  expect(await Context.validateRecordTarget({ review_id: REVIEW }, context())).toBeNull();
+  expect((await Context.validateRecordTarget({ review_id: REVIEW }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
+  expect(await Context.validateRecordTarget({ review_id: REVIEW }, context(), { toolName: 'update_customer' })).toBeNull();
 });
 
 test('read preparation checks a review with no selected customer instead of accepting a guessed ID', async () => {
@@ -384,15 +386,15 @@ test('read preparation checks a review with no selected customer instead of acce
   const selected = await Context.resolve({ prompt: 'Reply to this review', pageData: { review_id: REVIEW } });
   expect(await Context.prepareReadInput({ review_id: REVIEW }, selected, args)).toEqual({ input: { review_id: REVIEW } });
   const explicit = await Context.resolve({ prompt: `Reply to review ${REVIEW}`, pageData: {} });
-  expect(await Context.validateRecordTarget({ review_id: REVIEW }, explicit)).toBeNull();
-  expect((await Context.validateRecordTarget({ review_id: REVIEW }, { ...context(), page: selected.page })).code).toBe('target_clarification_required');
+  expect(await Context.validateRecordTarget({ review_id: REVIEW }, explicit, { toolName: 'update_customer' })).toBeNull();
+  expect((await Context.validateRecordTarget({ review_id: REVIEW }, { ...context(), page: selected.page }, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
 });
 
 test.each(['this', 'that', 'selected'])('a deliberate %s review request uses the viewed review', async word => {
   rows.google_reviews[0].customer_id = null;
   const task = await Context.resolve({ prompt: `Reply to ${word} review`, pageData: { review_id: REVIEW } });
   expect(task.reviewReference).toBe(REVIEW);
-  expect(await Context.validateRecordTarget({ review_id: REVIEW }, task)).toBeNull();
+  expect(await Context.validateRecordTarget({ review_id: REVIEW }, task, { toolName: 'update_customer' })).toBeNull();
 });
 
 test.each(['missing', 'stats', 'removed', 'dismissed'])('unavailable review (%s) cannot be drafted or posted', async kind => {
@@ -400,13 +402,13 @@ test.each(['missing', 'stats', 'removed', 'dismissed'])('unavailable review (%s)
   if (kind === 'dismissed') rows.google_reviews[0].dismissed = true;
   if (kind === 'stats') rows.google_reviews[0].reviewer_name = '_stats';
   if (kind === 'removed') rows.google_reviews[0].missing_since = new Date().toISOString();
-  expect((await Context.validateRecordTarget({ review_id: REVIEW }, context())).code).toBe('record_unavailable');
+  expect((await Context.validateRecordTarget({ review_id: REVIEW }, context(), { toolName: 'update_customer' })).code).toBe('record_unavailable');
 });
 
 test('malformed identifiers refuse before a query, and child relationships are checked separately', async () => {
-  expect((await Context.validateRecordTarget({ review_id: 'invalid' }, context())).code).toBe('invalid_target');
+  expect((await Context.validateRecordTarget({ review_id: 'invalid' }, context(), { toolName: 'update_customer' })).code).toBe('invalid_target');
   expect(db).not.toHaveBeenCalled();
-  expect((await Context.validateRecordTarget({ customer_id: A, property_id: PROPERTY }, context())).code).toBe('target_relationship_mismatch');
+  expect((await Context.validateRecordTarget({ customer_id: A, property_id: PROPERTY }, context(), { toolName: 'update_customer' })).code).toBe('target_relationship_mismatch');
 });
 
 test.each([['lead', 'leads', { first_name: 'Synthetic', last_name: 'Unlinkedfixture' }],
@@ -415,11 +417,11 @@ test.each([['lead', 'leads', { first_name: 'Synthetic', last_name: 'Unlinkedfixt
   rows[table] = [{ id, customer_id: null, ...name }];
   for (const prompt of ['Look up inventory', 'Add a note: Synthetic Unlinkedfixture needs attention', 'Add a note saying Synthetic Unlinkedfixture needs attention']) {
     const task = await Context.resolve({ prompt, pageData: { [`${noun}_id`]: id } });
-    expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).code).toBe('target_clarification_required');
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
   }
   for (const prompt of [`Update this ${noun}`, `Update that ${noun}`, 'Update Synthetic Unlinkedfixture']) {
     const task = await Context.resolve({ prompt, pageData: { [`${noun}_id`]: id } });
-    expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).toBeNull();
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task, { toolName: 'update_customer' })).toBeNull();
   }
 });
 
@@ -434,7 +436,7 @@ test.each([['lead', 'leads', { first_name: 'Synthetic', last_name: 'Unlinkedfixt
   rows.google_reviews[0].customer_id = null;
   const task = await Context.resolve({ prompt, pageData: { review_id: REVIEW } });
   expect(task.reviewReference).toBeNull();
-  expect((await Context.validateRecordTarget({ review_id: REVIEW }, task)).code).toBe('target_clarification_required');
+  expect((await Context.validateRecordTarget({ review_id: REVIEW }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
 });
 
 test.each(['customer', 'raw_sms', 'vendor_email', 'unlinked_lead', 'unlinked_estimate', 'unlinked_review', 'bulk_leads'])(
@@ -490,8 +492,8 @@ test.each([
   for (const reference of ['this', 'that', 'selected']) {
     const task = await Context.resolve({ prompt: `Update ${reference} ${noun}`, pageData: { [`${noun}_id`]: id } });
     expect(task.target.customer_id).toBe(A);
-    expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).toBeNull();
-    expect((await Context.validateRecordTarget({ [`${noun}_id`]: sibling }, task)).code).toBe('target_clarification_required');
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task, { toolName: 'update_customer' })).toBeNull();
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: sibling }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
   }
 });
 
@@ -508,7 +510,7 @@ test('an explicit named customer supersedes the viewed account without inheritin
   const task = await Context.resolve({ prompt: 'Update Synthetic Person using this customer', pageData: { customer_id: B } });
   expect(task.target.customer_id).toBe(A);
   expect(task.requestedRecords).toEqual({});
-  expect(await Context.validateRecordTarget({ customer_id: A }, task)).toBeNull();
+  expect(await Context.validateRecordTarget({ customer_id: A }, task, { toolName: 'update_customer' })).toBeNull();
 });
 
 
@@ -516,7 +518,7 @@ test('this customer resolves through a viewed property without requiring a redun
   const task = await Context.resolve({ prompt: 'Text this customer', pageData: { property_id: PROPERTY } });
   expect(task.target.customer_id).toBe(B);
   expect(task.requestedRecords).toEqual({});
-  expect(await Context.validateRecordTarget({ customer_id: B }, task)).toBeNull();
+  expect(await Context.validateRecordTarget({ customer_id: B }, task, { toolName: 'update_customer' })).toBeNull();
 });
 
 
@@ -525,7 +527,7 @@ test.each(['Text this customer', 'Email this customer', 'Send this customer a te
     lookupRows = [rows.customers[0]]; // A real matching alternate name is available to the lookup.
     const task = await Context.resolve({ prompt: `${prefix} that customer Synthetic Person canceled`, pageData: { customer_id: B } });
     expect(task.target.customer_id).toBe(B);
-    expect((await Context.validateRecordTarget({ customer_id: A }, task)).code).toBe('target_clarification_required');
+    expect((await Context.validateRecordTarget({ customer_id: A }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
   });
 
 test('"this stop" and "this visit" on a schedule panel resolve the appointment and its customer', async () => {
@@ -676,7 +678,7 @@ test('a technician name in assignment is not an explicit customer selector', asy
   rows.scheduled_services = [{ id: appointment, customer_id: B }];
   const task = await Context.resolve({ prompt: 'Assign Synthetic Person to this appointment', pageData: { appointment_id: appointment } });
   expect(task.target.customer_id).toBe(B);
-  expect(await Context.validateRecordTarget({ appointment_id: appointment }, task)).toBeNull();
+  expect(await Context.validateRecordTarget({ appointment_id: appointment }, task, { toolName: 'update_customer' })).toBeNull();
 });
 
 
@@ -684,8 +686,8 @@ test('a compound communication request retains a narrowing appointment constrain
   const viewed = '40000000-0000-4000-8000-000000000005', sibling = '40000000-0000-4000-8000-000000000006';
   rows.scheduled_services = [{ id: viewed, customer_id: B }, { id: sibling, customer_id: B }];
   const task = await Context.resolve({ prompt: 'Text this customer and reschedule that appointment', pageData: { appointment_id: viewed } });
-  expect(await Context.validateRecordTarget({ appointment_id: viewed }, task)).toBeNull();
-  expect((await Context.validateRecordTarget({ appointment_id: sibling }, task)).code).toBe('target_clarification_required');
+  expect(await Context.validateRecordTarget({ appointment_id: viewed }, task, { toolName: 'update_customer' })).toBeNull();
+  expect((await Context.validateRecordTarget({ appointment_id: sibling }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
 });
 
 
@@ -702,8 +704,9 @@ test('selector-free customer reads inherit one resolved task target and never ch
   const duplicate = await Context.resolve({ prompt: 'Update Synthetic Person', pageData: {}, selectedTarget: { customer_id: B } });
   expect(duplicate.target).toMatchObject({ customer_id: B, provenance: 'operator_selection' });
   const emailed = await Context.resolve({ prompt: 'Reply to synthetic@example.invalid', pageData: {} });
-  expect(emailed).toMatchObject({ ambiguous: false, explicitEmails: ['synthetic@example.invalid'] });
-  expect(await Context.prepareReadInput({ days_back: 7 }, emailed, args)).toEqual({ input: { days_back: 7 } });
+  expect(emailed).toMatchObject({ ambiguous: false, explicitEmails: ['synthetic@example.invalid'], contactRequested: true });
+  // An email literal that matched nobody is a scope refusal too: the selector-free read has no customer to inherit.
+  expect((await Context.prepareReadInput({ days_back: 7 }, emailed, args)).code).toBe('customer_scope_required');
   const unmatched = await Context.resolve({ prompt: 'Show call logs for Synthetiic Person', pageData: { customer_id: A } });
   expect(unmatched).toMatchObject({ target: null, targets: [], ambiguous: false, namesRequested: true });
   // The unresolved explicit name is a scope refusal (r18): correct the name before reading.
@@ -719,7 +722,7 @@ test('selector-free customer reads inherit one resolved task target and never ch
 test('bulk references use one query per table while preserving absent-record rejection', async () => {
   const leads = Array.from({ length: 500 }, (_, index) => ({ id: `50000000-0000-4000-8000-${String(index).padStart(12, '0')}`, customer_id: A }));
   rows.leads = leads.slice().reverse();
-  expect(await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id), customer_id: A }, context())).toBeNull();
+  expect(await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id), customer_id: A }, context(), { toolName: 'update_customer' })).toBeNull();
   expect(db.mock.calls.filter(([table]) => table === 'leads')).toHaveLength(1);
   expect(db.mock.calls.filter(([table]) => table === 'customers')).toHaveLength(1);
   const params = { lead_ids: leads.map(row => row.id), customer_id: A };
@@ -727,7 +730,7 @@ test('bulk references use one query per table while preserving absent-record rej
   rows.leads.reverse();
   expect(await Context.validateRecordTarget(params, proof, { toolName: 'bulk_update_leads' })).toBeNull();
   rows.leads.pop();
-  expect((await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id) }, context())).code).toBe('record_unavailable');
+  expect((await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id) }, context(), { toolName: 'update_customer' })).code).toBe('record_unavailable');
 });
 
 
@@ -735,7 +738,7 @@ test('an earlier explicit target survives a later communication clause referenci
   lookupRows = [rows.customers[0]];
   const task = await Context.resolve({ prompt: 'Update Synthetic Person and send a reminder to this customer', pageData: { customer_id: B } });
   expect(task.target.customer_id).toBe(A);
-  expect((await Context.validateRecordTarget({ customer_id: B }, task)).code).toBe('target_clarification_required');
+  expect((await Context.validateRecordTarget({ customer_id: B }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
 });
 
 test('verified city and technician words after "for" are filters, not customer names', async () => {
@@ -817,5 +820,50 @@ test('write scope classes are enforced for resolved and unresolved customers and
   for (const ctx of [context(), unresolved, { targets: [] }]) {
     expect(await Context.validateRecordTarget({ customer_id: A }, ctx, { toolName: 'update_lead' })).toMatchObject({ code: 'scope_unclassified' });
     expect(await Context.validateRecordTarget({ customer_id: A }, ctx, { toolName: 'update_lead', forApproval: true })).toMatchObject({ code: 'scope_unclassified' });
+    // The two-argument form names no tool and is refused the same way, so no caller can skip the scope check.
+    expect(await Context.validateRecordTarget({ customer_id: A }, ctx)).toMatchObject({ code: 'scope_unclassified' });
+    expect(await Context.validateRecordTarget({ date: '2026-09-09' }, ctx, { forApproval: true })).toMatchObject({ code: 'scope_unclassified' });
   }
+});
+
+test('a phone or email literal that resolved nobody fails scoped and selector-free record readers closed', async () => {
+  const schema = { properties: { customer_id: { type: 'string' }, days_back: { type: 'number' } } };
+  for (const prompt of ['Show the outstanding balance for 941-555-0123', 'What does synthetic.person@example.invalid owe']) {
+    const task = await Context.resolve({ prompt, pageData: {} });
+    expect(task).toMatchObject({ contactRequested: true, namesRequested: false, targets: [] });
+    expect(await Context.prepareReadInput({}, task, { toolName: 'query_customers', schema: { properties: {} } })).toMatchObject({ code: 'customer_scope_required' });
+    expect(await Context.prepareReadInput({ days_back: 7 }, task, { toolName: 'get_call_log', schema })).toMatchObject({ code: 'customer_scope_required' });
+    expect(await Context.prepareReadInput({ days_back: 7 }, task, { toolName: 'get_service_history', schema })).toMatchObject({ code: 'customer_scope_required' });
+    // A reader that touches no customer rows is unaffected.
+    expect(await Context.prepareReadInput({}, task, { toolName: 'get_kpi_snapshot', schema: { properties: {} } })).toEqual({ input: {} });
+  }
+});
+
+test('compute_estimate binds its lead to the task customer', async () => {
+  const lead = '60000000-0000-4000-8000-000000000001';
+  rows.leads = [{ id: lead, customer_id: B, first_name: 'Synthetic', last_name: 'Lead' }];
+  const schema = { properties: { leadId: { type: 'string' }, services: { type: 'array' } } };
+  const params = { leadId: lead, services: ['pest'] };
+  expect((await Context.prepareReadInput(params, context(), { toolName: 'compute_estimate', schema })).code).toBe('target_clarification_required');
+  expect(await Context.prepareReadInput(params, context(B), { toolName: 'compute_estimate', schema })).toEqual({ input: params });
+  // Without a lead there is nothing to bind and the pricing engine stays available.
+  expect(await Context.prepareReadInput({ services: ['pest'] }, context(), { toolName: 'compute_estimate', schema })).toEqual({ input: { services: ['pest'] } });
+  const unresolved = { targets: [], namesRequested: true, candidates: [], page: { ids: {} } };
+  expect((await Context.prepareReadInput({ services: ['pest'] }, unresolved, { toolName: 'compute_estimate', schema })).code).toBe('customer_scope_required');
+});
+
+test('address-keyed readers take only a task customer\'s own saved address', async () => {
+  rows.customers[0].address_line1 = '1234 Main St.';
+  rows.customer_properties.push({ id: '30000000-0000-4000-8000-000000000002', customer_id: A, address_line1: '99 Beach Rd', active: true });
+  const schema = { properties: { address: { type: 'string' } } };
+  const read = (address, ctx) => Context.prepareReadInput({ address }, ctx, { toolName: 'lookup_property', schema });
+  expect(await read('1234 Main St, Bradenton FL 34203', context())).toEqual({ input: { address: '1234 Main St, Bradenton FL 34203' } });
+  expect(await read('99 BEACH RD, Venice FL', context())).toEqual({ input: { address: '99 BEACH RD, Venice FL' } });
+  expect((await read('1234 Main Street, Bradenton FL', context())).code).toBe('target_clarification_required');
+  expect((await read('12345 Main St', context())).code).toBe('target_clarification_required');
+  expect((await read('', context())).code).toBe('target_clarification_required');
+  expect((await read('1234 Main St', { targets: [], namesRequested: true, page: { ids: {} } })).code).toBe('customer_scope_required');
+  expect((await read('1234 Main St', { targets: [], contactRequested: true, page: { ids: {} } })).code).toBe('customer_scope_required');
+  // Outside a customer-scoped task the lookup is open (new leads have no saved address yet).
+  expect(await read('500 Anywhere Ave', { targets: [], page: { ids: {} } })).toEqual({ input: { address: '500 Anywhere Ave' } });
 });

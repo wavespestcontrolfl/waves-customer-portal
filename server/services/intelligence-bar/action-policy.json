@@ -45,7 +45,7 @@
     "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm",
-    "scope": "none"
+    "scope": "record"
   },
   "bulk_update_customers": {
     "module": "tools.js",
@@ -165,7 +165,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "record"
   },
   "create_agent_estimate_draft": {
     "module": "estimate-tools.js",
@@ -605,7 +605,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_growthbook_features": {
     "module": "growthbook-tools.js",
@@ -613,7 +613,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_inbox_summary": {
     "module": "email-tools.js",
@@ -669,7 +669,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_meta_ads_delivery_status": {
     "module": "meta-ads-ops-tools.js",
@@ -837,7 +837,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_railway_status": {
     "module": "ops-tools.js",
@@ -941,7 +941,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_semantic_concept_map": {
     "module": "seo-tools.js",
@@ -957,7 +957,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_sentry_new_issues": {
     "module": "sentry-ops-tools.js",
@@ -965,7 +965,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_sentry_top_issues": {
     "module": "sentry-ops-tools.js",
@@ -973,7 +973,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_service_history": {
     "module": "tech-tools.js",
@@ -1133,7 +1133,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_twilio_alerts": {
     "module": "twilio-ops-tools.js",
@@ -1141,7 +1141,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_twilio_failed_messages": {
     "module": "twilio-ops-tools.js",
@@ -1277,7 +1277,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "address_keyed"
   },
   "match_existing_customer": {
     "module": "estimate-tools.js",
@@ -1493,7 +1493,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "search_emails": {
     "module": "email-tools.js",

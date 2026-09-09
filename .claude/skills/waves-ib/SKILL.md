@@ -130,7 +130,8 @@ CI against the migrated DB; warnings block):
 - **Declare the tool's data `scope`** in
   `server/services/intelligence-bar/action-policy.json` (reads: `none` /
   `record` / `scoped` / `broad` / `actor_wide` / `phone_keyed` /
-  `email_keyed`; writes: `none` / `record` / `route_wide`). Classify from
+  `email_keyed` / `address_keyed`; writes: `none` / `record` / `route_wide`).
+  A tool on the PII list (`pii-tools.js`) is never `none`. Classify from
   what the executor returns, not its description; see
   `docs/intelligence-bar-read-scope-catalog.md`. A tool without a valid
   scope never joins the action registry, and any class other than `none`
