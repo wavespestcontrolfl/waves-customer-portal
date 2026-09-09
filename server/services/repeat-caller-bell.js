@@ -108,7 +108,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
       const rows = await db('call_log')
         .where({ direction: 'inbound' })
         .whereRaw(`${PHONE_KEY_SQL} = ?`, [key])
-        .modify(whereNotSandboxCall)
+        .modify((qb) => whereNotSandboxCall(qb))
         .modify(whereNotBlockedCall)
         .where('created_at', '>', new Date(Date.now() - REPEAT_WINDOW_MS))
         .orderBy('created_at', 'desc').orderBy('id', 'desc')
