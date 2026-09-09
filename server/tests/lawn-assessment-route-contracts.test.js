@@ -147,6 +147,10 @@ describe('lawn assessment route contracts', () => {
       // The legacy baseline count ignores a pending run-backed row, so a legacy replacement after the kill switch still becomes the baseline.
       // …through the module's count, which falls back to the plain count on a database without the run table (the dark gate stays a usable kill switch mid-rollout).
       expect(assess).toMatch(/isBaseline = \(await visitAssessment\.priorAssessmentCount\(customerId, db\)\) === 0;/);
+      // The legacy insert re-decides the baseline UNDER the customer's baseline lock, in the insert's own transaction —
+      // the lock a run-backed confirm's legacy baseline check takes — so the two can never both become the baseline.
+      expect(assess).toMatch(/: await db\.transaction\(async \(trx\) => \{[\s\S]{0,800}if \(!propertyHistoryEnabled\) \{\s*await lawnAssessment\.lockCustomerBaseline\(customerId, trx\);\s*isBaseline = \(await visitAssessment\.priorAssessmentCount\(customerId, trx\)\) === 0;\s*assessmentRow\.is_baseline = isBaseline;\s*\}\s*return trx\('lawn_assessments'\)\.insert\(assessmentRow\)\.returning\('\*'\);\s*\}\);/);
+      expect(assess).not.toMatch(/: await db\('lawn_assessments'\)\.insert\(assessmentRow\)/);
       expect(assess).not.toMatch(/withoutPendingRuns\(/);
     });
 
@@ -201,7 +205,16 @@ describe('lawn assessment route contracts', () => {
       expect(write.indexOf('reviewRun(')).toBeLessThan(write.indexOf('persistProtocolFieldChecks('));
       // The already-confirmed response reads the row AND the run as the completing confirm left them — never the
       // run this request loaded before it waited on the lock.
-      expect(confirm).toMatch(/const \{ updated, reviewedVisitRun, alreadyConfirmed \} = reviewedRun \? await db\.transaction\(writeConfirm\) : await writeConfirm\(db\);\s*if \(alreadyConfirmed\) \{[\s\S]{0,400}const \[current, confirmedRun\] = await Promise\.all\(\[db\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.first\(\), visitAssessment\.loadRun\(assessmentId, db\)\]\);\s*return res\.json\(\{ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment\.responseForRun\(confirmedRun \|\| visitRun\) \}\);/);
+      expect(confirm).toMatch(/const written = reviewedRun \? await db\.transaction\(writeConfirm\) : await writeConfirm\(db\);/);
+      // The already-confirmed branch: reload the row and the run, then CLAIM the delivery — a retry after a process exit
+      // between the commit and the queue resumes it (no calibration); a retry after a delivered confirm returns with
+      // nothing rerun.
+      expect(confirm).toMatch(/if \(alreadyConfirmed\) \{[\s\S]{0,400}const \[current, confirmedRun\] = await Promise\.all\(\[db\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.first\(\), visitAssessment\.loadRun\(assessmentId, db\)\]\);[\s\S]{0,900}if \(!\(await visitAssessment\.claimPipeline\(assessmentId, db\)\)\) \{\s*return res\.json\(\{ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment\.responseForRun\(confirmedRun \|\| visitRun\) \}\);\s*\}\s*resumedPipeline = true;\s*updated = current;\s*currentRun = confirmedRun \|\| visitRun;\s*confirmed = true;\s*calibrationEligible = false;\s*\}/);
+      // The delivery is claimed durably before it is queued, once per confirmed row, and marked complete at its end.
+      expect(confirm).toMatch(/const deliver = !reviewedRun \|\| resumedPipeline \|\| await visitAssessment\.claimPipeline\(assessmentId, db\);\s*if \(deliver\) setImmediate\(async \(\) => \{/);
+      expect(confirm.match(/claimPipeline\(/g)).toHaveLength(2);
+      expect(confirm).toMatch(/LawnIntel\.trackAssessmentCompletion\(updated\.service_date\);\s*(?:\/\/[^\n]*\n\s*)*if \(reviewedRun\) await visitAssessment\.completePipeline\(assessmentId, db\);\s*\} catch \(intelErr\)/);
+      expect(confirm).toMatch(/res\.json\(\{ success: true, confirmed: true, \.\.\.\(resumedPipeline \? \{ alreadyConfirmed: true, resumedDelivery: true \} : \{\}\), assessment: updated, \.\.\.runPayload \}\);/);
       expect(confirm).toMatch(/if \(protocolFieldChecksProvided\) Object\.assign\(updated, protocolFieldChecks, \{ protocol_field_checks: protocolFieldChecks \}\);/);
       // The response reads the run the transaction reviewed (or loaded under the lock), not the pre-lock snapshot.
       expect(confirm).toMatch(/visitAssessment\.responseForRun\(reviewedVisitRun \|\| currentRun\)/);

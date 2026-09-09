@@ -11,6 +11,7 @@ const knexFactory = require('knex');
 const migrations = [
   require('../models/migrations/20260908000010_lawn_assessment_runs'),
   require('../models/migrations/20260908000020_lawn_assessment_runs_scores_adjusted'),
+  require('../models/migrations/20260908000030_lawn_assessment_runs_pipeline'),
 ];
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -201,6 +202,28 @@ const analysis = (overrides = {}) => ({
     // The second claim saw the first's saved score, so its own derivation merges instead of overwriting.
     expect(seen).toEqual(['first:72:null', 'second:72:80']);
     expect(await db.knex('lawn_assessments').where({ id: assessment.id }).first()).toMatchObject({ confirmed_by_tech: false, turf_density: 72, color_health: 80, thatch_level: 60 });
+  });
+
+  test('claimPipeline is a durable one-shot claim on the delivery: once per run, resumable only when stale and incomplete, complete blocks it for good', async () => {
+    const { assessment } = await seed();
+    await visit.recordRun({ assessment, analysis: analysis(), photoRecords: [] }, db.knex);
+    // Two concurrent claims: exactly one wins.
+    expect(await Promise.all([visit.claimPipeline(assessment.id, db.knex), visit.claimPipeline(assessment.id, db.knex)])).toEqual(expect.arrayContaining([true, false]));
+    expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(false);
+    // A stale, incomplete claim (the process died mid-delivery) is resumable.
+    await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).update({ pipeline_claimed_at: new Date(Date.now() - visit.PIPELINE_STALE_MS - 1000) });
+    expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(true);
+    // A completed delivery is never resumed, however old its claim.
+    await visit.completePipeline(assessment.id, db.knex);
+    await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).update({ pipeline_claimed_at: new Date(Date.now() - visit.PIPELINE_STALE_MS - 1000) });
+    expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(false);
+    expect((await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).first()).pipeline_completed_at).not.toBeNull();
+    // A row with no run has nothing to claim; a database without the columns delivers as before.
+    expect(await visit.claimPipeline(randomUUID(), db.knex)).toBe(false);
+    await migrations[2].down(db.knex);
+    expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(true);
+    await expect(visit.completePipeline(assessment.id, db.knex)).resolves.toBeUndefined();
+    await migrations[2].up(db.knex);
   });
 
   test('priorAssessmentCount against the real table: a pending run-backed row is not a prior assessment', async () => {

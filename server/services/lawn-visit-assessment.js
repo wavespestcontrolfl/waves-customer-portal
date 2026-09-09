@@ -592,6 +592,10 @@ const ECHO_COMMON_WORDS = new Set(('the a an and or but so if then this that the
   + 'water watering irrigation sprinkler sprinklers rain mow mowed mowing cut scalped shade shaded sun sunny dog dogs pet pets kids traffic '
   + 'chinch bugs bug insect insects pest pests fungus fungal disease weeds weed sedge nutsedge crabgrass clover spurge dollarweed drought thatch grubs grub worms worm armyworms caterpillars '
   + 'photo photos photos taken took recheck follow up next last today yesterday week month').split(/\s+/));
+// A word that follows a name when the name is the subject of the note
+// ("Brown reports damage", "Green's dog"): an ordinary lawn word in that
+// position is a surname, however common the word (Codex #4149 r12).
+const NAME_SYNTAX_RE = /^(?:reports?|reported|says?|said|mentions?|mentioned|asks?|asked|calls?|called|wants?|wanted|notes?|noted|tells?|told|confirms?|confirmed|thinks?|thought|requests?|requested|complains?|complained|prefers?|preferred|texted|emailed|phoned|met|showed|pointed|agreed|declined|approved)$/i;
 const echoWords = (text) => String(text || '').toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean);
 function echoesTechnicianNotes(text, notes) {
   if (!text || !notes) return false;
@@ -612,7 +616,9 @@ function echoesTechnicianNotes(text, notes) {
     // a name; on anything else it is a name ("Kowalski reports …"). The word
     // after an honorific ("Mrs. Kowalski") is always a name.
     const sentenceInitial = i === 0 || (/[.!?:;]$/.test(raw[i - 1]) && !/^(?:mr|mrs|ms|miss|mx|dr)\.?$/i.test(raw[i - 1]));
-    if (sentenceInitial && (ECHO_COMMON_WORDS.has(lower) || ECHO_COMMON_WORDS.has(base) || SUMMARY_CAUSE_RE.test(token))) continue;
+    const next = (raw[i + 1] || '').replace(/[^\p{L}']+$/gu, '');
+    const nameSyntax = /'s$/i.test(token) || NAME_SYNTAX_RE.test(next);
+    if (sentenceInitial && !nameSyntax && (ECHO_COMMON_WORDS.has(lower) || ECHO_COMMON_WORDS.has(base) || SUMMARY_CAUSE_RE.test(token))) continue;
     if (words.includes(lower) || words.includes(`${lower}'s`) || words.includes(lower.replace(/'s$/, ''))) return true;
   }
   return false;
@@ -927,6 +933,41 @@ async function priorAssessmentCount(customerId, knex) {
 // confirm that raced another merges into what that one saved (Codex #4153
 // r6) — and null when the row is already confirmed or does not exist.
 // Callers take the customer's baseline advisory lock first (lock order).
+// A confirmed row's customer delivery (recommendations, health signal,
+// standalone notification, report) is claimed DURABLY on the run row before
+// it is queued, and marked complete when it finishes: a retry arriving after
+// the confirm committed but before the queue (process exit, redeploy) claims
+// and RESUMES it; a retry after a completed delivery never runs it twice; a
+// claim older than PIPELINE_STALE_MS with no completion is resumable (the
+// process died mid-delivery). One UPDATE, so concurrent retries race on the
+// row and exactly one claims (Codex #4150 r13). A database without the
+// columns yet delivers as before (every caller claims).
+const PIPELINE_STALE_MS = 15 * 60 * 1000;
+const missingPipelineColumns = (err) => err && (err.code === '42P01' || err.code === '42703');
+async function claimPipeline(assessmentId, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  try {
+    const rows = await knex('lawn_assessment_runs')
+      .where({ assessment_id: assessmentId })
+      .where(function claimable() {
+        this.whereNull('pipeline_claimed_at')
+          .orWhere(function stale() { this.whereNull('pipeline_completed_at').andWhere('pipeline_claimed_at', '<', new Date(Date.now() - staleAfterMs)); });
+      })
+      .update({ pipeline_claimed_at: knex.fn.now(), updated_at: knex.fn.now() })
+      .returning('id');
+    return rows.length > 0;
+  } catch (err) {
+    if (missingPipelineColumns(err)) return true;
+    throw err;
+  }
+}
+async function completePipeline(assessmentId, knex) {
+  try {
+    await knex('lawn_assessment_runs').where({ assessment_id: assessmentId }).update({ pipeline_completed_at: knex.fn.now(), updated_at: knex.fn.now() });
+  } catch (err) {
+    if (!missingPipelineColumns(err)) throw err;
+  }
+}
+
 async function claimConfirm(assessmentId, trx) {
   const row = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
   return row && !row.confirmed_by_tech ? row : null;
@@ -1095,9 +1136,29 @@ function technicianFindingIds(details, stored, highWater = 0) {
 // activity: monitor response" watch item (Codex #4149 r11). The label
 // mapper handles a LEADING negation only.
 const NEGATED_DETAIL_RE = /\b(?:none|nothing|no\s+(?:signs?|evidence|indication|trace|activity|damage)|not\s+(?:found|seen|present|observed|detected|evident|visible)|absent|negative|ruled\s+out|did\s*n[o']t\s+(?:find|see|observe|detect|notice)|couldn['’]?t\s+(?:find|see|confirm)|clear\s+of|free\s+of|no\s+longer)\b/i;
+// Negation is scoped to the CLAUSE it sits in ("No signs of drought; chinch
+// bugs confirmed by float test" rules drought out and confirms chinch): the
+// detail is negated only when every cause-bearing clause is, and a positive
+// clause names the finding (Codex #4149 r12).
+const CLAUSE_SPLIT_RE = /[;.!?]|,\s*(?=(?:but|and|while|though|although|however)\b)|\b(?:but|while|though|although|however)\b/i;
+function detailClauses(text) {
+  return String(text || '').split(CLAUSE_SPLIT_RE).map((clause) => clause.trim()).filter(Boolean);
+}
+// Cause clauses with their negation resolved: a negation in the clause
+// itself, or a negation-only clause right after it ("Checked for chinch
+// bugs; none found") — that clause answers the one before.
+function causeClausesOf(text) {
+  const clauses = detailClauses(text).map((clause) => ({ clause, cause: SUMMARY_CAUSE_RE.test(clause), negation: NEGATED_DETAIL_RE.test(clause) }));
+  clauses.forEach((entry, index) => {
+    if (entry.negation && !entry.cause && index > 0 && clauses[index - 1].cause) clauses[index - 1].negation = true;
+  });
+  return clauses.filter((entry) => entry.cause);
+}
 function technicianFinding(detail, findingId) {
-  const negatedCause = NEGATED_DETAIL_RE.test(detail.text) && SUMMARY_CAUSE_RE.test(detail.text);
-  const label = negatedCause ? NO_STRESS_LABEL : safeConditionLabel(detail.text, 'moderate');
+  const causeClauses = causeClausesOf(detail.text);
+  const positive = causeClauses.filter((entry) => !entry.negation).map((entry) => entry.clause);
+  const negatedCause = causeClauses.length > 0 && positive.length === 0;
+  const label = negatedCause ? NO_STRESS_LABEL : safeConditionLabel(positive.length ? positive.join('; ') : detail.text, 'moderate');
   const negated = negatedCause || label === NO_STRESS_LABEL; // a leading "No …" the mapper already reads as clean
   return {
     finding_id: findingId,
@@ -1241,7 +1302,25 @@ async function reviewRun({ run, review, technicianId }, knex) {
  * scoreValue fallback would coerce it to 0); stress derives from the KNOWN
  * fungus / thatch / AI-floor values only — no 95 default.
  */
-function resolveConfirmScores(assessment, adjustedScores, scoreValue) {
+// The independent stressors of the run's answer (insect, drought,
+// mechanical), as a score floor — the components a technician cannot
+// correct through fungus / thatch. Null when the run rated none of them.
+function independentStressFloor(run) {
+  const severities = parseJsonObject(run?.severities);
+  if (!severities) return null;
+  const parts = ['insect_damage', 'drought_stress', 'mechanical_damage']
+    .map((key) => knownLevel(severities[key]?.level, FUNGUS_DISPLAY))
+    .filter((value) => value != null);
+  return parts.length ? Math.min(...parts) : null;
+}
+
+// `stressFloor`: the floor the derivation uses when the technician sent no
+// explicit stress correction — the run's INDEPENDENT stressors (above), so a
+// corrected fungus or thatch score re-derives stress from the corrected
+// components instead of keeping the stored AI stress as a permanent floor
+// (Codex #4150 r13: the standalone panel deletes stress_damage before posting
+// a fungus edit). `undefined` (no run) keeps the stored value as the floor.
+function resolveConfirmScores(assessment, adjustedScores, scoreValue, { stressFloor } = {}) {
   const adjusted = adjustedScores && typeof adjustedScores === 'object' ? adjustedScores : {};
   const present = (value) => value != null && value !== '';
   // An override counts only when it is a finite number (or a non-blank string
@@ -1266,7 +1345,8 @@ function resolveConfirmScores(assessment, adjustedScores, scoreValue) {
   if (numeric(adjusted.stress_damage)) {
     final.stress_damage = scoreValue(adjusted.stress_damage);
   } else {
-    const parts = [final.fungus_control, final.thatch_level, present(assessment.stress_damage) ? Number(assessment.stress_damage) : null]
+    const floor = stressFloor === undefined ? (present(assessment.stress_damage) ? Number(assessment.stress_damage) : null) : stressFloor;
+    const parts = [final.fungus_control, final.thatch_level, floor]
       .filter((value) => typeof value === 'number' && Number.isFinite(value));
     final.stress_damage = parts.length ? Math.min(...parts) : null;
   }
@@ -1313,7 +1393,7 @@ function overallScoreFor(finalScores, calculateOverallScore) {
 // fills the gaps and confirms again. `missing` names the gaps for the client;
 // calibration needs a confirmed row with AI scores to compare against.
 function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateOverallScore }) {
-  const finalScores = resolveConfirmScores(assessment, adjustedScores, scoreValue);
+  const finalScores = resolveConfirmScores(assessment, adjustedScores, scoreValue, run?.status === 'complete' ? { stressFloor: independentStressFloor(run) } : {});
   const confirmed = scoresComplete(finalScores);
   const aiScores = runAiScores(run);
   return {
@@ -1406,6 +1486,9 @@ module.exports = {
   withoutPendingRuns,
   priorAssessmentCount,
   claimConfirm,
+  claimPipeline,
+  completePipeline,
+  PIPELINE_STALE_MS,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
   SYSTEM_PROMPT,
@@ -1440,6 +1523,7 @@ module.exports = {
   reviewRun,
   reviewedObservations,
   resolveConfirmScores,
+  independentStressFloor,
   scoreVisit,
   photoFieldsFor,
   overallScoreFor,

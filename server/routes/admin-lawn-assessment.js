@@ -745,7 +745,20 @@ router.post('/assess', async (req, res, next) => {
         visitRun = await visitAssessment.recordRun({ assessment: rows[0], analysis: visitAnalysis, adjustedScores }, trx);
         return rows;
       })
-      : await db('lawn_assessments').insert(assessmentRow).returning('*');
+      : await db.transaction(async (trx) => {
+        // Legacy (property history off): the baseline decision and the insert
+        // under the customer's baseline lock — the one a run-backed confirm's
+        // legacy baseline check takes — so a legacy row replacing a pending
+        // run-backed one after the kill switch cannot decide "first" between
+        // that confirm's check and its commit and leave two baselines
+        // (Codex #4150 r13). The pre-read above still serves the response.
+        if (!propertyHistoryEnabled) {
+          await lawnAssessment.lockCustomerBaseline(customerId, trx);
+          isBaseline = (await visitAssessment.priorAssessmentCount(customerId, trx)) === 0;
+          assessmentRow.is_baseline = isBaseline;
+        }
+        return trx('lawn_assessments').insert(assessmentRow).returning('*');
+      });
 
     // Auto-capture grass type from the AI read into the turf profile so lawn
     // reports use the real turf instead of the St. Augustine default. COALESCE-
@@ -1167,13 +1180,30 @@ router.post('/confirm', async (req, res, next) => {
       if (protocolFieldChecksProvided) await persistProtocolFieldChecks({ assessment: row, checks: protocolFieldChecks, trx });
       return { updated: row, reviewedVisitRun: run };
     };
-    const { updated, reviewedVisitRun, alreadyConfirmed } = reviewedRun ? await db.transaction(writeConfirm) : await writeConfirm(db);
+    const written = reviewedRun ? await db.transaction(writeConfirm) : await writeConfirm(db);
+    const { reviewedVisitRun, alreadyConfirmed } = written;
+    let { updated } = written;
+    let resumedPipeline = false;
     if (alreadyConfirmed) {
       // The row AND the run as the completing confirm left them: the run this
       // request loaded before waiting on the lock may predate that confirm's
       // review (Codex #4150 r10).
       const [current, confirmedRun] = await Promise.all([db('lawn_assessments').where({ id: assessmentId }).first(), visitAssessment.loadRun(assessmentId, db)]);
-      return res.json({ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment.responseForRun(confirmedRun || visitRun) });
+      // The confirmed row is not proof its customer delivery ran: the
+      // pipeline is claimed durably on the run row (claimPipeline) before it
+      // is queued, so a retry after a process exit between the commit and the
+      // queue claims it here and RESUMES the delivery below — once, with no
+      // calibration (that request's payload is not this one's) — while a
+      // retry after a delivered confirm returns with nothing rerun
+      // (Codex #4150 r13).
+      if (!(await visitAssessment.claimPipeline(assessmentId, db))) {
+        return res.json({ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment.responseForRun(confirmedRun || visitRun) });
+      }
+      resumedPipeline = true;
+      updated = current;
+      currentRun = confirmedRun || visitRun;
+      confirmed = true;
+      calibrationEligible = false;
     }
     if (protocolFieldChecksProvided) Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
 
@@ -1207,8 +1237,11 @@ router.post('/confirm', async (req, res, next) => {
     // cards are retired — Lawn Report V2 owns the customer-facing story now — so we
     // no longer generate them on confirm.
 
-    // Knowledge Bridge + Lawn Intelligence: fire all async intelligence (non-blocking)
-    setImmediate(async () => {
+    // Knowledge Bridge + Lawn Intelligence: fire all async intelligence (non-blocking).
+    // A run-backed row's delivery is claimed durably first (see the resume
+    // branch above); a legacy row delivers as before.
+    const deliver = !reviewedRun || resumedPipeline || await visitAssessment.claimPipeline(assessmentId, db);
+    if (deliver) setImmediate(async () => {
       try {
         // 1. FAWN weather context
         await LawnIntel.attachWeather(assessmentId);
@@ -1264,12 +1297,14 @@ router.post('/confirm', async (req, res, next) => {
         // 7. Track assessment completion
         await LawnIntel.trackAssessmentCompletion(updated.service_date);
 
+        // Delivered: a later retry has nothing to resume.
+        if (reviewedRun) await visitAssessment.completePipeline(assessmentId, db);
       } catch (intelErr) {
         logger.error(`[lawn-assessment] Intelligence pipeline failed (non-blocking): ${intelErr.message}`);
       }
     });
 
-    res.json({ success: true, confirmed: true, assessment: updated, ...runPayload });
+    res.json({ success: true, confirmed: true, ...(resumedPipeline ? { alreadyConfirmed: true, resumedDelivery: true } : {}), assessment: updated, ...runPayload });
   } catch (err) {
     next(err);
   }
