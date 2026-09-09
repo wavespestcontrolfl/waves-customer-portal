@@ -278,7 +278,16 @@ router.get('/follow-through', async (req, res, next) => {
     if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
     const callbacksEnabled = cards.enabled();
     if (callbacksEnabled) await cards.prepareCallbackCards(db);
-    const callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
+    let callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
+    if (callbacksEnabled) {
+      const { refreshFulfillment } = require('../services/call-commitments');
+      let changed = 0;
+      for (const callId of new Set(callbacks.map((row) => row.call_log_id))) {
+        const result = await refreshFulfillment(db, callId).catch(() => ({}));
+        changed += (result.fulfilled || 0) + (result.hinted || 0) + (result.cleared || 0);
+      }
+      if (changed) callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
+    }
     const detector = require('../services/no-show-detector');
     const noShowsEnabled = detector.enabled();
     const noShows = await detector.listNoShows(db, { limit: 101, offset, actorId: req.technicianId, admin: req.techRole === 'admin' });

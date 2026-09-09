@@ -182,12 +182,12 @@ const NotificationService = {
     // unread beside the new one). Errors then PROPAGATE — swallowing one
     // inside a caller's transaction would leave it aborted and doom the
     // commit — so the caller owns containment.
-    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
     }
     const windowMs = Number(dedupeWindowMs);
-    const metadata = { ...createOpts.metadata, dedupeKey };
+    const metadata = { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) };
     const dedupeAndInsert = async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
         let existingQuery = trx('notifications')
@@ -203,10 +203,13 @@ const NotificationService = {
           const nextTitle = stripEmoji(title) || title;
           const nextBody = stripEmoji(body) || null;
           const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
-          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
-            const existingMeta = typeof existing.metadata === 'string'
-              ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
-              : (existing.metadata || {});
+          const existingMeta = typeof existing.metadata === 'string'
+            ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
+            : (existing.metadata || {});
+          // A same-count backlog can contain new deadlines or reopened work.
+          // Its optional version refreshes the one standing bell as well.
+          const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
+          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
             const refreshed = { title: nextTitle, body: nextBody, link: nextLink,
               metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
             await trx('notifications').where({ id: existing.id }).update(refreshed);

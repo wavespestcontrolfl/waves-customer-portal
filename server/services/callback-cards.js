@@ -5,6 +5,7 @@ const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-
 const { getBlackoutLayers } = require('./scheduling/blackout-dates');
 const { recordAuditEvent } = require('./audit-log');
 const logger = require('./logger');
+const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const enabled = () => gateEnvValue('GATE_CALLBACK_CARD') && isEnabled('callCommitments');
 const error = (message, status = 409) => Object.assign(new Error(message), { status });
@@ -136,33 +137,57 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
 async function notifyDueCallbacks(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   await prepareCallbackCards(conn);
-  const { refreshFulfillment } = require('./call-commitments');
-  let alerted = 0;
+  const { refreshFulfillment, staleAiRowSql } = require('./call-commitments');
+  const candidates = [];
+  // Gather the scan before refreshing: fulfillment removes rows from the
+  // open list and would otherwise shift later pages underneath the offset.
   for (let offset = 0; offset < 5000; offset += 200) {
     const rows = await listCallbackCards(conn, { now, limit: 200, offset });
-    for (const row of rows) {
-      if (!row.due_at || new Date(row.due_at) > now || row.snoozed) continue;
-      const refreshed = await refreshFulfillment(conn, row.call_log_id);
-      if (refreshed.failed) continue;
-      await conn.transaction(async (trx) => {
-        const live = await trx('call_commitments').where({ id: row.id, status: 'open' }).forUpdate().first();
-        if (!enabled() || !live || (live.snoozed_until && new Date(live.snoozed_until) > now)) return;
-        const deadline = live.due_at || live.callback_due_at;
-        if (!deadline || new Date(deadline) > now) return;
-        const alertVersion = [deadline, live.snoozed_until, live.reviewed_at]
-          .map((value) => value ? new Date(value).toISOString() : '').join(':');
-        const notice = await require('./notification-service').notifyAdmin('alert', 'A promised callback is due',
-          'Open the callback card to call, finish, or snooze this promise.', {
-            link: `/admin/communications#tab=owed&callback=${row.id}`,
-            dedupeKey: `callback-card:${row.id}:${alertVersion}:${live.assigned_to || 'unassigned'}`,
-            bell: true, trx, metadata: { triggerKey: 'call_commitment_overdue', commitment_id: row.id, customer_id: row.customer_id },
-          });
-        if (notice?.id && !notice.deduped) alerted += 1;
-      });
-    }
+    candidates.push(...rows.filter((row) => !isInternalTestCustomerId(row.customer_id)
+      && row.due_at && new Date(row.due_at) <= now && !row.snoozed));
     if (rows.length < 200) break;
   }
-  return { alerted };
+  const verifiedCalls = new Set();
+  for (const id of new Set(candidates.map((row) => row.call_log_id))) {
+    const result = await refreshFulfillment(conn, id).catch(() => ({ failed: 1 }));
+    if (!result.failed) verifiedCalls.add(id);
+  }
+  const ids = candidates.filter((row) => verifiedCalls.has(row.call_log_id)).map((row) => row.id);
+  if (!ids.length) return { alerted: 0 };
+  return conn.transaction(async (trx) => {
+    const live = await trx('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
+      .whereIn('cc.id', ids).where({ 'cc.status': 'open', 'cc.kind': 'callback', 'cc.party': 'waves' })
+      .whereRaw(`NOT ${staleAiRowSql('cc')}`).orderBy('cc.id').forUpdate('cc')
+      .select('cc.*', 'cl.customer_id');
+    if (!enabled()) return { alerted: 0 };
+    const overdue = live.filter((row) => !isInternalTestCustomerId(row.customer_id)
+      && (row.due_at || row.callback_due_at) && new Date(row.due_at || row.callback_due_at) <= now
+      && (!row.snoozed_until || new Date(row.snoozed_until) <= now));
+    const alertKey = (row) => `callback-card:${row.id}:${[row.due_at || row.callback_due_at, row.snoozed_until, row.reviewed_at]
+      .map((value) => value ? new Date(value).toISOString() : '').join(':')}:${row.assigned_to || 'unassigned'}`;
+    const notifications = require('./notification-service');
+    if (overdue.length > require('./call-commitments-watchdog').AGGREGATE_THRESHOLD) {
+      const notice = await notifications.notifyAdmin('alert', `${overdue.length} promised callbacks are due`,
+        'Open the callback cards to call, finish, or snooze these promises.', {
+          link: '/admin/communications#tab=owed', dedupeKey: `callback-cards-overdue:${etDateString(now)}`,
+          dedupeVersion: require('node:crypto').createHash('sha256').update(overdue.map(alertKey).join('|')).digest('hex'),
+          refreshOnDedupe: true, bell: true, trx,
+          metadata: { triggerKey: 'call_commitment_overdue', overdue_count: overdue.length,
+            overdue_commitment_ids: overdue.map((row) => row.id) },
+        });
+      return { alerted: notice?.id && (!notice.deduped || notice.refreshed) ? 1 : 0, aggregate: true };
+    }
+    let alerted = 0;
+    for (const row of overdue) {
+      const notice = await notifications.notifyAdmin('alert', 'A promised callback is due',
+        'Open the callback card to call, finish, or snooze this promise.', {
+          link: `/admin/communications#tab=owed&callback=${row.id}`, dedupeKey: alertKey(row),
+          bell: true, trx, metadata: { triggerKey: 'call_commitment_overdue', commitment_id: row.id, customer_id: row.customer_id },
+        });
+      if (notice?.id && !notice.deduped) alerted += 1;
+    }
+    return { alerted };
+  });
 }
 
 module.exports = { enabled, loadCalendar, staffedDeadline, prepareCallbackCards, listCallbackCards, actOnCallback, notifyDueCallbacks };
