@@ -186,10 +186,13 @@ lookups). Rounds 2–5 each found a new P1 in that grammar and none in the
 selection rule, so it hit the round cap. Owner decision 2026-09-08: fail closed
 on named cohorts. The current shape keeps two rules and deletes the grammar:
 
-- A selection never overrides current-request evidence. An explicit name that
-  matched nothing, a capped lookup, or a named cohort refuses the selected
-  customer with `context_mismatch`; a selection among the fresh matches (or
-  with no name evidence at all) remains an operator selection.
+- A selection is bound to the request's own fresh candidates. It is accepted
+  only as one of the rows this exact request resolved to (duplicate-name
+  disambiguation, the one flow that supplies a selection); a request that
+  named nobody, matched nothing, hit the lookup cap, or asked for a set has
+  no candidate to select and refuses with `context_mismatch`. No
+  stale-selection grammar is load-bearing: an unrecognized phrasing can only
+  over-refuse, never choose a customer.
 - A set quantifier is never a target. Any request containing `both`,
   `these customers` or `all of these` resolves to no targets and
   `ambiguous: true`, so the caller asks for one target at a time; write
@@ -247,6 +250,19 @@ reference; `and also`/`and then` open a clause), and made two distinct
 stated recipients refuse any selection while duplicate rows of one stated
 name still accept it. Communication objects (`message`, `receipt`, `text`,
 `link`, …) and the pests and lawn work a request names are non-names.
+
+The fifth round stopped at the cap with two new P1s (`all accounts` missed the
+set grammar; the partial-evidence check pooled name tokens, so `update Alice
+Missing and also text Alice Jones` accepted Alice Jones). Owner decision
+2026-09-09: server-bound selections plus a whole-reference check. A selection
+is now accepted only as one of the request's own candidates (above), the set
+noun takes every customer synonym (`customer`, `account`, `client`,
+`profile`, `record`), and each person reference is the whole name run after
+its selector, resolved only against a customer whose full name it starts with
+or, for a bare single name, whose first or last name it is. Both P1 examples
+fail safely with and without a selection, in the unit and PostgreSQL suites.
+The function words that can follow a selector (`on`, `about`, `after`, …)
+are non-names, which fixes a phone-read over-refusal found downstream.
 
 Validation: 159 target cases pass (135 unit and 24 rollback-only isolated
 PostgreSQL cases). No model, provider, production query, migration, merge or
