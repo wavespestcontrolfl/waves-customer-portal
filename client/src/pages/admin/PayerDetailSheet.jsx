@@ -98,10 +98,10 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/statements`);
       const d = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(d?.error || "Could not load statements.");
+      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       setStatements(Array.isArray(d?.statements) ? d.statements : []);
     } catch (err) {
-      setStatementsError(err.message || "Could not load statements.");
+      setStatementsError(err.message || "Could not load this payer's statements.");
     } finally {
       setLoading(false);
     }
@@ -113,10 +113,11 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/ar`);
       const d = await r.json().catch(() => null);
-      if (!r.ok || !d?.summary) throw new Error(d?.error || "Could not load payer aging.");
+      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+      if (!d?.summary) throw new Error("Could not load this payer's balance.");
       setAr(d);
     } catch (err) {
-      setArError(err.message || "Could not load payer aging.");
+      setArError(err.message || "Could not load this payer's balance.");
     } finally {
       setArLoading(false);
     }
@@ -174,7 +175,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
               this sheet by payer; closing it or changing payer clears the draft. */}
           <TabPanel value="statements" keepMounted>
             {statementsError && <ActionFeedback error onRetry={loadStatements}>{statementsError}</ActionFeedback>}
-            {loading && <ActionFeedback>Loading statements…</ActionFeedback>}
+            {loading && <ActionFeedback>Loading…</ActionFeedback>}
             {!loading && !statementsError && statements.length === 0 ? (
               <p className="text-ui-body text-ink-secondary py-4">
                 No statements yet. NET-terms visits accrue here once payer statements are enabled.
@@ -198,7 +199,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
           </TabPanel>
 
           <TabPanel value="ar">
-            {arLoading ? <ActionFeedback>Loading payer aging…</ActionFeedback>
+            {arLoading ? <ActionFeedback>Loading…</ActionFeedback>
               : arError ? <ActionFeedback error onRetry={loadAr}>{arError}</ActionFeedback>
               : <ArSummary summary={ar?.summary} />}
           </TabPanel>
@@ -409,7 +410,8 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
         />
       )}
 
-      {sequenceError ? <ActionFeedback error onRetry={loadDetail} className="mt-3">{sequenceError}</ActionFeedback> : showDunning && (
+      {sequenceError && <ActionFeedback error onRetry={loadDetail} className="mt-3">{sequenceError}</ActionFeedback>}
+      {showDunning && (
         <DunningControls base={base} sequence={sequence} busy={busy} act={act} />
       )}
 

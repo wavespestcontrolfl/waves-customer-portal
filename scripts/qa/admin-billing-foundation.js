@@ -195,8 +195,8 @@ async function payerWorkflow(page, server, state, report, name) {
   await page.getByRole('button', { name: payerName, exact: true }).waitFor();
   await screenshot(page, report, `${name}-payers`);
   await page.getByLabel('Search payers').fill('no match');
-  await page.getByText(/No payers match this search/).waitFor();
-  await page.getByRole('button', { name: 'Clear search' }).click();
+  await page.getByText(/No payers yet/).waitFor();
+  await page.getByLabel('Search payers').fill('');
   await page.getByRole('button', { name: payerName, exact: true }).waitFor();
   await page.getByLabel('Show inactive').check();
   await page.waitForResponse((response) => response.url().includes('/api/admin/payers?includeInactive=true'));
