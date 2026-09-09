@@ -458,13 +458,25 @@ function ProtectedRoute({ children }) {
       : null);
   const savedDiffers = !!targetProperty && !!resolvedTargetPropertyId && !profileDiffers
     && String(selectedProperty?.propertyId || '') !== resolvedTargetPropertyId;
-  const targetPending = isAuthenticated && (profileDiffers || savedDiffers);
+  // A profile-only link under a NON-primary selection whose primary entry is
+  // not known yet (list still loading, or failed) stays pending — mounting
+  // the portal would open the notification under the wrong house (codex
+  // #4207 r2). The propertiesError guard below fails it closed.
+  const primaryUnknown = !!targetProperty && !targetPropertyId && !profileDiffers
+    && !!selectedProperty?.propertyId && !primaryEntry;
+  const targetPending = isAuthenticated && (profileDiffers || savedDiffers || primaryUnknown);
   const switchingTarget = useRef(null);
   const [targetError, setTargetError] = useState(null);
   useEffect(() => {
     const destination = `${targetProperty}:${resolvedTargetPropertyId || ''}`;
     if (!targetPending || loading || switchingTarget.current === destination) return;
     if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
+    if (primaryUnknown) {
+      // Entries for this profile are listed but none is its primary (the
+      // office retired it): nothing safe to open — fail closed.
+      if (currentProfileEntries.length > 0) setTargetError('This notification belongs to a property that is no longer available on your account.');
+      return; // otherwise keep waiting for the list
+    }
     // Saved-property entries carry composite ids (GATE_APP_PROPERTY_SCOPE);
     // a notification names the PROFILE, so match on the entry's customer.
     if (!properties.some((property) => String(property.customerId || property.id) === targetProperty)) {
@@ -485,7 +497,7 @@ function ProtectedRoute({ children }) {
     void switchProperty(savedEntry ? { customerId: savedEntry.customerId, propertyId: savedEntry.propertyId } : targetProperty).then((switched) => {
       if (!switched) setTargetError('This property could not be opened. Try again.');
     }).catch(() => setTargetError('This property could not be opened. Try again.'));
-  }, [targetPending, targetProperty, resolvedTargetPropertyId, loading, properties, propertiesError, switchProperty]);
+  }, [targetPending, targetProperty, resolvedTargetPropertyId, primaryUnknown, currentProfileEntries.length, loading, properties, propertiesError, switchProperty]);
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
   useGlassSurface(loading || targetPending);

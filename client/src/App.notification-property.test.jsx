@@ -114,3 +114,30 @@ test('a profile-only push for the current profile while a NON-primary house is s
   render(<App />);
   await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith({ customerId: 'property-1', propertyId: 'prop-a' }));
 });
+
+test('a profile-only push under a NON-primary selection stays pending while the list is unavailable, then switches to the primary once it arrives', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
+    properties: [], propertiesError: null, switchProperty: vi.fn(async () => true) };
+  const view = render(<App />);
+  await new Promise((r) => setTimeout(r, 50));
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+  expect(document.body.textContent).not.toMatch(/no longer available/);
+  state.auth = { ...state.auth, properties: [
+    { id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true },
+    { id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false },
+  ] };
+  view.rerender(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith({ customerId: 'property-1', propertyId: 'prop-a' }));
+});
+
+test('a profile-only push under a NON-primary selection with a FAILED list read fails closed', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
+    properties: [], propertiesError: 'Other service properties are temporarily unavailable.', switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(document.body.textContent).toMatch(/could not be checked/));
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+});

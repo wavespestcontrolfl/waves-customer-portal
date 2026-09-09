@@ -47,11 +47,13 @@ router.use(authenticate);
 
 const listQuerySchema = Joi.object({
   days: Joi.number().integer().min(1).max(365).default(90),
-  // allProperties=1 (GATE_APP_PROPERTY_SCOPE): read the CUSTOMER's whole
-  // schedule regardless of the session's selected property. WaveGuard
-  // coverage is per customer (owner ruling 2026-06-29), so the My Plan tab's
-  // coverage evidence must see the services at every house; the visits
-  // surfaces never pass it.
+  // allProperties=1 (GATE_APP_PROPERTY_SCOPE): the CUSTOMER's whole schedule
+  // as a NARROW coverage projection — service identity and dates only, no
+  // windows, technician, confirm state or reschedule/calendar bearer links.
+  // WaveGuard coverage is per customer (owner ruling 2026-06-29), so the My
+  // Plan tab's coverage evidence must see the services at every house, but
+  // a session scoped to one house must never recover the other houses'
+  // actionable links through this client-controlled flag (codex #4207).
   allProperties: Joi.boolean().truthy('1').falsy('0').default(false),
 });
 
@@ -209,6 +211,47 @@ router.get('/', async (req, res, next) => {
       groupedById.set(String(s.id), g === true || g === 'unknown');
       calendarVerdictById.set(String(s.id), g === 'unknown' ? { blocked: true, endsAt: null }
         : g === true ? await groupedCalendarVerdict(s.visit_id) : null);
+    }
+
+    if (allProperties) {
+      // Coverage projection only (see listQuerySchema): nothing actionable.
+      return res.json({
+        coverageOnly: true,
+        hasCancellableWork: cancellable,
+        reservice: null,
+        overlayHandoff: false,
+        upcoming: upcoming.map((s) => ({
+          id: s.id,
+          date: s.scheduled_date,
+          serviceType: normalizeServiceType(s.service_type),
+          status: s.status,
+          isRecurring: s.is_recurring === true,
+          isCallback: s.is_callback === true,
+          waveguardQualifying: portalRowQualifiesForWaveGuard({
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          }),
+          serviceFamily: portalRowWaveGuardFamily({
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          }),
+          serviceDisplayName: (() => {
+            if (!s.catalog_service_name) return null;
+            const withCatalog = portalRowWaveGuardFamily({
+              service_type: s.service_type,
+              service_key: s.catalog_service_key,
+              service_name: s.catalog_service_name,
+              catalog_billing_type: s.catalog_billing_type,
+            });
+            const labelOnly = portalRowWaveGuardFamily({ service_type: s.service_type });
+            return withCatalog && withCatalog !== labelOnly ? normalizeServiceType(s.catalog_service_name) : null;
+          })(),
+        })),
+      });
     }
 
     res.json({
@@ -740,6 +783,20 @@ router.get('/next', async (req, res, next) => {
 
     if (!nextService) {
       return res.json({ next: null });
+    }
+    if (allProperties) {
+      // Coverage projection only — no reschedule/calendar bearer links.
+      return res.json({
+        coverageOnly: true,
+        next: {
+          id: nextService.id,
+          date: nextService.scheduled_date,
+          serviceType: normalizeServiceType(nextService.service_type),
+          status: nextService.status,
+          isRecurring: nextService.is_recurring === true,
+          isCallback: nextService.is_callback === true,
+        },
+      });
     }
     // Same group-aware posture as the list payload (codex #3609 r25 P2).
     const nextGroupedVerdict = nextService.visit_id ? await require('./reschedule-public').groupedVisit(nextService) : false;
