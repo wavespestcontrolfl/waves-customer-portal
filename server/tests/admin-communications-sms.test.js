@@ -1853,6 +1853,58 @@ describe('Communications review ask serialization', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
   });
+  test.each(['accepted', 'accepted throw', 'stamp failure'])('bare ask retains durable spacing without the provider SMS log: %s', async mode => {
+    let reserved = false;
+    const deleted = jest.fn();
+    db.mockImplementation(table => {
+      const b = makeUniversalBuilder();
+      if (table === 'customers') b.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      if (table === 'sms_log') {
+        b.insert.mockImplementation(values => {
+          expect(held.has('review-send:cust-A')).toBe(true);
+          expect(JSON.parse(values.metadata).review_ask_reservation).toBe(true);
+          reserved = true;
+          return b;
+        });
+        b.update.mockImplementation(() => {
+          expect(held.has('review-send:cust-A')).toBe(true);
+          if (mode === 'stamp failure') throw new Error('stamp unavailable');
+          return b;
+        });
+        b.del.mockImplementation(async () => { deleted(); reserved = false; return 1; });
+      }
+      return b;
+    });
+    history.lastManualAskAt.mockImplementation(async () => reserved ? new Date() : null);
+    sendCustomerMessage.mockImplementation(async () => {
+      expect(reserved).toBe(true);
+      if (mode === 'accepted throw') throw Object.assign(new Error('audit unavailable'), { providerOutcome: { sent: true, providerMessageId: 'SM-accepted' } });
+      return { sent: true, providerMessageId: 'SM-accepted' };
+    });
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl)).status).toBe(mode === 'accepted throw' ? 500 : 200);
+      expect(reserved).toBe(true);
+      expect(deleted).not.toHaveBeenCalled();
+      const retry = await send(baseUrl);
+      expect(retry.status).toBe(409);
+      expect((await retry.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('a failed pre-send reservation prevents the provider call', async () => {
+    db.mockImplementation(table => {
+      const b = makeUniversalBuilder();
+      if (table === 'customers') b.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      if (table === 'sms_log') b.insert.mockImplementation(() => { throw new Error('reservation unavailable'); });
+      return b;
+    });
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl)).status).toBe(500);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
   test('a preceding cadence delivery blocks the bare staff ask', async () => {
     history.lastDeliveredAskAt.mockResolvedValue(new Date());
     await withServer(async baseUrl => {
