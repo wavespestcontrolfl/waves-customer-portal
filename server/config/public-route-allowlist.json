@@ -401,11 +401,12 @@
     {
       "router": "server/routes/secure-card-public.js",
       "mount": "/api/public/secure-card",
-      "reason": "Tokenized secure card-capture links (Stripe Payment Element) from SMS/email; the USE entry is the router's privacy-header stamp (always next())",
+      "reason": "Tokenized secure card-capture links (Stripe Payment Element) from SMS/email; the USE entry is the router's privacy-header stamp (always next()); replace-intent (2026-09-08) is \"use a different payment method\" on the same bearer token — it only retires a SetupIntent pinned to that token's own request and mints its replacement, no money moves",
       "routes": [
         "USE /api/public/secure-card (inline function#8abc12e6)",
         "GET /api/public/secure-card/:token",
         "POST /api/public/secure-card/:token/complete",
+        "POST /api/public/secure-card/:token/replace-intent",
         "POST /api/public/secure-card/:token/select-plan"
       ]
     },

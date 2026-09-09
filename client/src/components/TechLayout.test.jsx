@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import {
   MemoryRouter,
   Outlet,
@@ -30,6 +30,7 @@ function renderTech(initialPath = '/tech/protocols?day=monday') {
         <Route path="/tech" element={<TechLayout />}>
           <Route index element={<div>Protected field route</div>} />
           <Route path="protocols" element={<div>Protected field protocols</div>} />
+          <Route path="documents" element={<div>Protected staff documents</div>} />
         </Route>
         <Route path="/admin/login" element={<LocationResult label="Staff login" />} />
         <Route path="/admin/change-password" element={<LocationResult label="Change password" />} />
@@ -57,6 +58,20 @@ describe('TechLayout staff-session verification', () => {
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each(['/tech?visit=row%3Atwo', '/TECH/?visit=row%3Atwo', '/TECH/PROTOCOLS/?visit=row%3Atwo'])('retains the unauthenticated sign-in destination %s', (path) => {
+    renderTech(path);
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(screen.getByText(`Staff login /admin/login?next=${encodeURIComponent(path)}`)).toBeInTheDocument();
+  });
+
+  it.each(['/TECH/DOCUMENTS', '/tech/documents/', '/TECH/DOCUMENTS/'])('keeps disabled documents unavailable at %s', async (path) => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', role: 'technician' })));
+    renderTech(path);
+    expect(await screen.findByText('Staff documents are unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText('Protected staff documents')).not.toBeInTheDocument();
   });
 
   it('does not treat the retired adminToken storage key as a staff session', () => {
