@@ -8,6 +8,45 @@ afterEach(async () => {
 });
 
 describe("local email editor recovery", () => {
+  it("persists the send before submission and restores an interrupted send as unknown", async () => {
+    let store = await import("./emailDrafts");
+    const session = store.loadEmailDrafts("fixture-owner");
+    const attempt = { id: "fixture-attempt", status: "running", snapshot: { to: "a@example.invalid", subject: "Fixture", body: "Hello" } };
+    expect(store.updateEmailSendAttempt(session, "compose", attempt)).toBe(true);
+    expect(store.updateEmailSendAttempt(session, "compose", { ...attempt, id: "duplicate" })).toBe(false);
+    // A real reload also removes the old module's unload listener.
+    const persisted = sessionStorage.getItem("waves_admin_email_drafts_v1");
+    store.clearEmailDrafts(); sessionStorage.setItem("waves_admin_email_drafts_v1", persisted);
+    vi.resetModules(); store = await import("./emailDrafts");
+    expect(store.loadEmailDrafts("fixture-owner").attempts.compose).toMatchObject({ id: attempt.id, status: "outcome_unknown" });
+    expect(store.loadEmailDrafts("another-owner").attempts).toEqual({});
+  });
+
+  it("preserves an uncertain guard when draft edits, outcome writes or reconciliation exceed storage quota", async () => {
+    let store = await import("./emailDrafts");
+    const session = store.loadEmailDrafts("fixture-owner");
+    const attempt = { id: "fixture-attempt", status: "running", snapshot: "Reply", replyId: "a" };
+    store.updateEmailSendAttempt(session, "reply:a", attempt);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Quota"); });
+    store.updateEmailDrafts(session, drafts => ({ ...drafts, replies: { a: "Edited" } }));
+    expect(store.updateEmailSendAttempt(session, "reply:a", { ...attempt, status: "outcome_unknown" }, attempt.id)).toBe(false);
+    expect(store.updateEmailSendAttempt(session, "reply:a", null, attempt.id)).toBe(false);
+    const persisted = sessionStorage.getItem("waves_admin_email_drafts_v1");
+    // A real reload also removes the old module's unload listener.
+    store.clearEmailDrafts(); vi.restoreAllMocks();
+    sessionStorage.setItem("waves_admin_email_drafts_v1", persisted);
+    vi.resetModules(); store = await import("./emailDrafts");
+    expect(store.loadEmailDrafts("fixture-owner").attempts["reply:a"]).toMatchObject({ id: attempt.id, status: "outcome_unknown" });
+  });
+
+  it("refuses to begin a send when its guard cannot be saved", async () => {
+    const store = await import("./emailDrafts");
+    const session = store.loadEmailDrafts("fixture-owner");
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Quota"); });
+    expect(store.updateEmailSendAttempt(session, "compose", { id: "attempt", status: "running", snapshot: {} })).toBe(false);
+    expect(session.attempts).toEqual({});
+  });
+
   it("recovers typed drafts after a module reload and isolates another verified account", async () => {
     let store = await import("./emailDrafts");
     const session = store.loadEmailDrafts("fixture-owner-a");
@@ -35,6 +74,28 @@ describe("local email editor recovery", () => {
     store.updateEmailDrafts(session, (d) => ({ ...d, replies: {} }));
     vi.resetModules(); store = await import("./emailDrafts");
     expect(store.loadEmailDrafts("fixture-owner").drafts.replies).toEqual({});
+  });
+
+  it("warns before leaving while an unresolved send attempt is the only record preventing a retry", async () => {
+    const store = await import("./emailDrafts");
+    const session = store.loadEmailDrafts("fixture-owner");
+    const attempt = { id: "attempt-1", status: "running", startedAt: "2026-09-09T00:00:00.000Z", snapshot: { drafts: session.drafts, saved: true } };
+    expect(store.updateEmailSendAttempt(session, "compose", attempt)).toBe(true);
+    expect(store.setEmailSending(session, "compose", true)).toBe(true);
+    expect(store.updateEmailSendAttempt(session, "compose", { ...attempt, status: "outcome_unknown" }, "attempt-1")).toBe(true);
+    expect(store.setEmailSending(session, "compose", false)).toBe(true);
+    const unresolved = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unresolved); expect(unresolved.defaultPrevented).toBe(true);
+    // A stored attempt arms the warning again as soon as the inbox reopens.
+    const stored = sessionStorage.getItem("waves_admin_email_drafts_v1");
+    store.clearEmailDrafts(); sessionStorage.setItem("waves_admin_email_drafts_v1", stored);
+    const reopened = store.loadEmailDrafts("fixture-owner");
+    expect(reopened.attempts.compose.status).toBe("outcome_unknown");
+    const hydrated = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(hydrated); expect(hydrated.defaultPrevented).toBe(true);
+    expect(store.updateEmailSendAttempt(reopened, "compose", null, "attempt-1")).toBe(true);
+    const reconciled = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(reconciled); expect(reconciled.defaultPrevented).toBe(false);
   });
 
   it("sign-out invalidates outstanding callbacks so they cannot resurrect discarded session data", async () => {

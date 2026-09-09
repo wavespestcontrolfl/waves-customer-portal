@@ -2654,6 +2654,7 @@ const InvoiceService = {
         // caller can requeue the exact pay-link text on the scheduled rail.
         if (sendResult.deferred) err.deferred = true;
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
+        if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
         err.smsBody = body;
         err.toPhone = customer.phone;
         throw err;
@@ -2849,6 +2850,7 @@ const InvoiceService = {
         // instead of treating the hold as a spent delivery attempt.
         if (err.deferred) sms.deferred = true;
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
+        if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
@@ -2862,7 +2864,7 @@ const InvoiceService = {
     // 8:00 AM under the same payment_link policy. Scheduled callers
     // (allowClaimed) skip this — their whole send defers below instead.
     if (!allowClaimed
-      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(sms.code)
+      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && sms.deferred
       && sms.nextAllowedAt
       && sms.heldBody
@@ -2934,7 +2936,7 @@ const InvoiceService = {
     // night sends, admin resends) are NOT deferred: their documented
     // gate-ON behavior is email-immediate with the SMS leg held.
     const scheduledSmsHeld = allowClaimed
-      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(sms.code)
+      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && Boolean(sms.nextAllowedAt);
     if (scheduledSmsHeld || sms.holdUnowned) {
       email.error = sms.holdUnowned
@@ -3337,11 +3339,19 @@ const InvoiceService = {
           });
       } else {
         failed += 1;
+        // A temporary native failure consumes an attempt under this
+        // queue's existing five-attempt cap, but cannot replay before
+        // the provider delay. Window/eligibility holds above spend none.
+        const nativeRetryMs = result.sms?.code === "APP_PROVIDER_RETRY"
+          ? Math.max(60000, Number(result.sms.retryAfterMs) || 60000)
+            * (2 ** Number(inv.scheduled_send_attempts || 0)) * (1 + Math.random() * 0.2)
+          : null;
         await db("invoices")
           .where({ id: inv.id })
           .update({
             status: "scheduled",
             scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+            ...(nativeRetryMs ? { scheduled_send_at: new Date(Date.now() + nativeRetryMs) } : {}),
             scheduled_send_error: error,
             updated_at: new Date(),
           });
