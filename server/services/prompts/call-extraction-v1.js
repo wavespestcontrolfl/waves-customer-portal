@@ -74,6 +74,7 @@ SCHEDULING STATUS — This is the most important field for downstream routing:
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
 - "offered": Agent offered specific time slots but caller has not confirmed.
 - "reschedule_requested": Caller wants to change an existing appointment. A reschedule that ENDS with a new agreed date+time stays "reschedule_requested" with confirmed_start_at set to the new slot — never plain "confirmed" (the office must move the existing visit, not add a second one).
+- proposed_start_at: For a reschedule, capture the caller's specifically requested NEW date AND time as an ISO 8601 Eastern-offset timestamp, even when the agent says "we'll check". Pin the caller's verbatim date/time quote to /scheduling/proposed_start_at with speaker "caller". Resolve relative dates against the call date. Vague ranges or multiple alternatives stay null. This is a REQUEST, never an agreement: confirmed_start_at still requires an agreed slot.
 - "canceled": Caller wants to cancel an existing appointment or service.
 - "ambiguous": Scheduling was discussed but the outcome is unclear.
 - "none": No scheduling discussion occurred.
@@ -217,6 +218,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
 - scheduling.confirmed_start_at (the quote must contain the agreed date AND time)
+- scheduling.proposed_start_at (when set — the CALLER's requested new date and time)
 - scheduling.agent_committed_booking (when true — the AGENT's commitment sentence; speaker must be "agent")
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
