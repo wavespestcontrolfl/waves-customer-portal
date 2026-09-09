@@ -457,6 +457,24 @@ describe('legacy baseline on confirm', () => {
 });
 
 describe('prior-assessment count', () => {
+  test('priorAssessmentCount excludes pending run-backed rows; a database without the run table counts every row; anything else rethrows', async () => {
+    const counting = (answers) => {
+      const calls = [];
+      const knex = (table) => {
+        const q = { where() { return this; }, whereNot() { return this; }, count() { return this; }, async first() { const next = answers.shift(); calls.push(next); if (next instanceof Error) throw next; return { cnt: String(next) }; } };
+        return Object.assign(q, { table });
+      };
+      knex.calls = calls;
+      return knex;
+    };
+    expect(await visit.priorAssessmentCount('c', counting([2]))).toBe(2);
+    const missing = Object.assign(new Error('relation "lawn_assessment_runs" does not exist'), { code: '42P01' });
+    const lagged = counting([missing, 3]);
+    expect(await visit.priorAssessmentCount('c', lagged)).toBe(3);
+    expect(lagged.calls).toHaveLength(2);
+    await expect(visit.priorAssessmentCount('c', counting([Object.assign(new Error('down'), { code: 'ECONNREFUSED' })]))).rejects.toThrow('down');
+  });
+
   test('withoutPendingRuns drops an unconfirmed run-backed row from the legacy baseline count, keeps everything else', () => {
     const knex = require('knex')({ client: 'pg' });
     const sql = visit.withoutPendingRuns(knex('lawn_assessments').where({ customer_id: 'c' })).count('id as cnt').toString();

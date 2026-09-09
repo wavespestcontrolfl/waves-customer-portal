@@ -782,6 +782,32 @@ async function loadRun(assessmentId, knex) {
   }
 }
 
+// The customer's prior assessments for the legacy baseline decision
+// (property history off): every row but a pending run-backed one. A database
+// without the run table yet (migration lag, the gate dark) has no pending
+// run-backed row to exclude — the plain count, so the legacy /assess path
+// never depends on the run table (Codex #4150 r8).
+async function priorAssessmentCount(customerId, knex) {
+  const count = async (query) => parseInt((await query.count('id as cnt').first()).cnt, 10);
+  try {
+    return await count(withoutPendingRuns(knex('lawn_assessments').where({ customer_id: customerId })));
+  } catch (err) {
+    if (err && err.code === '42P01') return count(knex('lawn_assessments').where({ customer_id: customerId }));
+    throw err;
+  }
+}
+
+// A run-backed row's confirmation is a one-shot transition: the row is
+// locked for the confirm's transaction and claimed only while it is still
+// unconfirmed, so a retried or concurrent confirm of a completed row neither
+// rewrites it nor runs the customer pipeline (duplicate notification, report
+// and calibration rows) a second time (Codex #4150 r8). True when this
+// transaction may confirm the row; false when it already is confirmed.
+async function claimConfirm(assessmentId, trx) {
+  const row = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first('confirmed_by_tech');
+  return !!row && !row.confirmed_by_tech;
+}
+
 const parseJsonArray = (value) => {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string') return [];
@@ -1177,6 +1203,8 @@ module.exports = {
   mergedReviewInputs,
   legacyBaselineFields,
   withoutPendingRuns,
+  priorAssessmentCount,
+  claimConfirm,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
   SYSTEM_PROMPT,
