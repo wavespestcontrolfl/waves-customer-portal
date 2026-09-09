@@ -26,11 +26,24 @@ export const Button = forwardRef(function Button(
   { variant = 'primary', size = 'md', className, type = 'button', ...rest },
   ref
 ) {
+  // Same silent-undefined pattern as Badge: an unknown variant or size
+  // rendered a bare <button>. Fall back and warn in dev.
+  const hasVariant = Object.prototype.hasOwnProperty.call(VARIANTS, variant);
+  const hasSize = Object.prototype.hasOwnProperty.call(SIZES, size);
+  if (import.meta.env.DEV) {
+    if (!hasVariant) console.warn(`Button: unknown variant "${variant}" — rendering primary`);
+    if (!hasSize) console.warn(`Button: unknown size "${size}" — rendering md`);
+  }
   return (
     <button
       ref={ref}
       type={type}
-      className={cn(BASE, SIZES[size], VARIANTS[variant], className)}
+      className={cn(
+        BASE,
+        SIZES[hasSize ? size : 'md'],
+        VARIANTS[hasVariant ? variant : 'primary'],
+        className
+      )}
       {...rest}
     />
   );
