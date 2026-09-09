@@ -50,8 +50,12 @@ const formatLineBasis = (line) => `${formatQuantity(line)} × ${formatUnitPrice(
 
 function computeProjectCosts(costing, totals) {
   const rows = Array.isArray(costing?.rows) ? costing.rows : [];
-  const revenueYears = Number(costing?.revenueYears) || 1;
-  const costsComplete = rows.length > 0 && rows.every((row) => String(row.description || '').trim()
+  // An absent period keeps the one-year default; a PRESENT blank or invalid
+  // period is incomplete, never silently one year (GH codex P2 on #4270).
+  const rawYears = costing?.revenueYears;
+  const revenueYears = rawYears == null ? 1
+    : (String(rawYears).trim() !== '' && Number.isInteger(Number(rawYears)) && Number(rawYears) >= 1 && Number(rawYears) <= 30 ? Number(rawYears) : null);
+  const costsComplete = revenueYears != null && rows.length > 0 && rows.every((row) => String(row.description || '').trim()
     && [row.quantity, row.unitCost, row.occurrences].every((value) => value != null && String(value).trim() !== '' && Number.isFinite(Number(value)))
     && Number(row.quantity) > 0 && Number(row.unitCost) >= 0 && Number.isInteger(Number(row.occurrences)) && Number(row.occurrences) > 0);
   const byCategory = {};
@@ -60,9 +64,9 @@ function computeProjectCosts(costing, totals) {
     byCategory[row.category] = roundCents((byCategory[row.category] || 0) + amount);
   }
   const cost = roundCents(Object.values(byCategory).reduce((sum, amount) => sum + amount, 0));
-  const revenue = roundCents(Number(totals?.oneTime || 0) + Number(totals?.annualRecurring || 0) * revenueYears);
+  const revenue = revenueYears == null ? null : roundCents(Number(totals?.oneTime || 0) + Number(totals?.annualRecurring || 0) * revenueYears);
   const profit = costsComplete ? roundCents(revenue - cost) : null;
-  return { cost, revenue, profit, marginPercent: costsComplete && revenue > 0 ? roundDecimal(profit / revenue * 100, 2) : null, byCategory, costsComplete };
+  return { cost, revenue, revenueYears, profit, marginPercent: costsComplete && revenue > 0 ? roundDecimal(profit / revenue * 100, 2) : null, byCategory, costsComplete };
 }
 
 module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, computeProjectCosts };

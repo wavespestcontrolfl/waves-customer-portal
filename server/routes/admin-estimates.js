@@ -4070,7 +4070,13 @@ router.put('/:id/proposal', async (req, res, next) => {
     // drop it — the public copy falls back to "your account manager has the
     // proposal" until the next send re-stamps proposalDelivery against the new
     // PDF. Otherwise the link would keep saying the edited proposal was emailed.
-    clearStaleProposalDelivery(nextData);
+    // A private-cost-only save leaves the customer proposal and its PDF
+    // exactly as delivered, so the emailed marker stays true (GH codex P2 on
+    // #4270). Anything that changes the normalized proposal drops it.
+    const proposalContent = (value) => { const { updatedAt, provenance, ...rest } = value || {}; return JSON.stringify(rest); };
+    if (!(Object.hasOwn(req.body || {}, 'projectCosting') && proposalContent(normalized) === proposalContent({ ...savedProposal, enabled: true, synthesized: false }))) {
+      clearStaleProposalDelivery(nextData);
+    }
     // Make the authored proposal sendable: clear the auto-quote-required
     // booleans the commercial estimate was created with, and resolve any
     // blocking lead/draft automation status. proposal.enabled (set above) is

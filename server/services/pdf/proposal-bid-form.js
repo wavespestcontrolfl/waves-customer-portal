@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { PDFDocument, PDFArray, StandardFonts, rgb } = require('pdf-lib');
+const { PDFDocument, PDFArray, PDFName, StandardFonts, rgb } = require('pdf-lib');
 const { normalizeProposal, computeProposalTotals } = require('../estimate-proposal');
 const { validDateOnly } = require('../../utils/date-only');
 const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQuantity, formatUnitPrice } = require('../../../shared/proposal-bid.cjs');
@@ -20,6 +20,24 @@ function pageContentHash(document, page) {
     if (typeof stream?.getContents !== 'function') throw invalid('The uploaded PDF has an unsupported page format.');
     return Buffer.from(stream.getContents());
   }))).digest('hex');
+}
+
+// The content-stream hash proves the printed layout; the rest of the page and
+// form state must be blank too (GH codex P2 on #4270). The reviewed originals
+// carry no annotations on the exported page, and their fields (North Port's
+// AcroForm on other pages) are empty, so a filled-in or annotated copy, a
+// signed packet, or a page whose visible box was cropped or shifted is refused
+// rather than preserved into the export.
+function assertBlankFormState(document, page) {
+  const boxes = [page.getMediaBox(), page.getCropBox()].every((box) => Math.abs(box.x) <= 0.1 && Math.abs(box.y) <= 0.1
+    && Math.abs(box.width - 612) <= 0.1 && Math.abs(box.height - 792) <= 0.1);
+  if (!boxes || page.getRotation().angle !== 0) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
+  if ((page.node.Annots()?.size() || 0) > 0) throw invalid('The selected page carries annotations or form fields. Upload the untouched original form.');
+  const acroForm = document.catalog.lookup(PDFName.of('AcroForm'));
+  if (!acroForm) return;
+  if (acroForm.get(PDFName.of('SigFlags'))) throw invalid('This PDF has been signed or prepared for signature. Upload the untouched original form.');
+  const filled = document.getForm().getFields().some((field) => field.acroField.dict.get(PDFName.of('V')) != null);
+  if (filled) throw invalid('This PDF has form fields already filled in. Upload the untouched original form.');
 }
 
 function mapFormPrices(proposal, template, mapping = {}) {
@@ -88,8 +106,8 @@ async function buildProposalBidForm({ estimate, sourcePdf, template, pageNumber,
   if (document.getPageCount() > 100) throw invalid('Upload the bid-form PDF with no more than 100 pages.');
   if (!Number.isInteger(Number(pageNumber)) || pageNumber < 1 || pageNumber > document.getPageCount()) throw invalid('The selected form page is outside this PDF.');
   const page = document.getPage(Number(pageNumber) - 1);
-  if (Math.abs(page.getWidth() - 612) > 0.1 || Math.abs(page.getHeight() - 792) > 0.1 || page.getRotation().angle !== 0
-    || pageContentHash(document, page) !== FORM_PAGE_HASHES[template]) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
+  if (pageContentHash(document, page) !== FORM_PAGE_HASHES[template]) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
+  assertBlankFormState(document, page);
   const font = await document.embedFont(StandardFonts.Helvetica);
   // Coordinates are points measured from the top of each reviewed original.
   const write = (text, x, top, width, size = 9) => {

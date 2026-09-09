@@ -37,9 +37,9 @@ export default function ProposalProjectCosting({ value, onChange, totals, disabl
       <label className="block max-w-xs">Years of recurring revenue to compare<Input type="number" min="1" max="30" step="1" disabled={disabled} value={costing.revenueYears} onChange={(e) => onChange({ ...costing, revenueYears: e.target.value })} /></label>
       <p className="text-zinc-600">Comparison includes one-time revenue plus this many years of recurring revenue, before sales tax. Enter all matching costs and any longer warranty costs above.</p>
       <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 tabular-nums">
-        {[['Revenue', dollars(summary.revenue)], ['Entered costs', dollars(summary.cost)], ['Estimated gross profit', summary.profit == null ? '—' : dollars(summary.profit)], ['Estimated margin', summary.marginPercent == null ? '—' : `${summary.marginPercent}%`]].map(([label, amount]) => <div key={label}><dt className="text-zinc-600">{label}</dt><dd className="font-medium">{amount}</dd></div>)}
+        {[['Revenue', summary.revenue == null ? '—' : dollars(summary.revenue)], ['Entered costs', dollars(summary.cost)], ['Estimated gross profit', summary.profit == null ? '—' : dollars(summary.profit)], ['Estimated margin', summary.marginPercent == null ? '—' : `${summary.marginPercent}%`]].map(([label, amount]) => <div key={label}><dt className="text-zinc-600">{label}</dt><dd className="font-medium">{amount}</dd></div>)}
       </dl>
-      {!summary.costsComplete && <p className="text-zinc-600">Complete the cost rows to see estimated profit and margin.</p>}
+      {!summary.costsComplete && <p className="text-zinc-600">Complete the cost rows and a 1–30 year revenue period to see estimated profit and margin.</p>}
     </CardBody>
   </UiSurface>;
 }
