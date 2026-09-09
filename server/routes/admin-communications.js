@@ -3051,12 +3051,12 @@ router.post('/blocked-numbers', async (req, res, next) => {
     // it would silently drop the prospect's next text and call (codex
     // #4213 P1). Same last-10 identity the inbox threads on.
     const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    // No catch: a failing safety check must refuse the block, not allow it.
     const openLead = await db('leads')
       .whereIn('status', OPEN_LEAD_STATUSES)
       .whereNull('converted_at')
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [number.replace(/\D/g, '').slice(-10)])
-      .first('id', 'name', 'first_name', 'last_name')
-      .catch(() => null);
+      .first('id', 'first_name', 'last_name');
     if (openLead) {
       return res.status(409).json({
         error: 'This number belongs to an open lead and cannot be blocked. Close or convert the lead first.',
