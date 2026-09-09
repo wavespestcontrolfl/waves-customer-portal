@@ -35,7 +35,7 @@ const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'h
 const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'status', 'billing', 'type', 'plan', 'frequency', 'autopay', 'balance', 'schedule', 'tags', 'tag', 'preferences', 'details',
   // every update_customer field (tools.js) and the contractions a request may open with
   'first', 'last', 'city', 'state', 'zip', 'waveguard', 'tier', 'pipeline', 'stage', 'source', 'monthly', 'rate', 'mode', 'membership',
-  'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using',
+  'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when', 'to', 'for', 'as', 'from', 'with', 'and', 'or', 'by', 'using',
   'on', 'at', 'in', 'of', 'about', 'regarding', 'via', 'through', 'after', 'before', 'during', 'until', 'since', 'over', 'into', 'off',
   'up', 'out', 'whose', 'whom', 'which', 'if', 'while', 'because', 'so', 'but', 'not', 'no', 'please', 'now', 'later', 'again', 'still', 'also', 'then', 'just', 'only',
   'account', 'accounts', 'profile', 'record', 'records',
@@ -50,10 +50,11 @@ const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', '
 // A set quantifier ("both A and B", "these customers …", "all of these …") is
 // never a target: one target per request, so the request asks to clarify.
 // Owner decision 2026-09-08: fail closed rather than parse cohorts.
-// Up to two qualifiers may sit between the quantifier and the noun ("all active
-// customers", "each overdue customer"); a deictic one names one account.
-// The noun takes every customer-reference synonym the resolver understands.
-const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+){0,2} (?:customer|account|client|profile|record)s?|all of (?:these|those))\b/;
+// Any number of qualifiers may sit between the quantifier and the noun ("all
+// active residential lawn customers"); a deictic word ends the run, so "all of
+// this customer's fields" still names one account. The noun takes every
+// customer-reference synonym the resolver understands.
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+)* (?:customer|account|client|profile|record)s?|all of (?:these|those))\b/;
 // An independently requested operation starts at "and/then <action>".
 const ACTION_CLAUSE_SPLIT = new RegExp(`\\b(?:and|then)\\s+(?:(?:also|then|please)\\s+)*(?=(?:${PERSON_ACTIONS}|revise|add|save|assign|draft|write|post|submit)\\b)`, 'i');
 const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
@@ -163,9 +164,10 @@ async function namedCustomers(prompt) {
   // person reference in the request matches nobody, as in "update Jhon Smith
   // and text Alice Owner" — is never a target and no selection survives it.
   // Each reference is the WHOLE name run after its selector ("alice missing"),
-  // and it resolves only against a customer whose full name it starts with,
-  // or, for a bare single name, whose first or last name it is. Sharing a
-  // first name with an accepted customer resolves nothing. A token that
+  // and it resolves only against a customer whose full name it equals, or,
+  // for a bare single name, whose first or last name it is. Sharing a first
+  // name resolves nothing, and neither does a longer reference ("alice jones
+  // jr"): an unlisted trailing word is refused, never assumed. A token that
   // modifies a non-person noun ("flea" in "flea treatment") is not a person
   // reference, and a request that resolved nobody keeps the plain
   // unresolved-name handling.
@@ -182,7 +184,7 @@ async function namedCustomers(prompt) {
     const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
     if (run.length === 1) return run[0] === first || run[0] === last;
     const full = `${first} ${last}`.trim().split(' ');
-    return full.length <= run.length && full.every((word, index) => word === run[index]);
+    return full.length === run.length && full.every((word, index) => word === run[index]);
   });
   const partial = accepted.length > 0 && normalized.split(ACTION_CLAUSE_SPLIT).some(clause => {
     const references = personReferences(clause);
@@ -291,7 +293,8 @@ function candidateSelection(candidates, prompt, viewedCustomer, complete, cohort
 
 async function resolve({ prompt, pageData, selectedTarget }) {
   // Object(null) is {} — an absent or null selection reads as no customer id.
-  const selectedId = Object(selectedTarget).customer_id;
+  // Candidate ids come from PostgreSQL in lowercase; a selection may not.
+  const selectedId = String(Object(selectedTarget).customer_id || '').toLowerCase() || null;
   const [page, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
   const named = namedResult.matches;
   // A stale page hint cannot block an unrelated task or an explicitly named
