@@ -102,29 +102,44 @@ function fixtureCase(row, photos = [], context = {}) {
 // customer's full name (knowledge-bridge), so the fixture copy goes through
 // the customer egress scrubber (phones, emails, URLs, street addresses,
 // brands) and then loses every customer-name token the exporter knows —
-// first, last, and the household's other names — before it is clipped.
-// Null when nothing is left.
+// the stored first and last name, each in full AND word by word, with and
+// without diacritics, so a summary that says only "Mary" of a "Mary Jane",
+// or "Jose" of a "José", is scrubbed too (Codex #4153 r5) — before it is
+// clipped. Word boundaries are Unicode-aware (JS `\b` knows ASCII letters
+// only, so "José" never matched at the end of a word). Null when nothing
+// is left.
+const NAME_TOKEN_MIN_LENGTH = 2; // an initial is not a name
+const withoutDiacritics = (value) => value.normalize('NFD').replace(/\p{M}+/gu, '');
+function customerNameTokens(customerNames) {
+  const tokens = new Set();
+  for (const value of customerNames || []) {
+    const full = String(value || '').trim();
+    for (const token of [full, ...full.split(/[^\p{L}\p{N}]+/u)]) {
+      if (token.length >= NAME_TOKEN_MIN_LENGTH) { tokens.add(token); tokens.add(withoutDiacritics(token)); }
+    }
+  }
+  return [...tokens].sort((a, b) => b.length - a.length);
+}
 function scrubPriorSummary(text, customerNames = []) {
   if (!text) return null;
   let out = scrubCustomerText(String(text));
-  const names = (customerNames || []).map((value) => String(value || '').trim()).filter((value) => value.length >= 2).sort((a, b) => b.length - a.length);
-  for (const name of names) {
-    out = out.replace(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), 'the customer');
+  for (const token of customerNameTokens(customerNames)) {
+    out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu'), 'the customer');
   }
   out = out.replace(/\b(?:Mr|Mrs|Ms|Miss|Dr)\.?\s+the customer\b/g, 'the customer').replace(/\bthe customer(?:\s+the customer)+\b/g, 'the customer').trim();
   return out ? out.slice(0, 400) : null;
 }
 
-// Deterministic selection: explicit ids first (in the order given), else a
-// stable pseudo-random sample keyed on the id so two runs pick the same set.
+// Deterministic selection, in the population's order: the explicit ids plus
+// a stable pseudo-random sample keyed on the id (so two runs pick the same
+// set) — the export's `--ids … --sample N` is their union, each case once;
+// neither asked for is every case.
 function selectCases(cases, { ids = [], sample = null } = {}) {
-  if (ids.length) {
-    const wanted = new Set(ids.map(String));
-    return cases.filter((c) => wanted.has(String(c.assessmentId)));
-  }
-  if (!sample) return cases;
-  const keyed = cases.map((c) => ({ c, k: hashKey(c.assessmentId) })).sort((a, b) => a.k.localeCompare(b.k));
-  return keyed.slice(0, sample).map((x) => x.c);
+  if (!ids.length && !sample) return cases;
+  const wanted = new Set(ids.map(String));
+  const sampled = cases.map((c) => ({ c, k: hashKey(c.assessmentId) })).sort((a, b) => a.k.localeCompare(b.k)).slice(0, sample || 0);
+  for (const { c } of sampled) wanted.add(String(c.assessmentId));
+  return cases.filter((c) => wanted.has(String(c.assessmentId)));
 }
 function hashKey(value) {
   let h = 2166136261;

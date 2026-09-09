@@ -58,6 +58,13 @@ const positiveInt = (flag) => (raw) => {
   if (!Number.isInteger(n) || n < 1) { console.error(`${flag} needs a positive whole number, got ${JSON.stringify(raw ?? null)}`); process.exit(2); }
   return n;
 };
+// A choice flag: one of the listed values (any case), or the script stops
+// the same way — every flag's value is checked where it is read.
+const oneOf = (flag, values) => (raw) => {
+  const v = String(raw || '').toUpperCase();
+  if (!values.includes(v)) { console.error(`${flag} must be ${values.slice(0, -1).join(', ')} or ${values.at(-1)}, got ${JSON.stringify(raw ?? null)}`); process.exit(2); }
+  return v;
+};
 
 // One row per flag: the args key, whether it takes a value, and how that
 // value is read. Boolean flags take none.
@@ -70,13 +77,13 @@ const ARG_SPECS = {
   '--ids': { key: 'ids', value: true, parse: (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean) },
   '--sample': { key: 'sample', value: true, parse: positiveInt('--sample') },
   '--limit': { key: 'limit', value: true, parse: positiveInt('--limit') },
-  '--thinking': { key: 'thinking', value: true, parse: (v) => String(v || '').toUpperCase() },
+  '--thinking': { key: 'thinking', value: true, parse: oneOf('--thinking', ['LOW', 'MEDIUM', 'HIGH']) },
   '--repeat': { key: 'repeat', value: true, parse: positiveInt('--repeat') },
   '--concurrency': { key: 'concurrency', value: true, parse: positiveInt('--concurrency') },
 };
 
 function parseArgs(argv) {
-  const args = { export: false, run: null, ids: [], sample: null, all: false, json: false, thinking: null, forceFallback: false, repeat: 1, concurrency: 2, limit: null };
+  const args = { export: false, run: null, ids: [], sample: null, all: false, json: false, thinking: null, forceFallback: false, repeat: 1, concurrency: 2, limit: Infinity };
   for (let i = 2; i < argv.length; i += 1) {
     const spec = ARG_SPECS[argv[i]];
     if (!spec) { console.error(`unknown argument: ${argv[i]}`); process.exit(2); }
@@ -113,28 +120,25 @@ async function exportFixture(args) {
       .whereExists(function () { this.select(1).from('lawn_assessment_photos as p').whereRaw('p.assessment_id = la.id').andWhere('p.s3_key', 'not like', 'pending/%'); })
       .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date')
       .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC, la.created_at DESC');
+    // Selection is the library's tested mechanism: the explicit ids plus the
+    // deterministic sample, or the whole population with --all.
     const all = rows.map((row) => evalLib.fixtureCase(row, [], {}));
-    const chosen = new Map();
-    if (args.ids.length) for (const c of evalLib.selectCases(all, { ids: args.ids })) chosen.set(c.assessmentId, c);
-    if (args.sample) for (const c of evalLib.selectCases(all, { sample: args.sample })) chosen.set(c.assessmentId, c);
-    if (args.all) for (const c of all) chosen.set(c.assessmentId, c);
+    const chosen = new Set((args.all ? all : evalLib.selectCases(all, { ids: args.ids, sample: args.sample })).map((c) => c.assessmentId));
     const missing = args.ids.filter((id) => !chosen.has(id));
     if (missing.length) console.error(`warning: ${missing.length} requested id(s) are not confirmed assessments with stored photos and were skipped`);
-    const ids = [...chosen.keys()];
-    const photos = ids.length ? await knex('lawn_assessment_photos').whereIn('assessment_id', ids).orderBy('photo_order').select('id', 'assessment_id', 's3_key', 'mime_type', 'photo_order', 'zone') : [];
-    const byAssessment = new Map();
-    for (const p of photos) { if (!byAssessment.has(p.assessment_id)) byAssessment.set(p.assessment_id, []); byAssessment.get(p.assessment_id).push(p); }
     const cases = [];
     for (const row of rows.filter((r) => chosen.has(r.id))) {
       const visitDate = evalLib.dateString(row.scheduled_date) || evalLib.dateString(row.service_date);
       const scheduledService = row.service_id ? await knex('scheduled_services').where({ id: row.service_id }).first() : null;
       const grassCtx = await loadCustomerGrassContext(row.customer_id, knex);
-      const [irrigation, customer, prior] = await Promise.all([
+      // Each case's photos load with the case — one small query per exported row.
+      const [photos, irrigation, customer, prior] = await Promise.all([
+        knex('lawn_assessment_photos').where({ assessment_id: row.id }).orderBy('photo_order').select('id', 's3_key', 'mime_type', 'photo_order', 'zone'),
         loadIrrigationContext(row.customer_id, grassCtx, knex),
         knex('customers').where({ id: row.customer_id }).first('first_name', 'last_name'),
         loadPriorSummary({ customerId: row.customer_id, serviceId: row.service_id, scheduledService, visitDate, propertyHistoryEnabled }, knex).catch((err) => { console.error(`warning: prior-visit summary failed for ${row.id}: ${err.message}`); return null; }),
       ]);
-      cases.push(evalLib.fixtureCase(row, byAssessment.get(row.id) || [], {
+      cases.push(evalLib.fixtureCase(row, photos, {
         grassType: grassCtx.grassTypeLabel || null,
         irrigation,
         // Scrubbed in fixtureCase: the summary was written with the customer's name in the prompt.
@@ -168,7 +172,6 @@ async function runReplay(args) {
     console.error('ABORT: an LLM ledger gate resolved ENABLED — this run would write llm_dispatch_log rows. Unset GATE_LLM_DISPATCH_METRICS / GATE_LLM_CALL_LEDGER / GATE_LLM_CALL_TRACES and re-run.');
     process.exit(2);
   }
-  if (args.thinking && !['LOW', 'MEDIUM', 'HIGH'].includes(args.thinking)) { console.error('--thinking must be LOW, MEDIUM or HIGH'); process.exit(2); }
   const config = require(path.join(REPO, 'server/config'));
   if (!config.s3?.bucket) { console.error('S3 is not configured in this environment — run via: railway run --service waves-customer-portal node ops/agents/lawn-visit-assessment-eval.js --run …'); process.exit(2); }
   if (!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) console.error('warning: no Gemini key — every primary leg will miss (no_key)');
@@ -180,19 +183,21 @@ async function runReplay(args) {
   const evalLib = require(path.join(REPO, 'server/services/eval/lawn-visit-assessment-eval'));
 
   const fixture = JSON.parse(fs.readFileSync(args.run, 'utf8'));
-  let cases = evalLib.selectCases(fixture.cases || [], { ids: args.ids });
-  if (args.limit) cases = cases.slice(0, args.limit);
+  const cases = evalLib.selectCases(fixture.cases || [], { ids: args.ids }).slice(0, args.limit);
   if (!cases.length) { console.error('no cases selected'); process.exit(2); }
   const policy = MODELS.TEXT_POLICIES.lawnVisitAssessment;
-  console.error(`replaying ${cases.length} case(s) × ${args.repeat} · policy ${policy.primary.provider}:${policy.primary.model} → ${policy.fallback.provider}:${policy.fallback.model}${args.forceFallback ? ' (Gemini FORCED to miss)' : ''}${args.thinking ? ` · thinking ${args.thinking}` : ''}`);
+  // What this replay varies from the production policy, named once — on the
+  // progress line and in the report's title.
+  const variant = [args.forceFallback ? 'forced fallback (Gemini made to miss)' : '', args.thinking ? `thinking ${args.thinking}` : ''].filter(Boolean).map((v) => ` · ${v}`).join('');
+  console.error(`replaying ${cases.length} case(s) × ${args.repeat} · policy ${policy.primary.provider}:${policy.primary.model} → ${policy.fallback.provider}:${policy.fallback.model}${variant}`);
 
   const { results, skipped, summary } = await evalLib.runEval(cases, {
     analyzeVisit: (input) => visit.analyzeVisit(input),
     loadPhoto: (s3Key) => PhotoService.getPhotoBase64(s3Key),
     log: (line) => console.error(line),
-  }, { repeat: args.repeat, concurrency: args.concurrency, thinkingLevel: args.thinking || undefined });
+  }, { repeat: args.repeat, concurrency: args.concurrency, thinkingLevel: args.thinking });
 
-  const title = `Lawn visit assessment eval — ${visit.PROMPT_VERSION}${args.forceFallback ? ' · forced fallback' : ''}${args.thinking ? ` · thinking ${args.thinking}` : ''}`;
+  const title = `Lawn visit assessment eval — ${visit.PROMPT_VERSION}${variant}`;
   if (args.json) {
     process.stdout.write(`${JSON.stringify({
       generatedAt: new Date().toISOString(), promptVersion: visit.PROMPT_VERSION,

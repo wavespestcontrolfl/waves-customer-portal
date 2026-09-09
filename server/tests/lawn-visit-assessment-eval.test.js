@@ -53,6 +53,12 @@ describe('fixture export shape', () => {
     expect(evalLib.fixtureCase(row({ scheduled_date: null, composite_scores: null }), []).visitDate).toBe('2026-09-01');
   });
 
+  test('a compound or accented name is scrubbed word by word — "Mary" of a "Mary Jane", "Jose" of a "José" — while an initial or a longer word containing the name is left alone', () => {
+    const scrubbed = evalLib.scrubPriorSummary("Mary's lawn improved; Jane asked about Mary Jane's side yard. José-Luis Núñez's back lawn is thin; Jose asked twice, Nunez once.", ['Mary Jane', 'José-Luis Núñez']);
+    expect(scrubbed).toBe("the customer's lawn improved; the customer asked about the customer's side yard. the customer's back lawn is thin; the customer asked twice, the customer once.");
+    expect(evalLib.scrubPriorSummary('The Janeway hedge by the Al fence.', ['Jane', 'A', 'L'])).toBe('The Janeway hedge by the Al fence.');
+  });
+
   test('pg DATE values arrive as Date objects or strings; both become the ISO calendar day, never String(Date)', () => {
     expect(evalLib.dateString(new Date('2026-09-01T04:00:00.000Z'))).toBe('2026-09-01');
     expect(evalLib.dateString('2026-07-15')).toBe('2026-07-15');
@@ -65,12 +71,15 @@ describe('fixture export shape', () => {
     expect(evalLib.contextFor(c).season).toBe('dormant');
   });
 
-  test('selection is by explicit ids first, else a deterministic sample', () => {
+  test('selection is the explicit ids plus a deterministic sample, each case once in population order; neither asked for is every case', () => {
     const cases = ['a', 'b', 'c', 'd', 'e'].map((id) => ({ assessmentId: id }));
-    expect(evalLib.selectCases(cases, { ids: ['d', 'zz', 'a'] }).map((c) => c.assessmentId)).toEqual(['a', 'd']);
-    const s1 = evalLib.selectCases(cases, { sample: 3 }).map((c) => c.assessmentId);
+    const ids = (selected) => selected.map((c) => c.assessmentId);
+    expect(ids(evalLib.selectCases(cases, { ids: ['d', 'zz', 'a'] }))).toEqual(['a', 'd']);
+    const s1 = ids(evalLib.selectCases(cases, { sample: 3 }));
     expect(s1).toHaveLength(3);
-    expect(evalLib.selectCases(cases.slice().reverse(), { sample: 3 }).map((c) => c.assessmentId)).toEqual(s1);
+    expect(ids(evalLib.selectCases(cases.slice().reverse(), { sample: 3 })).sort()).toEqual(s1.slice().sort());
+    // --ids … --sample N (the export recipe) is their union.
+    expect(ids(evalLib.selectCases(cases, { ids: ['e', 'a'], sample: 3 }))).toEqual(ids(cases).filter((id) => ['a', 'e'].includes(id) || s1.includes(id)));
     expect(evalLib.selectCases(cases, {})).toHaveLength(5);
   });
 
@@ -182,6 +191,16 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
         expect(error).toHaveBeenLastCalledWith(expect.stringContaining(`${flag} needs a positive whole number`));
       }
       expect(exit).toHaveBeenCalledTimes(6);
+    } finally { exit.mockRestore(); error.mockRestore(); }
+  });
+
+  test('--thinking is LOW, MEDIUM or HIGH in any case or the script stops; --limit unset replays every selected case', () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(parseArgs(['node', 'x', '--run', 'f.json', '--thinking', 'low'])).toMatchObject({ thinking: 'LOW', limit: Infinity });
+      expect(() => parseArgs(['node', 'x', '--run', 'f.json', '--thinking', 'max'])).toThrow('exit 2');
+      expect(error).toHaveBeenLastCalledWith(expect.stringContaining('--thinking must be LOW, MEDIUM or HIGH, got "max"'));
     } finally { exit.mockRestore(); error.mockRestore(); }
   });
 
