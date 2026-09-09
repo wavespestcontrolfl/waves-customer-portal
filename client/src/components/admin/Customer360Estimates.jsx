@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ArrowUpRight, Search } from "lucide-react";
-import { Badge, Card, Input } from "../ui";
+import { buttonStyles, Badge, Card, Input } from "../ui";
 import { formatETDate } from "../../lib/timezone";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -54,7 +54,7 @@ export default function Customer360Estimates({ estimates }) {
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3 text-14 text-ink-secondary">
           <span>{estimate.created_at ? formatETDate(estimate.created_at, { month: "short", day: "numeric", year: "numeric" }) : "No creation date"}</span>
-          <a className="c360-outline-link u-focus-ring" href={`/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`}>Open estimate<ArrowUpRight size={15} aria-hidden="true" /></a>
+          <a className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })} href={`/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`}>Open estimate<ArrowUpRight size={15} aria-hidden="true" /></a>
         </div>
       </Card>)}
       {matches.length === 0 && <Card className="p-5 text-14 text-ink-secondary">{query ? "No matching estimates." : "No estimates linked to this customer."}</Card>}

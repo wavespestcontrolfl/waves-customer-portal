@@ -15,6 +15,7 @@ const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest, PORTAL_CANCEL_REASON_PREFIX } = require('../services/cancellation-processor');
 const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
+const { isSecondarySelection, resolveSessionScope } = require('../services/account-properties');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
 const { situationalHardStop } = require('../services/cancellation-resolution/resolve');
@@ -105,6 +106,13 @@ const createSchema = Joi.object({
   locationOnProperty: Joi.string().valid(...VALID_LOCATIONS).allow(null, '').optional(),
   source: Joi.string().trim().max(50).optional(),
   type: Joi.string().trim().max(50).optional(),
+  // The saved property the customer SAW this ticket filed under
+  // (GATE_APP_PROPERTY_SCOPE, uncapped codex r1o P1): the server refuses the
+  // ticket when its resolved scope names a different house — the selected
+  // house was retired after the overlay loaded and the middleware fell back
+  // to the primary. Optional: older clients and profile-mode sessions send
+  // nothing and keep today's path.
+  expectedPropertyId: Joi.string().trim().max(64).allow(null, '').optional(),
   photos: Joi.array().items(Joi.string().max(MAX_ENCODED_PHOTO_CHARS)).max(MAX_PHOTOS).optional(),
   // Cancellation resolution engine (PR E, GATE_CANCEL_FLOW_V2) — additive,
   // all optional so every existing client payload validates unchanged. The
@@ -179,7 +187,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     const { value, error } = createSchema.validate(req.body, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
 
-    const { category, subject, description, urgency, locationOnProperty, photos } = value;
+    const { category, subject, description, urgency, locationOnProperty, photos, expectedPropertyId } = value;
 
     if (req.customerInactive && category !== 'cancellation') {
       return res.status(401).json({ error: 'Customer not found or inactive' });
@@ -206,10 +214,64 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     }
     const photoData = photoValidation.photos;
 
+    // Under a SECONDARY saved-property selection (GATE_APP_PROPERTY_SCOPE)
+    // GET /schedule withholds the picker (it books the primary address), so
+    // the guard steps aside with it and the ticket files (codex #4207 r1h).
+    // Same fail-open posture as the eligibility check below.
+    let secondarySelection = false;
+    let requestProperty = null;
+    // The property the session RESOLVED to, whether or not a property
+    // predicate applies (single home: scoped=false, but the customer still
+    // sees — and pins — that one property; uncapped codex r1p P1).
+    let resolvedPropertyId = null;
+    // The server-validated saved property this ticket is about (codex #4207
+    // r1j): persisted on the row, part of the dedupe key, and shown to staff
+    // — a secondary-house ticket must name its house.
+    const ticketProperty = (p) => ({
+      id: String(p.id),
+      isPrimary: p.is_primary === true,
+      label: p.label || null,
+      address: [p.address_line1, p.address_line2].filter(Boolean).join(' ')
+        + (p.city ? `, ${p.city}` : '') + (p.state || p.zip ? `, ${[p.state, p.zip].filter(Boolean).join(' ')}` : ''),
+    });
+    try {
+      const scope = await resolveSessionScope(req);
+      secondarySelection = isSecondarySelection(scope);
+      if (scope && scope.enabled && scope.property) resolvedPropertyId = String(scope.property.id);
+      if (scope && scope.enabled && scope.scoped && scope.property) requestProperty = ticketProperty(scope.property);
+    } catch (scopeErr) {
+      logger.warn(`Property scope check failed for ${req.customer.id}: ${scopeErr.message}`);
+      // The resolver failed, but the auth middleware already validated the
+      // token's claim against an ACTIVE row of this customer (req.property).
+      // Keep that binding (uncapped codex r1n P1): treating the request as
+      // unscoped would steer a covered secondary-house issue into the
+      // primary-only picker guard and file every other ticket without its
+      // house. A claim-less session has no binding to keep — today's path.
+      if (req.property && String(req.property.customer_id || req.customer.id) === String(req.customer.id)) {
+        requestProperty = ticketProperty(req.property);
+        resolvedPropertyId = String(req.property.id);
+        secondarySelection = req.property.is_primary !== true;
+      }
+    }
+    // The house the customer saw must be the house this ticket binds to
+    // (uncapped codex r1o P1). Fail CLOSED on a mismatch: a schedule-change
+    // ticket stored and announced for the fallback address is worse than a
+    // retry. 409 (not 4xx-validation) so the client refreshes its selection.
+    if (expectedPropertyId && String(expectedPropertyId) !== String(resolvedPropertyId || '')) {
+      return res.status(409).json({
+        error: 'Your property selection changed. Please check the property shown and try again.',
+        code: 'property_selection_stale',
+      });
+    }
     // Lightweight server-side dedupe — reject identical create within 60s
     const dupeWindow = new Date(Date.now() - 60 * 1000);
-    const dupe = await db('service_requests')
-      .where({ customer_id: req.customer.id, category, subject: cleanSubject })
+    const dupeQuery = db('service_requests')
+      .where({ customer_id: req.customer.id, category, subject: cleanSubject });
+    // Same subject at a DIFFERENT saved property is a different ticket
+    // (only once a saved property is in play — single-home and gate-off
+    // sessions keep today's exact dedupe).
+    if (requestProperty) dupeQuery.whereRaw("COALESCE(metadata->>'propertyId', '') = ?", [requestProperty.id]);
+    const dupe = await dupeQuery
       .where('created_at', '>=', dupeWindow)
       .first();
     if (dupe) {
@@ -395,7 +457,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // one-time/lapsed) still file tickets — those genuinely are office calls.
     // Fail-open on lookup errors: a broken eligibility check must not block a
     // customer from reporting a problem.
-    if (category === 'pest_issue' || category === 'lawn_concern') {
+    if ((category === 'pest_issue' || category === 'lawn_concern') && !secondarySelection) {
       try {
         const { reserviceStreamlineAccess } = require('../services/reservice-link');
         const access = await reserviceStreamlineAccess(req.customer.id);
@@ -525,6 +587,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         location_on_property: validLocation,
         photos: JSON.stringify(photoData),
         status: 'new',
+        ...(requestProperty ? { metadata: JSON.stringify({ propertyId: requestProperty.id, property: requestProperty }) } : {}),
       })
       .returning('*');
 
@@ -670,6 +733,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         title,
         `Category: ${categoryLabel}\n` +
           `Subject: ${cleanSubject}` +
+          (requestProperty ? `\nProperty: ${requestProperty.label ? `${requestProperty.label} — ` : ''}${requestProperty.address}${requestProperty.isPrimary ? '' : ' (not the primary address)'}` : '') +
           (locationLabel ? `\nLocation: ${locationLabel}` : '') +
           (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
           (cleanDescription ? `\n\n"${cleanDescription}"` : '') +
@@ -680,6 +744,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           metadata: {
             requestId: request.id,
             customerId: req.customer.id,
+            ...(requestProperty ? { propertyId: requestProperty.id, propertyAddress: requestProperty.address } : {}),
             category,
             urgency: validUrgency,
             photoCount,
@@ -1161,6 +1226,7 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
 // GET /api/requests — List current customer's service requests
 // =========================================================================
 const listSchema = Joi.object({
+  requestId: Joi.string().uuid(),
   limit: Joi.number().integer().min(1).max(100).default(50),
   offset: Joi.number().integer().min(0).default(0),
 });
@@ -1169,10 +1235,10 @@ router.get('/', authenticate, async (req, res, next) => {
   try {
     const { value, error } = listSchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { limit, offset } = value;
+    const { limit, offset, requestId } = value;
 
     const requests = await db('service_requests')
-      .where({ customer_id: req.customer.id })
+      .where({ customer_id: req.customer.id, ...(requestId ? { 'service_requests.id': requestId } : {}) })
       // Admin-originated rows (the C3 cancel acceptance) are internal ops
       // records: their subject embeds the staff actor and their description
       // is the operator's free-text note — neither is customer-facing.
@@ -1200,7 +1266,7 @@ router.get('/', authenticate, async (req, res, next) => {
       .offset(offset);
 
     const total = await db('service_requests')
-      .where({ customer_id: req.customer.id })
+      .where({ customer_id: req.customer.id, ...(requestId ? { 'service_requests.id': requestId } : {}) })
       // Same admin-row exclusion as the page above — a total that counts
       // hidden rows produces empty or phantom pages (codex GH r28 P2).
       .where((qb) => { qb.whereNull('source').orWhereNot('source', 'admin'); })

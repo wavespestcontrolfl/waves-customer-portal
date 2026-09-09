@@ -10,9 +10,10 @@ jest.mock('../middleware/auth', () => ({
   authenticate: jest.fn((req, _res, next) => {
     req.customerId = 'cust-1';
     req.accountId = 'acct-1';
-    req.customer = { id: 'cust-1', account_id: 'acct-1', active: true, first_name: 'Jordan', last_name: 'Rivera', profile_label: 'Primary', is_primary_profile: true };
+    req.customer = { id: 'cust-1', account_id: 'acct-1', active: !global.__CANCELLED__, first_name: 'Jordan', last_name: 'Rivera', profile_label: 'Primary', is_primary_profile: true };
+    req.customerInactive = !!global.__CANCELLED__;
     req.authSessionId = 'fam-1';
-    req.propertyId = null;
+    req.propertyId = global.__CANCELLED__ ? 'prop-b' : null;
     next();
   }),
   createRefreshSession: jest.fn(),
@@ -155,5 +156,20 @@ describe('saved-property session switch and list', () => {
       expect(body.properties.map((p) => p.id)).toEqual([TARGET.id]);
       expect(accountSavedProperties).toHaveBeenCalledTimes(1);
     });
+  });
+
+  test('a cancelled (read-only) session is UNSCOPED end to end: ?scope=saved still answers the profile list', async () => {
+    tables.customers = [TARGET];
+    global.__CANCELLED__ = true;
+    try {
+      await withServer(async (baseUrl) => {
+        appPropertyScopeEnabled.mockReturnValue(true);
+        const res = await fetch(`${baseUrl}/auth/properties?scope=saved`);
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body).not.toHaveProperty('scope');
+        expect(accountSavedProperties).not.toHaveBeenCalled();
+      });
+    } finally { global.__CANCELLED__ = false; }
   });
 });

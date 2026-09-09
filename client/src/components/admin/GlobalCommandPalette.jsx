@@ -28,6 +28,8 @@ import PendingActionsCard from "./PendingActionsCard";
 import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
+import useAdminNavigation from "../../hooks/useAdminNavigation";
+import AdminPageFinder from "./AdminPageFinder";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RECENTS_KEY = "admin_ib_recents";
@@ -297,7 +299,10 @@ function renderInline(text) {
 }
 
 // ─── MAIN COMPONENT ─────────────────────────────────────────────
-function GlobalCommandPalette({ user }, ref) {
+function GlobalCommandPalette({ user, onNavigate }, ref) {
+  const canFindPages = Boolean(useAdminNavigation());
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  useEffect(() => { if (!canFindPages) setNavigationOpen(false); }, [canFindPages]);
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
@@ -337,6 +342,7 @@ function GlobalCommandPalette({ user }, ref) {
   const [dragY, setDragY] = useState(0);
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
+  const openerRef = useRef(null);
   const fileInputRef = useRef(null);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
@@ -359,22 +365,33 @@ function GlobalCommandPalette({ user }, ref) {
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
 
+  const rememberOpener = () => {
+    // Mode switches retain the trigger from before either dialog opened.
+    if (!open && !navigationOpen) openerRef.current = document.activeElement;
+  };
+
   useImperativeHandle(
     ref,
     () => ({
-      open: () => setOpen(true),
-      close: () => setOpen(false),
-      toggle: () => setOpen((v) => !v),
+      open: () => { rememberOpener(); setNavigationOpen(false); setOpen(true); },
+      openNavigation: () => { if (canFindPages) { rememberOpener(); setOpen(false); setNavigationOpen(true); } },
+      close: () => { setNavigationOpen(false); setOpen(false); },
+      toggle: () => { rememberOpener(); setNavigationOpen(false); setOpen((v) => !v); },
     }),
-    [],
+    [canFindPages, open, navigationOpen],
   );
 
   // ⌘K / Ctrl+K listener
   useEffect(() => {
     const handler = (e) => {
+      if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        setOpen((prev) => !prev);
+        rememberOpener();
+        if (canFindPages) {
+          setOpen(false);
+          setNavigationOpen((prev) => !prev);
+        } else setOpen((prev) => !prev);
       }
       if (e.key === "Escape" && open) {
         setOpen(false);
@@ -382,7 +399,7 @@ function GlobalCommandPalette({ user }, ref) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open]);
+  }, [open, canFindPages, navigationOpen]);
 
   // Focus input when opening + refresh recents
   useEffect(() => {
@@ -676,6 +693,8 @@ function GlobalCommandPalette({ user }, ref) {
     dragStartRef.current = null;
   };
 
+  if (navigationOpen && canFindPages) return <AdminPageFinder onClose={() => setNavigationOpen(false)} onNavigate={onNavigate}
+    onAsk={() => { openerRef.current?.focus({ preventScroll: true }); onNavigate?.(); setNavigationOpen(false); setOpen(true); }} />;
   if (!open) return null;
 
   if (isMobile) {
