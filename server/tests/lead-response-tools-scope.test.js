@@ -37,10 +37,22 @@ const mockDb = jest.fn(table => {
       mockState.activity = { id: `activity-${++mockState.inserts}`, ...value };
       return { returning: async () => [mockState.activity] };
     }),
+    update: jest.fn(async value => {
+      if (table === 'lead_activities' && mockState.activity) {
+        const metadata = JSON.parse(mockState.activity.metadata);
+        if (typeof value.metadata === 'string') mockState.activity.metadata = value.metadata;
+        else {
+          delete metadata.alertClaimToken; delete metadata.alertLeaseUntil;
+          mockState.activity.metadata = JSON.stringify({ ...metadata, alertStatus: value.metadata.bindings[0] });
+        }
+      }
+      return 1;
+    }),
   };
   return builder;
 });
 mockDb.transaction = jest.fn(async callback => callback(mockDb));
+mockDb.raw = (sql, bindings) => ({ sql, bindings });
 jest.mock('../models/db', () => mockDb);
 const { executeLeadTool } = require('../services/lead-response-tools');
 const context = { leadId: '00000000-0000-4000-8000-000000000001', customerId: '00000000-0000-4000-8000-000000000002', sessionId: 'session-1', toolUseId: 'tool-1' };
@@ -91,12 +103,15 @@ test('failed insert cannot report queued or alert', async () => {
   await expect(executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Draft' }, context)).rejects.toThrow('storage unavailable');
   expect(mockSend).not.toHaveBeenCalled();
 });
-test('saved draft survives alert failure; replay does not duplicate', async () => {
-  mockSend.mockRejectedValue(new Error('provider unavailable'));
+test('saved draft survives alert failure; retry delivers once and closes the receipt', async () => {
+  mockSend.mockRejectedValueOnce(new Error('provider unavailable'));
   const first = await executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Draft' }, context);
-  expect(first).toMatchObject({ queued: true, activityId: 'activity-1', alertStatus: 'failed' });
-  expect(await executeLeadTool('queue_for_adam', { reason: 'Review' }, context)).toEqual({ queued: true, activityId: 'activity-1', replayed: true });
-  expect(mockSend).toHaveBeenCalledTimes(1);
+  expect(first).toMatchObject({ queued: true, activityId: 'activity-1', alertStatus: 'failed', failed: true, retryable: true });
+  expect(await executeLeadTool('queue_for_adam', { reason: 'Changed retry' }, context)).toMatchObject({ queued: true, activityId: 'activity-1', replayed: true, alertStatus: 'sent' });
+  expect(mockSend.mock.calls[1][1]).toContain('Suggested reply:\n"Draft"');
+  expect(await executeLeadTool('queue_for_adam', {}, context)).toMatchObject({ queued: true, replayed: true, alertStatus: 'sent' });
+  expect(mockSend).toHaveBeenCalledTimes(2);
+  expect(mockState.inserts).toBe(1);
 });
 test('rechecks relationship inside draft transaction', async () => {
   mockDb.transaction.mockImplementationOnce(async callback => {

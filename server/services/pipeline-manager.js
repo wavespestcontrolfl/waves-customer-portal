@@ -40,7 +40,9 @@ class PipelineManager {
         body: `Auto-moved to "${newStage}". Trigger: ${eventType}`,
         metadata: JSON.stringify(eventData),
       });
-      logger.info(`Pipeline: customerId=${customerId} → ${newStage} (${eventType})`);
+      // A supplied transaction still belongs to its caller and can roll back.
+      // Its committed customer_interactions row is the durable audit trail.
+      if (database === db) logger.info(`Pipeline: customerId=${customerId} → ${newStage} (${eventType})`);
     }
   }
 
