@@ -497,6 +497,27 @@ postgres('visit summary recipient recovery', () => {
     expect(await Summary.reconcileSummaryEmailRecovery(replacement)).toEqual({ reconciled: true });
   });
 
+  test.each(['delivered', 'queued'])('packet replay respects a %s corrected-address recovery while finishing another recipient', async (status) => {
+    const originalId = randomUUID();
+    const recoveryId = randomUUID();
+    const corrected = `${fixture.visitId}-corrected@example.invalid`;
+    await priorEmail(fixture.serviceEmail, { id: originalId, status: 'bounced' });
+    await priorEmail(corrected, { id: recoveryId, status, idempotency_key: `bounce_recovery:${originalId}` });
+    await mockPg('email_bounce_recoveries').insert({ original_message_id: originalId,
+      recovery_message_id: recoveryId, bounced_email: fixture.serviceEmail,
+      corrected_email: corrected, customer_id: fixture.customerId, status: status === 'delivered' ? 'delivered' : 'resent' });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_email: corrected });
+    await priorClaim('completion_email', { status: 'failed' });
+
+    expect(await deliver()).toEqual({ state: status === 'delivered' ? 'delivered' : 'delivery_review' });
+    expect(sendOne).toHaveBeenCalledTimes(1);
+    expect(sendOne.mock.calls[0][0].to).toBe(fixture.primaryEmail);
+    expect(await mockPg('email_messages').where({ recipient_id: fixture.customerId })).toHaveLength(3);
+    expect(await mockPg('email_messages').where({ id: originalId }).first('status')).toEqual({ status: 'bounced' });
+    await deliver();
+    expect(sendOne).toHaveBeenCalledTimes(1);
+  });
+
   test('a hidden service cannot enable SMS for a visible service that opted out', async () => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });

@@ -282,18 +282,20 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
   if (claim?.state !== 'owner') return;
   const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
   try {
-    const messages = await database('email_messages').where({
-      trigger_event_id: `visit_summary:${visit.id}`, template_key: 'service.visit_summary', recipient_id: customer.id,
-    }).select('idempotency_key', 'status', 'sent_at', 'provider_message_id', 'error_message');
+    const scope = { trigger_event_id: `visit_summary:${visit.id}`, recipient_id: customer.id };
+    const { messages, outcomes: states } = await summaryEmailEvidence(scope, database);
     const previous = new Map(messages.map((message) => [message.idempotency_key, message]));
-    const states = messages.map(summaryEmailState);
+    // Corrected-address recovery uses its own idempotency key. A saved send
+    // or uncertain handoff to that address also owns it during packet replay.
+    const ownedAddresses = new Set(messages.filter((message) => summaryEmailState(message) !== 'retry')
+      .map((message) => String(message.recipient_email_snapshot || '').toLowerCase()));
     let sent = states.includes('sent');
     let unknown = states.includes('unknown_delivery');
     let pending = false;
     for (const recipient of recipients) {
       const recipientKey = crypto.createHash('sha256').update(recipient.email.toLowerCase()).digest('hex').slice(0, 32);
       const idempotencyKey = `visit_summary:${visit.id}:${recipientKey}`;
-      if (summaryEmailState(previous.get(idempotencyKey)) !== 'retry') continue;
+      if (summaryEmailState(previous.get(idempotencyKey)) !== 'retry' || ownedAddresses.has(recipient.email.toLowerCase())) continue;
       let dispatched = false;
       try {
         const result = await require('./email-template-library').sendTemplate({
@@ -331,9 +333,7 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
     // a bounce webhook can land between the provider handoff and the
     // library's return, in which case the row already carries its terminal
     // status while the call still reports sent.
-    const ledger = (await database('email_messages').where({
-      trigger_event_id: `visit_summary:${visit.id}`, template_key: 'service.visit_summary', recipient_id: customer.id,
-    }).select('status', 'sent_at', 'provider_message_id', 'error_message')).map(summaryEmailState);
+    const { outcomes: ledger } = await summaryEmailEvidence(scope, database);
     sent = ledger.includes('sent');
     unknown ||= ledger.includes('unknown_delivery');
     // Finish proven-unsent recipients before surfacing an earlier uncertain
@@ -345,10 +345,10 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
   }
 }
 
-async function summaryEmailOutcomes(message, database) {
+async function summaryEmailEvidence(message, database) {
   const messages = await database('email_messages').where({ trigger_event_id: message.trigger_event_id,
     template_key: 'service.visit_summary', recipient_id: message.recipient_id })
-    .select('id', 'status', 'sent_at', 'provider_message_id', 'error_message');
+    .select('id', 'idempotency_key', 'recipient_email_snapshot', 'status', 'sent_at', 'provider_message_id', 'error_message');
   const states = new Map(messages.map((row) => [row.id, summaryEmailState(row)]));
   // A corrected-address resend has a new ledger row. Only its successful
   // outcome can supersede the original; another recipient's delivery cannot.
@@ -357,7 +357,7 @@ async function summaryEmailOutcomes(message, database) {
   for (const recovery of recoveries) {
     if (states.get(recovery.recovery_message_id) === 'sent') states.delete(recovery.original_message_id);
   }
-  return [...states.values()];
+  return { messages, outcomes: [...states.values()] };
 }
 
 // A provider bounce arrives after the aggregate closed as sent. When the
@@ -373,7 +373,7 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'sent' })
     .forUpdate().first('id');
   if (!effect) return { reconciled: false };
-  const outcomes = await summaryEmailOutcomes(message, database);
+  const { outcomes } = await summaryEmailEvidence(message, database);
   if (!outcomes.includes('unknown_delivery')) return { reconciled: false };
   const flipped = await database('visit_effects').where({ id: effect.id, status: 'sent' })
     .update({ status: 'unknown_delivery', last_error: 'provider_bounce', updated_at: database.fn.now() }).returning('id');
@@ -427,7 +427,7 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
       .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
     if (!effect) return { reconciled: false };
-    const outcomes = await summaryEmailOutcomes(message, trx);
+    const { outcomes } = await summaryEmailEvidence(message, trx);
     if (!outcomes.includes('sent') || outcomes.some((state) => !['sent', 'suppressed'].includes(state))) {
       return { reconciled: false };
     }
