@@ -28,7 +28,10 @@ const policy = require('./action-policy.json');
 //               keyed by a contact that must belong to the task customer
 // Write classes.
 //   none        touches no customer records
-//   record      acts on specific customer records proven by validateRecordTarget
+//   record      acts on customer records; every record it references must belong
+//               to a task customer (validateRecordTarget). A writer that creates a
+//               record, or whose cohort the route resolves to ids before proposal,
+//               references nothing at proposal time and is admitted on that basis
 //   route_wide  acts on every stop for a date or technician; refused inside a
 //               customer-scoped task
 const READ_SCOPES = Object.freeze(['none', 'record', 'scoped', 'broad', 'actor_wide', 'phone_keyed', 'email_keyed']);

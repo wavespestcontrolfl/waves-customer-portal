@@ -32,7 +32,7 @@ Write tools (`kind: internal_write` or `external_action`):
 | scope | meaning | inside a customer-scoped task |
 |---|---|---|
 | `none` | touches no customer records | unrestricted (still subject to its approval gate) |
-| `record` | acts on specific customer records | every referenced record must belong to a task customer (`validateRecordTarget`) |
+| `record` | acts on customer records | every record it references must belong to a task customer (`validateRecordTarget`); a writer that references none at proposal time (creating a customer or estimate, or a cohort the route has already resolved to ids) is admitted on that basis, so the class proves referenced records, not that a reference exists |
 | `route_wide` | acts on every stop for a date or technician, no record ids | refused (`customer_scope_required`), also for an unresolved explicit name |
 
 A tool the catalog does not know, or whose scope does not fit its kind, is
