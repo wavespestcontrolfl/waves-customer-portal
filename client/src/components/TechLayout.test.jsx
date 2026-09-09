@@ -13,10 +13,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../hooks/useFeatureFlag', () => ({
   refetchFlags: vi.fn(async () => ({})),
+  useFeatureFlagReady: vi.fn(() => ({ enabled: false, ready: true })),
 }));
 
-import { refetchFlags } from '../hooks/useFeatureFlag';
+import { refetchFlags, useFeatureFlagReady } from '../hooks/useFeatureFlag';
 import TechLayout from './TechLayout';
+import TechNavigationLock from './tech/TechNavigationLock';
 
 function LocationResult({ label }) {
   const location = useLocation();
@@ -25,18 +27,19 @@ function LocationResult({ label }) {
 
 function renderTech(initialPath = '/tech/protocols?day=monday') {
   return render(
-    <MemoryRouter initialEntries={[initialPath]}>
+    <TechNavigationLock><MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/tech" element={<TechLayout />}>
           <Route index element={<div>Protected field route</div>} />
           <Route path="protocols" element={<div>Protected field protocols</div>} />
+          <Route path="more" element={<div>Protected field more</div>} />
           <Route path="documents" element={<div>Protected staff documents</div>} />
         </Route>
         <Route path="/admin/login" element={<LocationResult label="Staff login" />} />
         <Route path="/admin/change-password" element={<LocationResult label="Change password" />} />
         <Route path="*" element={<Outlet />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter></TechNavigationLock>,
   );
 }
 
@@ -52,6 +55,7 @@ describe('TechLayout staff-session verification', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.mocked(refetchFlags).mockResolvedValue({});
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: false, ready: true });
   });
 
   afterEach(() => {
@@ -60,10 +64,54 @@ describe('TechLayout staff-session verification', () => {
     vi.unstubAllGlobals();
   });
 
+  it('shows the light navigation only after verified staff access and an enabled workspace flag', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: true, ready: true });
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', name: 'Fixture Tech', role: 'technician' })));
+    renderTech('/tech');
+    expect(await screen.findByText('Protected field route')).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'Field navigation' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Today' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Tools' })).toHaveAttribute('href', '/tech/tools');
+    expect(screen.getByRole('link', { name: 'More' })).toHaveAttribute('href', '/tech/more');
+    expect(screen.queryByText('Messages')).not.toBeInTheDocument();
+  });
+
   it.each(['/tech?visit=row%3Atwo', '/TECH/?visit=row%3Atwo', '/TECH/PROTOCOLS/?visit=row%3Atwo'])('retains the unauthenticated sign-in destination %s', (path) => {
     renderTech(path);
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     expect(screen.getByText(`Staff login /admin/login?next=${encodeURIComponent(path)}`)).toBeInTheDocument();
+  });
+
+  it.each(['/tech/documents', '/tech/documents/', '/TECH/DOCUMENTS/'])('keeps controlled documents unavailable at %s inside the enabled field shell', async (path) => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: true, ready: true });
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', role: 'technician' })));
+    renderTech(path);
+    expect(await screen.findByText('Staff documents are unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText('Protected staff documents')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['/tech/', 'Today', false], ['/TECH/', 'Today', false],
+    ['/tech/more/', 'More', true], ['/TECH/MORE/', 'More', true],
+    ['/TECH/PROTOCOLS/', 'Tools', true],
+  ])('matches shell navigation and visit return state at %s', async (path, section, returnVisible) => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: true, ready: true });
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', role: 'technician' })));
+    renderTech(`${path}?visit=row%3Atwo`);
+    expect(await screen.findByRole('link', { name: section, exact: true })).toHaveAttribute('aria-current', 'page');
+    expect(Boolean(screen.queryByRole('link', { name: 'Return to visit' }))).toBe(returnVisible);
+  });
+
+  it('holds the outlet until the workspace flag resolves', async () => {
+    localStorage.setItem('waves_admin_token', 'fixture-only');
+    vi.mocked(useFeatureFlagReady).mockReturnValue({ enabled: false, ready: false });
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, { id: 'tech-fixture', name: 'Fixture Tech', role: 'technician' })));
+    renderTech();
+    expect(await screen.findByText('Loading field workspace…')).toBeInTheDocument();
+    expect(screen.queryByText('Protected field protocols')).not.toBeInTheDocument();
   });
 
   it.each(['/TECH/DOCUMENTS', '/tech/documents/', '/TECH/DOCUMENTS/'])('keeps disabled documents unavailable at %s', async (path) => {

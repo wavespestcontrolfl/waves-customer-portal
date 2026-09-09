@@ -14,7 +14,7 @@
 //   POST /api/tech/social/publish    { photo, captions, platforms, locationId, techNote }
 
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -99,6 +99,8 @@ function Card({ children, style }) {
 
 export default function TechSocialPostPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const visit = searchParams.get('visit');
   const [photo, setPhoto] = useState(null); // { dataUrl, base64, mimeType }
   const [techNote, setTechNote] = useState('');
   const [locations, setLocations] = useState([]);
@@ -244,7 +246,7 @@ export default function TechSocialPostPage() {
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', color: D.text, fontFamily: BODY }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <button type="button" onClick={() => navigate('/tech')} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>
+        <button type="button" onClick={() => navigate(visit ? `/tech?visit=${encodeURIComponent(visit)}` : '/tech')} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>
           ← Back
         </button>
         <h1 style={{ fontFamily: HEAD, fontSize: 20, fontWeight: 700, color: D.white, margin: 0 }}>Field Social Post</h1>
