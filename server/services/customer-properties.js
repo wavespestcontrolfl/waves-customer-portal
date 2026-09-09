@@ -138,8 +138,9 @@ async function listProperties(customerId, conn = db) {
   const properties = await conn('customer_properties')
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
+  const customer = await conn('customers').where({ id: customerId }).first('contact_role');
   return properties.map(property => {
-    const unavailable = primaryPropertyUnavailable(property);
+    const unavailable = primaryPropertyUnavailable(property, customer);
     return { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
   });
 }
@@ -727,8 +728,11 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
 // relationship is checked in its own right before a promotion.
 const NON_RESIDENCE_RELATIONSHIPS = new Set(['rental_owned', 'managed_for_client']);
 
-function primaryPropertyUnavailable(target) {
+function primaryPropertyUnavailable(target, customer) {
   if (target.is_primary) return { message: 'This property is already primary', code: 'already_primary' };
+  if (String(customer?.contact_role || '').trim().toLowerCase() === 'tenant') {
+    return { message: 'A tenant account cannot be promoted to an owner-occupied primary residence.', code: 'primary_role_unavailable' };
+  }
   if (require('./pricing-engine/commercial-helpers').normalizePropertyType(target.property_type) === 'commercial'
     || !['owner_occupied', 'unknown'].includes(normalizeOccupancy(target.occupancy_type))) {
     return { message: 'Primary requires an owner-occupied or unclassified residential property.', code: 'primary_role_unavailable' };
@@ -743,7 +747,7 @@ function primaryPropertyUnavailable(target) {
 }
 
 async function previewPrimaryPropertyChange(conn, customerId, target, primary, customer) {
-  const unavailable = primaryPropertyUnavailable(target);
+  const unavailable = primaryPropertyUnavailable(target, customer);
   if (unavailable) throw propertyActionError(unavailable.message, 409, unavailable.code);
   const invoices = await conn('invoices').where({ customer_id: customerId }).whereNull('customer_address_snapshot').orderBy('id').select('id');
   const oldAddress = primary || (customer.address_line1 ? customer : null);
@@ -779,7 +783,7 @@ async function writeManualProperty(customerId, kind, input, propertyId, options,
     const properties = await listProperties(customerId, trx);
     const saved = properties.find(p => p.id === savedId);
     const matches = saved && Object.entries(preview.changes || {}).every(([key, value]) => saved[key] === value);
-    if (!matches || (kind === 'primary' && !saved.is_primary)) throw propertyActionError('The saved property did not match the requested change', 409, 'verification_failed');
+    if (!matches || (kind === 'primary' && (!saved.is_primary || saved.occupancy_type !== 'owner_occupied'))) throw propertyActionError('The saved property did not match the requested change', 409, 'verification_failed');
     if (saved.is_primary && kind !== 'edit') {
       const account = await trx('customers').where({ id: customerId }).first();
       if (addressKey(account) !== addressKey(saved)) throw propertyActionError('The primary property and account address did not match', 409, 'verification_failed');
@@ -814,15 +818,18 @@ async function changePrimaryProperty(customerId, propertyId, options = {}) {
     // A legacy account whose address is already saved as a non-primary row
     // reuses that row as the old primary instead of inserting a duplicate,
     // which the address-key index would refuse.
-    if (customer.address_line1 && !properties.some(p => p.is_primary && p.active)) {
-      const saved = properties.find(p => p.active && addressKey(p) === addressKey(customer));
-      if (saved) await trx('customer_properties').where({ id: saved.id }).update({ is_primary: true, updated_at: trx.fn.now() });
+    const savedAccountRow = customer.address_line1 && !properties.some(p => p.is_primary && p.active)
+      ? properties.find(p => p.active && addressKey(p) === addressKey(customer)) : null;
+    if (savedAccountRow && savedAccountRow.id !== propertyId) {
+      await trx('customer_properties').where({ id: savedAccountRow.id }).update({ is_primary: true, updated_at: trx.fn.now() });
     }
-    await ensurePrimaryProperty(customer, { conn: trx });
+    // A selected account row must go through the shared promotion writer so
+    // occupancy, labels, measurements and irrigation review all complete.
+    if (savedAccountRow?.id !== propertyId) await ensurePrimaryProperty(customer, { conn: trx });
     const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
-    if (customer.address_line1 && !primary) throw propertyActionError('The existing account property could not be preserved. Review the saved properties before changing the primary.', 409, 'primary_missing');
+    if (customer.address_line1 && !primary && savedAccountRow?.id !== propertyId) throw propertyActionError('The existing account property could not be preserved. Review the saved properties before changing the primary.', 409, 'primary_missing');
     const target = properties.find(p => p.id === propertyId);
-    await preserveSettledVisitAddresses(trx, customerId, primary);
+    await preserveSettledVisitAddresses(trx, customerId, primary || savedAccountRow);
     const result = await require('./property-role-proposals').applyPropertyRoleProposals(trx, { customerId, proposals: [{
       kind: 'primary_flip', new_primary_property_id: propertyId, new_primary_address_key: addressKey(target),
       old_primary_property_id: primary?.id || null, old_primary_address_key: primary ? addressKey(primary) : null,
@@ -842,11 +849,19 @@ async function changePrimaryProperty(customerId, propertyId, options = {}) {
 async function preserveSettledVisitAddresses(trx, customerId, oldPrimary) {
   if (!oldPrimary) return;
   const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
-  await trx('scheduled_services')
+  const { estimateQuotesCustomerAddress } = require('./estimate-property-linkage');
+  const visits = trx('scheduled_services')
     .where({ customer_id: customerId })
     .where(function () { this.whereNull('property_id').orWhere('property_id', oldPrimary.id); })
     .whereNull('service_address_line1')
-    .whereIn('status', TERMINAL_VISIT_STATUSES)
+    .whereIn('status', TERMINAL_VISIT_STATUSES);
+  const legacyEstimates = await trx('estimates').whereNull('property_id')
+    .whereIn('id', visits.clone().select('source_estimate_id')).select('id', 'address');
+  const otherEstimateIds = legacyEstimates.filter(estimate => !estimateQuotesCustomerAddress(estimate.address, oldPrimary)).map(estimate => estimate.id);
+  await visits
+    .modify(query => {
+      if (otherEstimateIds.length) query.where(q => q.whereNull('source_estimate_id').orWhereNotIn('source_estimate_id', otherEstimateIds));
+    })
     .where(function () {
       this.whereNull('source_estimate_id').orWhereNotExists(trx('estimates')
         .whereRaw('estimates.id = scheduled_services.source_estimate_id')
