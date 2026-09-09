@@ -121,9 +121,10 @@ async function findCapacitySlots(opts) {
   const { getBlackoutLayers } = require('./blackout-dates');
   const requestedServices = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
     .map(service_type => ({ service_type }));
-  const inactive = await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
+  const inactive = opts.arrivalWindow?.serviceId ? []
+    : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
   const inactiveTechs = new Set(inactive.map(row => row.technician_id));
-  const { dates: blackout } = await getBlackoutLayers(dateFrom, dateTo);
+  const blackout = opts.includeBlackoutDates ? new Set() : (await getBlackoutLayers(dateFrom, dateTo)).dates;
   const now = new Date();
   const today = etDateString(now);
   const parts = etParts(now);
@@ -142,6 +143,8 @@ async function findCapacitySlots(opts) {
           service_type: opts.serviceType || opts.serviceKey || '' } }),
       });
       if (!context) continue;
+      if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
+        .inactiveCapabilitiesForServices(db, [tech.id], context.visitMembers || [context.target])).length) continue;
       const floor = Math.max(SHIFT.startMinutes, opts.earliestStartMin || 0,
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       for (let start = Math.ceil(floor / 60) * 60; start + SHIFT.arrivalMinutes <= SHIFT.endMinutes; start += 60) {

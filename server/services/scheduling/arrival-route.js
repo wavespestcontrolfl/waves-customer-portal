@@ -49,7 +49,6 @@ function hasCoords(stop) {
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
   changes = {}, now = new Date(), travel, preserveCapacity = false, includeVisitGroup = false, visitWindows = null,
-  fixedOrder = false, routeOrderChanges = [],
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -94,10 +93,6 @@ async function loadArrivalRouteContext({
   // Complete visit members are excluded below only when their
   // total work is represented by the moving group.
   const capacity = capacityEnabled() || preserveCapacity;
-  for (const row of [...rows, target]) {
-    const patch = routeOrderChanges.find(change => String(change.id) === String(row.id));
-    if (patch) row.route_order = patch.routeOrder;
-  }
   const excluded = new Set([serviceId, ...(capacity && !prospective ? [] : excludeServiceIds)].map(String));
   // Grouped work needs the unit mover's complete duration/placement. Do not
   // certify a partial group by excluding siblings from the simulated route.
@@ -112,10 +107,6 @@ async function loadArrivalRouteContext({
       .where('scheduled_services.visit_id', target.visit_id)
       .whereNotIn('scheduled_services.status', TERMINAL_ROW_STATUSES)
       .select(...COLUMNS.map(column => `scheduled_services.${column}`), ...guardedCoordSelects(conn));
-    for (const member of visitMembers) {
-      const patch = routeOrderChanges.find(change => String(change.id) === String(member.id));
-      if (patch) member.route_order = patch.routeOrder;
-    }
     if (visitMembers.length > 1 && (!visitWindows || visitMembers.every(member => visitWindows.some(window => window.id === member.id)))) {
       for (const member of visitMembers) excluded.add(String(member.id));
       grouped = false;
@@ -128,7 +119,7 @@ async function loadArrivalRouteContext({
   date, now, grouped, activeTarget, prospective: !!prospective,
   insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
     || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
-  travel, preserveCapacity, blocks, visitMembers, visitWindows, fixedOrder };
+  travel, preserveCapacity, blocks, visitMembers, visitWindows };
 }
 
 // A visit consumes the sum of its members' work, with one journey to the
@@ -244,19 +235,8 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (!hasCoords(origin) || pending.some(row => !hasCoords(row))) return unverified(target, date);
   const groupedPending = capacity ? groupRouteStops(pending) : pending;
   if (!groupedPending) return unverified(target, date);
-  if (capacity && context.fixedOrder) {
-    const ordered = currentOrder([...pending, ...(context.visitMembers || [target])]);
-    const closed = new Set();
-    let previous;
-    for (const row of ordered) {
-      const key = row.visit_id || allocationKey(row) || row.id;
-      if (key !== previous && closed.has(key)) return unverified(target, date);
-      if (previous !== undefined && key !== previous) closed.add(previous);
-      previous = key;
-    }
-  }
   const baseline = currentOrder(groupedPending);
-  const orders = capacity && !context.fixedOrder && (context.prospective || context.insertTarget || context.visitMembers)
+  const orders = capacity && (context.prospective || context.insertTarget || context.visitMembers)
     ? Array.from({ length: baseline.length + 1 }, (_, i) => [...baseline.slice(0, i), target, ...baseline.slice(i)])
     : [currentOrder([...baseline, target])];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);

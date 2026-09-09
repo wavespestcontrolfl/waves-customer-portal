@@ -94,6 +94,14 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       await mockConn('tech_schedule_blocks').delete();
       await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'general', active: false });
       expect((await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control' })).slots).toEqual([]);
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ service_type: 'Lawn Care' });
+      expect((await findAvailableSlots(OPTIONS)).slots.length).toBeGreaterThan(0);
+      await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'lawn', active: false });
+      expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
+      await mockConn('technician_capabilities').delete();
+      await mockConn('schedule_blackout_dates').insert({ date: DAY });
+      expect((await findAvailableSlots(OPTIONS)).slots.length).toBeGreaterThan(0);
+      expect((await findAvailableSlots({ ...OPTIONS, includeBlackoutDates: false })).slots).toEqual([]);
     } finally {
       if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = gate;
