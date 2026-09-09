@@ -177,6 +177,10 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
     // without claiming a new write.
     reservice: Joi.alternatives().try(Joi.boolean(), Joi.valid('existing')),
     capture: Joi.alternatives().try(Joi.boolean(), Joi.object().min(1).unknown(true)),
+    // lookup_customer only: the account each customer_ref in this answer
+    // names, as the live relay registers it — so a ref to the caller's OWN
+    // account is graded as their own write, not a third party's.
+    refs: Joi.object().min(1).pattern(/^C\d+(?:-\d+)?$/, Joi.string().pattern(/\S/)),
   }).custom((entry, helpers) => {
     const hasEffect = ['hang', 'transfer', 'booking', 'reservice', 'capture'].some((key) => entry[key] === true) || entry.reservice === 'existing';
     if (entry.text || hasEffect || (entry.capture && typeof entry.capture === 'object')) return entry;
@@ -362,9 +366,14 @@ function toolResponseEntryRules(name, raw) {
   const { error } = TOOL_RESPONSES_SCHEMA.validate(entries, { convert: false });
   // An effect belongs to the tool that performs it live — never to another.
   const foreign = [...new Set(entries.flatMap((e) => (e && typeof e === 'object' ? Object.values(TOOL_EFFECT).filter((key) => e[key] !== undefined && TOOL_EFFECT[name] !== key) : [])))];
+  const withRefs = entries.filter((e) => e && typeof e === 'object' && e.refs && typeof e.refs === 'object');
+  // A ref mapping belongs to the answer that hands the ref out.
+  const unissued = withRefs.flatMap((e) => Object.keys(e.refs).filter((ref) => !String(e.text || '').includes(`customer_ref: ${ref}`)));
   return [
     [!!error, `toolResponses.${name}: ${error ? error.message : ''}`],
     ...foreign.map((key) => [true, `toolResponses.${name}: "${key}" is the effect of ${Object.keys(TOOL_EFFECT).find((t) => TOOL_EFFECT[t] === key)}, not ${name}`]),
+    [name !== 'lookup_customer' && withRefs.length > 0, `toolResponses.${name}: "refs" belongs to lookup_customer answers only`],
+    ...unissued.map((ref) => [true, `toolResponses.${name}: refs names "${ref}", which the answer text does not hand out (customer_ref: ${ref})`]),
   ];
 }
 
@@ -641,22 +650,34 @@ const WRITE_REFUSALS = Object.freeze({
       + 'them back about it. Do NOT tell the caller a re-service has been scheduled or filed.',
   },
 });
-function writeRefusal(name, input, ctx) {
+// The account a customer_ref names, as the fixture lookup answer that
+// issued it declared (`refs`). Undeclared: some other account — the live
+// default for a looked-up ref is a third party's, never the caller's own.
+function refCustomerId(scenario, ref) {
+  const raw = scenario?.fixtures?.toolResponses?.lookup_customer;
+  for (const entry of (Array.isArray(raw) ? raw : [raw]).map(normalizeToolResponse).filter(Boolean)) {
+    if (entry.refs && typeof entry.refs[ref] === 'string') return entry.refs[ref];
+  }
+  return null;
+}
+function writeRefusal(name, input, ctx, scenario) {
   const refusals = WRITE_REFUSALS[name];
   if (!refusals) return null;
   const { matchedCallerTier } = require('../voice-agent/relay-tools');
   const { allowsThirdPartyWrites } = require('../voice-agent/relay-booking');
   const ref = String(input.customer_ref || '').trim();
   // A re-service is the matched caller's own account only; a booking may
-  // name a looked-up account, which is then a third-party write.
+  // name a looked-up account, which is a third-party write unless the ref
+  // resolves to the caller's own account (relay-booking compares the ids).
   if (name === 'request_reservice' && ref) return refusals.noCustomer;
   if (!ref && !ctx.customerId) return refusals.noCustomer;
-  const thirdParty = !!ref || matchedCallerTier(ctx) !== 'full';
+  const lookedUpAccount = !!ref && refCustomerId(scenario, ref) !== (ctx.customerId || null);
+  const thirdParty = lookedUpAccount || matchedCallerTier(ctx) !== 'full';
   return thirdParty && !allowsThirdPartyWrites() ? refusals.thirdParty : null;
 }
-function liveAuthorizationRefusal(name, input = {}, ctx = {}) {
+function liveAuthorizationRefusal(name, input = {}, ctx = {}, scenario = null) {
   const { ATTESTATION_ONLY_TOOLS, matchedCallerTier } = require('../voice-agent/relay-tools');
-  const write = writeRefusal(name, input, ctx);
+  const write = writeRefusal(name, input, ctx, scenario);
   if (write) return write;
   // lookup_customer is reachable by an unmatched caller, so it proves the
   // call itself (relay-context lookupCustomersText) before anything else.
@@ -807,7 +828,7 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   const answer = (text, ok) => { event.ok = ok; event.text = text; return text; };
   // The real tool's own refusals come first — a missing argument, a bad
   // enum, an invented ref — before any fixture answer, hanging or not.
-  const refused = liveAuthorizationRefusal(name, input, ctx);
+  const refused = liveAuthorizationRefusal(name, input, ctx, scenario);
   if (refused) { event.invalid = true; event.refused = true; return answer(refused, false); }
   const invalid = validateToolInput(name, input, record) || noCallbackNumber(name, input, scenario);
   // The live resolvers normalised the handle before resolving it; grade the
@@ -820,7 +841,10 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   // Only a call the real tool would have run advances the staged answers: a
   // rejected attempt never invoked the tool, so it cannot consume a result.
   record.toolUse[name] = (record.toolUse[name] || 0) + 1;
-  const picked = pickToolResponse(scenario, name, record.toolUse[name], matcherInput(record, event, name, input), record.toolResponseUse);
+  // The view the tool acted on: for capture_lead, this call's fields over
+  // the earlier accepted captures' (the live accumulation) — graded as such.
+  event.accumulated = matcherInput(record, event, name, input);
+  const picked = pickToolResponse(scenario, name, record.toolUse[name], event.accumulated, record.toolResponseUse);
   if (!picked) {
     event.unexpected = true;
     record.warnings.push(`tool ${name} called with no fixture response`);
@@ -1144,7 +1168,9 @@ const CHECK_RUNNERS = Object.freeze({
     // side effects) recorded nothing, whatever fields it carried.
     const captures = record.toolCalls.filter((t) => t.name === 'capture_lead' && t.ok === true && !t.invalid && !t.unexpected);
     if (!captures.length) return ['fail', record.toolCalls.some((t) => t.name === 'capture_lead') ? 'capture_lead never succeeded (every call was rejected for its arguments or failed)' : 'capture_lead was never called'];
-    const best = captures.map((c) => inputIncludes(c.input, value)).reduce((a, b) => (b.length < a.length ? b : a));
+    // Graded on the accumulated view the tool acted on: a retry that supplied
+    // only the missing field completed the request live, and does here.
+    const best = captures.map((c) => inputIncludes(c.accumulated || c.input, value)).reduce((a, b) => (b.length < a.length ? b : a));
     return best.length ? ['fail', `no capture_lead input satisfied: ${best.join('; ')}`] : ['pass', 'capture_lead input includes every expected field'];
   },
   end_session_called(value, record) {

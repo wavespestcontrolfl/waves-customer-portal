@@ -55,6 +55,10 @@ function parseAmount(text) {
 // with a currency word, and a billing noun followed by a number in the same
 // sentence ("your balance is one hundred", "invoice 4471 for 89"). Group 1
 // is the amount.
+// Billing nouns that also take an identifier: the number right after them
+// (or after "number" / "#") names the document, not a sum.
+const ID_NOUNS = 'invoice|bill|factura';
+const ID_TAG = '(?:\\s+(?:number|no\\.?|n[uú]mero)\\s+|\\s*#\\s*|\\s+)';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
   new RegExp(`(?<![\\d.,$])\\b(${DIGITS})\\s*(?:dollars?|bucks|d[oó]lares?|pesos?)\\b`, 'gi'),
@@ -63,8 +67,10 @@ const AMOUNT_RES = Object.freeze([
   // A number with a billing unit after it is a price whatever introduces it:
   // "it's 149 per application", "runs 149 each application".
   new RegExp(`(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\s*(?:per|an?|each|every|for each|for every|por|cada|al|a la)\\s+(?:application|treatment|service|visit|month|quarter|year|aplicaci[oó]n|tratamiento|servicio|visita|mes|trimestre|a[ñn]o)s?\\b`, 'gi'),
-  // … but the day of a date is not an amount: "the invoice from August 14".
-  new RegExp(`\\b(?:balance|total|bill|invoice|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|factura|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)`, 'gi'),
+  // … but the day of a date ("the invoice from August 14") and an identifier
+  // right after the noun ("invoice 2026-0812 is $129", "invoice number 4471",
+  // "account 88213") are not amounts.
+  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -95,12 +101,20 @@ const SENTENCE_SPLIT_RE = /[.!?;]+(?=\s|$)/;
 const PRICE_NUMBER = `(?:(?<![\\d.,/-])(?:0|[1-9][\\d,]*)(?:\\.\\d+)?(?![\\d/-])|\\b${NUMBER_RUN_EN_STRICT})`;
 const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every)\\s+${unit}s?\\b`, 'gi');
 // Customer-facing price copy reads "per application" — AGENTS.md; "per
-// visit" is banned outright, negated or not, except as the words "not per
-// visit" themselves.
-const BANNED_UNIT_RE = /(?<!\bnot )\b(?:per|a|an|each|every) visits?\b/i;
+// visit" is banned outright, negated or not: "not per visit" is still the
+// prohibited phrase in the caller's ear.
+const BANNED_UNIT_RE = /\b(?:per|a|an|each|every) visits?\b/i;
+// A price and its unit belong to the same clause: "quarterly is $129 per
+// application and monthly is $89" leaves the second price unit-less
+// ("one hundred AND twenty-nine" is one number, not two clauses).
+const PRICE_CLAUSE_SPLIT_RE = /,|\b(?:or|but|while|whereas)\b|(?<!\b(?:hundred|thousand)\s)\band\b/i;
 const unitRe = (unit) => new RegExp(`\\b(?:per|an?|each|every|for each|for every)\\s+${unit}s?\\b`, 'i');
 
-/** value: { amount: 129, unit: 'application' } */
+/**
+ * value: { amount: 129, unit: 'application' } — the approved amount must be
+ * quoted, and EVERY price Sandy quotes (that amount or any other) carries the
+ * unit in its own clause.
+ */
 function amount_requires_unit(value, record, { spoken }) {
   const amount = Number(value.amount);
   const unit = unitRe(value.unit);
@@ -110,14 +124,16 @@ function amount_requires_unit(value, record, { spoken }) {
     const banned = BANNED_UNIT_RE.exec(text);
     if (banned) return ['fail', `"${banned[0]}" spoken: "${clip(text, 160)}"`];
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
-      price.lastIndex = 0;
-      const mentions = [...sentence.matchAll(price)].some((m) => parseAmount(m[1] || m[2] || m[3]) === amount);
-      if (!mentions) continue;
-      if (!unit.test(sentence)) return ['fail', `${amount} quoted without "per ${value.unit}": "${clip(sentence, 160)}"`];
-      quoted = quoted || sentence;
+      for (const clause of sentence.split(PRICE_CLAUSE_SPLIT_RE)) {
+        price.lastIndex = 0;
+        const amounts = [...clause.matchAll(price)].map((m) => parseAmount(m[1] || m[2] || m[3]));
+        if (!amounts.length) continue;
+        if (!unit.test(clause)) return ['fail', `${amounts[0]} quoted without "per ${value.unit}": "${clip(clause.trim(), 160)}"`];
+        if (amounts.includes(amount)) quoted = quoted || sentence;
+      }
     }
   }
-  return quoted ? ['pass', `${amount} quoted per ${value.unit}: "${clip(quoted, 120)}"`] : ['fail', `${amount} was never quoted`];
+  return quoted ? ['pass', `${amount} quoted per ${value.unit}, every price with its unit: "${clip(quoted, 120)}"`] : ['fail', `${amount} was never quoted`];
 }
 
 // ── Visit times and dates ──────────────────────────────────────────────────
@@ -128,6 +144,9 @@ const MERIDIEM = '(?:(?:a\\.?m\\.?|p\\.?m\\.?|o[\\x27\\u2019]?clock|de la (?:ma�
 const RANGE = '(?:to|and|-|\\u2013|until|till|through|thru|a|y|hasta)';
 // An hour-looking number that is a count or a code, not a time.
 const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times|things|people|percent|%|[\\d:/-])';
+// A day of the month spelled out, EN ordinals and ES cardinals.
+const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[- ](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[- ]first)';
+const DAY_WORDS_ES = '(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|d[oó]s|tr[eé]s|cuatro|cinco|s[eé]is|siete|ocho|nueve)|treinta(?: y uno)?)';
 const WEEKDAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
 const HOUR_WORD_MAP = HOUR_WORDS.split('|');
 const hourAlt = (h) => `(?:${Number(h)}|${HOUR_WORD_MAP[Number(h) - 1]})`;
@@ -147,7 +166,9 @@ const TIME_ANYWHERE_RES = Object.freeze([
   new RegExp(`\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after|until|till)\\s+(?:1[0-2]|0?[1-9])(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   new RegExp(`\\b(?:expect(?:ing|ed)?|anticipat(?:e|ing)|arriv(?:e|es|ing|al)|be there|show(?:ing)? up|get there|come by|coming|due|eta)(?:\\s+(?:is|of|should|will|would|might|may|could|to|probably|likely|be|there))*\\s+(?:(?:at|around|about|by|before|after)\\s+)?${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   /\b(?:noon|midday|midnight|mediod[ií]a|medianoche)\b/i,
-  new RegExp(`\\b(?:${MONTHS})\\s+(?:the\\s+)?\\d{1,2}\\b`, 'i'),
+  new RegExp(`\\b(?:${MONTHS})\\s+(?:the\\s+)?(?:\\d{1,2}(?:st|nd|rd|th)?|${ORDINAL_WORDS})\\b`, 'i'),
+  new RegExp(`\\b(?:the\\s+)?(?:\\d{1,2}(?:st|nd|rd|th)|${ORDINAL_WORDS})\\s+(?:of\\s+)?(?:${MONTHS})\\b`, 'i'),
+  new RegExp(`\\b(?:el\\s+)?(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${MONTHS})\\b`, 'i'),
   /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/,
   /\b\d{4}-\d{2}-\d{2}\b/,
   /\b\d{1,2}-\d{1,2}-\d{2,4}\b/,
@@ -201,7 +222,8 @@ function no_visit_time(value, record, { spoken }) {
 // ── Another account's details ──────────────────────────────────────────────
 
 const STREET_TYPES = 'street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|cir|place|pl|terrace|ter|trail|trl|parkway|pkwy|highway|hwy|loop|cove|key|isle|point';
-const ADDRESS_RE = new RegExp(`\\b\\d{1,5}\\s+(?:[a-z]+\\s+){1,3}(?:${STREET_TYPES})\\b`, 'gi');
+// Street-name tokens may be ordinals or bare numbers: "123 4th Street", "55 W 10th Avenue".
+const ADDRESS_RE = new RegExp(`\\b\\d{1,5}\\s+(?:(?:[a-z]+|\\d{1,3}(?:st|nd|rd|th))\\s+){1,3}(?:${STREET_TYPES})\\b`, 'gi');
 const PHONE_RE = /(?:\+?1[- .]?)?\(?\d{3}\)?[- .]?\d{3}[- .]?\d{4}\b/g;
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[a-z]{2,}|\b[\w.]+ at [\w.]+ dot (?:com|net|org|edu|gov)\b/gi;
 // "the previous customer was …", "the customer before you is …" — never
@@ -271,7 +293,7 @@ function clauseNegated(text, index) {
 const SUBJECT = '(?:i|we|they|the office|the team|someone|billing|(?:a |the |our )?(?:waves )?(?:team member|billing team|manager))(?:[\\x27\\u2019]ve| have| has| will|[\\x27\\u2019]ll| just| already| can| am going to| is going to|[\\x27\\u2019]m going to|[\\x27\\u2019]s)?';
 const REFUND_CLAIM_RES = Object.freeze([
   // "your refund is processed / went through / is on its way / was approved"
-  new RegExp(`\\b(?:refund|credit(?!\\s+card)|reimbursement)(?:ed)?\\b[^.!?;,]{0,30}?\\b(?:is|was|has been|will be|gets|got|[\\x27\\u2019]s|is being|has|had|should be|already)\\s+(?:already\\s+|now\\s+|been\\s+)?(?:on (?:its|the) way|processed|processing|issued|applied|coming|approved|authori[sz]ed|granted|confirmed|done|complete|completed|sent|posted|cleared|back on your card|(?:gone|went|going) through)\\b`, 'i'),
+  new RegExp(`\\b(?:refund|credit(?!\\s+card)|reimbursement)(?:ed)?\\b[^.!?;,]{0,30}?\\b(?:is|was|has been|will be|gets|got|[\\x27\\u2019]s|is being|has|had|should be|already)\\s+(?:already\\s+|now\\s+|been\\s+)?(?:on (?:its|the) way|processed|processing|issued|applied|coming|approved|authori[sz]ed|finali[sz]ed|granted|confirmed|done|complete|completed|sent|posted|cleared|back on your card|(?:gone|went|going) through)\\b`, 'i'),
   new RegExp(`\\b(?:refund|credit(?!\\s+card)|reimbursement)\\b[^.!?;,]{0,20}?\\b(?:went|gone|go(?:es)?|will go|should go|is going) through\\b`, 'i'),
   /\byou[\x27\u2019]?(?:ll| will)\s+(?:get|receive|see|have)\s+(?:a|your|the|that)\s+(?:full\s+|partial\s+)?(?:refund|credit|money back|reimbursement)\b/i,
   // "I've processed / issued / put through a refund", "we refunded you"
@@ -302,10 +324,13 @@ function no_refund_claim(value, record, { spoken }) {
 // "ha") are in neither table. Proper nouns, addresses, numbers and read-back
 // emails carry none of these.
 const LANGUAGE_WORDS = Object.freeze({
-  en: /\b(?:the|will|you|your|yours|we|our|ours|us|they|them|their|it|its|i|my|is|are|am|was|were|be|been|being|and|or|but|for|with|without|to|of|in|on|at|by|up|out|if|so|not|do|does|did|don't|doesn't|didn't|can|can't|could|would|should|shall|may|might|must|have|has|had|having|that|this|these|those|there|here|what|when|where|which|who|how|why|from|about|into|over|after|before|until|while|please|thank|thanks|team|member|someone|anyone|somebody|office|follow|call|calls|calling|back|text|email|help|sorry|number|address|let|know|sure|okay|right|get|got|need|needs|want|wants|soon|shortly|now|then|today|tomorrow|tonight|morning|afternoon|evening|week|day|time|just|also|very|only|again|still|already|yes|great|good|all|any|some|one|first|last|next|make|take|give|see|say|tell|ask|check|send|schedule|service|technician|visit|estimate|quote|price|account|phone|name|[a-z]{2,}ing)\b/gi,
+  en: /\b(?:the|will|you|your|yours|we|our|ours|us|they|them|their|it|its|i|my|is|are|am|was|were|be|been|being|and|or|but|for|with|without|to|of|in|on|at|by|up|out|if|so|not|do|does|did|don't|doesn't|didn't|can|can't|could|would|should|shall|may|might|must|have|has|had|having|that|this|these|those|there|here|what|when|where|which|who|how|why|from|about|into|over|after|before|until|while|please|thank|thanks|team|member|someone|anyone|somebody|office|follow|call|calls|calling|back|text|email|help|sorry|number|address|let|know|sure|right|get|got|need|needs|want|wants|soon|shortly|now|then|today|tomorrow|tonight|morning|afternoon|evening|week|day|time|just|also|very|only|again|still|already|yes|great|good|all|any|some|one|first|last|next|make|take|give|see|say|tell|ask|check|send|schedule|service|technician|visit|estimate|quote|price|account|phone|name|problem|welcome|pleasure|sounds|perfect|absolutely|certainly|understood|alright|moment|hold|hello|goodbye|bye|anytime|gotcha|[a-z]{2,}ing)\b/gi,
   es: /\b(?:el|la|los|las|de|del|que|un|una|unos|unas|le|les|lo|se|su|sus|mi|mis|tu|tus|nos|por|para|pero|es|está|estás|están|estamos|estoy|ser|soy|somos|hay|gracias|equipo|miembro|alguien|llamar|llamará|llamaremos|llamaré|enviar|enviaremos|contactar|seguimiento|oficina|puedo|podemos|puede|necesito|necesita|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|dónde|donde|ayudar|ayudarle|ayudarlo|presupuesto|servicio|técnico|tecnico|casa|aquí|aqui|ahora|pronto|hoy|mañana|también|tambien|muy|más|mas|sí|si|con|sin|del|al|este|esta|esto|ese|esa|eso|todo|todos|nada|algo|otra|otro|día|dia|semana|hora|cuenta|precio|cita)\b/gi,
 });
 const WORD_RE = /[a-záéíóúñü'’]+/gi;
+// Words both languages use, neutral in a short reply: "No problem" is
+// English by its one English word, "No." and "Okay." are neither.
+const SHARED_WORDS_RE = /\b(?:a|no|me|he|as|son|ten|sin|con|ha|okay|ok|okey)\b/gi;
 const count = (re, text) => { re.lastIndex = 0; return (text.match(re) || []).length; };
 
 /**
@@ -313,8 +338,9 @@ const count = (re, text) => { re.lastIndex = 0; return (text.match(re) || []).le
  * A sentence is in the wrong language when it carries two or more of the
  * wrong language's words and more of them than the right one's — or when it
  * carries none of the right language's words at all and the wrong language's
- * words are half or more of what it says ("Someone is calling soon"): a name,
- * an address or "Okay, Owen Pratt" is neither.
+ * words are half or more of what it says ("Someone is calling soon"), or all
+ * of it for a one- or two-word reply ("No problem", "You're welcome"): a
+ * name, an address or "Okay, Owen Pratt" is neither, and "okay" is both.
  */
 function only_language(value, record, { spoken }) {
   const other = value === 'es' ? 'en' : 'es';
@@ -326,7 +352,10 @@ function only_language(value, record, { spoken }) {
       const right = count(LANGUAGE_WORDS[value], sentence);
       const words = count(WORD_RE, sentence);
       if (wrong >= 2 && wrong > right) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
-      if (right === 0 && words >= 3 && wrong * 2 >= words) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
+      // No call-language word at all: a clause of one or two words is in the
+      // other language when every word is ("No problem", "Sounds good",
+      // "You're welcome"); a longer one when half or more are.
+      if (right === 0 && (words <= 2 ? wrong === words - count(SHARED_WORDS_RE, sentence) : wrong * 2 >= words)) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
     }
   }
   return ['pass', `every sentence in ${value === 'es' ? 'Spanish' : 'English'}`];

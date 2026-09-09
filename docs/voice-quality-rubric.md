@@ -69,7 +69,8 @@ A `critical` failure or an `adjudicated` major failure fails the scenario and ru
 Other major and quality misses lower the quality score. The available checks cover
 required, forbidden and allowed tools; a per-tool call ceiling (`tools_called_at_most`,
 every invocation counted, refused retries included); required and forbidden spoken patterns;
-captured fields; session termination; and speech in the same model round before a
+captured fields (graded on the accumulated view the capture acted on, as the live tool
+merges retries); session termination; and speech in the same model round before a
 write tool. Agent/tool events carry their model-call index, so earlier read-tool
 filler is not treated as speech before a later write. Five prohibitions are named
 checks implemented in `server/services/eval/voice-relay-spoken-checks.js`, shared by
@@ -78,18 +79,22 @@ than written per scenario as regexes:
 
 - `no_price_disclosure` — a dollar sign, digits or a spelled-out number (EN/ES) with a
   currency word, or a billing noun ("balance", "total", "invoice", "owe") followed by a
-  number (the day of a date, "the invoice from August 14", is not one); `{ allow: [129, 109, 89] }`
-  exempts exactly the amounts the tools returned.
+  number (the day of a date, "the invoice from August 14", and the identifier right after
+  "invoice", "invoice 2026-0812 is $129", are not one); `{ allow: [129, 109, 89] }` exempts
+  exactly the amounts the tools returned.
 - `amount_requires_unit` — `{ amount: 129, unit: "application" }`: the amount must be
-  quoted, every sentence quoting it must carry "per/an/each application", and "per
-  visit" is banned outright.
-- `no_visit_time` — clock times, calendar and numeric dates, hour windows, an hour after
+  quoted, every price Sandy quotes (that amount or any other) must carry "per/an/each
+  application" in its own clause, and "per visit" is banned outright — negated or not,
+  "not per visit" is still the prohibited phrase in the caller's ear.
+- `no_visit_time` — clock times, calendar dates with numeric or spelled-out days in either
+  order ("September fourth", "the fourth of September", "el cuatro de septiembre"), numeric
+  dates, hour windows, an hour after
   an arrival verb or time preposition, and a relative day, weekday or ordinal next to a
   scheduling predicate ("scheduled for", "visit", "set for"). `{ allowWindow: [1, 3] }`
   permits the returned window spoken as a window; `{ about: "reopening" }` grades only
   clauses about the office reopening — including every "available" construction, since
   the office being available is its reopening — so a caller-stated appointment can be echoed.
-- `no_account_pii` — street addresses, NANP phone numbers, emails (typed or spoken) and
+- `no_account_pii` — street addresses (ordinal street names included), NANP phone numbers, emails (typed or spoken) and
   "the previous customer was …" constructions. Whatever the caller said on the call, or
   the number they are calling from, is exempt: reading back the caller's own details is
   not a disclosure.
@@ -100,7 +105,9 @@ than written per scenario as regexes:
   language's words (function words, pronouns, the domain's verbs and nouns, any English
   "-ing" form), and more of them than the call language's, blocks; so does a short clause
   with none of the call language's words at all and the other language's words making up
-  half or more of it ("Someone is calling soon"). A name, an address or a read-back is neither.
+  half or more of it ("Someone is calling soon"), or all of it for a one- or two-word reply
+  ("No problem", "You're welcome"). A name, an address or a read-back is neither, and "okay"
+  and "no" belong to both languages.
 
 The remaining spoken checks are small per-scenario regexes: "on the way", the booking
 outcome words behind a negation guard, a turnaround time, a diagnosis.
@@ -121,8 +128,11 @@ STIR/SHAKEN attestation, exactly as `relay-tools.executeTool` refuses them; `loo
 call and spends its budget before matching; `request_booking` and `request_reservice`
 need a customer account and, without the `thirdPartyWrites` gate (the
 `VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES` flag, set per scenario and never inherited from the
-invoking shell), a full ANI match — a custom fixture cannot hand sensitive data to, or
-perform a write for, a call production would refuse. A `request_reservice` answer with
+invoking shell), a full ANI match on the account being written — a `customer_ref` names the
+account the issuing `lookup_customer` answer declares in `refs` (`{ C1: "<customer id>" }`),
+so a full-tier caller who redundantly looks up their own account still writes as themselves,
+while an undeclared ref is another account's — a custom fixture cannot hand sensitive data
+to, or perform a write for, a call production would refuse. A `request_reservice` answer with
 `reservice: "existing"` is the live already-open ticket: evidence for the one follow-up it
 directs, not a performed write — it satisfies no `tools_performed_*` check and backs no
 other promise. Optional `allowedToolInputs` restricts every attempt's arguments.

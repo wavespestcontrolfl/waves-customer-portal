@@ -168,7 +168,7 @@
           "value": [
             "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(booked|locked in|confirmed|all set|reserved|guaranteed|scheduled|set for|on the (?:schedule|calendar|books)|put you down for|penci(?:l|ll)ed in)\\b"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
@@ -637,7 +637,7 @@
             "get_pricing",
             "capture_lead"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "capture_lead_input_includes",
@@ -2690,7 +2690,8 @@
           "check": "spoken_never_matches",
           "value": [
             "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(saved|booked|filed|in the system|all set|got you down|you'?re (all )?(set|in)|got (all )?(of )?your (details|info|information) (down|noted|in))\\b",
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(went|gone) through\\b"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(went|gone) through\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(sent|passed|submitted|forwarded|relayed|logged|put (in|through))\\b[^.!?;,]{0,40}?\\b(to|with|over to|along to|through to) the (office|team)\\b"
           ],
           "severity": "critical"
         },

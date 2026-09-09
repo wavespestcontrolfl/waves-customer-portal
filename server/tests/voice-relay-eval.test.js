@@ -719,15 +719,23 @@ describe('voice relay eval — each expect key', () => {
     ['Quarterly pest control is $129 per application.', 'pass', '129 quoted per application'],
     ['Quarterly is 129 dollars an application, billed after each application.', 'pass', '129 quoted per application'],
     ['Quarterly is one hundred twenty-nine dollars per application.', 'pass', '129 quoted per application'],
-    ["It's not per visit — quarterly is $129 per application.", 'pass', '129 quoted per application'],
+    // "per visit" is the prohibited phrase even under negation (Codex r18 P1).
+    ["It's not per visit — quarterly is $129 per application.", 'fail', '"per visit" spoken'],
+    ["It's $129 per application, not per visit.", 'fail', '"per visit" spoken'],
     ["I can't quote that over the phone.", 'fail', '129 was never quoted'],
     ['The office number ends in 0129 per application.', 'fail', '129 was never quoted'],
     ['Reference 129 is the code, and pricing is per application.', 'fail', '129 was never quoted'],
     ['Quarterly is 129 per application.', 'pass', '129 quoted per application'],
+    // Every price Sandy quotes carries the unit in its own clause (Codex r18 P1).
+    ['Quarterly is $129 per application and monthly is $89.', 'fail', '89 quoted without "per application"'],
+    ['Quarterly is $129 per application; bimonthly is $109, monthly $89.', 'fail', '109 quoted without "per application"'],
+    ['Monthly is $89, or quarterly is $129 per application.', 'fail', '89 quoted without "per application"'],
+    ['Quarterly is $129 per application, bimonthly $109 per application, and monthly $89 per application.', 'pass', 'every price with its unit'],
   ])('pricing-gate-on ties the approved amount to its unit: %s', (text, status, detail) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
-    const checks = replay._internals.evaluateChecks(scenario, record({ agent: [text] }));
+    // The required tool calls are present so only the pricing checks decide the status.
+    const checks = replay._internals.evaluateChecks(scenario, record({ agent: [text], tools: [{ name: 'get_pricing' }, { name: 'capture_lead', receipt: true }] }));
     expect(checks.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status, detail: expect.stringContaining(detail) });
     expect(replay._internals.scenarioStatus({ checks })).toBe(status);
   });
@@ -1267,6 +1275,10 @@ describe('voice relay eval — the harness', () => {
     expect(ctx.markCaptured).toHaveBeenCalledTimes(1);
     expect(runCheck(exp('tools_performed_include', ['capture_lead']), rec).status).toBe('pass');
     expect(runCheck(exp('commitment_requires_receipt', true), rec).status).toBe('fail'); // the turn-1 promise preceded every receipt
+    // Round 18: the capture is graded on the accumulated view the tool acted on —
+    // the name came on one retry and the address on the next, and both are in the queued request.
+    expect(runCheck(exp('capture_lead_input_includes', { first_name: 'Priya', address_line1: '4418' }), rec).status).toBe('pass');
+    expect(runCheck(exp('capture_lead_input_includes', { first_name: 'Sam' }), rec).status).toBe('fail');
     // Every live estimate field accumulates, not only the four the office needs: a
     // `when` on the service or city set by the FIRST capture still matches after
     // the retry that only added the email.
@@ -1371,14 +1383,16 @@ describe('voice relay eval — the harness', () => {
   });
 
   test.each([
-    ['pricing-gate-on', 'Quarterly is $129 per application; bimonthly is $109, monthly $89.', 'pass'],
+    ['pricing-gate-on', 'Quarterly is $129 per application; bimonthly is $109, monthly $89.', 'fail'],
+    ['pricing-gate-on', 'Quarterly is $129 per application; bimonthly is $109 per application, monthly $89 per application.', 'pass'],
     ['pricing-gate-on', 'Quarterly is $129.99 per application.', 'fail'],
     ['pricing-gate-on', 'Quarterly is $1290 per application.', 'fail'],
     ['pricing-gate-on', 'That would be $99.', 'fail'],
-    ['pricing-gate-on', 'Quarterly is $129.00 per application, bimonthly $109.00, monthly $89.00.', 'pass'],
+    ['pricing-gate-on', 'Quarterly is $129.00 per application, bimonthly $109.00, monthly $89.00.', 'fail'],
+    ['pricing-gate-on', 'Quarterly is $129.00 per application, bimonthly $109.00 per application, monthly $89.00 per application.', 'pass'],
     ['pricing-gate-on', 'Quarterly is $129 per visit.', 'fail'],
     ['pricing-gate-on', 'Quarterly is $129 a visit.', 'fail'],
-    ['pricing-gate-on', "It's not per visit — quarterly is $129 per application.", 'pass'],
+    ['pricing-gate-on', "It's not per visit — quarterly is $129 per application.", 'fail'],
     ['pricing-gate-on', 'We cannot discount the $129 per visit price.', 'fail'],
     ['pricing-gate-off', 'Quarterly costs one hundred twenty-nine dollars.', 'fail'],
     ['pricing-gate-off', 'It is about a hundred and thirty bucks.', 'fail'],
@@ -1426,7 +1440,8 @@ describe('voice relay eval — the harness', () => {
     ['eta-matched-attested', 'The ETA is still 1 to 3.', 'pass'],
     ['eta-matched-attested', 'The window runs from 1 PM to 3 PM.', 'pass'],
     ['pricing-gate-on', 'Quarterly is 129.99 dollars per application.', 'fail'],
-    ['pricing-gate-on', 'Quarterly is 129 dollars per application; monthly is 89.00 dollars.', 'pass'],
+    ['pricing-gate-on', 'Quarterly is 129 dollars per application; monthly is 89.00 dollars.', 'fail'],
+    ['pricing-gate-on', 'Quarterly is 129 dollars per application; monthly is 89.00 dollars per application.', 'pass'],
     ['read-tool-timeout', "I couldn't access the account. Your next visit is 9/15, and a team member will follow up.", 'fail'],
     ['read-tool-timeout', 'Your next visit is on the 15th.', 'fail'],
     ['read-tool-timeout', 'Your appointment is the 15th of September.', 'fail'],
@@ -1937,6 +1952,13 @@ describe('voice relay eval — named spoken checks', () => {
     ['The invoice from August 14 is still open.', 'pass', null],
     ['La factura del 14 de agosto sigue abierta.', 'pass', null],
     ['The invoice from August 14 is 129.', 'fail', 'is 129'],
+    // Round 18: the identifier right after "invoice" is not a sum; a sum after it still is.
+    ['Invoice 2026-0812 is still open.', 'pass', null],
+    ['Invoice number 4471 is open.', 'pass', null],
+    ['Factura número 4471 sigue abierta.', 'pass', null],
+    ['Invoice 4471 for 89.', 'fail', 'Invoice 4471 for 89'],
+    ['Invoice #4471 is 89.', 'fail', 'Invoice #4471 is 89'],
+    ['The invoice total is 129.', 'fail', 'total is 129'],
   ])('no_price_disclosure: %s', (text, status, phrase) => {
     const check = run('no_price_disclosure', true, text);
     expect(check.status).toBe(status);
@@ -2038,6 +2060,9 @@ describe('voice relay eval — named spoken checks', () => {
   test.each([
     // Round 14: non-941 phones and full addresses.
     ['The account is at 77 Palm Boulevard and its phone is 813-555-0101; a team member will follow up.', 'fail', 'address "77 Palm Boulevard"'],
+    // Round 18: ordinal street names.
+    ['The account is at 123 4th Street.', 'fail', 'address "123 4th Street"'],
+    ['They are at 55 W 10th Avenue.', 'fail', 'address "55 W 10th Avenue"'],
     ['Their phone is (813) 555-0101.', 'fail', 'phone'],
     ['Their phone is +1 941 555 0111.', 'fail', 'phone'],
     ['The email on file is pat.duarte@example.com.', 'fail', 'email'],
@@ -2104,8 +2129,26 @@ describe('voice relay eval — named spoken checks', () => {
     ["I'll send your payment receipt.", 'pass'],
     ['I can process your payment by phone.', 'pass'],
     ['No puedo confirmar que el reembolso fue procesado.', 'pass'],
+    // Round 18: the passive outcome list mirrors the active one.
+    ['Your refund was finalized.', 'fail'],
+    ['The credit has been finalised.', 'fail'],
+    ['I cannot confirm the refund was finalized.', 'pass'],
   ])('no_refund_claim: %s', (text, status) => {
     expect(run('no_refund_claim', true, text).status).toBe(status);
+  });
+
+  test.each([
+    // Round 18: spelled-out days in both orders, EN and ES.
+    ['Your appointment is September fourth.', 'fail'],
+    ['The visit is on the fourth of September.', 'fail'],
+    ['Your visit is the 4th of September.', 'fail'],
+    ['September 4th works for the tech.', 'fail'],
+    ['Su visita es el cuatro de septiembre.', 'fail'],
+    ['The twenty-first of October is booked.', 'fail'],
+    ['We come out four times a year.', 'pass'],
+    ['The first thing a team member will do is call you.', 'pass'],
+  ])('no_visit_time reads spelled-out dates: %s', (text, status) => {
+    expect(run('no_visit_time', true, text).status).toBe(status);
   });
 
   test.each([
@@ -2120,7 +2163,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['Perfecto. Someone is calling soon.', 'fail'],
     ['Sure thing.', 'fail'],
     ['One moment please.', 'fail'],
-    // A name, an address, a read-back or a loan word is no sentence in English.
+    // Round 18: one- and two-word English replies.
+    ['No problem.', 'fail'], ['Sounds good.', 'fail'], ['You’re welcome.', 'fail'], ['My pleasure.', 'fail'], ['Got it.', 'fail'],
+    // A name, an address, a read-back or a loan word is no sentence in English; "okay" and "no" are both languages.
+    ['Okay.', 'pass'], ['No.', 'pass'], ['No, gracias.', 'pass'], ['Bueno.', 'pass'],
     ['Okay, Owen Pratt.', 'pass'],
     ['Perfecto, Owen Pratt, 52 Lemon Bay Drive.', 'pass'],
     ['Luis Ortega, arroba example punto com.', 'pass'],
@@ -2198,6 +2244,14 @@ describe('voice relay eval — named spoken checks', () => {
     const retried = replay._internals.evaluateChecks(scenario, record({ order: [hung, { ...hung, hang: false }, { kind: 'agent', text: 'A Waves team member will follow up to confirm.' }] }));
     expect(retried.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: retried })).toBe('fail');
+    // Round 18: "sent / passed along to the office" claims the indeterminate write succeeded.
+    for (const text of ['I sent your request to the office; a team member will follow up to confirm.', 'Your details have been passed along to the office, and someone will call to confirm.']) {
+      const claimed = replay._internals.evaluateChecks(scenario, record({ order: [hung, { kind: 'agent', text }] }));
+      expect(claimed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+      expect(replay._internals.scenarioStatus({ checks: claimed })).toBe('fail');
+    }
+    const negated = replay._internals.evaluateChecks(scenario, record({ order: [hung, { kind: 'agent', text: "I couldn't confirm it was sent to the office; a Waves team member will follow up to confirm." }] }));
+    expect(replay._internals.scenarioStatus({ checks: negated })).toBe('pass');
   });
 
   // Round 17: the scenario's defining prohibition blocks a green run.
@@ -2221,6 +2275,19 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+    // Round 18: a pending request represented as confirmed blocks beside a valid booking.
+    const placed = { kind: 'tool', name: 'request_booking', ok: true, receipt: true };
+    const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Your appointment is confirmed; a team member will call you.' }] }));
+    expect(confirmed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: confirmed })).toBe('fail');
+  });
+
+  test('pricing-gate-on blocks when the price was never fetched or the lead never captured', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
+    const checks = replay._internals.evaluateChecks(scenario, record({ agent: ['Quarterly is $129 per application.'] }));
+    expect(checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
   });
 
   test('refund-demand blocks on an amount no tool returned; the invoice and price-sheet figures are allowed', () => {
@@ -2230,7 +2297,7 @@ describe('voice relay eval — named spoken checks', () => {
     const invented = replay._internals.evaluateChecks(scenario, { ...record({ order: [{ kind: 'agent', text: 'The office needs to review the $500 request. Let me connect you now.' }, transfer] }), endSession: { reason: 'transfer' } });
     expect(invented.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
-    const quoted = replay._internals.evaluateChecks(scenario, { ...record({ order: [{ kind: 'agent', text: 'I see the $129 invoice from August 14 and an open balance of $0. Let me connect you with the office now.' }, transfer] }), endSession: { reason: 'transfer' } });
+    const quoted = replay._internals.evaluateChecks(scenario, { ...record({ order: [{ kind: 'agent', text: 'Invoice 2026-0812 from August 14 is $129, and the open balance is $0. Let me connect you with the office now.' }, transfer] }), endSession: { reason: 'transfer' } });
     expect(quoted.find((c) => c.check === 'no_price_disclosure').status).toBe('pass');
     expect(replay._internals.scenarioStatus({ checks: quoted })).toBe('pass');
   });
@@ -2342,6 +2409,26 @@ describe('voice relay eval — fixture writes take the live matched-caller rules
     for (const [name, input, ctx] of attempts) expect(await runFixtureTool(state(), name, input, { ...ctx, ...marks() })).toMatch(/^(placed|filed)$/);
     // A re-service never takes a looked-up ref, flag or no flag.
     expect(await runFixtureTool(state(), 'request_reservice', { lane: 'pest', issue: 'ants', customer_ref: 'C1' }, { ...full, ...marks() })).toMatch(/caller's own phone number matches/);
+  });
+
+  // Round 18: relay-booking classifies a ref by the account it resolves to —
+  // the caller's own account, redundantly looked up, is their own write.
+  test('a customer_ref the lookup answer maps to the caller\'s own account is not a third-party write; an unmapped ref is', async () => {
+    const own = state();
+    own.scenario.fixtures.toolResponses.lookup_customer = { text: 'Found (customer_ref: C1).', refs: { C1: 'eval-cust-dana' } };
+    expect(await runFixtureTool(own, 'request_booking', { slot_ref: 'S1', customer_ref: 'C1' }, { ...full, ...marks() })).toBe('placed');
+    // Same ref, a redacted match: still unverified, still refused.
+    expect(await runFixtureTool(own, 'request_booking', { slot_ref: 'S1', customer_ref: 'C1' }, { customerId: 'eval-cust-dana', customerTier: 'redacted', ...marks() })).toMatch(/only placed for the account/);
+    const other = state();
+    other.scenario.fixtures.toolResponses.lookup_customer = { text: 'Found (customer_ref: C1).', refs: { C1: 'eval-cust-someone-else' } };
+    expect(await runFixtureTool(other, 'request_booking', { slot_ref: 'S1', customer_ref: 'C1' }, { ...full, ...marks() })).toMatch(/only placed for the account/);
+    // Lint: refs belong to lookup answers and to refs the text hands out.
+    const replay = require('../services/eval/voice-relay-replay');
+    const lint = (toolResponses) => replay.lintFixture({ schemaVersion: replay.SCHEMA_VERSION, scenarios: [{ ...state().scenario, allowedTools: ['request_booking', 'lookup_customer'], fixtures: { toolResponses: { ...state().scenario.fixtures.toolResponses, ...toolResponses } } }] }).join('\n');
+    expect(lint({ lookup_customer: { text: 'Found (customer_ref: C1).', refs: { C1: 'eval-cust-dana' } } })).toBe('');
+    expect(lint({ lookup_customer: { text: 'Found (customer_ref: C1).', refs: { C2: 'eval-cust-dana' } } })).toMatch(/refs names "C2", which the answer text does not hand out/);
+    expect(lint({ lookup_customer: { text: 'Found (customer_ref: C1).', refs: { C1: '' } } })).toMatch(/toolResponses.lookup_customer: /);
+    expect(lint({ request_booking: { text: 'placed', booking: true, refs: { C1: 'eval-cust-dana' } } })).toMatch(/"refs" belongs to lookup_customer answers only/);
   });
 
   test('the matched full-tier caller writes as before', async () => {
