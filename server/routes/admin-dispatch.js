@@ -2887,7 +2887,7 @@ function recapStatusForReason(reason) {
   // Conflict: pest-control gate, a cancelled/skipped visit that can't be
   // recapped, or a stale recap against a job rescheduled to a future day.
   if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped'
-    || reason === 'future_scheduled_date') return 409;
+    || reason === 'future_scheduled_date' || reason === 'visit_identity_changed') return 409;
   return 400;
 }
 
@@ -2992,7 +2992,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
     }
     const { actorType, actorId } = recapActor(req);
     const {
-      technicianNotes, products, productsConfirmed, productsPreserve, customerRecap, sendSms, clientPestRating,
+      technicianNotes, products, productsConfirmed, productsPreserve, customerRecap, sendSms, clientPestRating, expectedVisit,
     } = req.body || {};
     const result = await PestRecap.submitRecap({
       serviceId: req.params.serviceId,
@@ -3005,6 +3005,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       customerRecap,
       sendSms: !!sendSms,
       clientPestRating: clientPestRating == null ? null : clientPestRating,
+      expectedVisit: expectedVisit && typeof expectedVisit === 'object' && !Array.isArray(expectedVisit) ? expectedVisit : null,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
     await settleRecapSupplies(req.params.serviceId, result);

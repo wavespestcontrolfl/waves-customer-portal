@@ -205,6 +205,7 @@ async function buildRecapContext(serviceId, knex = db) {
       status: svc.status,
       scheduledDate: svc.scheduled_date,
       propertyId: svc.property_id ?? null,
+      catalogServiceId: svc.service_id ?? null,
       address: resolveVisitAddress({
         visit: svc,
         customer: {
@@ -279,6 +280,23 @@ async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, pro
  * Commit the recap: complete (no bill) + service_records + service_products,
  * track_state complete, optional customer SMS.
  */
+const sameIdentityKey = (a, b) => String(a ?? '') === String(b ?? '');
+
+// True when the client's expected ownership identity no longer matches the
+// locked visit row. Only keys the client sent are compared; the address is
+// resolved the same way the context resolves it (stamped visit address
+// first, legacy primary fallback).
+function recapVisitIdentityChanged(expected, locked, customerRow) {
+  if (!expected || typeof expected !== 'object') return false;
+  if ('propertyId' in expected && !sameIdentityKey(expected.propertyId, locked.property_id)) return true;
+  if ('customerId' in expected && !sameIdentityKey(expected.customerId, locked.customer_id)) return true;
+  if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
+  if (!('address' in expected)) return false;
+  const live = resolveVisitAddress({ visit: locked, customer: customerRow || {} });
+  const want = expected.address || {};
+  return ['line1', 'line2', 'city', 'state', 'zip'].some((field) => !sameIdentityKey(want[field], live[field]));
+}
+
 async function submitRecap({
   serviceId,
   actorType,
@@ -298,6 +316,12 @@ async function submitRecap({
   customerRecap,
   sendSms = false,
   clientPestRating = null,
+  // Ownership identity the client's form was built against (customer,
+  // property, catalog service, resolved address). Re-checked under the
+  // row lock so a visit reassigned after the context loaded cannot be
+  // completed with the former property's treatment (codex P1 on #4249).
+  // Legacy clients omit it and keep the previous behavior.
+  expectedVisit = null,
   knex = db,
 }) {
   const { ok, reason, svc, eligible } = await resolveEligibility(serviceId, knex);
@@ -390,6 +414,7 @@ async function submitRecap({
       .where({ id: serviceId })
       .forUpdate()
       .first('id', 'status', 'scheduled_date', 'service_id', 'service_type', 'visit_id', 'is_callback',
+        'customer_id', 'property_id',
         // Stamped visit address + coords feed the report identity snapshot.
         'service_address_line1', 'service_address_line2', 'service_address_city',
         'service_address_state', 'service_address_zip', 'lat', 'lng');
@@ -413,6 +438,15 @@ async function submitRecap({
     //     must not complete (TOCTOU; Codex P1).
     if (locked && trackTransitions.isFutureScheduledDate(locked.scheduled_date)) {
       rejectReason = 'future_scheduled_date';
+      return;
+    }
+
+    // 0d. Ownership identity under the lock (codex P1 on #4249): the same
+    //     visit id can be moved to another property, customer or catalog
+    //     service between the context read and this submit; the client's
+    //     comparison against its stale context cannot see that.
+    if (locked && recapVisitIdentityChanged(expectedVisit, locked, snapshotCustomerRow)) {
+      rejectReason = 'visit_identity_changed';
       return;
     }
 

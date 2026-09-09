@@ -28,7 +28,7 @@ function contextDb(visit) {
 
 const visit = {
   id: 'visit-example', customer_id: 'customer-example', property_id: 'property-a',
-  service_type: 'Quarterly Pest Control', scheduled_date: '2026-09-09', status: 'confirmed',
+  service_type: 'Quarterly Pest Control', service_id: 'cat-1', scheduled_date: '2026-09-09', status: 'confirmed',
   cust_address_line1: '100 Example Court', cust_address_line2: 'Unit 3',
   cust_city: 'Example City', cust_state: 'FL', cust_zip: '34201',
 };
@@ -37,6 +37,7 @@ test('recap context exposes the live property and resolved legacy primary addres
   const result = await buildRecapContext(visit.id, contextDb(visit));
   expect(result.service).toMatchObject({
     propertyId: 'property-a',
+    catalogServiceId: 'cat-1',
     address: { line1: '100 Example Court', line2: 'Unit 3', city: 'Example City', state: 'FL', zip: '34201' },
   });
 });

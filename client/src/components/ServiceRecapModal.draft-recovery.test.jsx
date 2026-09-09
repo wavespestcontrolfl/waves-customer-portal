@@ -21,9 +21,10 @@ describe('recap interruption recovery', () => {
     ['customerId', 'customer-b'],
     ['scheduledDate', '2026-01-02'],
     ['propertyId', 'property-b'],
+    ['catalogServiceId', 'catalog-b'],
     ['address', { line1: '200 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' }],
   ])('blocks stale treatment drafts after the live visit %s changes', async (field, value) => {
-    const service = { ...context.service, serviceType: 'Pest Control', customerId: 'customer-a', scheduledDate: '2026-01-01',
+    const service = { ...context.service, serviceType: 'Pest Control', customerId: 'customer-a', scheduledDate: '2026-01-01', catalogServiceId: 'catalog-a',
       propertyId: 'property-a', address: { line1: '100 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' } };
     let current = { ...structuredClone(context), service };
     const request = vi.fn(async (path) => path.endsWith('/context') ? structuredClone(current) : { ok: true });
@@ -74,6 +75,61 @@ describe('recap interruption recovery', () => {
       const payload = JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'POST')[1].body);
       expect(payload.products).toMatchObject([{ product_id: 2, application_rate: 0.2 }]);
     }
+  });
+
+  it('restores a draft after a normal lifecycle transition of the same visit', async () => {
+    const service = { ...context.service, status: 'en_route', propertyId: 'property-a', customerId: 'customer-a' };
+    let current = { ...structuredClone(context), service };
+    const request = vi.fn(async (path) => path.endsWith('/context') ? structuredClone(current) : { ok: true });
+    const open = () => render(<ServiceRecapModal service={service} request={request} onClose={vi.fn()} />);
+    const first = open();
+    await screen.findByRole('button', { name: 'Example gel', exact: true });
+    fireEvent.change(noteInput(), { target: { value: 'Started before arrival.' } });
+    first.unmount();
+
+    current = { ...current, service: { ...service, status: 'on_site' } };
+    open();
+    const restore = await screen.findByRole('button', { name: 'Restore draft', exact: true });
+    expect(restore).toBeEnabled();
+    fireEvent.click(restore);
+    expect(noteInput()).toHaveValue('Started before arrival.');
+  });
+
+  it('does not keep a phantom draft after a selected product is deselected again', async () => {
+    const request = requestFor();
+    const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
+    const first = open();
+    const gel = await screen.findByRole('button', { name: 'Example gel', exact: true });
+    fireEvent.click(gel);
+    fireEvent.change(screen.getByLabelText('Application rate for Example gel'), { target: { value: '0.4' } });
+    fireEvent.click(gel);
+    await waitFor(() => expect(screen.queryByText(/Draft saved on this device/)).toBeNull());
+    first.unmount();
+
+    open();
+    await screen.findByRole('button', { name: 'Example gel', exact: true });
+    expect(screen.queryByRole('button', { name: 'Restore draft', exact: true })).toBeNull();
+  });
+
+  it('sends the verified visit identity with the completion and explains a server ownership rejection', async () => {
+    const service = { ...context.service, customerId: 'customer-a', propertyId: 'property-a', catalogServiceId: 'catalog-a',
+      serviceType: 'Pest Control', scheduledDate: '2026-01-01', address: { line1: '100 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' } };
+    const request = vi.fn(async (path, options) => {
+      if (path.endsWith('/context')) return { ...structuredClone(context), service };
+      if (options?.method === 'POST') throw new Error('visit_identity_changed');
+      return { ok: true };
+    });
+    render(<ServiceRecapModal service={service} request={request} onClose={vi.fn()} />);
+    await screen.findByRole('button', { name: 'Example gel', exact: true });
+    fireEvent.change(noteInput(), { target: { value: 'Treatment.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Complete Service', exact: true }));
+    expect(await screen.findByText(/This visit changed since it was opened/)).toBeInTheDocument();
+    const payload = JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'POST')[1].body);
+    expect(payload.expectedVisit).toEqual({
+      customerId: 'customer-a', propertyId: 'property-a', catalogServiceId: 'catalog-a', serviceType: 'Pest Control', scheduledDate: '2026-01-01',
+      address: { line1: '100 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' },
+    });
+    expect(noteInput()).toHaveValue('Treatment.');
   });
 
   it('warns before unloading dirty edits that device storage could not save', async () => {
