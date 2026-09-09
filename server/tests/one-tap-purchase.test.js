@@ -693,12 +693,13 @@ describe('confirm', () => {
     expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
   });
 
-  test('an expired hold mid-confirm 409s and returns the purchase to pick-a-time', async () => {
+  test.each([['commitReservation', 'RESERVATION_EXPIRED'], ['prepareReservationCommit', 'SLOT_UNAVAILABLE']])('%s failure returns the purchase to pick-a-time', async (method, code) => {
     const err = new Error('reservation expired');
-    err.code = 'RESERVATION_EXPIRED';
-    slotReservation.commitReservation.mockRejectedValue(err);
+    err.code = code;
+    if (method === 'prepareReservationCommit') err.status = 409;
+    slotReservation[method].mockRejectedValueOnce(err);
     await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
-      .rejects.toMatchObject({ status: 409, code: 'RESERVATION_EXPIRED' });
+      .rejects.toMatchObject({ status: 409, code });
     expect(db.__state.tables.one_tap_purchases[0].status).toBe('initiated');
     expect(db.__state.tables.one_tap_purchases[0].scheduled_service_id).toBeNull();
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();

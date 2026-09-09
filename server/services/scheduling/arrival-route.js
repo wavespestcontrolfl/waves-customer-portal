@@ -310,7 +310,6 @@ function routeFingerprint(context) {
   // Prospective creation time is bookkeeping, not a changed route input.
   for (const row of rows) if (row.id === '__candidate__') row.created_at = null;
   return createHash('sha256').update(JSON.stringify({ rows,
-    members: currentOrder(context.visitMembers || []),
     blocks: [...(context.blocks || [])].sort((a, b) => String(a.id).localeCompare(String(b.id))) })).digest('hex');
 }
 
@@ -344,7 +343,7 @@ async function prepareArrivalCapacity(options) {
   return { options, fingerprint: routeFingerprint(context), travel: context.travel };
 }
 
-async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, durationMinutes } = {}) {
+async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, durationMinutes, serviceTypes } = {}) {
   if (!prepared || (!capacityEnabled() && !prepared.options.preserveCapacity)) throw capacityError();
   const context = await loadArrivalRouteContext({ ...prepared.options, conn, travel: prepared.travel });
   if (!context || routeFingerprint(context) !== prepared.fingerprint) throw capacityError();
@@ -352,14 +351,13 @@ async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, d
     ...(windowStart ? { windowStart } : {}), ...(windowEnd ? { windowEnd } : {}),
     ...(durationMinutes ? { durationMinutes } : {}), bufferMinutes: 0 });
   if (!fit.feasible) throw capacityError(fit.reason);
-  await assertCapacityEligibility(conn, context);
+  await assertCapacityEligibility(conn, context, serviceTypes);
   return fit;
 }
 
-async function assertCapacityEligibility(conn, context) {
+async function assertCapacityEligibility(conn, context, serviceTypes) {
   await require('../technician-eligibility').assertAssignableTechnician(context.target.technician_id, { conn });
-  const members = (context.fixedOrder ? [...context.rows, ...(context.visitMembers || []), context.target]
-    .filter(row => row.technician_id === context.target.technician_id && row.status !== 'completed') : context.visitMembers)
+  const members = serviceTypes?.map(service_type => ({ service_type }))
     || context.target.reservation_service_mix?.services?.map(service_type => ({ service_type }))
     || [context.target];
   await require('../technician-capabilities').assertCapabilitiesActive(conn, context.target.technician_id, members,
@@ -377,6 +375,19 @@ async function persistArrivalOrder(conn, fit, targetId) {
       .whereRaw('route_order IS DISTINCT FROM ?', [i + 1]).update({ route_order: i + 1 });
   }
   await recordCapacityDecision(conn, fit, targetId);
+}
+
+// Conversion expands a certified combined anchor without changing its route position.
+async function persistCapacityAllocation(conn, anchor, memberIds) {
+  const rows = await conn('scheduled_services').where({ scheduled_date: dateOnly(anchor.scheduled_date),
+    technician_id: anchor.technician_id }).select('id', 'route_order', 'window_start', 'created_at');
+  const order = currentOrder(rows).filter(row => row.id === anchor.id || !memberIds.includes(row.id))
+    .flatMap(row => row.id === anchor.id ? memberIds : [row.id]);
+  if (!order.includes(anchor.id)) throw capacityError();
+  for (const [index, id] of order.entries()) await conn('scheduled_services').where({ id }).update({ route_order: index + 1 });
+  await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.capacity_allocated',
+    resource_type: 'scheduled_service', resource_id: anchor.id, critical: true, trx: conn,
+    metadata: { route_order: order, allocated_service_ids: memberIds } });
 }
 
 async function recordCapacityDecision(conn, fit, targetId) {
@@ -398,5 +409,5 @@ module.exports = {
   arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
-  prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, capacityError,
+  prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
 };

@@ -5871,6 +5871,8 @@ const EstimateConverter = {
         await database('scheduled_services').where({ id: reservedStart.id }).update(
           VisitCapacity.windowForCapacityService(reservedStart, 0),
         );
+        if (combinedCapacity.version === 2) await require('./scheduling/arrival-route').persistCapacityAllocation(
+          database, reservedStart, allocation.reservation_service_mix.allocatedServiceIds);
         Object.assign(reservedStart, allocation);
       }
 

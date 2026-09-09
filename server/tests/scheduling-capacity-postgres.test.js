@@ -116,19 +116,6 @@ describeDb('scheduling capacity on PostgreSQL', () => {
     expect((await mockPg('scheduled_services').where({ id: booked.id }).first()).route_order).toBe(1);
   });
 
-  test('the earliest recommendation and complete day use the same signed slot identity', async () => {
-    let ticks = Date.now();
-    const tickingClock = jest.spyOn(Date, 'now').mockImplementation(() => ++ticks);
-    try {
-      const availability = await require('../services/estimate-slot-availability').getAvailableSlots(estimateIds[0], {
-        dateFrom: date, dateTo: date, includeWeekends: true,
-      });
-      expect(availability.primary.length).toBeGreaterThan(0);
-      expect(availability.calendar.days[0].openingCount).toBeGreaterThan(0);
-      expect(availability.selectedDay.slots.map(slot => slot.slotId)).toContain(availability.primary[0].slotId);
-    } finally { tickingClock.mockRestore(); }
-  });
-
   test('concurrent customers cannot both consume the final thirty minutes', async () => {
     await mockPg('scheduled_services').insert(baseStop({ window_start: '08:00', window_end: '16:00',
       estimated_duration_minutes: 480, route_order: 1 }));
@@ -171,6 +158,29 @@ describeDb('scheduling capacity on PostgreSQL', () => {
     expect(booked).toMatchObject({ estimated_duration_minutes: 120,
       reservation_service_mix: { version: 1, durationMinutes: 120 }, window_end: '11:00:00' });
     expect((await mockPg('scheduled_services').where({ id: current.scheduledServiceId }).first()).estimated_duration_minutes).toBe(30);
+  });
+
+  test('acceptance checks a changed single-service selection against live capabilities', async () => {
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
+    await mockPg('estimates').where({ id: estimateIds[0] }).update({ estimate_data: estimateData(['lawn_care']) });
+    await mockPg('technician_capabilities').insert({ technician_id: technicianId, service_category: 'lawn', active: false });
+    await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId }))
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'technician_unavailable' });
+    expect((await mockPg('scheduled_services').where({ id: held.scheduledServiceId }).first()).customer_id).toBeNull();
+  });
+
+  test('conversion keeps companions beside their anchor ahead of the next appointment', async () => {
+    const { persistCapacityAllocation, groupRouteStops } = require('../services/scheduling/arrival-route');
+    const visit_id = randomUUID();
+    const anchor = baseStop({ visit_id, route_order: 1 });
+    const companion = baseStop({ visit_id, service_type: 'Lawn Care', route_order: null });
+    const next = baseStop({ window_start: '12:00', window_end: '12:30', route_order: 2 });
+    await mockPg('scheduled_services').insert([anchor, companion, next]);
+    await mockPg.transaction(trx => persistCapacityAllocation(trx, anchor, [anchor.id, companion.id]));
+    const rows = await mockPg('scheduled_services').orderBy('route_order');
+    expect(rows.map(row => row.id)).toEqual([anchor.id, companion.id, next.id]);
+    expect(groupRouteStops(rows)[0].memberIds).toEqual([anchor.id, companion.id]);
+    expect(await mockPg('audit_log').where({ action: 'schedule.capacity_allocated' })).toHaveLength(1);
   });
 
 });

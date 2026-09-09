@@ -861,9 +861,9 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   if (!card) throw httpError(402, 'A saved payment method is required to confirm.', { needsCard: true });
 
   const EstimateConverter = require('./estimate-converter');
-  const preparedReservationCapacity = await slotReservation.prepareReservationCommit(purchase.scheduled_service_id, { serviceMode: 'recurring' });
   let txOut;
   try {
+    const preparedReservationCapacity = await slotReservation.prepareReservationCommit(purchase.scheduled_service_id, { serviceMode: 'recurring' });
     txOut = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // copied from the estimate-accept txn, which documents the real

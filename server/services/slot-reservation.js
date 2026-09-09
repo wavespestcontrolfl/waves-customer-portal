@@ -894,6 +894,7 @@ async function reserveSlot({
       if (useCapacity && !holdPin) throw capacityError('address_changed');
       const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
         conn: trx, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
+        serviceTypes: serviceProfile.services.map(service => service.label || service.service),
       }) : null;
       // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
       // graduated visit carries it even if the profile can't be re-resolved
@@ -1433,6 +1434,7 @@ async function commitReservation({
 
     const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
       conn: client, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
+      serviceTypes: serviceProfile?.services.map(service => service.label || service.service),
     }) : null;
 
     if (windowEnd && !useCapacity) {

@@ -1103,26 +1103,6 @@ function splitSlotResults(slots, maxResults, expanderMaxResults) {
   };
 }
 
-function distinctArrivalWindows(slots) {
-  const windows = new Map();
-  for (const slot of slots) {
-    const key = `${slot.date}|${slot.windowStart}`;
-    if (!windows.has(key)) windows.set(key, slot);
-  }
-  return [...windows.values()];
-}
-
-function calendarSummary(slots, rangeFrom, rangeTo) {
-  const days = new Map();
-  for (const slot of distinctArrivalWindows(slots)) {
-    if (!days.has(slot.date)) days.set(slot.date, { date: slot.date, openingCount: 0, nearby: false });
-    const day = days.get(slot.date);
-    day.openingCount++;
-    day.nearby ||= !!slot.routeOptimal;
-  }
-  return { rangeFrom, rangeTo, days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)) };
-}
-
 function dateWithTimeSlotId(date, windowStart, techId) {
   return `${date}_${String(windowStart).replace(':', '-')}_${techId || 'unassigned'}`;
 }
@@ -1346,15 +1326,6 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
     .sort(compareCustomerFacingSlots);
   if (!sorted.length) return [];
 
-  if (capacityEnabled()) {
-    const unique = distinctArrivalWindows(sorted);
-    const earliest = unique[0];
-    const recommended = unique.slice(1).sort((a, b) =>
-      (a.recommendationScore ?? Infinity) - (b.recommendationScore ?? Infinity)
-      || compareCustomerFacingSlots(a, b));
-    return [earliest, ...diversifyByDay(recommended)].slice(0, safeLimit);
-  }
-
   const diversified = routeFirst ? routeFirstOrder(sorted) : diversifyByDay(sorted);
 
   // Scarce first day (≤2 bookable windows): pin ALL of that day's slots
@@ -1576,7 +1547,7 @@ function stampSlotRainChances(slots, outlook) {
 // `{ slotId }` untouched. reserveSlot refuses any slotId that doesn't verify,
 // so the constraint checks it also runs are defense-in-depth, not the gate.
 // Runs LAST (after dedupe/spread/selection, which key off the base slotId).
-function signCustomerFacingSlots(slots, estimateId, offeredAt = Date.now()) {
+function signCustomerFacingSlots(slots, estimateId) {
   return (Array.isArray(slots) ? slots : []).map((slot) => {
     const offer = signSlotOffer({
       surface: 'estimate',
@@ -1585,7 +1556,7 @@ function signCustomerFacingSlots(slots, estimateId, offeredAt = Date.now()) {
       startMinutes: timeToMinutes(slot.windowStart),
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
-    }, offeredAt);
+    });
     return { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
   });
 }
@@ -1606,7 +1577,7 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
     windowStart,
     windowEnd,
     durationMinutes,
-    ...(capacityEnabled() ? { routeMode: slot.route_mode, recommendationScore: slot.score } : {}),
+    ...(capacityEnabled() ? { routeMode: slot.route_mode } : {}),
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,
     routeOptimal,
@@ -1620,10 +1591,7 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
 
 async function getAvailableSlots(estimateId, userOpts = {}) {
   const opts = { ...DEFAULT_OPTS, ...userOpts };
-  if (capacityEnabled() && opts.dateFrom && opts.dateFrom === opts.dateTo) {
-    opts.maxResults = Number.MAX_SAFE_INTEGER;
-    opts.expanderMaxResults = 0;
-  }
+
 
   const estimate = await db('estimates').where({ id: estimateId }).first();
   if (!estimate) {
@@ -1809,7 +1777,6 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const fallback = {
       primary: signCustomerFacingSlots(primary, estimateId),
       expander: signCustomerFacingSlots(expander, estimateId),
-      ...(capacityEnabled() ? { calendar: calendarSummary([], dateFrom, dateTo), selectedDay: null } : {}),
       nearby: [...primary, ...expander].some((s) => s.routeOptimal),
       metadata: {
         // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -1916,19 +1883,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   stampSlotRainChances(primary, rainOutlook);
   stampSlotRainChances(expander, rainOutlook);
 
-  // The same window appears in both recommendations and the full day.
-  // One signing time gives it one identity, including its expiry/HMAC.
-  const offeredAt = Date.now();
   const result = {
     // Signed at the edge; the 5-min wrapper cache stores the SIGNED result,
     // well inside the offer TTL (see slot-offer-token.js).
-    primary: signCustomerFacingSlots(primary, estimateId, offeredAt),
-    expander: signCustomerFacingSlots(expander, estimateId, offeredAt),
-    ...(capacityEnabled() ? {
-      calendar: calendarSummary(allBookable, dateFrom, dateTo),
-      selectedDay: allBookable.length ? { date: allBookable[0].date,
-        slots: signCustomerFacingSlots(distinctArrivalWindows(allBookable.filter(slot => slot.date === allBookable[0].date)), estimateId, offeredAt) } : null,
-    } : {}),
+    primary: signCustomerFacingSlots(primary, estimateId),
+    expander: signCustomerFacingSlots(expander, estimateId),
     nearby: [...primary, ...expander].some((s) => s.routeOptimal),
     metadata: {
       // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -2017,7 +1976,6 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   return {
     summary: summarizeWindow(when, { count: primary.length + expander.length, nearby }),
     understood: when.understood,
-    ...(result.calendar ? { calendar: result.calendar, selectedDay: result.selectedDay } : {}),
     window: { date_from: when.dateFrom, date_to: when.dateTo },
     time_of_day: when.timeOfDay,
     nearby,
