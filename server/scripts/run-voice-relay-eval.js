@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * Manually replay synthetic voice scenarios with deterministic grading.
+ * Manually replay synthetic voice scenarios with deterministic and optional judged grading.
  * Run in this dedicated process: the harness patches the live relay's world.
- * Requires ANTHROPIC_API_KEY for Sandy; no database, notifications or cron.
+ * Requires ANTHROPIC_API_KEY for Sandy; --judge opts into the registered judge.
+ * The judged layer may write ordinary LLM ledger/trace rows when those gates are on.
  *
- * Usage: node server/scripts/run-voice-relay-eval.js [--json]
+ * Usage: node server/scripts/run-voice-relay-eval.js [--json] [--judge]
  *        [--only=booking-happy-path,slot-gone] [--fixture=path/to/scenarios.json]
  * Exit: 0 = checks passed; 1 = checks failed; 2 = replay could not run.
  */
@@ -16,7 +17,7 @@ const ARGS = Object.fromEntries(process.argv.slice(2).map((arg) => {
 }));
 
 function printReport(run, summaryLine) {
-  console.log('\n-- Voice relay deterministic eval --\n');
+  console.log('\n-- Voice relay eval --\n');
   console.log(`Status: ${run.failed ? 'fail' : 'pass'}`);
   console.log(summaryLine(run.summary));
   for (const scenario of run.results) {
@@ -31,10 +32,10 @@ function printReport(run, summaryLine) {
 (async function main() {
   try {
     if (ARGS.json) logger.transports.forEach((t) => { t.silent = true; });
-    const unknown = Object.keys(ARGS).filter((key) => !['json', 'only', 'fixture'].includes(key));
+    const unknown = Object.keys(ARGS).filter((key) => !['json', 'only', 'fixture', 'judge'].includes(key));
     if (unknown.length) throw new Error(`Unsupported argument(s): ${unknown.join(', ')}`);
     const { runVoiceRelayReplay, summaryLine } = require('../services/eval/voice-relay-replay');
-    const opts = {};
+    const opts = { judge: ARGS.judge === true };
     if (ARGS.fixture) opts.fixturePath = ARGS.fixture;
     if (ARGS.only) opts.only = String(ARGS.only).split(',').map((s) => s.trim()).filter(Boolean);
     const run = await runVoiceRelayReplay(opts);
