@@ -202,6 +202,13 @@ Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
   refused — ruling R2 pending, contacts stay per profile); the primary
   property or no `propertyId` = today's profile write. The Visits tab's
   Appointment-texts card follows the page's selected house.
+- **Shadow-log hygiene.** One row per (property, visit, seam) — the resolver
+  writes `ON CONFLICT DO NOTHING` on the unique index from
+  `20260909000031`, on the ROOT db handle (never a caller's transaction),
+  only in shadow mode, and only where the two rules CAN disagree (a chosen
+  toggle, or a rental / managed house); an inheriting house with no chosen
+  toggle agrees by construction and is not logged. The scheduler prunes rows
+  older than 90 days (daily 3:35 AM ET).
 - **Shadow-log review (read-only, prod)** before flipping
   `GATE_APP_PROPERTY_TEXTS` — one week, expect `agreed = true` for every
   inheriting house and `false` only where a rental/managed house would go

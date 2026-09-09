@@ -37,9 +37,12 @@ const CUSTOMER_PREFS = { customer_id: 'c1', appointment_confirmation: true, serv
 
 function chain(rows, { onInsert, onUpdate } = {}) {
   const c = { calls: [] };
-  for (const m of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'forUpdate']) c[m] = jest.fn((...a) => { c.calls.push([m, ...a]); return c; });
+  for (const m of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'forUpdate', 'onConflict']) c[m] = jest.fn((...a) => { c.calls.push([m, ...a]); return c; });
   c.first = jest.fn(async () => rows[0]);
-  c.insert = jest.fn(async (r) => { if (onInsert) onInsert(r); return [1]; });
+  // insert(...).onConflict('property_id').merge(updates) — the upsert the
+  // route uses; a bare insert stays awaitable for the profile path.
+  c.insert = jest.fn((r) => { c.pendingInsert = r; c.then = (resolve, reject) => Promise.resolve((onInsert && onInsert(r), [1])).then(resolve, reject); return c; });
+  c.merge = jest.fn(async (u) => { if (onInsert) onInsert({ ...c.pendingInsert, ...u }); return [1]; });
   c.update = jest.fn(async (r) => { if (onUpdate) onUpdate(r); return 1; });
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;
@@ -63,7 +66,7 @@ function setDb({ propertyRows = [], property = null, prefsRow = CUSTOMER_PREFS }
     if (table === 'notification_prefs') return chain([prefsRow], { onUpdate: (r) => writes.push(['notification_prefs', r]) });
     if (table === 'property_notification_prefs') {
       return chain(propertyRowState, {
-        onInsert: (r) => { writes.push(['insert', r]); propertyRowState = [{ property_id: r.property_id, ...r }]; },
+        onInsert: (r) => { writes.push(['upsert', r]); propertyRowState = [{ ...(propertyRowState[0] || {}), ...r }]; },
         onUpdate: (r) => { writes.push(['update', r]); propertyRowState = [{ ...(propertyRowState[0] || {}), ...r }]; },
       });
     }
@@ -111,18 +114,19 @@ describe('GET /property-preferences (saved scope)', () => {
 });
 
 describe('PUT /property-preferences/:customerId with propertyId', () => {
-  test('non-primary: inserts the property row on first save, updates after, never touches notification_prefs', async () => {
+  test('non-primary: upserts the property row under the comms lock (insert … on conflict merge), never touches notification_prefs', async () => {
     setDb({ property: { id: 'pr', customer_id: 'c1', is_primary: false, active: true, relationship: 'rental_owned', label: null, address_line1: '3 Rent Rd' } });
     let res = await fetch(`${base}/notifications/property-preferences/c1`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ propertyId: '6f1c2e2a-1111-4a2b-8c3d-0123456789ab', techEnRoute: true }) });
     expect(res.status).toBe(200);
     let body = await res.json();
     expect(body.preferences).toMatchObject({ techEnRoute: true, techArrived: false, appointmentConfirmation: false });
-    expect(writes[0][0]).toBe('insert');
+    expect(writes[0][0]).toBe('upsert');
     expect(writes[0][1]).toMatchObject({ property_id: 'pr', customer_id: 'c1', tech_en_route: true });
     expect(writes.some(([t]) => t === 'notification_prefs')).toBe(false);
+    expect(require('../utils/customer-comms-lock').withCustomerCommsLock).toHaveBeenCalledWith(expect.anything(), 'c1', expect.any(Function));
     res = await fetch(`${base}/notifications/property-preferences/c1`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ propertyId: '6f1c2e2a-1111-4a2b-8c3d-0123456789ab', techArrived: true }) });
     body = await res.json();
-    expect(writes[writes.length - 1][0]).toBe('update');
+    expect(writes[writes.length - 1][0]).toBe('upsert');
     expect(body.preferences).toMatchObject({ techEnRoute: true, techArrived: true });
   });
   test('the PRIMARY property writes the profile row (today\'s path)', async () => {
@@ -130,7 +134,7 @@ describe('PUT /property-preferences/:customerId with propertyId', () => {
     const res = await fetch(`${base}/notifications/property-preferences/c1`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ propertyId: '6f1c2e2a-1111-4a2b-8c3d-0123456789ab', techEnRoute: false }) });
     expect(res.status).toBe(200);
     expect(writes.some(([t, r]) => t === 'notification_prefs' && r.tech_en_route === false)).toBe(true);
-    expect(writes.some(([t]) => t === 'insert' || t === 'update')).toBe(false);
+    expect(writes.some(([t]) => t === 'upsert' || t === 'update')).toBe(false);
   });
   test('contacts on a non-primary property are refused (contacts stay per profile)', async () => {
     setDb({ property: { id: 'pb', customer_id: 'c1', is_primary: false, active: true, relationship: 'family_home' } });

@@ -9,7 +9,9 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/property-notification-prefs', () => ({
   prefsForVisit: jest.fn(async (prefs) => prefs),
+  resolveAppointmentPrefs: jest.fn(async ({ prefs }) => ({ prefs, property: null, propertyDecided: false, propertyToggles: null })),
   APPOINTMENT_TOGGLES: ['appointment_confirmation', 'service_reminder_72h', 'service_reminder_24h', 'tech_en_route', 'tech_arrived'],
+  PROPERTY_PREF_COLUMNS: ['appointment_confirmation', 'service_reminder_72h', 'service_reminder_24h', 'tech_en_route', 'tech_arrived', 'appointment_notify_primary'],
 }));
 
 const db = require('../models/db');
@@ -28,6 +30,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   Prefs.prefsForVisit.mockReset();
   Prefs.prefsForVisit.mockImplementation(async (prefs) => prefs);
+  Prefs.resolveAppointmentPrefs.mockReset();
+  Prefs.resolveAppointmentPrefs.mockImplementation(async ({ prefs }) => ({ prefs, property: null, propertyDecided: false, propertyToggles: null }));
   db.mockImplementation((table) => {
     if (table === 'notification_prefs') return chain([PREFS]);
     if (table === 'customers') return chain([{ id: 'c1', first_name: 'Pat', last_name: 'Q', phone: '+19415550100', account_id: 'a1', is_primary_profile: true }]);
@@ -68,24 +72,44 @@ describe('bell preference check', () => {
     Prefs.prefsForVisit.mockRejectedValueOnce(new Error('down'));
     expect(await customerPreferenceEnabled('c1', 'tech_en_route', { scheduledServiceId: 'v1' })).toBe(false);
   });
+  test('a key the property never owns (service_completed) skips the resolver even with a visit', async () => {
+    expect(await customerPreferenceEnabled('c1', 'service_completed', { scheduledServiceId: 'v1' })).toBe(true);
+    expect(Prefs.prefsForVisit).not.toHaveBeenCalled();
+  });
 });
 
 describe('consent validator', () => {
-  const { loadContactState } = require('../services/messaging/validators/consent');
-  test('an appointment send names its visit: the per-purpose toggles come from the property', async () => {
-    Prefs.prefsForVisit.mockResolvedValueOnce({ ...PREFS, tech_arrived: false });
+  const { loadContactState, checkConsentForPurpose } = require('../services/messaging/validators/consent');
+  test('an appointment send names its visit: the property decision lands in propertyToggles, the prefs row is untouched', async () => {
+    Prefs.resolveAppointmentPrefs.mockResolvedValueOnce({ prefs: { ...PREFS, tech_arrived: false }, property: { id: 'pb' }, propertyDecided: true });
     const state = await loadContactState({ customerId: 'c1', appointmentId: 'v1', purpose: 'tech_arrived' });
-    expect(Prefs.prefsForVisit).toHaveBeenCalledWith(PREFS, 'c1', 'v1', 'consent', expect.anything());
-    expect(state.prefs.tech_arrived).toBe(false);
+    expect(Prefs.resolveAppointmentPrefs).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', scheduledServiceId: 'v1', prefs: PREFS, source: 'consent' }), expect.anything());
+    expect(state.prefs).toEqual(PREFS);
+    expect(state.propertyToggles.tech_arrived).toBe(false);
     expect(state.lookupFailed).toBe(false);
+    const verdict = await checkConsentForPurpose({ customerId: 'c1', purpose: 'tech_arrived', channel: 'sms', audience: 'customer' },
+      { requireConsent: 'transactional', prefsColumn: 'tech_arrived' }, { ...state, suppressionLoaded: true });
+    expect(verdict.ok).toBe(false);
+  });
+  test('a customer with NO prefs row still gets the ruling-R1 decision without minting a row', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return chain([]);
+      if (table === 'customers') return chain([{ id: 'c1', first_name: 'Pat', last_name: 'Q', phone: '+19415550100' }]);
+      return chain([]);
+    });
+    Prefs.resolveAppointmentPrefs.mockResolvedValueOnce({ prefs: { tech_en_route: false }, property: { id: 'pr' }, propertyDecided: true });
+    const state = await loadContactState({ customerId: 'c1', appointmentId: 'v1', purpose: 'tech_en_route' });
+    expect(Prefs.resolveAppointmentPrefs).toHaveBeenCalledWith(expect.objectContaining({ prefs: {} }), expect.anything());
+    expect(state.prefs).toBeUndefined();
+    expect(state.propertyToggles.tech_en_route).toBe(false);
   });
   test('no appointmentId: untouched', async () => {
     const state = await loadContactState({ customerId: 'c1', purpose: 'tech_arrived' });
-    expect(Prefs.prefsForVisit).not.toHaveBeenCalled();
+    expect(Prefs.resolveAppointmentPrefs).not.toHaveBeenCalled();
     expect(state.prefs).toEqual(PREFS);
   });
   test('a resolver failure is a lookup failure (CONSENT_LOOKUP_FAILED → retry), not the customer row', async () => {
-    Prefs.prefsForVisit.mockRejectedValueOnce(new Error('down'));
+    Prefs.resolveAppointmentPrefs.mockRejectedValueOnce(new Error('down'));
     const state = await loadContactState({ customerId: 'c1', appointmentId: 'v1', purpose: 'tech_arrived' });
     expect(state.lookupFailed).toBe(true);
   });

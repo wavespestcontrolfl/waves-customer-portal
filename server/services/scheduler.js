@@ -2466,6 +2466,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:35AM ET — Purge property_text_decisions older than 90 days (the
+  // ruling-R5 shadow log for appointment texts by saved property; the review
+  // window is one week, 90 days keeps the flip's evidence around).
+  // =========================================================================
+  cron.schedule('35 3 * * *', async () => {
+    try {
+      const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const db = require('../models/db');
+      if (!(await db.schema.hasTable('property_text_decisions'))) return;
+      const purged = await db('property_text_decisions').where('created_at', '<', cutoff).del();
+      if (purged > 0) {
+        logger.info(`[property-texts-purge] Removed ${purged} property_text_decisions row(s) older than 90 days`);
+      }
+    } catch (err) {
+      logger.error(`property_text_decisions purge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 5AM — Newsletter event normalization (P3b leg 3). One hour
   // after ingestion so newly-pulled rows get Claude venue extraction +
   // Google geocoding in the same day. Capped at 50 rows per run so the

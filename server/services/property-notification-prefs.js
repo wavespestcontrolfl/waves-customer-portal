@@ -28,18 +28,20 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const { appPropertyScopeEnabled } = require('./account-properties');
+const { SECONDARY_PROFILE_APPOINTMENT_TEXTS_OFF } = require('./customer-default-rows');
+const { PROPERTY_RELATIONSHIPS } = require('../constants/property-relationships');
 
-const APPOINTMENT_TOGGLES = Object.freeze([
-  'appointment_confirmation',
-  'service_reminder_72h',
-  'service_reminder_24h',
-  'tech_en_route',
-  'tech_arrived',
-]);
+// The five appointment toggles = the columns the 2026-09-06 "start quiet"
+// ruling already names for sibling profiles (customer-default-rows) — one
+// definition of the shape for both readers of that ruling.
+const APPOINTMENT_TOGGLES = Object.freeze(Object.keys(SECONDARY_PROFILE_APPOINTMENT_TEXTS_OFF));
 const PROPERTY_PREF_COLUMNS = Object.freeze([...APPOINTMENT_TOGGLES, 'appointment_notify_primary']);
-// Ruling R1: relationships whose appointment texts start OFF (mirrors the
-// 2026-09-06 "rentals default off" ruling for sibling profiles).
+// Ruling R1: relationships whose appointment texts start OFF (the same ruling
+// for saved properties). Vocabulary: constants/property-relationships.js.
 const QUIET_RELATIONSHIPS = Object.freeze(['rental_owned', 'managed_for_client']);
+for (const rel of QUIET_RELATIONSHIPS) {
+  if (!PROPERTY_RELATIONSHIPS.includes(rel)) throw new Error(`property-notification-prefs: unknown relationship "${rel}"`);
+}
 
 function propertyTextsEnforced() {
   return appPropertyScopeEnabled() && gateEnvValue('GATE_APP_PROPERTY_TEXTS');
@@ -52,9 +54,12 @@ function isQuietRelationship(relationship) {
 // The ruling-R1 default for every column, from the CUSTOMER row (a missing
 // row = the table defaults, every toggle on).
 function defaultPropertyToggles(property, customerPrefs = {}) {
-  const quiet = isQuietRelationship(property?.relationship);
   const out = {};
-  for (const col of APPOINTMENT_TOGGLES) out[col] = quiet ? false : customerPrefs?.[col] !== false;
+  if (isQuietRelationship(property?.relationship)) {
+    Object.assign(out, SECONDARY_PROFILE_APPOINTMENT_TEXTS_OFF);
+  } else {
+    for (const col of APPOINTMENT_TOGGLES) out[col] = customerPrefs?.[col] !== false;
+  }
   out.appointment_notify_primary = customerPrefs?.appointment_notify_primary !== false;
   return out;
 }
@@ -96,22 +101,32 @@ async function propertyPrefsRow(propertyId, knex = db) {
   return knex('property_notification_prefs').where({ property_id: propertyId }).first(...PROPERTY_PREF_COLUMNS);
 }
 
-async function recordDecision({ customerId, property, scheduledServiceId, source, customer, effective, enforced }, knex = db) {
+// The ruling-R5 shadow row: one per (property, visit, seam), only while the
+// comparison has a reader (shadow mode) and only where the two rules CAN
+// disagree — an inheriting house with no chosen toggle agrees by
+// construction and would only inflate the review counts. Always written on
+// the ROOT handle (never a caller's transaction: a failed best-effort insert
+// on a handoff trx would abort it) and best-effort — it never decides a send.
+// Retention: the scheduler prunes rows older than 90 days.
+async function recordDecision({ customerId, property, scheduledServiceId, source, customer, effective, row, enforced }) {
   const agreed = PROPERTY_PREF_COLUMNS.every((col) => customer[col] === effective[col]);
+  if (enforced || (!row && !isQuietRelationship(property.relationship))) return agreed;
   try {
-    await knex('property_text_decisions').insert({
-      customer_id: customerId,
-      property_id: property.id,
-      scheduled_service_id: scheduledServiceId || null,
-      source: String(source || 'unknown').slice(0, 40),
-      relationship: property.relationship || null,
-      customer_decisions: JSON.stringify(customer),
-      property_decisions: JSON.stringify(effective),
-      agreed,
-      enforced,
-    });
+    await db('property_text_decisions')
+      .insert({
+        customer_id: customerId,
+        property_id: property.id,
+        scheduled_service_id: scheduledServiceId,
+        source: String(source || 'unknown').slice(0, 40),
+        relationship: property.relationship || null,
+        customer_decisions: JSON.stringify(customer),
+        property_decisions: JSON.stringify(effective),
+        agreed,
+        enforced,
+      })
+      .onConflict(['property_id', 'scheduled_service_id', 'source'])
+      .ignore();
   } catch (err) {
-    // Best-effort WRITE: the shadow log must never decide a send.
     logger.warn(`[property-texts] shadow log write failed for property ${property.id}: ${err.message}`);
   }
   return agreed;
@@ -142,13 +157,15 @@ async function resolveAppointmentPrefs({ customerId, scheduledServiceId = null, 
     if (!property) return unchanged;
     row = await propertyPrefsRow(property.id, knex);
   } catch (err) {
-    if (enforced) throw err;
+    // A caller's transaction must never be left aborted behind a swallowed
+    // read (the consent validator's handoff lock) — rethrow on a trx.
+    if (enforced || knex.isTransaction) throw err;
     logger.warn(`[property-texts] property lookup failed for visit ${scheduledServiceId} (shadow mode, customer row kept): ${err.message}`);
     return unchanged;
   }
   const customer = customerToggles(prefs || {});
   const effective = effectivePropertyToggles(property, row, prefs || {});
-  await recordDecision({ customerId, property, scheduledServiceId, source, customer, effective, enforced }, knex);
+  await recordDecision({ customerId, property, scheduledServiceId, source, customer, effective, row, enforced });
   if (!enforced) return { ...unchanged, property, propertyToggles: effective };
   return { prefs: { ...(prefs || {}), ...effective }, property, propertyDecided: true, propertyToggles: effective };
 }

@@ -5416,7 +5416,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                   </div>
                 )}
                 <div style={{ fontSize: 15, color: muted, marginTop: 10 }}>
-                  {perPropertyTexts
+                  {perPropertyTexts && !shownTextsEntry
+                    ? 'Select a property above to manage its appointment texts.'
+                    : perPropertyTexts
                     ? (shownTextsEntry?.isPrimaryProperty
                       ? 'Your primary residence gets every alert unless you turn one off.'
                       : shownTextsEntry?.quietByDefault

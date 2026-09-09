@@ -57,11 +57,15 @@ async function customerPreferenceEnabled(customerId, preferenceKey, { scheduledS
   }
 
   try {
+    const PropertyTexts = require('./property-notification-prefs');
+    // Only the five appointment keys are property-owned; the resolver needs
+    // the whole toggle set of the customer row to compare against.
+    const propertyOwned = !!scheduledServiceId && PropertyTexts.APPOINTMENT_TOGGLES.includes(preferenceKey);
     let prefs = await db('notification_prefs')
       .where({ customer_id: customerId })
-      .first(preferenceKey);
-    if (scheduledServiceId) {
-      prefs = await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'bell');
+      .first(...(propertyOwned ? [...new Set([...PropertyTexts.PROPERTY_PREF_COLUMNS, preferenceKey])] : [preferenceKey]));
+    if (propertyOwned) {
+      prefs = await PropertyTexts.prefsForVisit(prefs, customerId, scheduledServiceId, 'bell');
     }
     return !prefs || prefs[preferenceKey] !== false;
   } catch (err) {

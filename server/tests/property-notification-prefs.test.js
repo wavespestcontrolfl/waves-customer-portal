@@ -18,9 +18,10 @@ const PRIMARY = { ...SECONDARY, id: 'pa', is_primary: true };
 
 function chain(rows) {
   const c = {};
-  for (const m of ['where', 'whereIn', 'select', 'orderBy', 'limit']) c[m] = jest.fn(() => c);
+  for (const m of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'onConflict']) c[m] = jest.fn(() => c);
   c.first = jest.fn(async () => rows[0]);
-  c.insert = jest.fn(async () => [1]);
+  c.insert = jest.fn(() => c);
+  c.ignore = jest.fn(async () => [1]);
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;
 }
@@ -32,7 +33,7 @@ function setDb({ visit, property, row, failOn = null }) {
     if (table === 'scheduled_services') return chain(visit ? [visit] : []);
     if (table === 'customer_properties') return chain(property ? [property] : []);
     if (table === 'property_notification_prefs') return chain(row ? [row] : []);
-    if (table === 'property_text_decisions') { const c = chain([]); c.insert = jest.fn(async (r) => { inserts.push(r); return [1]; }); return c; }
+    if (table === 'property_text_decisions') { const c = chain([]); c.insert = jest.fn((r) => { inserts.push(r); return c; }); return c; }
     throw new Error(`unexpected table ${table}`);
   });
 }
@@ -79,11 +80,26 @@ describe('resolveAppointmentPrefs', () => {
     expect(JSON.parse(inserts[0].property_decisions).tech_en_route).toBe(false);
     expect(JSON.parse(inserts[0].customer_decisions).tech_en_route).toBe(true);
   });
-  test('shadow: an inheriting family home with no chosen toggle logs agreed=true', async () => {
+  test('shadow: an inheriting family home with NO chosen toggle agrees by construction — not logged; with a chosen toggle it is', async () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true';
     setDb({ visit: { property_id: 'pb' }, property: SECONDARY, row: null });
     await Prefs.resolveAppointmentPrefs({ customerId: 'c1', scheduledServiceId: 'v1', prefs: CUSTOMER, source: 'reminders' });
-    expect(inserts[0].agreed).toBe(true);
+    expect(inserts).toHaveLength(0);
+    setDb({ visit: { property_id: 'pb' }, property: SECONDARY, row: { tech_en_route: false } });
+    await Prefs.resolveAppointmentPrefs({ customerId: 'c1', scheduledServiceId: 'v1', prefs: CUSTOMER, source: 'reminders' });
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].agreed).toBe(false);
+  });
+  test('the shadow row is written on the ROOT handle with a dedupe key, never on a caller transaction; a trx read failure rethrows', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    setDb({ visit: { property_id: 'pr' }, property: RENTAL, row: null });
+    const trxCalls = [];
+    const trx = Object.assign((table) => { trxCalls.push(table); return db(table); }, { isTransaction: true });
+    await Prefs.resolveAppointmentPrefs({ customerId: 'c1', scheduledServiceId: 'v1', prefs: CUSTOMER, source: 'consent' }, trx);
+    expect(inserts).toHaveLength(1);
+    expect(trxCalls).not.toContain('property_text_decisions');
+    setDb({ visit: { property_id: 'pb' }, property: SECONDARY, failOn: 'customer_properties' });
+    await expect(Prefs.resolveAppointmentPrefs({ customerId: 'c1', scheduledServiceId: 'v1', prefs: CUSTOMER, source: 'consent' }, trx)).rejects.toThrow('down');
   });
   test('texts ON (enforced): the six columns are overlaid, everything else on the row stays', async () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true'; process.env.GATE_APP_PROPERTY_TEXTS = 'true';
@@ -92,7 +108,8 @@ describe('resolveAppointmentPrefs', () => {
     expect(out.propertyDecided).toBe(true);
     expect(out.prefs).not.toBe(CUSTOMER);
     expect(out.prefs).toMatchObject({ tech_en_route: false, tech_arrived: true, appointment_confirmation: false, appointment_notify_primary: true, sms_enabled: true, customer_id: 'c1' });
-    expect(inserts[0].enforced).toBe(true);
+    // Enforced: the comparison has no reader — nothing logged.
+    expect(inserts).toHaveLength(0);
   });
   test('unstamped visit, a PRIMARY property, a retired one, or a foreign one: customer row, nothing logged', async () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true'; process.env.GATE_APP_PROPERTY_TEXTS = 'true';
@@ -128,14 +145,16 @@ describe('resolveAppointmentPrefs', () => {
   test('a failed shadow-log WRITE never decides a send', async () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true'; process.env.GATE_APP_PROPERTY_TEXTS = 'true';
     setDb({ visit: { property_id: 'pr' }, property: RENTAL, row: null });
+    delete process.env.GATE_APP_PROPERTY_TEXTS;
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return chain([{ property_id: 'pr' }]);
       if (table === 'customer_properties') return chain([RENTAL]);
       if (table === 'property_notification_prefs') return chain([]);
-      const c = chain([]); c.insert = jest.fn(async () => { throw new Error('log down'); }); return c;
+      const c = chain([]); c.ignore = jest.fn(async () => { throw new Error('log down'); }); return c;
     });
     const out = await Prefs.resolveAppointmentPrefs({ customerId: 'c1', scheduledServiceId: 'v1', prefs: CUSTOMER, source: 't' });
-    expect(out.prefs.tech_en_route).toBe(false);
+    expect(out.prefs).toBe(CUSTOMER);
+    expect(out.propertyToggles.tech_en_route).toBe(false);
   });
   test('prefsForVisit returns the row to read from', async () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true'; process.env.GATE_APP_PROPERTY_TEXTS = 'true';

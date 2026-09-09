@@ -549,14 +549,12 @@ async function savedPropertyPreferences(req) {
   });
 }
 
-const PREF_COLUMN_TO_KEY = {
-  appointment_confirmation: 'appointmentConfirmation',
-  service_reminder_72h: 'serviceReminder72h',
-  service_reminder_24h: 'serviceReminder24h',
-  tech_en_route: 'techEnRoute',
-  tech_arrived: 'techArrived',
-  appointment_notify_primary: 'appointmentNotifyPrimary',
-};
+// The six property-owned columns, keyed both ways from the one field map the
+// profile path already uses (DB_FIELD_BY_PREF) — no second spelling.
+const PREF_KEY_TO_COLUMN = Object.fromEntries(
+  Object.entries(DB_FIELD_BY_PREF).filter(([, col]) => PropertyTexts.PROPERTY_PREF_COLUMNS.includes(col)),
+);
+const PREF_COLUMN_TO_KEY = Object.fromEntries(Object.entries(PREF_KEY_TO_COLUMN).map(([key, col]) => [col, key]));
 
 router.get('/property-preferences', async (req, res, next) => {
   try {
@@ -992,12 +990,15 @@ async function savePropertyToggles(req, res, updates) {
     res.status(400).json({ error: 'No notification setting to save.' });
     return true;
   }
+  // One statement, serialized like the profile write: two quick taps on a
+  // fresh house race the read-then-insert (property_id is UNIQUE), and an
+  // in-flight send must not read a half-committed toggle.
   const existing = await db('property_notification_prefs').where({ property_id: property.id }).first(...PropertyTexts.PROPERTY_PREF_COLUMNS);
-  if (existing) {
-    await db('property_notification_prefs').where({ property_id: property.id }).update(dbUpdates);
-  } else {
-    await db('property_notification_prefs').insert({ property_id: property.id, customer_id: property.customer_id, ...dbUpdates });
-  }
+  await withCustomerCommsLock(db, property.customer_id, (trx) =>
+    trx('property_notification_prefs')
+      .insert({ property_id: property.id, customer_id: property.customer_id, ...dbUpdates })
+      .onConflict('property_id')
+      .merge(dbUpdates));
   const row = await db('property_notification_prefs').where({ property_id: property.id }).first(...PropertyTexts.PROPERTY_PREF_COLUMNS);
   const customerPrefs = await ensurePrefs(req.params.customerId);
   const effective = PropertyTexts.effectivePropertyToggles(property, row, customerPrefs);
@@ -1014,8 +1015,6 @@ async function savePropertyToggles(req, res, updates) {
   res.json({ success: true, propertyId: property.id, preferences: payload });
   return true;
 }
-
-const PREF_KEY_TO_COLUMN = Object.fromEntries(Object.entries(PREF_COLUMN_TO_KEY).map(([col, key]) => [key, col]));
 
 router._private = {
   comparableEmail,
