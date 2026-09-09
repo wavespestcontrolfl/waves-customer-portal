@@ -96,6 +96,10 @@ describe('fixture export shape', () => {
     expect(c.context.turfHeightIn).toBe(3.5);
     expect(evalLib.contextFor(c)).toEqual({ region: 'Southwest Florida', month: 1, season: 'dormant', grassType: 'Zoysia', turfHeightIn: 3.5, irrigation: 'well, 0.5 in/wk', priorSummary: 'Prior.' });
     expect(evalLib.contextFor({ month: 7, context: {} })).toEqual({ region: 'Southwest Florida', month: 7, season: 'peak' });
+    // The season is the route's classifier, never a parallel month map.
+    const { getSeason } = require('../services/lawn-assessment');
+    for (let month = 1; month <= 12; month += 1) expect(evalLib.contextFor({ month, context: {} }).season).toBe(getSeason(month));
+    expect(evalLib.seasonOf).toBeUndefined();
     // No reading, or one outside the route's 0.5–8 in acceptance range, omits the line exactly as /assess does.
     expect(evalLib.fixtureCase(row(), [], {}).context.turfHeightIn).toBeNull();
     for (const value of [0.25, 9, 'tall', null]) expect(evalLib.fixtureCase(row(), [], { turfHeightIn: value }).context.turfHeightIn).toBeNull();
@@ -156,11 +160,15 @@ describe('scoring', () => {
     expect(both.legs).toHaveLength(2);
     expect(both.usage).toEqual({ input_tokens: 9100, output_tokens: 1050, reasoning_tokens: 500 });
     expect(both.costUsd).toBe(evalLib.costUsd('gemini-3.8-flash', rejected.usage) + evalLib.costUsd('gpt-6-astra', { input_tokens: 100, output_tokens: 50 }));
-    // A failure without usage (never reached the model) is not a leg; an unpriced model adds no cost but its tokens still count.
+    // A failure without usage (never reached the model) is not a leg; a chain with an unpriced leg has an UNKNOWN cost
+    // (never the priced legs presented as the total), while its tokens still count.
     const mixed = evalLib.scoreResult(testCase, { ...analysis(), failures: [{ provider: 'gemini', reason: 'gemini_503' }, { provider: 'openai', model: 'mystery', reason: 'x', usage: { input_tokens: 1, output_tokens: 1 } }] });
     expect(mixed.legs.map((leg) => leg.model)).toEqual(['mystery', 'gemini-3.8-flash']);
-    expect(mixed.costUsd).toBe(0.0255);
+    expect(mixed.costUsd).toBeNull();
+    expect(mixed.unpricedLegs).toBe(1);
     expect(mixed.usage.input_tokens).toBe(9001);
+    expect(evalLib.legsCostUsd([])).toBeNull();
+    expect(both.unpricedLegs).toBe(0);
   });
 
   test('summary: MAE + bias per metric, undeterminable and unavailable rates, provider mix, percentiles, cost, repeat variance', () => {
@@ -175,8 +183,11 @@ describe('scoring', () => {
     expect(summary.mae.vsLegacyAi.turf_density).toEqual({ mae: 5, bias: 5, n: 2 });
     // No priced leg is an unknown spend, never $0.
     const unpriced = evalLib.summarize([evalLib.scoreResult(testCase, analysis({ model: 'gemini-override' }), { adjust: (s) => s })]);
-    expect(unpriced.costUsd).toEqual({ total: null, perRun: null, priced: 0 });
-    expect(evalLib.renderMarkdown(unpriced)).toMatch(/est\. cost \$n\/a/);
+    expect(unpriced.costUsd).toEqual({ total: null, perRun: null, priced: 0, unpriced: 1 });
+    expect(evalLib.renderMarkdown(unpriced)).toMatch(/est\. cost \$n\/a .*1 with an unpriced leg — spend unknown/);
+    // A partially priced chain sits outside the total and is disclosed next to it.
+    const partial = evalLib.summarize([a1, evalLib.scoreResult(testCase, analysis({ failures: [{ provider: 'gemini', model: 'gemini-override', reason: 'x', usage: { input_tokens: 5, output_tokens: 5 } }] }), { adjust: (s) => s })]);
+    expect(partial.costUsd).toEqual({ total: 0.0255, perRun: 0.0255, priced: 1, unpriced: 1 });
     expect(summary.mae.vsConfirmed.color_health).toEqual({ mae: 0, bias: 0, n: 1 }); // a2 color 8 → 80 = confirmed 80; a1 undeterminable
     expect(summary.undeterminableRate.color_health).toBe(0.5);
     expect(summary.causeNamedBelowModerate).toBe(2);
@@ -250,6 +261,17 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     expect(src).toMatch(/const profilePredates = profile\?\.grass_type && assessedAt && profile\.updated_at && new Date\(profile\.updated_at\) < assessedAt;/);
     expect(src).toMatch(/'la\.created_at'/);
     expect(src).not.toMatch(/grassType: grassCtx\.grassTypeLabel/);
+    // Irrigation follows the same provenance rule (its sources are the turf profile a confirm's field checks write).
+    expect(src).toMatch(/loadVisitIrrigation\(row, knex\),/);
+    expect(src).not.toMatch(/loadIrrigationContext\(/);
+    expect(src).toMatch(/if \(!profile \|\| !assessedAt \|\| !profile\.updated_at \|\| !\(new Date\(profile\.updated_at\) < assessedAt\)\) return null;/);
+    // The read-only promise: dotenv (server/config) loads BEFORE the ledger gates are cleared, and the gates are verified
+    // before and after every import the replay uses.
+    const run = src.slice(src.indexOf('async function runReplay('), src.indexOf('const fixture = JSON.parse('));
+    expect(run.indexOf("require(path.join(REPO, 'server/config'))")).toBeLessThan(run.indexOf('for (const gate of LEDGER_GATES) delete process.env[gate];'));
+    expect(run.indexOf("assertNoLedgerWrites(gates, 'before imports')")).toBeLessThan(run.indexOf("require(path.join(REPO, 'server/config/models'))"));
+    expect(run.indexOf("assertNoLedgerWrites(gates, 'after imports')")).toBeGreaterThan(run.indexOf("require(path.join(REPO, 'server/services/eval/lawn-visit-assessment-eval'))"));
+    expect(src).toMatch(/const LEDGER_GATES = \['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_CALL_TRACES'\];/);
     expect(src).toMatch(/knex\('turf_height_readings'\)\.where\(\{ service_record_id: serviceRecordId \}\)\.first\('manual_height_in'\)/);
     expect(src).toMatch(/knex\('service_records'\)\.where\(\{ scheduled_service_id: row\.service_id \}\)\.orderBy\('created_at', 'desc'\)\.first\('id'\)/);
     // The script is a module for tests and a program for operators.

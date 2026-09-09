@@ -25,7 +25,7 @@
  *     Gemini 3.8 line and stability has to be measured, not assumed
  */
 
-const { applySeasonalAdjustment } = require('../lawn-assessment');
+const { applySeasonalAdjustment, getSeason } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores, contextHash } = require('../lawn-visit-assessment');
 const { scrubCustomerText, SUMMARY_CAUSE_RE } = require('../lawn-diagnostic-report');
 const { containsReportAccessCode } = require('../service-report/technician-report-copy');
@@ -180,17 +180,15 @@ function hashKey(value) {
 // and never the planned products.
 function contextFor(testCase) {
   const context = { region: 'Southwest Florida' };
-  if (testCase.month) { context.month = testCase.month; context.season = seasonOf(testCase.month); }
+  // The season is the route's own classifier (lawn-assessment.getSeason) — the
+  // one the score adjustment uses too — never a parallel month map that could
+  // drift from the live prompt's claim (Codex #4153 r11).
+  if (testCase.month) { context.month = testCase.month; context.season = getSeason(testCase.month); }
   if (testCase.context?.grassType) context.grassType = testCase.context.grassType;
   if (testCase.context?.turfHeightIn != null) context.turfHeightIn = testCase.context.turfHeightIn;
   if (testCase.context?.irrigation) context.irrigation = testCase.context.irrigation;
   if (testCase.context?.priorSummary) context.priorSummary = testCase.context.priorSummary;
   return context;
-}
-function seasonOf(month) {
-  if (month >= 5 && month <= 9) return 'peak';
-  if ((month >= 3 && month <= 4) || (month >= 10 && month <= 11)) return 'shoulder';
-  return 'dormant';
 }
 
 // ── Scoring (pure) ────────────────────────────────────────────────────
@@ -223,10 +221,19 @@ function sumUsage(legs) {
   return total;
 }
 
-// Null until at least one leg is priced (an unpriced model's leg adds nothing).
+// The chain's cost is known only when EVERY billed leg is priced: one leg on
+// a model PRICES_PER_M does not list (a registry override) makes the whole
+// chain an unknown spend — a partial sum would present the priced legs as
+// the total and understate paid usage (Codex #4153 r11). `unpricedLegs`
+// says how many legs were left out.
 function legsCostUsd(legs) {
-  const priced = legs.map((leg) => costUsd(leg.model, leg.usage)).filter((value) => value != null);
-  return priced.length ? Math.round(priced.reduce((sum, value) => sum + value, 0) * 1e4) / 1e4 : null;
+  if (!legs.length) return null;
+  const priced = legs.map((leg) => costUsd(leg.model, leg.usage));
+  if (priced.some((value) => value == null)) return null;
+  return Math.round(priced.reduce((sum, value) => sum + value, 0) * 1e4) / 1e4;
+}
+function unpricedLegCount(legs) {
+  return legs.filter((leg) => costUsd(leg.model, leg.usage) == null).length;
 }
 
 function causeNamedBelowModerate(findings = []) {
@@ -260,6 +267,7 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
     legs,
     usage: legs.length ? sumUsage(legs) : null,
     costUsd: legsCostUsd(legs),
+    unpricedLegs: unpricedLegCount(legs),
     contextHash: analysis.contextHash || null,
   };
   if (analysis.status !== 'complete') {
@@ -358,15 +366,17 @@ function summarize(results = []) {
     },
     // No priced leg (a registry override selecting a model PRICES_PER_M does
     // not list) is an UNKNOWN spend, never $0 (Codex #4153 r8).
-    costUsd: { total: costs.length ? round(costs.reduce((sum, v) => sum + v, 0), 4) : null, perRun: costs.length ? round(mean(costs), 4) : null, priced: costs.length },
+    // A run with an unpriced leg is outside the total (its spend is unknown), and is counted so the report discloses it.
+    costUsd: { total: costs.length ? round(costs.reduce((sum, v) => sum + v, 0), 4) : null, perRun: costs.length ? round(mean(costs), 4) : null, priced: costs.length, unpriced: results.filter((r) => (r.unpricedLegs || 0) > 0).length },
     repeatVariance: variance,
   };
 }
 
+const unpricedNote = (summary) => (summary.costUsd.unpriced ? `, ${summary.costUsd.unpriced} with an unpriced leg — spend unknown` : '');
 function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment eval' } = {}) {
   const lines = [`## ${title}`, ''];
   lines.push(`runs ${summary.runs} · cases ${summary.cases} · unavailable ${summary.unavailable} (${fmtRate(summary.unavailableRate)}) · findings/run ${summary.findingsPerRun ?? 'n/a'} · cause named below moderate: ${summary.causeNamedBelowModerate}`);
-  lines.push(`latency p50 ${summary.latencyMs.p50 ?? 'n/a'} ms · p95 ${summary.latencyMs.p95 ?? 'n/a'} ms · tokens in ${summary.tokens.input} / out ${summary.tokens.output} / reasoning ${summary.tokens.reasoning} · est. cost $${summary.costUsd.total ?? 'n/a'} ($${summary.costUsd.perRun ?? 'n/a'} per run, ${summary.costUsd.priced} priced)`);
+  lines.push(`latency p50 ${summary.latencyMs.p50 ?? 'n/a'} ms · p95 ${summary.latencyMs.p95 ?? 'n/a'} ms · tokens in ${summary.tokens.input} / out ${summary.tokens.output} / reasoning ${summary.tokens.reasoning} · est. cost $${summary.costUsd.total ?? 'n/a'} ($${summary.costUsd.perRun ?? 'n/a'} per run, ${summary.costUsd.priced} priced${unpricedNote(summary)})`);
   lines.push(`answered by: ${Object.entries(summary.byProvider).map(([k, v]) => `${k} ×${v}`).join(', ') || 'n/a'}`, '');
   lines.push('| metric | MAE vs confirmed | bias | n | MAE vs legacy AI | bias | n | not determinable |');
   lines.push('|---|---|---|---|---|---|---|---|');
@@ -440,6 +450,7 @@ module.exports = {
   billedLegs,
   sumUsage,
   legsCostUsd,
+  unpricedLegCount,
   causeNamedBelowModerate,
   scoreResult,
   summarize,

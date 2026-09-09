@@ -114,7 +114,7 @@ async function exportFixture(args) {
   // customer-wide lookup off. The gate is read the way the route reads it,
   // so set it on the `railway run` command line to export the other
   // configuration; the fixture records which branch it took.
-  const { loadCustomerGrassContext, loadIrrigationContext, loadPriorSummary } = require(path.join(REPO, 'server/services/lawn-grass-context'));
+  const { loadPriorSummary } = require(path.join(REPO, 'server/services/lawn-grass-context'));
   const propertyHistoryEnabled = require(path.join(REPO, 'server/config/feature-gates')).gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
   const knex = knexFactory({ client: 'pg', connection: { connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } }, pool: { min: 0, max: 2 } });
   try {
@@ -146,11 +146,10 @@ async function exportFixture(args) {
     for (const row of rows.filter((r) => chosen.has(r.id))) {
       const visitDate = evalLib.dateString(row.scheduled_date) || evalLib.dateString(row.service_date);
       const scheduledService = row.service_id ? await knex('scheduled_services').where({ id: row.service_id }).first() : null;
-      const grassCtx = await loadCustomerGrassContext(row.customer_id, knex);
       // Each case's photos load with the case — one small query per exported row.
       const [photos, irrigation, customer, prior, turfHeight] = await Promise.all([
         knex('lawn_assessment_photos').where({ assessment_id: row.id }).orderBy('photo_order').select('id', 's3_key', 'mime_type', 'photo_order', 'zone'),
-        loadIrrigationContext(row.customer_id, grassCtx, knex),
+        loadVisitIrrigation(row, knex),
         knex('customers').where({ id: row.customer_id }).first('first_name', 'last_name'),
         loadPriorSummary({ customerId: row.customer_id, serviceId: row.service_id, scheduledService, visitDate, propertyHistoryEnabled }, knex).catch((err) => { console.error(`warning: prior-visit summary failed for ${row.id}: ${err.message}`); return null; }),
         loadVisitTurfHeight(row, knex),
@@ -190,6 +189,24 @@ async function loadVisitGrassType(row, knex) {
   return grassType ? grassTypeLabel(grassType) : null;
 }
 
+// The irrigation line the route could have known AT THE VISIT. Both of its
+// sources live on customer_turf_profiles (irrigation_type,
+// irrigation_inches_per_week), and a confirm's protocol field checks write
+// that same row AFTER the model call (persistProtocolFieldChecks), so the
+// profile counts only when untouched since before the assessment was created
+// — the same provenance rule as the grass type; otherwise the line is
+// omitted (Codex #4153 r11). Formatted as lawn-grass-context's
+// loadIrrigationContext formats it.
+async function loadVisitIrrigation(row, knex) {
+  const assessedAt = row.created_at ? new Date(row.created_at) : null;
+  const profile = await knex('customer_turf_profiles').where({ customer_id: row.customer_id }).first('irrigation_type', 'irrigation_inches_per_week', 'updated_at').catch(() => null);
+  if (!profile || !assessedAt || !profile.updated_at || !(new Date(profile.updated_at) < assessedAt)) return null;
+  const parts = [];
+  if (profile.irrigation_type) parts.push(String(profile.irrigation_type).replace(/_/g, ' '));
+  if (profile.irrigation_inches_per_week != null) parts.push(`${profile.irrigation_inches_per_week} in/wk`);
+  return parts.length ? parts.join(', ') : null;
+}
+
 // The gauge reading the visit's completion recorded: turf_height_readings
 // keys on the service record (one per completion), reached through the
 // assessment's own back-link or, for a row completed before the back-link
@@ -207,24 +224,33 @@ async function loadVisitTurfHeight(row, knex) {
 }
 
 // ── Phase 2: run ──────────────────────────────────────────────────────
+// The ledger gates are read at CALL time (feature-gates), so the promise is
+// checked after every import that could set them: server/config loads the
+// checkout's .env (dotenv fills MISSING variables — a deleted gate would come
+// back), so it loads FIRST, then the gates are cleared, then verified, and
+// verified again once every module the replay uses is loaded (Codex #4153
+// r11). A promise that can be broken by moving a line is not a promise
+// (compliance-gate-eval.js precedent).
+const LEDGER_GATES = ['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_CALL_TRACES'];
+function assertNoLedgerWrites(gates, when) {
+  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER') || gates.gateEnvValue('GATE_LLM_CALL_TRACES')) {
+    console.error(`ABORT (${when}): an LLM ledger gate resolved ENABLED — this run would write llm_dispatch_log rows. Unset ${LEDGER_GATES.join(' / ')} and re-run.`);
+    process.exit(2);
+  }
+}
+
 async function runReplay(args) {
   // NO DB WRITES. The dispatcher's ledger + chain rows are written whenever
-  // these gates resolve enabled; delete BEFORE the first require (feature-gates
-  // snapshots at load) and verify after — a promise that can be broken by
-  // moving a line is not a promise (compliance-gate-eval.js precedent).
-  delete process.env.GATE_LLM_DISPATCH_METRICS;
-  delete process.env.GATE_LLM_CALL_LEDGER;
-  delete process.env.GATE_LLM_CALL_TRACES;
+  // these gates resolve enabled. server/config (dotenv) loads before the
+  // gates are cleared, so nothing can refill them afterwards.
+  const config = require(path.join(REPO, 'server/config'));
+  for (const gate of LEDGER_GATES) delete process.env[gate];
   // The registry reads the selector at load: a nonexistent Gemini id makes
   // every primary leg miss so the GPT-6 Astra fallback carries the run.
   if (args.forceFallback) process.env.MODEL_GEMINI_VISION = 'gemini-eval-forced-miss';
 
   const gates = require(path.join(REPO, 'server/config/feature-gates'));
-  if (gates.isEnabled('llmDispatchMetrics') || gates.gateEnvValue('GATE_LLM_CALL_LEDGER') || gates.gateEnvValue('GATE_LLM_CALL_TRACES')) {
-    console.error('ABORT: an LLM ledger gate resolved ENABLED — this run would write llm_dispatch_log rows. Unset GATE_LLM_DISPATCH_METRICS / GATE_LLM_CALL_LEDGER / GATE_LLM_CALL_TRACES and re-run.');
-    process.exit(2);
-  }
-  const config = require(path.join(REPO, 'server/config'));
+  assertNoLedgerWrites(gates, 'before imports');
   if (!config.s3?.bucket) { console.error('S3 is not configured in this environment — run via: railway run --service waves-customer-portal node ops/agents/lawn-visit-assessment-eval.js --run …'); process.exit(2); }
   if (!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) console.error('warning: no Gemini key — every primary leg will miss (no_key)');
   if (!process.env.OPENAI_API_KEY) console.error('warning: no OpenAI key — the GPT-6 Astra fallback cannot answer (no_key)');
@@ -233,6 +259,7 @@ async function runReplay(args) {
   const PhotoService = require(path.join(REPO, 'server/services/photos'));
   const visit = require(path.join(REPO, 'server/services/lawn-visit-assessment'));
   const evalLib = require(path.join(REPO, 'server/services/eval/lawn-visit-assessment-eval'));
+  assertNoLedgerWrites(gates, 'after imports');
 
   const fixture = JSON.parse(fs.readFileSync(args.run, 'utf8'));
   const cases = evalLib.selectCases(fixture.cases || [], { ids: args.ids }).slice(0, args.limit);
