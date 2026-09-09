@@ -183,6 +183,14 @@ describe('voice relay eval — fixture lint', () => {
         { ...good, id: 'bad-expect-key', expect: [{ ...exp('tools_called_include', ['capture_lead']), adjudciated: true }] },
         { ...good, id: 'performed-outside', expect: [exp('tools_performed_include', ['request_booking'])] },
         { ...good, id: 'cross-effect', fixtures: { toolResponses: { request_booking: [{ text: 'x', capture: true }, { text: 'y', reservice: true, booking: true }] } } },
+        { ...good, id: 'judge-typo', judge: { severity: 'major', adjudciated: true } },
+        { ...good, id: 'judge-severity', judge: { severity: 'blocking' } },
+        { ...good, id: 'spec-typo', spec: { required_fact: ['x'] } },
+        { ...good, id: 'spec-transfer', spec: { transfer_required: 'true' } },
+        { ...good, id: 'spec-range', spec: { response_range: { min: 3, max: 1 } } },
+        { ...good, id: 'spec-words', spec: { max_words_per_agent_turn: 0 } },
+        { ...good, id: 'spec-fact-type', spec: { required_facts: [1] } },
+        { ...good, id: 'spec-ok', spec: { fixture_facts: ['f'], required_facts: ['r'], prohibited_facts: [], required_action: 'capture_lead', acceptable_actions: ['a'], transfer_required: false, ideal_move: 'i', response_range: { min: 1, max: 3 }, max_words_per_agent_turn: 60 }, judge: { severity: 'major', adjudicated: true } },
       ],
     };
     const errors = replay.lintFixture(fixture);
@@ -197,6 +205,15 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/mixed-cut: turns\[0\]: /);
     expect(joined).not.toMatch(/heard-turn:/);
     expect(joined).toMatch(/no-spec: spec is required/);
+    // The judge block and the spec are executable: a misspelt or mistyped field is refused, not ignored.
+    expect(joined).toMatch(/judge-typo: judge: "adjudciated" is not allowed/);
+    expect(joined).toMatch(/judge-severity: judge: "severity" must be one of/);
+    expect(joined).toMatch(/spec-typo: spec: "required_fact" is not allowed/);
+    expect(joined).toMatch(/spec-transfer: spec: "transfer_required" must be a boolean/);
+    expect(joined).toMatch(/spec-range: spec: "response_range.max" must be greater than or equal to/);
+    expect(joined).toMatch(/spec-words: spec: "max_words_per_agent_turn" must be a positive number|spec-words: spec: "max_words_per_agent_turn" must be greater than or equal to 1/);
+    expect(joined).toMatch(/spec-fact-type: spec: "required_facts\[0\]" must be a string/);
+    expect(joined).not.toMatch(/spec-ok:/);
     expect(joined).toMatch(/bad-tool: .*unknown tool "launch_missiles"/);
     expect(joined).toMatch(/no-sev: .*severity must be/);
     expect(joined).toMatch(/bad-regex: .*invalid regex/);
@@ -1234,12 +1251,16 @@ describe('voice relay eval — the judge', () => {
     // tools line — a change to any of them moves the fingerprint.
     const render = (opts) => judge.buildJudgePrompt({ fixture_facts: ['F'], required_facts: ['R'], prohibited_facts: ['P'], required_action: 'A', acceptable_actions: ['B'], ideal_move: 'I', response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40, ...opts.spec }, 'X', opts).text;
     const parts = [judge.JUDGE_PROMPT_VERSION, judge._internals.SYSTEM_PROMPT, JSON.stringify(judge.JUDGE_SCHEMA)];
-    for (const language of ['en', 'es']) for (const transfer_required of [false, true]) for (const callerBlock of [null, 'BLOCK']) for (const standingInstructions of [null, 'SYS']) for (const toolsAvailable of [[], ['T']]) parts.push(render({ language, toolsAvailable, callerBlock, standingInstructions, spec: { transfer_required } }));
+    for (const language of ['en', 'es']) for (const transfer_required of [false, true]) for (const callerBlock of [null, 'BLOCK']) for (const dataTurn of [null, 'DATA']) for (const standingInstructions of [null, 'SYS']) for (const toolsAvailable of [[], ['T']]) parts.push(render({ language, toolsAvailable, callerBlock, dataTurn, standingInstructions, spec: { transfer_required } }));
     const crypto = require('crypto');
     expect(sha).toBe(crypto.createHash('sha256').update(parts.join('\n')).digest('hex'));
     expect(parts.filter((x) => /Spanish/.test(x)).length).toBeGreaterThan(0);
     expect(parts.filter((x) => /transfer_required: true/.test(x)).length).toBeGreaterThan(0);
-    expect(judge._internals.cartesian(judge._internals.TEMPLATE_AXES)).toHaveLength(32);
+    expect(judge._internals.cartesian(judge._internals.TEMPLATE_AXES)).toHaveLength(64);
+    // The seeded recent-text data turn is agent-visible context, rendered where the judge traces claims.
+    const seeded = judge.buildJudgePrompt({}, 'X', { dataTurn: 'RECENT TEXTS: the caller asked about ants on Monday.' }).text;
+    expect(seeded).toMatch(/Recent-text data turn[^\n]*\n\s*RECENT TEXTS: the caller asked about ants on Monday\./);
+    expect(judge.buildJudgePrompt({}, 'X', {}).text).toMatch(/Recent-text data turn[^\n]*\n\s*\(none\)/);
     // The standing instructions Sandy ran under are agent-visible context too:
     // "we serve Manatee, Sarasota and Charlotte" traces to them, not to a tool.
     const grounded = judge.buildJudgePrompt({}, 'Agent: We serve Sarasota County.', { standingInstructions: 'You are the phone assistant for Waves Pest Control (Manatee, Sarasota, and Charlotte counties).' }).text;
@@ -1334,6 +1355,11 @@ describe('voice relay eval — the judge', () => {
     expect(holistic.filter((c) => c.status === 'fail').map((c) => c.check)).toEqual(['judge:verdict']);
     expect(pinned.find((c) => c.check === 'judge:forbidden_claim:invented_price')).toMatchObject({ status: 'fail', severity: 'critical', adjudicated: false });
     expect(pinned.find((c) => c.check === 'judge:transfer').status).toBe('fail');
+    // Where no transfer is required, transfer_ok is not a detail finding: a verdict failing on it alone fails on the verdict line, and no transfer line is emitted.
+    const noTransfer = judgeChecks({ spec: { transfer_required: false }, judge: { severity: 'major', adjudicated: true } }, { ok: true, judge_fallback: false, verdict: { ...verdict, forbidden_claims: [], required_facts_missing: [], action_ok: true, transfer_ok: false, empathy_ok: true, tone: 4, rationale: 'no handoff' } });
+    expect(noTransfer.find((c) => c.check === 'judge:transfer')).toBeUndefined();
+    expect(noTransfer.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'fail', detail: expect.stringContaining('no handoff') });
+    expect(scenarioStatus({ checks: noTransfer })).toBe('fail');
     expect(pinned.find((c) => c.check === 'judge:empathy')).toMatchObject({ status: 'fail', severity: 'quality' });
     expect(scenarioStatus({ checks: pinned })).toBe('fail');
     const ordinaryVerdict = { ...verdict, forbidden_claims: [] };
@@ -1516,9 +1542,12 @@ describe('voice relay eval — the harness', () => {
     expect(result.status).toBe('pass');
     // The effect latches were never touched: no capture, no re-service mark, so the session is still open after the goodbye.
     expect(result.endSession).toBeNull();
-    // A receipt is meaningless on a read tool — lint says so.
-    const bad = { schemaVersion: 'voice-relay-scenarios.v1', scenarios: [{ ...fixture, id: 'receipt-on-read', fixtures: { ...fixture.fixtures, toolResponses: { ...fixture.fixtures.toolResponses, get_call_history: { text: 'x', receipt: true } } } }] };
-    expect(replay.lintFixture(bad).join('\n')).toMatch(/receipt-on-read: toolResponses.get_call_history: "receipt" belongs to a write tool/);
+    // There is no bare receipt marker on any tool: a write the live tool never latched cannot back a promise.
+    for (const [name, id] of [['get_call_history', 'receipt-on-read'], ['capture_lead', 'receipt-on-write']]) {
+      const bad = { schemaVersion: 'voice-relay-scenarios.v1', scenarios: [{ ...fixture, id, fixtures: { ...fixture.fixtures, toolResponses: { ...fixture.fixtures.toolResponses, [name]: { text: 'x', receipt: true } } } }] };
+      expect(replay.lintFixture(bad).join('\n')).toMatch(new RegExp(`${id}: toolResponses.${name}: .*receipt" is not allowed`));
+    }
+    expect(replay._internals.applyToolSideEffects({ text: 'saved', receipt: true }, { input: {}, ctx: {}, scenario: fixture })).toMatchObject({ receipt: false });
   });
 
   test('runs the live loop against fixture tools: capture latch ends the session, end() never runs, the db is never touched, gates are restored', async () => {

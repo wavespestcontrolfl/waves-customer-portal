@@ -45,9 +45,12 @@ plus a verified caller, the live release conditions for an earlier segment. A
 exposes as its customer id — without one a "matched" caller would be graded unmatched. An `ok: false` response stands in for a thrown tool failure: it performs no fixture
 side effects, earns no receipt, and counts toward the relay's provider-failure handoff.
 A refusal the live tool returns as text (a redacted schedule, missing sizing) stays `ok`.
-A write-tool answer marked `receipt: true` is the live dedupe branch — the record already
-exists (a re-service already open), nothing is performed, and the answer still backs
-the follow-up it tells Sandy to promise.
+There is no bare receipt marker: only an answer that performs its tool's live effect
+(`capture`, `booking`, `reservice`, `transfer`) is a receipt. The dedupe answer is
+`reservice: "existing"` — the ticket already on file, nothing performed, evidence for the
+one follow-up the answer directs.
+`spec` and `judge` are executable contracts, validated key by key at lint (unknown or
+mistyped fields are refused), because the judge grades against exactly what they say.
 Every scripted turn is `{ caller }` with an optional `interrupt` (`true`, `{ words }`
 or `{ heard }`); any other key is a lint error.
 
@@ -194,7 +197,8 @@ the registered OpenAI fallback keeps results available but marks every check adv
 A fallback verdict cannot change pass/fail. Each verdict records the served provider,
 model, fallback status and a SHA of the complete prompt template and output schema.
 
-The judge receives the caller context Sandy saw, the standing instructions she ran
+The judge receives the caller context Sandy saw — the account block and, when the
+scenario seeds one, the recent-text data turn — the standing instructions she ran
 under (the frozen system prompt minus the caller block, as grounding data), the exact
 per-turn clock blocks, earlier call segments and complete tool results (the reviewable
 record clips them; the judge does not). Hidden grading notes cannot ground an agent
