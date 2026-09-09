@@ -336,7 +336,14 @@ function normalizeReviewTiming(value) {
 }
 // What the chosen timing means, from the server preview (never a client
 // approximation of the smart window).
-function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
+function reviewTimingHint(options) {
+  const hint = reviewTimingHintDetails(options);
+  if (options.preview?.schedulerEnabled === true && options.reviewTiming !== "customer_requested") {
+    return `For a new eligible enrollment: ${hint} An existing cadence keeps its schedule.`;
+  }
+  return hint;
+}
+function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
   // An unpaid completion invoice holds the ask until payment lands (the
   // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
   // relative timing is re-derived from the payment time; an absolute one is
