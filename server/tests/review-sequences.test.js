@@ -107,7 +107,7 @@ function makeMock(initial = {}, opts = {}) {
         state.rows[this.table].push(inserted);
         return { returning: async () => [inserted] };
       },
-      async update(patch) { if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
+      async update(patch) { if (opts.onUpdate) opts.onUpdate(this.table, patch, state); if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
       async del() { const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
       then(res, rej) { return Promise.resolve(filtered(this)).then(res, rej); },
     };
@@ -887,6 +887,70 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: true });
     const winner = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-winner');
     expect(JSON.parse(winner.customer_requested)).toEqual(requested);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('request capture retries enrollment when the active cadence settles before the update', async () => {
+    const requested = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    const firstTouchAt = new Date(Date.now() + 3600000);
+    const mock = makeMock({
+      customers: [{ id: 'capture-race' }],
+      review_sequences: [{ id: 'settled', customer_id: 'capture-race', status: 'active' }],
+    }, {
+      onUpdate: (table, patch, state) => {
+        if (table === 'review_sequences' && patch.customer_requested) state.rows.review_sequences[0].status = 'completed';
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'capture-race', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, firstTouchAt });
+
+    expect(result).toMatchObject({ started: true, scheduledFor: firstTouchAt });
+    expect(JSON.parse(result.sequence.customer_requested)).toEqual(requested);
+    expect(mock.__state.rows.review_sequences[0].customer_requested).toBeUndefined();
+    expect(mock.__state.rows.review_sequences.filter(row => row.status === 'active')).toHaveLength(1);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])('a vanished unique-index winner retries with the delivery cap rechecked (delivered: %s)', async (delivered) => {
+    const requested = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    let collided = false;
+    const mock = makeMock({ customers: [{ id: 'vanished-winner' }] }, {
+      onInsert: (table, row, state) => {
+        if (table !== 'review_sequences' || collided) return null;
+        collided = true;
+        if (delivered) state.rows.review_requests.push({ id: 'winner-ask', customer_id: row.customer_id, status: 'sent', sent_at: new Date(), template_key: 'day0_ask' });
+        return Object.assign(new Error('concurrent enrollment settled'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'vanished-winner', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, firstTouchAt: new Date(Date.now() + 3600000) });
+
+    if (delivered) {
+      expect(result).toMatchObject({ started: false, reason: 'cooldown' });
+      expect(mock.__state.rows.review_sequences).toHaveLength(0);
+    } else {
+      expect(result.started).toBe(true);
+      expect(JSON.parse(result.sequence.customer_requested)).toEqual(requested);
+    }
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('persistent enrollment contention fails visibly after a bounded capture retry', async () => {
+    let attempts = 0;
+    const mock = makeMock({ customers: [{ id: 'capture-contention' }] }, {
+      onInsert: (table) => {
+        if (table !== 'review_sequences') return null;
+        attempts += 1;
+        return Object.assign(new Error('concurrent enrollment settled'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    await expect(ReviewService.startReviewSequence({ customerId: 'capture-contention', serviceType: 'pest control', techName: 'Bea', customerRequested: { source: 'completion_panel' } }))
+      .rejects.toThrow('Active review cadence changed during request capture');
+    expect(attempts).toBe(2);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 

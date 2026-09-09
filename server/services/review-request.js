@@ -4123,20 +4123,29 @@ const ReviewService = {
    * for the link" capture is never lost (codex #4140 r4 P2, r9 P2). Only
    * customer_requested is written: the schedule is not moved (a second ask
    * inside the window is what the 3-day rule spaces) and updated_at is the
-   * runner's claim stamp (claimIsStale) and must not be refreshed. A race
-   * that left NO active row (the winner already completed) records nothing.
+   * runner's claim stamp (claimIsStale) and must not be refreshed. If the
+   * winner settled before capture, retry enrollment with all gates intact.
    */
-  async _alreadyActive(active, customerRequested) {
+  async _alreadyActive(active, customerRequested, retryEnrollment) {
+    if (!active) return retryEnrollment();
     let requestRecorded = false;
-    if (customerRequested && active?.id) {
-      await db("review_sequences").where({ id: active.id }).update({ customer_requested: JSON.stringify(customerRequested) });
+    if (customerRequested) {
+      const captured = await db("review_sequences").where({ id: active.id, status: "active" }).update({ customer_requested: JSON.stringify(customerRequested) });
+      if (!captured) return retryEnrollment();
       requestRecorded = true;
     }
     return { started: false, reason: "already_active", sequence: active, requestRecorded };
   },
 
 
-  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null }) {
+  async startReviewSequence(options, captureRetries = 1) {
+    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null } = options;
+    const retryEnrollment = () => {
+      // Re-run caps and visit dedupe too: the settled winner may have sent.
+      // Persistent contention must fail visibly, never claim a lost capture.
+      if (captureRetries <= 0) throw new Error("Active review cadence changed during request capture");
+      return this.startReviewSequence(options, captureRetries - 1);
+    };
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     if (customer.deleted_at) throw new Error("Customer is archived");
@@ -4218,7 +4227,7 @@ const ReviewService = {
         // second ask inside the window is what the 3-day rule (PR 3) spaces.
         // Only customer_requested is written: updated_at is the runner's
         // claim stamp (claimIsStale) and must not be refreshed here.
-        return this._alreadyActive(active, customerRequested);
+        return this._alreadyActive(active, customerRequested, retryEnrollment);
       }
     }
 
@@ -4404,20 +4413,20 @@ const ReviewService = {
           await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested, decision });
           return { started: false, reason: "deferred_inflight", deferred: true };
         }
-        if (existing) return this._alreadyActive(existing, customerRequested);
+        if (existing) return this._alreadyActive(existing, customerRequested, retryEnrollment);
         supersedeOpenerId = null;
         try {
           [sequence] = await insertReplacement();
         } catch (retryErr) {
           if (retryErr?.code === "23505") {
             const raced = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-            return this._alreadyActive(raced, customerRequested);
+            return this._alreadyActive(raced, customerRequested, retryEnrollment);
           }
           throw retryErr;
         }
       } else if (err?.code === "23505") {
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-        return this._alreadyActive(existing, customerRequested);
+        return this._alreadyActive(existing, customerRequested, retryEnrollment);
       } else {
         throw err;
       }
