@@ -113,6 +113,32 @@ test('saved draft survives alert failure; retry delivers once and closes the rec
   expect(mockSend).toHaveBeenCalledTimes(2);
   expect(mockState.inserts).toBe(1);
 });
+
+test('intentional alert suppression does not report a tool failure or retry delivery', async () => {
+  mockSend.mockResolvedValue({ success: true, suppressed: true });
+  for (let replay = 0; replay < 2; replay++) {
+    const result = await executeLeadTool('queue_for_adam', { reason: 'Review' }, context);
+    expect(result).toMatchObject({ queued: true, alertStatus: 'suppressed' });
+    expect(result.failed).toBeUndefined();
+    expect(result.error).toBeUndefined();
+  }
+  expect(mockSend).toHaveBeenCalledTimes(1);
+});
+
+test('a concurrent replay reports pending delivery without treating the active claim as an outage', async () => {
+  let started; let release;
+  const delivering = new Promise(resolve => { started = resolve; });
+  mockSend.mockImplementationOnce(() => { started(); return new Promise(resolve => { release = resolve; }); });
+  const first = executeLeadTool('queue_for_adam', { reason: 'Review' }, context);
+  await delivering;
+  try {
+    const replay = await executeLeadTool('queue_for_adam', {}, context);
+    expect(replay).toMatchObject({ queued: true, replayed: true, alertStatus: 'pending', retryable: true });
+    expect(replay.failed).toBeUndefined();
+    expect(replay.error).toBeUndefined();
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  } finally { release({ success: true, sid: 'SM_fixture' }); await first; }
+});
 test('rechecks relationship inside draft transaction', async () => {
   mockDb.transaction.mockImplementationOnce(async callback => {
     mockState.lead.customer_id = 'other';
