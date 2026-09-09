@@ -60,7 +60,7 @@ async function prepareCallbackCards(conn, { callId = null } = {}) {
     let due;
     try {
       const day = etDateString(from);
-      if (!calendars.has(day)) calendars.set(day, await loadCalendar(conn, from));
+      if (!calendars.has(day)) calendars.set(day, await conn.transaction((sp) => loadCalendar(sp, from)));
       // Keep the fallback independent: re-extraction may withdraw a stated date.
       due = staffedDeadline(from, calendars.get(day));
     } catch (err) {
@@ -136,6 +136,7 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
       patch.snoozed_until = null;
     }
     await trx('call_commitments').where({ id }).update(patch);
+    await prepareCallbackCards(trx, { callId: row.call_log_id });
     await recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: `callback_${action}`,
       resource_type: 'call_commitment', resource_id: id, metadata: { snoozed_until: until?.toISOString() || null }, critical: true, trx });
     await trx('notifications').where({ recipient_type: 'admin' }).where(function containsCallback() {

@@ -51,6 +51,23 @@ run('callback ledger on PostgreSQL', () => {
       callback_due_at: ago, created_at: ago, updated_at: ago, ...patch }).returning('*');
     return row;
   }
+  test('existing, human-created and edited callbacks receive deadlines without the notification worker', async () => {
+    const ledger = require('../services/call-commitments');
+    const existing = await seed({ callback_due_at: null });
+    await ledger.listOpenCommitments(trx);
+    expect((await trx('call_commitments').where({ id: existing.id }).first()).callback_due_at).not.toBeNull();
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    const added = await ledger.addHumanCommitment(trx, existing.call_log_id, {
+      party: 'waves', kind: 'callback', description: 'Call about the next visit', reviewedBy: staff.id, due_at: future,
+    });
+    expect(added.callback_due_at).not.toBeNull();
+    const edited = await cards.actOnCallback(trx, added.id, { action: 'edit', actorId: staff.id,
+      expectedAt: added.updated_at, due_at: null, now });
+    expect(edited.due_at).toBeNull();
+    expect(edited.effective_due_at).toEqual(edited.callback_due_at);
+    expect(edited.callback_due_at).not.toBeNull();
+  });
+
   test('snooze takes shared ownership and rejects a second action on the old version', async () => {
     const row = await seed();
     const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');

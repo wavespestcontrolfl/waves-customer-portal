@@ -1420,6 +1420,7 @@ function selectOverdue(rows, { now = new Date() } = {}) {
 }
 
 async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
+  await require('./callback-cards').prepareCallbackCards(conn);
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -1746,7 +1747,8 @@ async function addHumanCommitment(conn, callLogId, { party, kind, description, d
     reviewed_at: new Date(),
     status: 'open',
   }).onConflict(['call_log_id', 'commitment_key']).ignore().returning('*');
-  if (row) return normalizeRow(row);
+  const prepared = await require('./callback-cards').prepareCallbackCards(conn, { callId: callLogId });
+  if (row && !prepared) return normalizeRow(row);
   const existing = await conn('call_commitments').where({ call_log_id: callLogId, commitment_key: key }).first();
   return normalizeRow(existing);
 }
