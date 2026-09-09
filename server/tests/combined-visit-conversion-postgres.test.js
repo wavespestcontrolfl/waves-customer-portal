@@ -10,11 +10,13 @@ jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: async () => {} }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: async () => {} }));
 jest.mock('../services/inspection-credit', () => ({ markBookingForInspectionCredit: async () => {} }));
-jest.mock('../services/scheduling/blackout-dates', () => ({ isBlackoutDate: async () => false }));
+jest.mock('../services/scheduling/blackout-dates', () => ({
+  isBlackoutDate: async () => false, getBlackoutLayers: async () => ({ dates: new Set() }),
+}));
 jest.mock('../services/slot-zone', () => ({ resolveEstimateZone: async () => null, zoneSlugOf: () => null }));
 jest.mock('../services/estimate-slot-availability', () => ({
   ...jest.requireActual('../services/estimate-slot-availability'),
-  resolveEstimateCoords: async () => null,
+  resolveEstimateCoords: jest.fn(async () => null),
 }));
 
 const knex = require('knex');
@@ -87,6 +89,67 @@ postgres('combined capacity conversion on the migrated application schema', () =
     delete process.env.GATE_VISIT_COMBINED_CAPACITY;
     delete process.env.GATE_SEPARATE_COMBO_VISITS;
     if (mockPg) await mockPg.destroy();
+  });
+
+  test('a primary-only capacity offer never assigns excluded companion work to its technician', async () => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    const combinedGate = process.env.GATE_VISIT_COMBINED_CAPACITY;
+    const availability = require('../services/estimate-slot-availability');
+    const pin = require('../services/route-optimizer').HQ;
+    mockPg = trx;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'false';
+    availability.resolveEstimateCoords.mockResolvedValue(pin);
+    try {
+      for (const [index, line] of lines.slice(0, 2).entries()) {
+        let catalog = await trx('services').where({ service_key: line.catalog }).first('id');
+        if (!catalog) {
+          [catalog] = await trx('services').insert({ id: randomUUID(), service_key: line.catalog, name: line.name,
+            category: line.service, billing_type: 'recurring', is_active: true, default_duration_minutes: 60 }).returning('id');
+        }
+        await trx('services').where({ id: catalog.id }).update({ scheduling_duration_policy: {
+          version: 1, default_duration_minutes: index ? 40 : 30, min_duration_minutes: 30, max_duration_minutes: 40,
+        } });
+      }
+      const f = await fixture(trx, lines.slice(0, 2));
+      await trx('scheduled_services').where({ id: f.anchor.id }).del();
+      await trx('estimates').where({ id: f.estimateId }).update({ status: 'sent' });
+      await trx('technician_capabilities').insert({ technician_id: f.anchor.technician_id, service_category: 'lawn', active: false });
+      const estimate = await trx('estimates').where({ id: f.estimateId }).first();
+      const profile = await availability.resolveCatalogSlotProfile(estimate, {}, trx);
+      expect(profile.durationMinutes).toBe(30);
+      const offers = await require('../services/scheduling/find-time').findAvailableSlots({ ...pin,
+        dateFrom: f.date, dateTo: f.date, technicianId: f.anchor.technician_id,
+        durationMinutes: profile.durationMinutes, serviceType: 'pest_control', includeWeekends: true, topN: 99 });
+      expect(offers.slots.some(slot => slot.start_time === '09:00')).toBe(true);
+      const offer = signSlotOffer({ surface: 'estimate', scopeId: f.estimateId, date: f.date,
+        startMinutes: 540, technicianId: f.anchor.technician_id, durationMinutes: profile.durationMinutes });
+      const held = await reserveSlot({ estimateId: f.estimateId,
+        slotId: appendOfferToSlotId(`${f.date}_09-00_${f.anchor.technician_id}`, offer) });
+      const preparedCapacity = await require('../services/slot-reservation').prepareReservationCommit(held.scheduledServiceId);
+      await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.customerId, preparedCapacity, trx });
+      await trx('estimates').where({ id: f.estimateId }).update({ status: 'accepted' });
+      await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+      const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId }).whereNull('recurring_parent_id');
+      expect(parents).toHaveLength(2);
+      const primary = parents.find(row => row.id === held.scheduledServiceId);
+      expect(primary).toMatchObject({ technician_id: f.anchor.technician_id, window_start: '09:00:00', estimated_duration_minutes: 30 });
+      const companion = parents.find(row => row.id !== primary.id);
+      expect(companion).toMatchObject({ technician_id: null, window_start: null, window_end: null, estimated_duration_minutes: 40 });
+      const children = await trx('scheduled_services').where({ recurring_parent_id: companion.id });
+      expect(children.length).toBeGreaterThan(0);
+      expect(children.every(row => row.technician_id == null && row.window_start == null && row.window_end == null)).toBe(true);
+    } finally {
+      availability.resolveEstimateCoords.mockResolvedValue(null);
+      mockPg = pool;
+      await trx.rollback();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+      if (combinedGate === undefined) delete process.env.GATE_VISIT_COMBINED_CAPACITY;
+      else process.env.GATE_VISIT_COMBINED_CAPACITY = combinedGate;
+    }
   });
 
   test.each([1, 2])('version-2 conversion preserves %i program allowances after capacity shutdown', async count => {

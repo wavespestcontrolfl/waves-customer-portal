@@ -109,6 +109,8 @@ allowance before route traffic preparation and again under the transaction lock.
 Without a combined recurring allocation, catalog sizing and capability checks use only
 the primary appointment (pest when selected, otherwise the first program);
 independently scheduled companion programs do not enlarge its allowance.
+Those excluded companions are created unassigned and without a promised time
+until scheduled independently; they cannot inherit the certified primary trip.
 One-time paid add-ons retain their work on the same appointment. When the combined-capacity gate and its prerequisite
 below are also enabled, new combined allocations use version 2, per-service
 work allowances and one shared arrival anchor. Version-1 holds retain their

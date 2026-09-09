@@ -5593,7 +5593,13 @@ const EstimateConverter = {
             const unitDate = unit.seasonalMosquito
               ? await rolledSeasonalFirstDate(scheduledDateOnly(reservedStart.scheduled_date))
               : scheduledDateOnly(reservedStart.scheduled_date);
-            const sameTrip = unitDate === scheduledDateOnly(reservedStart.scheduled_date);
+            // A primary-only capacity hold certifies no companion work.
+            // Keep those programs unassigned and without a promised window
+            // until an independent scheduling writer certifies their route.
+            const capacityReservation = reservedStart.reservation_policy_version === 2
+              || require('./scheduling/policy').capacityEnabled();
+            const sameTrip = unitDate === scheduledDateOnly(reservedStart.scheduled_date)
+              && (!!combinedCapacity || !capacityReservation);
             // Row notes are customer-visible — a seasonal line's raw
             // every_6_weeks frequency must not leak into them.
             const unitFrequencyLabel = unit.seasonalMosquito
