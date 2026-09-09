@@ -73,7 +73,12 @@ model is scripted; no live-provider or production rollout claim is made. The
 contract and write-gate suites verify approval effects and tool registration.
 Customer 360 controls and rendered coverage are the fourth replacement slice.
 
-Split validation: all 6 IB PostgreSQL scenarios, 87 authorization/write-gate/tool-
+Split validation: all 6 IB PostgreSQL scenarios, 88 authorization/write-gate/tool-
 definition tests and 12 scoped contract checks pass. Contract smoke invokes the
 unconfirmed preview, as required by the two-step tool registry; only the real
 confirmation route can persist the write. The domain scan is clean.
+
+The add-property definition retains its length constraints without provider
+strict mode, whose grammar rejects them. A regression checks the actual tool
+projection and preserves the 200-character server address bound. Reference:
+[Anthropic schema limitations](https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations).
