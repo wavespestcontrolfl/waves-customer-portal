@@ -562,6 +562,8 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
   test.each([
     'We can bring you exclusive pest control leads daily with no upfront cost.',
     'We provide unlimited estimates for contractors.',
+    'We can grow your business with booked pest jobs',
+    'We have unlimited pest jobs available in your area',
   ])('a vendor pitch on an active clarify/intake thread is a terminal veto: %s', async (triggerBody) => {
     const result = await startSmsThreadDraft({
       phone: PHONE,

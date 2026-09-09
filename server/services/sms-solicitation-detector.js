@@ -11,6 +11,7 @@ const SOLICITATION_MARKERS = [
   // A prospect can offer enough service work to fill our schedule.
   // This needs an independent outreach clue, like other capacity wording.
   { key: 'grow_business', strong: false, re: /\b(?:grow|scale|book(?:ing)?\s+more|fill)\s+(?:your\s+)?(?:business|schedule|calendar)\b/i },
+  { key: 'sender_growth_offer', strong: true, re: /\b(?:we|i)\s+(?:(?:can|could|will)\s+)?(?:help\s+(?:you\s+)?)?(?:grow|scale)\s+your\s+business\b/i },
   { key: 'vendor_tool', strong: true, re: /\b(?:having|offer(?:ing)?|provid(?:e|ing)|try)\s+(?:an?\s+|our\s+)?ai\s+receptionist\b|\breview\s+system\b[^.!?]{0,80}\bfor\s+your\s+business\b/i },
   // Matching homeowners to contractors is lead generation; connecting us
   // with a property manager for access is ordinary quote coordination.
@@ -21,6 +22,7 @@ const SOLICITATION_MARKERS = [
   // Even "exclusive rates for new customers" or "unlimited estimates"
   // needs a separate outreach clue before it can establish a pitch.
   { key: 'additional_work', strong: false, re: /\b(?:handle|open\s+to)\s+(?:\d+(?:\s*[-–]\s*\d+)?\s+)?(?:more|extra)\s+(?:\w+\s+){0,3}(?:jobs?|customers?|estimates?)\b|\b(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}(?:jobs?|customers?|estimates?)\b/i },
+  { key: 'sender_work_offer', strong: true, re: /\b(?:we|i)\s+(?:have|offer|provide)\s+(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}jobs?\s+available\b/i },
   // Explicit sender-side offers to contractors are outreach; a customer
   // asking whether WE offer estimates for their contractors is not.
   { key: 'contractor_offer', strong: false, outreach: true, re: /\b(?:we|our\s+(?:network|team|company))\s+(?:provide|offer)s?\b[^.!?]{0,80}\b(?:jobs?|customers?|estimates?|leads?)\s+for\s+(?:local\s+)?contractors?\b/i },
