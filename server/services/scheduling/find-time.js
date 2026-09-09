@@ -138,7 +138,6 @@ async function findCapacitySlots(opts) {
         excludeServiceIds: opts.excludeServiceIds,
         ...(opts.arrivalWindow?.serviceId ? {
           serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
-          includeVisitGroup: true,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
           service_type: opts.serviceType || opts.serviceKey || '' } }),
       });
@@ -152,7 +151,7 @@ async function findCapacitySlots(opts) {
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
           // Owner policy: ordinary setup/closeout is already in the on-site allowance.
-          durationMinutes, bufferMinutes: 0,
+          durationMinutes, bufferMinutes: 0, allowInsertion: false,
         } });
       }
     }

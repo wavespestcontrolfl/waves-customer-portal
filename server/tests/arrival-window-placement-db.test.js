@@ -99,6 +99,10 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'lawn', active: false });
       expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
       await mockConn('technician_capabilities').delete();
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 1 });
+      await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 2 });
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: OLD_DAY });
+      expect((await findAvailableSlots(OPTIONS)).slots.every(slot => slot.route_arrivals.at(-1).id === TARGET)).toBe(true);
       await mockConn('schedule_blackout_dates').insert({ date: DAY });
       expect((await findAvailableSlots(OPTIONS)).slots.length).toBeGreaterThan(0);
       expect((await findAvailableSlots({ ...OPTIONS, includeBlackoutDates: false })).slots).toEqual([]);
