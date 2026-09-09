@@ -26,7 +26,7 @@ import {
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
-import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, UiSurface, cn } from "../../components/ui";
+import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
 import "../../styles/estimate-workflow.css";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
@@ -47,7 +47,6 @@ import { computeProvisionalState, provisionalSummary } from "../../utils/estimat
 
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-const ROBOTO = "'Roboto', Arial, sans-serif";
 
 const TRENCHING_PRODUCT_OPTIONS = [
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
@@ -533,25 +532,9 @@ class EstimateErrorBoundary extends Component {
   }
 }
 
-// ── Form context + local V2 helpers ─────────────────────────────
+// Domain bindings keep the estimate draft in one owner; shared primitives
+// provide field associations, focus treatment and control density.
 const FormCtx = createContext({});
-
-function FieldV2({ label, children, className }) {
-  const control = React.Children.toArray(children).find((child) => child?.props?.k);
-  return (
-    <div className={cn("mb-4", className)}>
-      {" "}
-      <label htmlFor={control ? `estimate-${control.props.k}` : undefined} className="block text-14 font-medium text-zinc-900 mb-2">
-        {label}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-const INPUT_CLS =
-  "w-full h-11 px-3 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 " +
-  "rounded-sm u-focus-ring placeholder:text-ink-disabled";
 
 const CONTACT_FIELDS = new Set([
   "leadId",
@@ -5941,7 +5924,7 @@ export default function EstimateToolViewV2({
                   )}
                   {isDethatchingStAugustine && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-                      <FieldV2 label="Manager Approval Reason">
+                      <Field label="Manager Approval Reason" id="estimate-dethatchingManagerApprovalReason" className="mb-4">
                         <SelectV2
                           k="dethatchingManagerApprovalReason"
                           options={[
@@ -5952,7 +5935,7 @@ export default function EstimateToolViewV2({
                             { value: "manager_override", label: "Manager override" },
                           ]}
                         />
-                      </FieldV2>
+                      </Field>
                       <div className="pt-7">
                         <CheckboxV2 k="dethatchingManagerApproved" label="Manager approval confirmed" />
                       </div>
@@ -5982,23 +5965,23 @@ export default function EstimateToolViewV2({
                   {form.svcTermiteBait && (
                     <>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <FieldV2 label="Footprint Sq Ft">
+                        <Field label="Footprint Sq Ft" id="estimate-termiteFootprintSqFt" className="mb-4">
                           <InputV2
                             k="termiteFootprintSqFt"
                             type="number"
                             placeholder="Admin-entered"
                           />
-                        </FieldV2>
-                        <FieldV2 label="Perimeter LF Override">
+                        </Field>
+                        <Field label="Perimeter LF Override" id="estimate-termitePerimeterLF" className="mb-4">
                           <InputV2
                             k="termitePerimeterLF"
                             type="number"
                             placeholder="Optional"
                           />
-                        </FieldV2>
+                        </Field>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <FieldV2 label="Layout">
+                        <Field label="Layout" id="estimate-termiteBaitComplexity" className="mb-4">
                           <SelectV2
                             k="termiteBaitComplexity"
                             options={[
@@ -6008,7 +5991,7 @@ export default function EstimateToolViewV2({
                               { value: "complex", label: "Complex" },
                             ]}
                           />
-                        </FieldV2>
+                        </Field>
                         {/* System + Monitoring selects removed (owner
                             2026-07-28): the menu is Trelona-only at its
                             label 15-ft spacing, and the station check is
@@ -6022,7 +6005,7 @@ export default function EstimateToolViewV2({
                             never strands a stale price here. Commercial keeps
                             the manual-quote scope split below. */}
                         {!isCommercialEstimateInput(form) && (
-                          <FieldV2 label="Bond (warranty)">
+                          <Field label="Bond (warranty)" id="estimate-termiteBondTerm" className="mb-4">
                             <SelectV2
                               k="termiteBondTerm"
                               options={[
@@ -6032,7 +6015,7 @@ export default function EstimateToolViewV2({
                                 { value: "10yr", label: "10-Year term" },
                               ]}
                             />
-                          </FieldV2>
+                          </Field>
                         )}
                         {/* Station ownership (owner 2026-07-26): rental drops
                             the one-time install and recovers it as a per-
@@ -6042,7 +6025,7 @@ export default function EstimateToolViewV2({
                             commercial routes hardware through the manual-quote
                             scope split below. */}
                         {!isCommercialEstimateInput(form) && termiteRentalAvailable && (
-                          <FieldV2 label="Stations">
+                          <Field label="Stations" id="estimate-termiteOwnership" className="mb-4">
                             <SelectV2
                               k="termiteOwnership"
                               options={[
@@ -6050,14 +6033,14 @@ export default function EstimateToolViewV2({
                                 { value: "rent", label: "Rented" },
                               ]}
                             />
-                          </FieldV2>
+                          </Field>
                         )}
                       </div>
                       {/* Scope-split is commercial-only — the residential termite
                           pricer ignores termiteScope, so hide it there to avoid a
                           "Bond — manual quote" label that still auto-prices. */}
                       {isCommercialEstimateInput(form) && (
-                        <FieldV2 label="Scope (liability)">
+                        <Field label="Scope (liability)" id="estimate-termiteScope" className="mb-4">
                           <SelectV2
                             k="termiteScope"
                             options={[
@@ -6069,20 +6052,20 @@ export default function EstimateToolViewV2({
                               { value: "initial_install_manual", label: "Initial install — manual quote" },
                             ]}
                           />
-                        </FieldV2>
+                        </Field>
                       )}
                     </>
                   )}
                   {form.svcTrenching && (
                     <>
-                      <FieldV2 label="Trenching Product">
+                      <Field label="Trenching Product" id="estimate-trenchingProductKey" className="mb-4">
                         <SelectV2
                           k="trenchingProductKey"
                           options={TRENCHING_PRODUCT_OPTIONS}
                         />
-                      </FieldV2>
+                      </Field>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <FieldV2 label="Application Rate">
+                        <Field label="Application Rate" id="estimate-trenchingApplicationRate" className="mb-4">
                           <SelectV2
                             k="trenchingApplicationRate"
                             options={[
@@ -6090,8 +6073,8 @@ export default function EstimateToolViewV2({
                               { value: "high", label: "High/problem-soil rate (+12%)" },
                             ]}
                           />
-                        </FieldV2>
-                        <FieldV2 label="Trench Depth">
+                        </Field>
+                        <Field label="Trench Depth" id="estimate-trenchingDepthFt" className="mb-4">
                           <SelectV2
                             k="trenchingDepthFt"
                             options={[
@@ -6100,8 +6083,8 @@ export default function EstimateToolViewV2({
                               { value: "1.5", label: "1.5 ft / 18 in (+30%)" },
                             ]}
                           />
-                        </FieldV2>
-                        <FieldV2 label="Warranty">
+                        </Field>
+                        <Field label="Warranty" id="estimate-trenchingWarrantyTier" className="mb-4">
                           <SelectV2
                             k="trenchingWarrantyTier"
                             options={[
@@ -6111,39 +6094,39 @@ export default function EstimateToolViewV2({
                               { value: "five_year_repair_retreat", label: "5-Year Repair + Retreat" },
                             ]}
                           />
-                        </FieldV2>
+                        </Field>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <FieldV2 label="Perimeter LF">
+                        <Field label="Perimeter LF" id="estimate-trenchingPerimeterLF" className="mb-4">
                           <InputV2
                             k="trenchingPerimeterLF"
                             type="number"
                             placeholder="Measured LF"
                           />
-                        </FieldV2>
-                        <FieldV2 label="Concrete / Slab LF">
+                        </Field>
+                        <Field label="Concrete / Slab LF" id="estimate-trenchingConcreteLF" className="mb-4">
                           <InputV2
                             k="trenchingConcreteLF"
                             type="number"
                             placeholder="Optional"
                           />
-                        </FieldV2>
+                        </Field>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <FieldV2 label="Dirt Trench LF">
+                        <Field label="Dirt Trench LF" id="estimate-trenchingDirtLF" className="mb-4">
                           <InputV2
                             k="trenchingDirtLF"
                             type="number"
                             placeholder="Optional"
                           />
-                        </FieldV2>
-                        <FieldV2 label="Concrete %">
+                        </Field>
+                        <Field label="Concrete %" id="estimate-trenchingConcretePct" className="mb-4">
                           <InputV2
                             k="trenchingConcretePct"
                             type="number"
                             placeholder="0.40 or 40"
                           />
-                        </FieldV2>
+                        </Field>
                       </div>
                       <CheckboxV2
                         k="trenchingEstimateFromFootprint"
@@ -6164,47 +6147,47 @@ export default function EstimateToolViewV2({
                   )}
                   {form.svcBoracare && (
                     <>
-                      <FieldV2 label="Attic / Raw Wood Sq Ft">
+                      <Field label="Attic / Raw Wood Sq Ft" id="estimate-boracareSqft" className="mb-4">
                         <InputV2
                           k="boracareSqft"
                           type="number"
                           placeholder="Admin-entered"
                         />
-                      </FieldV2>
-                      <FieldV2 label="Surface Linear Ft">
+                      </Field>
+                      <Field label="Surface Linear Ft" id="estimate-boracareSurfaceLinearFt" className="mb-4">
                         <InputV2
                           k="boracareSurfaceLinearFt"
                           type="number"
                           placeholder="Linear ft of surface"
                         />
-                      </FieldV2>
-                      <FieldV2 label="Surface Height (ft)">
+                      </Field>
+                      <Field label="Surface Height (ft)" id="estimate-boracareSurfaceHeightFt" className="mb-4">
                         <InputV2
                           k="boracareSurfaceHeightFt"
                           type="number"
                           placeholder="Default 8"
                         />
-                      </FieldV2>
+                      </Field>
                     </>
                   )}
                   {form.svcPreslab && (
                     <>
-                      <FieldV2 label="Product">
+                      <Field label="Product" id="estimate-preslabProductKey" className="mb-4">
                         <SelectV2
                           k="preslabProductKey"
                           options={PRE_SLAB_PRODUCT_OPTIONS}
                         />
-                      </FieldV2>
+                      </Field>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {" "}
-                        <FieldV2 label="Slab Sq Ft">
+                        <Field label="Slab Sq Ft" id="estimate-preslabSqft" className="mb-4">
                           <InputV2
                             k="preslabSqft"
                             type="number"
                             placeholder="Admin-entered"
                           />
-                        </FieldV2>{" "}
-                        <FieldV2 label="Warranty">
+                        </Field>{" "}
+                        <Field label="Warranty" id="estimate-preslabWarranty" className="mb-4">
                           <SelectV2
                             k="preslabWarranty"
                             options={[
@@ -6213,9 +6196,9 @@ export default function EstimateToolViewV2({
                               { value: "EXTENDED", label: "Extended 5-yr (+$200)" },
                             ]}
                           />
-                        </FieldV2>{" "}
+                        </Field>{" "}
                       </div>{" "}
-                      <FieldV2 label="Builder Volume">
+                      <Field label="Builder Volume" id="estimate-preslabVolume" className="mb-4">
                         <SelectV2
                           k="preslabVolume"
                           options={[
@@ -6224,13 +6207,13 @@ export default function EstimateToolViewV2({
                             { value: "10", label: "10+ homes (-15%)" },
                           ]}
                         />
-                      </FieldV2>
-                      <FieldV2 label="Pre-Slab Job Context">
+                      </Field>
+                      <Field label="Pre-Slab Job Context" id="estimate-preslabJobContext" className="mb-4">
                         <SelectV2
                           k="preslabJobContext"
                           options={PRE_SLAB_JOB_CONTEXT_OPTIONS}
                         />
-                      </FieldV2>
+                      </Field>
                       <CheckboxV2
                         k="preslabLabelConfirmed"
                         label="Label rate and finished dilution confirmed"
@@ -6249,8 +6232,7 @@ export default function EstimateToolViewV2({
               {form.svcFoam && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <FieldV2 label="Drill Points" className="mb-0">
-                    {" "}
+                  <Field label="Drill Points" className="mb-0" id="estimate-foamPoints">
                     <SelectV2
                       k="foamPoints"
                       options={[
@@ -6259,16 +6241,15 @@ export default function EstimateToolViewV2({
                         { value: "15", label: "11-15 Extensive" },
                         { value: "20", label: "15+ Full Perimeter" },
                       ]}
-                    />{" "}
-                  </FieldV2>{" "}
+                    />
+                  </Field>{" "}
                 </div>
               )}
               <CheckboxV2 k="svcFoamRecurring" label="Recurring Termite Foam Service" />
               {form.svcFoamRecurring && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <FieldV2 label="Cadence" className="mb-2">
-                    {" "}
+                  <Field label="Cadence" className="mb-4 mb-2" id="estimate-foamRecurringFreq">
                     <SelectV2
                       k="foamRecurringFreq"
                       options={[
@@ -6276,10 +6257,9 @@ export default function EstimateToolViewV2({
                         { value: "bimonthly", label: "Bimonthly (every 2 mo) — 15% off" },
                         { value: "monthly", label: "Monthly — 20% off" },
                       ]}
-                    />{" "}
-                  </FieldV2>{" "}
-                  <FieldV2 label="Drill Points" className="mb-0">
-                    {" "}
+                    />
+                  </Field>{" "}
+                  <Field label="Drill Points" className="mb-0" id="estimate-foamRecurringPoints">
                     <SelectV2
                       k="foamRecurringPoints"
                       options={[
@@ -6288,8 +6268,8 @@ export default function EstimateToolViewV2({
                         { value: "15", label: "11-15 Extensive" },
                         { value: "20", label: "15+ Full Perimeter" },
                       ]}
-                    />{" "}
-                  </FieldV2>{" "}
+                    />
+                  </Field>{" "}
                   <div className="text-14 text-zinc-500 leading-snug mt-2">
                     Per-visit rate is discounted off the one-time price by cadence. Standalone — does not count toward WaveGuard tier.
                   </div>
@@ -6302,14 +6282,14 @@ export default function EstimateToolViewV2({
               {form.svcFlea && (
                 <div className="ml-7 mb-3 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="mb-3">
-                    <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                    <div className="text-14 font-medium text-ink-secondary mb-2">
                       Infestation / prep complexity
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {FLEA_COMPLEXITY_OPTIONS.map((option) => {
                         const active = (form.fleaComplexity || "light") === option.value;
                         return (
-                          <button
+                          <button data-ui-text-action
                             key={option.value}
                             type="button"
                             onClick={() => set("fleaComplexity", option.value)}
@@ -6327,21 +6307,21 @@ export default function EstimateToolViewV2({
                       })}
                     </div>
                   </div>
-                  <label className="flex items-start gap-2.5 mb-3 cursor-pointer text-14 text-zinc-900 select-none">
-                    <input
+                  <label className="ui-choice-label flex items-start gap-2.5 mb-3 cursor-pointer text-14 text-zinc-900 select-none">
+                    <Checkbox
                       type="checkbox"
                       checked={!!form.fleaExteriorSourceSuspected}
                       onChange={(e) => set("fleaExteriorSourceSuspected", e.target.checked)}
-                      className="mt-0.5 h-4 w-4 accent-zinc-900"
+                      className="shrink-0"
                     />
                     <span>Exterior source suspected. If exterior treatment is declined, warranty scope remains interior-only.</span>
                   </label>
-                  <label className="flex items-center gap-2.5 mb-3 cursor-pointer text-14 text-zinc-900 select-none">
-                    <input
+                  <label className="ui-choice-label flex items-center gap-2.5 mb-3 cursor-pointer text-14 text-zinc-900 select-none">
+                    <Checkbox
                       type="checkbox"
                       checked={!!form.svcFleaExterior}
                       onChange={(e) => setFleaExteriorEnabled(e.target.checked)}
-                      className="h-4 w-4 accent-zinc-900"
+                      className="shrink-0"
                     />
                     Add exterior flea treatment
                   </label>
@@ -6364,14 +6344,14 @@ export default function EstimateToolViewV2({
                         </Badge>
                       </div>
                       <div className="mb-3">
-                        <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                        <div className="text-14 font-medium text-ink-secondary mb-2">
                           Area source
                         </div>
                         <div className="flex flex-wrap gap-1.5">
                           {FLEA_EXTERIOR_SOURCE_OPTIONS.map((option) => {
                             const active = fleaExteriorAreaSource === option.value;
                             return (
-                              <button
+                              <button data-ui-text-action
                                 key={option.value}
                                 type="button"
                                 onClick={() => set("fleaExteriorAreaSource", option.value)}
@@ -6389,29 +6369,29 @@ export default function EstimateToolViewV2({
                         </div>
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
-                        <FieldV2 label="Area" className="mb-0">
-                          <input
+                        <Field label="Area" className="mb-0">
+                          <Input
                             type="number"
                             min="0"
                             step="250"
                             value={form.fleaExteriorAreaSqFt || ""}
                             onChange={(e) => set("fleaExteriorAreaSqFt", e.target.value)}
                             placeholder="Treatable sq ft"
-                            className={INPUT_CLS}
+
                           />
-                        </FieldV2>
+                        </Field>
                         <div className="h-10 px-3 flex items-center rounded-sm border-hairline border-zinc-300 bg-white text-14 text-zinc-900 u-nums">
                           {formatSqFt(fleaExteriorAreaSqFt)}
                         </div>
                       </div>
-                      <input
+                      <input aria-label="Exterior flea treatment area"
                         type="range"
                         min="0"
                         max={fleaExteriorMaxSqFt}
                         step="250"
                         value={Math.min(fleaExteriorAreaSqFt, fleaExteriorMaxSqFt)}
                         onChange={(e) => set("fleaExteriorAreaSqFt", e.target.value)}
-                        className="mt-3 w-full accent-zinc-900"
+                        className="mt-3 w-full min-h-11 accent-zinc-900 u-focus-ring"
                       />
                       <div
                         className="mt-1 grid gap-1 text-14 text-ink-secondary"
@@ -6436,7 +6416,7 @@ export default function EstimateToolViewV2({
                         {formatSqFt(fleaExteriorAreaSqFt)}
                       </div>
                       <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs">
-                        <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-1">
+                        <div className="text-14 font-medium text-ink-secondary mb-1">
                           Exterior flea add-on
                         </div>
                         {fleaExteriorPreview.priceable ? (
@@ -6463,20 +6443,20 @@ export default function EstimateToolViewV2({
                         </div>
                       )}
                       <div className="mt-3">
-                        <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                        <div className="text-14 font-medium text-ink-secondary mb-2">
                           Exterior treatment zones
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                           {FLEA_EXTERIOR_ZONES.map((zone) => (
                             <label
                               key={zone.value}
-                              className="flex items-center gap-2 text-14 text-zinc-900 cursor-pointer select-none"
+                              className="ui-choice-label flex items-center gap-2 text-14 text-zinc-900 cursor-pointer select-none"
                             >
-                              <input
+                              <Checkbox
                                 type="checkbox"
                                 checked={(form.fleaExteriorZones || []).includes(zone.value)}
                                 onChange={(e) => setFleaExteriorZone(zone.value, e.target.checked)}
-                                className="h-3.5 w-3.5 accent-zinc-900"
+                                className="shrink-0"
                               />
                               {zone.label}
                             </label>
@@ -6494,8 +6474,7 @@ export default function EstimateToolViewV2({
                   <div className="text-14 font-medium text-zinc-900 mb-2">
                     Standalone / Specialty Services
                   </div>
-                  <FieldV2 label="Service Type" className="mb-0">
-                    {" "}
+                  <Field label="Service Type" className="mb-0" id="estimate-roachType">
                     <SelectV2
                       k="roachType"
                       options={[
@@ -6505,10 +6484,10 @@ export default function EstimateToolViewV2({
                         },
                         { value: "GERMAN", label: "German Roach Cleanout" },
                       ]}
-                    />{" "}
-                  </FieldV2>{" "}
+                    />
+                  </Field>{" "}
                   {form.roachType === "GERMAN" && (
-                    <FieldV2 label="Infestation Severity" className="mb-0 mt-2">
+                    <Field label="Infestation Severity" className="mb-0 mt-2" id="estimate-germanRoachSeverity">
                       <SelectV2
                         k="germanRoachSeverity"
                         options={[
@@ -6517,7 +6496,7 @@ export default function EstimateToolViewV2({
                           { value: "heavy", label: "Heavy — 4 Visits ($550)" },
                         ]}
                       />
-                    </FieldV2>
+                    </Field>
                   )}
                   {form.roachType === "GERMAN" && (
                     <div className="text-14 text-ink-secondary mt-2">
@@ -6538,13 +6517,13 @@ export default function EstimateToolViewV2({
                       </div>
                     ) : (
                       <>
-                        <FieldV2 label="Fee Override ($)" className="mb-0 mt-2">
+                        <Field label="Fee Override ($)" className="mb-0 mt-2" id="estimate-standaloneRoachFeeOverride">
                           <InputV2
                             k="standaloneRoachFeeOverride"
                             type="number"
                             placeholder="Engine price"
                           />
-                        </FieldV2>
+                        </Field>
                         <div className="text-14 text-ink-secondary mt-2">
                           Leave blank to use the engine's footprint-bracket
                           price.
@@ -6559,28 +6538,40 @@ export default function EstimateToolViewV2({
               )}
               <CheckboxV2 k="svcWasp" label="Bee / Wasp Nest Removal Service" />
               {form.svcWasp && <div className="ml-7 mb-4 grid grid-cols-1 sm:grid-cols-2 gap-x-3">
-                <FieldV2 label="Species"><SelectV2 k="stingSpecies" options={[
+                <Field label="Species" id="estimate-stingSpecies" className="mb-4">
+                  <SelectV2 k="stingSpecies" options={[
                   { value: "PAPER_WASP", label: "Paper wasps" }, { value: "YJ_AERIAL", label: "Yellow jackets — aerial" },
                   { value: "YJ_GROUND", label: "Yellow jackets — ground" }, { value: "MUD_DAUBER", label: "Mud daubers" },
                   { value: "HONEYBEE_NEW", label: "Honeybees — new colony" }, { value: "HONEYBEE_EST", label: "Honeybees — established" },
                   { value: "CARPENTER", label: "Carpenter bees" }, { value: "BALDFACED", label: "Baldfaced hornets" },
                   { value: "AFRICANIZED", label: "Africanized bees" },
-                ]} /></FieldV2>
-                <FieldV2 label="Scope tier"><SelectV2 k="stingTier" options={[1, 2, 3, 4].map((tier) => ({ value: String(tier), label: `Tier ${tier}` }))} /></FieldV2>
-                <FieldV2 label="Nest removal"><SelectV2 k="stingRemoval" options={[
+                ]} />
+                </Field>
+                <Field label="Scope tier" id="estimate-stingTier" className="mb-4">
+                  <SelectV2 k="stingTier" options={[1, 2, 3, 4].map((tier) => ({ value: String(tier), label: `Tier ${tier}` }))} />
+                </Field>
+                <Field label="Nest removal" id="estimate-stingRemoval" className="mb-4">
+                  <SelectV2 k="stingRemoval" options={[
                   { value: "NONE", label: "No removal" }, { value: "SMALL", label: "Small nest" },
                   { value: "LARGE", label: "Large comb" }, { value: "HONEYCOMB", label: "Honeycomb extraction" },
                   { value: "RELOCATE", label: "Live bee relocation" },
-                ]} /></FieldV2>
-                <FieldV2 label="Aggressiveness"><SelectV2 k="stingAggressive" options={[
+                ]} />
+                </Field>
+                <Field label="Aggressiveness" id="estimate-stingAggressive" className="mb-4">
+                  <SelectV2 k="stingAggressive" options={[
                   { value: "NO", label: "None" }, { value: "MILD", label: "Mild" }, { value: "HIGH", label: "High" }, { value: "EXTREME", label: "Extreme" },
-                ]} /></FieldV2>
-                <FieldV2 label="Access height"><SelectV2 k="stingHeight" options={[
+                ]} />
+                </Field>
+                <Field label="Access height" id="estimate-stingHeight" className="mb-4">
+                  <SelectV2 k="stingHeight" options={[
                   { value: "GROUND", label: "Ground" }, { value: "MID", label: "Mid-level" }, { value: "HIGH", label: "High" },
-                ]} /></FieldV2>
-                <FieldV2 label="Confined space"><SelectV2 k="stingConfined" options={[
+                ]} />
+                </Field>
+                <Field label="Confined space" id="estimate-stingConfined" className="mb-4">
+                  <SelectV2 k="stingConfined" options={[
                   { value: "NO", label: "No" }, { value: "YES", label: "Yes" },
-                ]} /></FieldV2>
+                ]} />
+                </Field>
               </div>}
               <CheckboxV2 k="svcBedbug" label="Bed Bug Treatment Service" />
               {form.svcBedbug && (
@@ -6588,10 +6579,10 @@ export default function EstimateToolViewV2({
                   {" "}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
-                    <FieldV2 label="Rooms">
+                    <Field label="Rooms" id="estimate-bedbugRooms" className="mb-4">
                       <InputV2 k="bedbugRooms" type="number" min="1" max="10" />
-                    </FieldV2>{" "}
-                    <FieldV2 label="Method">
+                    </Field>{" "}
+                    <Field label="Method" id="estimate-bedbugMethod" className="mb-4">
                       <SelectV2
                         k="bedbugMethod"
                         options={[
@@ -6600,10 +6591,10 @@ export default function EstimateToolViewV2({
                           { value: "HYBRID", label: "Hybrid" },
                         ]}
                       />
-                    </FieldV2>{" "}
+                    </Field>{" "}
                   </div>{" "}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
-                    <FieldV2 label="Severity">
+                    <Field label="Severity" id="estimate-bedbugSeverity" className="mb-4">
                       <SelectV2
                         k="bedbugSeverity"
                         options={[
@@ -6613,8 +6604,8 @@ export default function EstimateToolViewV2({
                           { value: "severe", label: "Severe/Quote" },
                         ]}
                       />
-                    </FieldV2>
-                    <FieldV2 label="Prep">
+                    </Field>
+                    <Field label="Prep" id="estimate-bedbugPrepStatus" className="mb-4">
                       <SelectV2
                         k="bedbugPrepStatus"
                         options={[
@@ -6624,8 +6615,8 @@ export default function EstimateToolViewV2({
                           { value: "refused", label: "Refused/Quote" },
                         ]}
                       />
-                    </FieldV2>
-                    <FieldV2 label="Occupancy">
+                    </Field>
+                    <Field label="Occupancy" id="estimate-bedbugOccupancyType" className="mb-4">
                       <SelectV2
                         k="bedbugOccupancyType"
                         options={[
@@ -6635,11 +6626,11 @@ export default function EstimateToolViewV2({
                           { value: "studentHousing", label: "Student Housing" },
                         ]}
                       />
-                    </FieldV2>
+                    </Field>
                   </div>
                   {form.bedbugMethod !== "CHEMICAL" && (
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
-                      <FieldV2 label="Equipment">
+                      <Field label="Equipment" id="estimate-bedbugEquipment" className="mb-4">
                         <SelectV2
                           k="bedbugEquipment"
                           options={[
@@ -6647,8 +6638,8 @@ export default function EstimateToolViewV2({
                             { value: "SUBCONTRACT", label: "Subcontract" },
                           ]}
                         />
-                      </FieldV2>
-                      <FieldV2 label="Heat Scope">
+                      </Field>
+                      <Field label="Heat Scope" id="estimate-bedbugHeatScope" className="mb-4">
                         <SelectV2
                           k="bedbugHeatScope"
                           options={[
@@ -6656,11 +6647,11 @@ export default function EstimateToolViewV2({
                             { value: "WHOLE_HOME", label: "Whole Home" },
                           ]}
                         />
-                      </FieldV2>
+                      </Field>
                       {form.bedbugEquipment === "SUBCONTRACT" && (
-                        <FieldV2 label="Vendor Cost">
+                        <Field label="Vendor Cost" id="estimate-bedbugSubcontractCost" className="mb-4">
                           <InputV2 k="bedbugSubcontractCost" type="number" min="1" />
-                        </FieldV2>
+                        </Field>
                       )}
                     </div>
                   )}
@@ -6680,7 +6671,7 @@ export default function EstimateToolViewV2({
               {form.svcTrapOnlyRetainer && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <FieldV2 label="Retainer Plan">
+                    <Field label="Retainer Plan" id="estimate-trapOnlyRetainerPlan" className="mb-4">
                       <SelectV2
                         k="trapOnlyRetainerPlan"
                         options={[
@@ -6689,8 +6680,8 @@ export default function EstimateToolViewV2({
                           { value: "monthly", label: "Monthly $995/yr or $99/mo" },
                         ]}
                       />
-                    </FieldV2>
-                    <FieldV2 label="Billing">
+                    </Field>
+                    <Field label="Billing" id="estimate-trapOnlyRetainerBilling" className="mb-4">
                       <SelectV2
                         k="trapOnlyRetainerBilling"
                         options={[
@@ -6698,14 +6689,14 @@ export default function EstimateToolViewV2({
                           { value: "monthly", label: "Monthly, 12-month agreement" },
                         ]}
                       />
-                    </FieldV2>
-                    <FieldV2 label="Response Callbacks Used">
+                    </Field>
+                    <Field label="Response Callbacks Used" id="estimate-trapOnlyResponseCallbacksUsed" className="mb-4">
                       <InputV2 k="trapOnlyResponseCallbacksUsed" type="number" min="0" />
-                    </FieldV2>
-                    <FieldV2 label="Extra Response Callbacks">
+                    </Field>
+                    <Field label="Extra Response Callbacks" id="estimate-trapOnlyExtraCallbackCount" className="mb-4">
                       <InputV2 k="trapOnlyExtraCallbackCount" type="number" min="0" />
-                    </FieldV2>
-                    <div className="col-span-2">
+                    </Field>
+                    <div className="sm:col-span-2">
                       <CheckboxV2 k="trapOnlyAttachedToCompletedTrappingJob" label="Attached to completed trapping job (waive setup)" />
                     </div>
                   </div>
@@ -6721,7 +6712,7 @@ export default function EstimateToolViewV2({
                   {" "}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
-                    <FieldV2 label="Tier">
+                    <Field label="Tier" id="estimate-sanitationTier" className="mb-4">
                       <SelectV2
                         k="sanitationTier"
                         options={[
@@ -6730,8 +6721,8 @@ export default function EstimateToolViewV2({
                           { value: "heavy", label: "Heavy" },
                         ]}
                       />
-                    </FieldV2>{" "}
-                    <FieldV2 label="Access">
+                    </Field>{" "}
+                    <Field label="Access" id="estimate-sanitationAccess" className="mb-4">
                       <SelectV2
                         k="sanitationAccess"
                         options={[
@@ -6740,55 +6731,55 @@ export default function EstimateToolViewV2({
                           { value: "tight", label: "Tight" },
                         ]}
                       />
-                    </FieldV2>{" "}
-                    <FieldV2 label="Affected Sq Ft">
+                    </Field>{" "}
+                    <Field label="Affected Sq Ft" id="estimate-sanitationArea" className="mb-4">
                       <InputV2
                         k="sanitationArea"
                         type="number"
                         min="0"
                         placeholder="Auto from footprint"
                       />
-                    </FieldV2>{" "}
-                    <FieldV2 label="Debris Cu Ft">
+                    </Field>{" "}
+                    <Field label="Debris Cu Ft" id="estimate-sanitationDebris" className="mb-4">
                       <InputV2 k="sanitationDebris" type="number" min="0" />
-                    </FieldV2>{" "}
+                    </Field>{" "}
                   </div>{" "}
                 </div>
               )}
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion Service" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
-                  <p className="text-14 tracking-label uppercase text-zinc-400 font-medium">Wire Mesh Points</p>
+                  <p className="text-14 text-zinc-400 font-medium">Wire Mesh Points</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <FieldV2 label="Standard — $75/pt">
+                    <Field label="Standard — $75/pt" id="estimate-exclStandardWireMesh" className="mb-4">
                       <InputV2 k="exclStandardWireMesh" type="number" min="0" />
-                    </FieldV2>
-                    <FieldV2 label="Roof/High — $150/pt">
+                    </Field>
+                    <Field label="Roof/High — $150/pt" id="estimate-exclAdvancedWireMesh" className="mb-4">
                       <InputV2 k="exclAdvancedWireMesh" type="number" min="0" />
-                    </FieldV2>
+                    </Field>
                   </div>
-                  <p className="text-14 tracking-label uppercase text-zinc-400 font-medium">Bird Boxes</p>
+                  <p className="text-14 text-zinc-400 font-medium">Bird Boxes</p>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <FieldV2 label="Standard — $150">
+                    <Field label="Standard — $150" id="estimate-exclStandardBirdBox" className="mb-4">
                       <InputV2 k="exclStandardBirdBox" type="number" min="0" />
-                    </FieldV2>
-                    <FieldV2 label="Tile/High — $210">
+                    </Field>
+                    <Field label="Tile/High — $210" id="estimate-exclTileHighBirdBox" className="mb-4">
                       <InputV2 k="exclTileHighBirdBox" type="number" min="0" />
-                    </FieldV2>
-                    <FieldV2 label="Custom — $250+">
+                    </Field>
+                    <Field label="Custom — $250+" id="estimate-exclCustomBirdBox" className="mb-4">
                       <InputV2 k="exclCustomBirdBox" type="number" min="0" />
-                    </FieldV2>
+                    </Field>
                   </div>
-                  <p className="text-14 tracking-label uppercase text-zinc-400 font-medium">Linear Mesh (LF)</p>
+                  <p className="text-14 text-zinc-400 font-medium">Linear Mesh (LF)</p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <FieldV2 label="Soft material — $14/LF">
+                    <Field label="Soft material — $14/LF" id="estimate-exclMeshSoftLF" className="mb-4">
                       <InputV2 k="exclMeshSoftLF" type="number" min="0" />
-                    </FieldV2>
-                    <FieldV2 label="Hard material — $22/LF">
+                    </Field>
+                    <Field label="Hard material — $22/LF" id="estimate-exclMeshConcreteLF" className="mb-4">
                       <InputV2 k="exclMeshConcreteLF" type="number" min="0" />
-                    </FieldV2>
+                    </Field>
                   </div>
-                  <FieldV2 label="Waive Inspection ($75)?">
+                  <Field label="Waive Inspection ($75)?" id="estimate-exclWaive" className="mb-4">
                     <SelectV2
                       k="exclWaive"
                       options={[
@@ -6796,13 +6787,13 @@ export default function EstimateToolViewV2({
                         { value: "YES", label: "Yes — booking work" },
                       ]}
                     />
-                  </FieldV2>
+                  </Field>
                 </div>
               )}
               <CheckboxV2 k="svcRodentGuarantee" label="Rodent Guarantee Service" />
               {form.svcRodentGuarantee && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <p className="text-14 tracking-label uppercase text-zinc-400 font-medium mb-2">
+                  <p className="text-14 text-zinc-400 font-medium mb-2">
                     Guarantee Eligibility — all four required
                   </p>
                   <CheckboxV2 k="rgTrappingCompleted" label="Trapping completed" />
@@ -6816,25 +6807,24 @@ export default function EstimateToolViewV2({
               )}
             </section>
             <section tabIndex={-1} id="estimate-pricing" className="estimate-workflow-section space-y-4" aria-label="Pricing and terms">
-            <h2 className="text-20 font-semibold">Pricing & terms</h2>
-            <label className="block text-14 font-medium">Customer-visible notes
-              <textarea className={`${INPUT_CLS} h-24 mt-2 py-2`} value={form.notes || ""} onChange={(event) => set("notes", event.target.value)} />
-            </label>
-            <p className="text-14 text-zinc-600">These notes appear on the customer estimate. Keep internal instructions in the lead activity record.</p>
+            <h2 className="text-18 font-medium">Pricing & terms</h2>
+            <Field label="Customer-visible notes" help="These notes appear on the customer estimate. Keep internal instructions in the lead activity record.">
+              <Textarea rows={4} value={form.notes || ""} onChange={(event) => set("notes", event.target.value)} />
+            </Field>
                 <div className="mb-3 p-3 border-hairline border-zinc-300 rounded-xs bg-zinc-50">
                   {" "}
-                  <div className="text-14 font-medium text-zinc-900 mb-2 uppercase tracking-label">
+                  <div className="text-14 font-medium text-zinc-900 mb-2">
                     Customer options
                   </div>{" "}
-                  <label className="flex items-start gap-2 cursor-pointer text-14 text-zinc-900 select-none mb-2">
+                  <label className="ui-choice-label flex items-start gap-2 cursor-pointer text-14 text-zinc-900 select-none mb-2">
                     {" "}
-                    <input
+                    <Checkbox
                       type="checkbox"
                       checked={form.showOneTimeOption || false}
                       onChange={(e) =>
                         setCustomerChoiceOption(e.target.checked)
                       }
-                      className="accent-zinc-900 mt-0.5"
+                      className="shrink-0"
                     />{" "}
                     <span>
                       {" "}
@@ -6848,13 +6838,13 @@ export default function EstimateToolViewV2({
                       </span>{" "}
                     </span>{" "}
                   </label>{" "}
-                  <label className="flex items-start gap-2 cursor-pointer text-14 text-zinc-900 select-none">
+                  <label className="ui-choice-label flex items-start gap-2 cursor-pointer text-14 text-zinc-900 select-none">
                     {" "}
-                    <input
+                    <Checkbox
                       type="checkbox"
                       checked={form.billByInvoice || false}
                       onChange={(e) => set("billByInvoice", e.target.checked)}
-                      className="accent-zinc-900 mt-0.5"
+                      className="shrink-0"
                     />{" "}
                     <span>
                       {" "}
@@ -6870,15 +6860,11 @@ export default function EstimateToolViewV2({
             <div>
               {" "}
               <PanelTitle>Manual / Custom Discount (optional)</PanelTitle>{" "}
-              <FieldV2 label="Preset">
-                {" "}
-                <select
+              <Field label="Preset" className="mb-4">
+                <Select
                   value={form.manualDiscountPreset || ""}
                   onChange={(e) => applyDiscountPreset(e.target.value)}
-                  className={cn(
-                    INPUT_CLS,
-                    "cursor-pointer appearance-none pr-8",
-                  )}
+
                 >
                   {" "}
                   <option value="">— None —</option>
@@ -6891,8 +6877,8 @@ export default function EstimateToolViewV2({
                     );
                   })}
                   <option value="__custom__">Custom…</option>{" "}
-                </select>{" "}
-              </FieldV2>
+                </Select>
+              </Field>
               {form.manualDiscountPreset &&
                 form.manualDiscountPreset !== "__custom__" &&
                 (() => {
@@ -6907,8 +6893,7 @@ export default function EstimateToolViewV2({
                 })()}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {" "}
-                <FieldV2 label="Type">
-                  {" "}
+                <Field label="Type" id="estimate-manualDiscountType" className="mb-4">
                   <SelectV2
                     k="manualDiscountType"
                     options={[
@@ -6916,36 +6901,33 @@ export default function EstimateToolViewV2({
                       { value: "PERCENT", label: "Percent %" },
                       { value: "FIXED", label: "Dollar $" },
                     ]}
-                  />{" "}
-                </FieldV2>{" "}
-                <FieldV2 label="Amount">
-                  {" "}
+                  />
+                </Field>{" "}
+                <Field label="Amount" id="estimate-manualDiscountValue" className="mb-4">
                   <InputV2
                     k="manualDiscountValue"
                     type="number"
                     min="0"
                     placeholder="0"
-                  />{" "}
-                </FieldV2>{" "}
-                <div className="col-span-2">
+                  />
+                </Field>{" "}
+                <div className="sm:col-span-2">
                   {" "}
-                  <FieldV2 label="Label (shown on estimate)">
-                    {" "}
+                  <Field label="Label (shown on estimate)" id="estimate-manualDiscountLabel" className="mb-4">
                     <InputV2
                       k="manualDiscountLabel"
                       placeholder="e.g. Military, Referral"
-                    />{" "}
-                  </FieldV2>{" "}
+                    />
+                  </Field>{" "}
                 </div>{" "}
-                <div className="col-span-2">
+                <div className="sm:col-span-2">
                   {" "}
-                  <FieldV2 label="Internal reason">
-                    {" "}
+                  <Field label="Internal reason" id="estimate-manualDiscountInternalReason" className="mb-4">
                     <InputV2
                       k="manualDiscountInternalReason"
                       placeholder="Required for custom discounts"
-                    />{" "}
-                  </FieldV2>{" "}
+                    />
+                  </Field>{" "}
                 </div>{" "}
               </div>{" "}
               <div className="text-14 text-ink-tertiary mt-2">
@@ -6963,14 +6945,14 @@ export default function EstimateToolViewV2({
                     return (
                       <label
                         key={credit.id || key}
-                        className="flex items-center justify-between gap-3 rounded-xs border-hairline border-zinc-300 bg-white px-3 py-2 text-14 text-zinc-900"
+                        className="ui-choice-label flex items-center justify-between gap-3 rounded-xs border-hairline border-zinc-300 bg-white px-3 py-2 text-14 text-zinc-900"
                       >
                         <span>{credit.name}</span>
-                        <input
+                        <Checkbox
                           type="checkbox"
                           checked={checked}
                           onChange={() => toggleServiceSpecificDiscount(key)}
-                          className="h-3.5 w-3.5 accent-zinc-900"
+                          className="shrink-0"
                         />
                       </label>
                     );
@@ -6980,50 +6962,37 @@ export default function EstimateToolViewV2({
             )}
             </section>
             <section tabIndex={-1} id="estimate-review" className="estimate-workflow-section space-y-4" aria-label="Review and send">
-            <h2 className="text-20 font-semibold">Review & send</h2>
-            {saveError && <p role="alert" className="text-14 text-alert-fg">{saveError}</p>}
+            <h2 className="text-18 font-medium">Review & send</h2>
+            {saveError && <ActionFeedback error>{saveError}</ActionFeedback>}
             {/* Action buttons */}
-            <div
-              className={cn(
-                "grid gap-3",
-                estimate
-                  ? editMode
-                    ? "grid-cols-2 sm:grid-cols-4"
-                    : "grid-cols-3"
-                  : "grid-cols-2",
-              )}
-            >
+            <div className="ui-record-actions">
               {" "}
               <Button
                 onClick={() => doGenerate()}
                 disabled={generateBusy}
+                loading={generating}
                 variant="primary"
                 size="md"
-                className={cn("h-12", estimate ? "text-14" : "text-14")}
               >
-                {generating
-                  ? "Generating…"
-                  : estimate
-                    ? "Regenerate"
-                    : "Generate Estimate"}
+                {estimate ? "Regenerate" : "Generate Estimate"}
               </Button>{" "}
               {estimate && (
                 <Button
                   variant="secondary"
                   size="md"
-                  className="h-12 text-14"
+                  loading={saving}
                   disabled={generateBusy || saving}
                   onClick={() => doSave()}
                   title="Update the existing estimate — the customer's link shows the new quote without a resend"
                 >
-                  {saving ? "Saving…" : editMode?.status === "sent" || editMode?.status === "viewed" ? "Save changes" : "Save draft"}
+                  {editMode?.status === "sent" || editMode?.status === "viewed" ? "Save changes" : "Save draft"}
                 </Button>
               )}
               {estimate && (
                 <Button
                   variant="secondary"
                   size="md"
-                  className="h-12 text-14 gap-2"
+                  className="gap-2"
                   disabled={generateBusy || saving || !savedId}
                   onClick={previewCustomerEstimate}
                   title="Open the customer-facing estimate in a new tab"
@@ -7035,20 +7004,19 @@ export default function EstimateToolViewV2({
               <Button
                 variant="secondary"
                 size="md"
-                className={cn("h-12", estimate ? "text-14" : "text-14")}
                 disabled={generateBusy || !savedId}
-                onClick={reviewAndSend}
+                onClick={(event) => { event.currentTarget.focus(); void reviewAndSend(); }}
               >
                 Review and send
               </Button>{" "}
             </div>
 
             {savedId && (
-              <div className="text-14 text-ink-secondary">
+              <ActionFeedback>
                 {["sent", "viewed"].includes(editMode?.status)
                   ? "Changes saved to the existing customer link. Resend to notify them."
                   : "Draft saved. It has not been sent."}
-              </div>
+              </ActionFeedback>
             )}
             {(savedId || editMode?.id) && (
               <Button
@@ -7087,15 +7055,7 @@ export default function EstimateToolViewV2({
             {!estimate ? (
               <Card className="p-10 text-center">
                 {" "}
-                <div
-                  className="text-zinc-900 mb-3"
-                  style={{
-                    fontFamily: ROBOTO,
-                    fontSize: 12,
-                    fontWeight: 500,
-                    letterSpacing: "0.02em",
-                  }}
-                >
+                <div className="text-16 font-medium text-zinc-900 mb-3">
                   {!livePreview.anySelected
                     ? "Select Services to Get Started"
                     : "Estimate preview"}
@@ -7108,7 +7068,7 @@ export default function EstimateToolViewV2({
                 {enrichedProfile && (
                   <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-14 text-ink-secondary leading-relaxed">
                     {" "}
-                    <div className="text-14 font-medium text-zinc-900 uppercase tracking-label mb-1.5">
+                    <div className="text-14 font-medium text-zinc-900 mb-1.5">
                       Current property inputs
                     </div>{" "}
                     <div>{form.address}</div>{" "}
@@ -7194,7 +7154,7 @@ export default function EstimateToolViewV2({
                                 <div className="text-18 font-medium text-zinc-900 u-nums">
                                   {fmtInt(E.oneTime.total)}
                                 </div>{" "}
-                                <div className="text-14 text-ink-secondary uppercase tracking-label">
+                                <div className="text-14 text-ink-secondary">
                                   {E.oneTime.tmInstall > 0
                                     ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)`
                                     : "Recurring Membership"}
@@ -7206,7 +7166,7 @@ export default function EstimateToolViewV2({
                               <div className="text-18 font-medium text-zinc-900 u-nums">
                                 {fmt(E.totals.year1)}
                               </div>{" "}
-                              <div className="text-14 text-ink-secondary uppercase tracking-label">
+                              <div className="text-14 text-ink-secondary">
                                 Year 1 Total
                               </div>{" "}
                             </div>
@@ -7216,7 +7176,7 @@ export default function EstimateToolViewV2({
                                 <div className="text-18 font-medium text-zinc-900 u-nums">
                                   -{fmt(E.recurring.savings)}
                                 </div>{" "}
-                                <div className="text-14 text-ink-secondary uppercase tracking-label">
+                                <div className="text-14 text-ink-secondary">
                                   Bundle Savings/yr
                                 </div>{" "}
                               </div>
@@ -7948,7 +7908,7 @@ export default function EstimateToolViewV2({
                               className="bg-white border-hairline border-zinc-200 rounded-sm p-4"
                             >
                               {" "}
-                              <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-1">
+                              <div className="text-14 font-medium text-ink-secondary mb-1">
                                 {s.name}
                               </div>{" "}
                               <div className="text-18 font-medium text-zinc-900 u-nums">
