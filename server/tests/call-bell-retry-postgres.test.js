@@ -15,14 +15,14 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const { triggerNotification } = require('../services/notification-triggers');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
-const { sweepMissedCalls } = require('../services/missed-call-bell');
+const { ringMissedCallIfUnanswered, sweepMissedCalls } = require('../services/missed-call-bell');
 const { ringRepeatCallerIfNeeded, sweepRepeatCallers } = require('../services/repeat-caller-bell');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('call bell retries on PostgreSQL', () => {
   let database;
   const schema = `call_retry_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'scheduled_services', 'customers', 'notifications'];
+  const tables = ['call_log', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts'];
   let now;
   const gateNames = ['missedCallUnknownCallers', 'repeatCallerBell'];
   const savedGates = Object.fromEntries(gateNames.map(key => [key, gates[key]]));
@@ -169,17 +169,69 @@ jest.setTimeout(30000);
     expect(await sweepRepeatCallers()).toBe(0);
   });
 
-  test('the repeat push guard rechecks a booking committed during notification delivery', async () => {
+  test.each(['push', 'bell-only'])('a booking committed during %s notification delivery retires only its repeat bell', async delivery => {
     const rows = [call(60), call(30), call(10)];
     await database('call_log').insert(rows);
+    const repeatId = randomUUID();
+    const missedId = randomUUID();
+    const otherId = randomUUID();
     triggerNotification.mockImplementationOnce(async (_trigger, _payload, { beforePush }) => {
       expect(await beforePush()).toBe(true);
+      await database('notifications').insert([
+        { id: repeatId, recipient_type: 'admin', category: 'missed_call', metadata: { triggerKey: 'repeat_caller', payload: { callLogId: rows[2].id } } },
+        { id: missedId, recipient_type: 'admin', category: 'missed_call', metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: rows[2].id } } },
+        { id: otherId, recipient_type: 'admin', category: 'missed_call', metadata: { triggerKey: 'repeat_caller', payload: { callLogId: rows[1].id } } },
+      ]);
       await database('scheduled_services').insert({ id: randomUUID(), source_call_log_id: rows[0].id, status: 'confirmed' });
-      expect(await beforePush()).toBe(false);
-      return { bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } };
+      if (delivery === 'push') expect(await beforePush()).toBe(false);
+      return { bellWritten: true, push: delivery === 'push' ? { sent: 0, skipped: 'superseded_before_push' } : null };
     });
     expect(await ringRepeatCallerIfNeeded(rows[2].twilio_call_sid)).toBe(true);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect((await database('notifications').where({ id: repeatId }).first()).read_at).not.toBeNull();
+    expect((await database('notifications').where({ id: missedId }).first()).read_at).toBeNull();
+    expect((await database('notifications').where({ id: otherId }).first()).read_at).toBeNull();
+  });
+
+  test.each(['hard_block', 'marchex_auto'])('centrally blocked %s callers stay silent and cannot fill the repeat sweep limit', async blockType => {
+    const rows = [call(60), call(30), call(10)];
+    if (blockType === 'hard_block') {
+      rows[1].from_phone = '9415550100';
+      rows[2].from_phone = '(941) 555-0100';
+    }
+    await database('call_log').insert(rows);
+    if (blockType === 'hard_block') {
+      await database('blocked_numbers').insert({ number: rows[0].from_phone, block_type: blockType });
+    } else {
+      await database('blocked_call_attempts').insert(rows.map(row => ({ number: row.from_phone, channel: 'voice', block_type: blockType, twilio_sid: row.twilio_call_sid })));
+    }
+    expect(await ringRepeatCallerIfNeeded(rows[2].twilio_call_sid)).toBe(false);
+    expect(await sweepRepeatCallers({ limit: 1 })).toBe(0);
+    expect(await ringMissedCallIfUnanswered(rows[2].twilio_call_sid)).toBe(false);
+    expect(await sweepMissedCalls({ limit: 1 })).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    // An international caller with the same domestic suffix is independent.
+    await database('call_log').insert([call(60), call(30), call(10)].map(row => ({ ...row, from_phone: '+449415550100' })));
+    expect(await sweepRepeatCallers({ limit: 1 })).toBe(1);
+    expect(triggerNotification.mock.calls[0][1].phone).toBe('+449415550100');
+  });
+
+  test('Marchex shadow-only attempts remain eligible for repeat alerts', async () => {
+    const rows = [call(60), call(30), call(10)];
+    await database('call_log').insert(rows);
+    await database('blocked_call_attempts').insert(rows.map(row => ({ number: row.from_phone, channel: 'voice', block_type: 'marchex_shadow', twilio_sid: row.twilio_call_sid })));
+    expect(await sweepRepeatCallers()).toBe(1);
+    expect(await ringMissedCallIfUnanswered(rows[2].twilio_call_sid)).toBe(true);
+  });
+
+  test('a blocked attempt cannot claim an eligible sibling window', async () => {
+    const rows = [call(60), call(45), call(30), call(10)];
+    await database('call_log').insert(rows);
+    await database('blocked_call_attempts').insert({ number: rows[3].from_phone, channel: 'voice', block_type: 'marchex_auto', twilio_sid: rows[3].twilio_call_sid });
+    expect(await ringRepeatCallerIfNeeded(rows[3].twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(await sweepRepeatCallers()).toBe(1);
+    expect(triggerNotification.mock.calls[0][1]).toMatchObject({ count: 3, callLogId: rows[2].id });
   });
 
   test('a booking made during the newest call keeps the repeat window quiet after termination', async () => {

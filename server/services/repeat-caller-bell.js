@@ -10,6 +10,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 const { isSentinelPhone } = require('./external-phone');
 const { outcomeUnanswered } = require('./missed-call-bell');
+const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
 const { whereNotSandboxCall, VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
 
 const REPEAT_THRESHOLD = 3;
@@ -17,11 +18,6 @@ const REPEAT_WINDOW_MS = 3 * 60 * 60 * 1000;
 const LEASE_MS = 10 * 60 * 1000;
 const SWEEP_GRACE_MS = 5 * 60 * 1000;
 const TERMINAL_STATUSES = new Set(['completed', 'no-answer', 'busy', 'canceled', 'failed']);
-// Mirror toE164: '+' preserves country codes; bare domestic forms use the last ten.
-const PHONE_DIGITS_SQL = "regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g')";
-const PHONE_KEY_SQL = `(CASE WHEN LEFT(BTRIM(COALESCE(from_phone, '')), 1) = '+' THEN ${PHONE_DIGITS_SQL}`
-  + ` WHEN LENGTH(${PHONE_DIGITS_SQL}) >= 10 THEN '1' || RIGHT(${PHONE_DIGITS_SQL}, 10)`
-  + ` ELSE ${PHONE_DIGITS_SQL} END)`;
 const CLAIM_FREE_SQL = "(COALESCE(metadata->>'repeat_caller_claim', '') = '' OR (metadata->>'repeat_caller_claim')::timestamptz < ?)";
 const BOOKED_SQL = "EXISTS (SELECT 1 FROM scheduled_services s WHERE s.source_call_log_id = call_log.id AND s.status IN ('pending', 'confirmed', 'en_route', 'on_site', 'completed'))";
 
@@ -68,6 +64,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
         .where({ direction: 'inbound' })
         .whereRaw(`${PHONE_KEY_SQL} = ?`, [key])
         .modify((qb) => whereNotSandboxCall(qb))
+        .modify(whereNotBlockedCall)
         .where('created_at', '>', new Date(Date.now() - REPEAT_WINDOW_MS))
         .orderBy('created_at', 'desc')
         .orderBy('id', 'desc')
@@ -76,6 +73,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
           trx.raw("(metadata->>'repeat_caller_claim') as repeat_caller_claim"),
           trx.raw("(metadata->>'repeat_caller_delivery_id') as repeat_caller_delivery_id"),
           trx.raw(`${BOOKED_SQL} AS booked`));
+      if (!rows.some(row => row.id === call.id)) return null;
       const p = repeatCallerPlan(rows);
       if (!p) return null;
       // Legacy claims use their original call ID; later retries carry that ID forward.
@@ -85,6 +83,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
       p.windowIds = rows.map((r) => r.id);
       const claimed = await trx('call_log')
         .where({ id: call.id })
+        .modify(whereNotBlockedCall)
         .whereRaw("COALESCE(metadata->>'repeat_caller_alerted_at','') = ''")
         .whereRaw(CLAIM_FREE_SQL, [new Date(Date.now() - LEASE_MS)])
         .update({ metadata: trx.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('repeat_caller_claim', ?::text, 'repeat_caller_delivery_id', ?::text)", [token, String(p.deliveryId)]) });
@@ -132,6 +131,11 @@ async function ringRepeatCallerIfNeeded(callSid) {
         if (!stats?.superseded) logger.warn(`[repeat-caller-bell] delivery did not happen for call ${String(callSid).slice(-6)} — lease released`);
       }
     }
+    // A booking can commit while preferences or badge counts are loading.
+    // Retire the persisted bell too, including when push is disabled.
+    if (stats?.bellWritten && !await stillUnbooked()) {
+      await require('./notification-service').supersedeMissedCallAdmin({ callLogId: call.id, triggerKey: 'repeat_caller' });
+    }
     return delivered;
   } catch (err) {
     logger.warn(`[repeat-caller-bell] failed for call ${String(callSid).slice(-6)}: ${err.message}`);
@@ -145,6 +149,7 @@ async function sweepRepeatCallers({ limit = 50 } = {}) {
     .where({ direction: 'inbound' })
     .where('created_at', '>', new Date(Date.now() - REPEAT_WINDOW_MS))
     .modify((qb) => whereNotSandboxCall(qb))
+    .modify(whereNotBlockedCall)
     .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`)
     .groupByRaw(PHONE_KEY_SQL)
     .havingRaw('COUNT(*) >= ?', [REPEAT_THRESHOLD])

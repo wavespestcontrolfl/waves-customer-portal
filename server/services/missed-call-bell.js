@@ -14,6 +14,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isSentinelPhone, PHONE_SENTINELS } = require('./external-phone');
+const { whereNotBlockedCall } = require('../middleware/spam-block');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // A row with NO answered_by (the Studio-flow status_callback fallback in
@@ -75,7 +76,7 @@ function leaseStale(token, now = Date.now()) {
 async function ringMissedCallIfUnanswered(callSid) {
   if (!callSid) return false;
   try {
-    const row = await db('call_log').where('twilio_call_sid', callSid).first();
+    const row = await db('call_log').where('twilio_call_sid', callSid).modify(whereNotBlockedCall).first();
     const { isEnabled } = require('../config/feature-gates');
     if (!missedCallEligible(row, Date.now(), { unknownCallers: isEnabled('missedCallUnknownCallers') })) return false;
     // Atomic claim: first writer wins across retries / pods. The mutable
@@ -86,6 +87,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     const reclaimed = Boolean(parseMeta(row.metadata).missed_call_notified_at);
     const claimed = await db('call_log')
       .where({ id: row.id })
+      .modify(whereNotBlockedCall)
       .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
       .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
       .whereNull('recording_sid')
@@ -118,7 +120,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     // Is this call still the missed-call lane's? False once a recording
     // persisted or the voicemail lane claimed it.
     const stillMissed = async () => {
-      const cur = await db('call_log').where({ id: row.id }).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at');
+      const cur = await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at');
       return Boolean(cur) && !cur.recording_sid && !cur.recording_url && !cur.voicemail_callback_alerted_at;
     };
     let stats = null;
@@ -182,6 +184,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
   while (offered < limit) {
     const rows = await db('call_log')
       .where({ direction: 'inbound' })
+      .modify(whereNotBlockedCall)
       .modify((q) => {
         if (!unknownCallers) q.whereNotNull('customer_id');
         else {
