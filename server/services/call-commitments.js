@@ -1164,8 +1164,12 @@ async function resolveFulfillment(conn, commitment, call) {
     }
     case "callback": {
       // Rollback must not weaken proof for an attempt placed by a callback card.
+      // A persisted attempt made under the card policy: the card's own
+      // commitment link, or the Call Log action's source-call link stamped
+      // with the policy at placement.
       const cardAttempt = !require('./callback-cards').enabled() && await conn('call_log')
-        .whereRaw("metadata->>'relatedCommitmentId' = ?", [commitment.id]).first('id');
+        .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))",
+          [commitment.id, commitment.call_log_id]).first('id');
       if (require('./callback-cards').enabled() || cardAttempt) {
         if (!phone) return null;
         // A child-leg connection plus reviewed extraction of a real

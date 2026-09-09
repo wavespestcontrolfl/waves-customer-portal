@@ -161,6 +161,17 @@ describe('POST /outbound-connect', () => {
     expect(res.body).not.toContain('machineDetection');
   });
 
+  test('a Call Log callback placed under the card policy keeps completion after rollback; a pre-policy one does not', async () => {
+    installDb({ call_log: { metadata: { relatedCallId: 'call-1', callback_policy: 'card' } } });
+    let res = mockRes();
+    await connect()(req(), res);
+    expect(res.body).toContain(`/outbound-dial-complete?callLogId=${CALL_LOG_ID}`);
+    installDb({ call_log: { metadata: { relatedCallId: 'call-1' } } });
+    res = mockRes();
+    await connect()(req(), res);
+    expect(res.body).not.toContain('outbound-dial-complete');
+  });
+
   test('a failed linkage lookup still dials with completion evidence enabled', async () => {
     db.mockImplementation(() => {
       const query = { where: () => query, update: async () => 1,

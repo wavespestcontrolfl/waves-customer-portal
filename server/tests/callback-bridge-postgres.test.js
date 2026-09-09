@@ -141,6 +141,25 @@ run('callback bridge on PostgreSQL', () => {
     }
   });
 
+  test('the existing Call Log callback action takes the same customer interlock as the card', async () => {
+    const row = await seed();
+    expect((await invoke(row)).status).toBe(200);
+    const legacy = await invoke(row, { relatedCommitmentId: undefined, source: 'call-log-callback', relatedCallId: row.call_log_id });
+    expect(legacy.status).toBe(409);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const placed = await conn('call_log').where({ from_phone: from, direction: 'outbound' }).first();
+    expect(placed.metadata).toMatchObject({ relatedCommitmentId: row.id, callback_policy: 'card' });
+  });
+
+  test('an unlinked callback persists its canonical dial target so the live-call interlock matches it', async () => {
+    const row = await seed({ linked: false });
+    const result = await invoke(row, { customerId: undefined, to: '(555) 555-0176' });
+    expect(result.status).toBe(200);
+    const placed = await conn('call_log').where({ id: result.json.callLogId }).first();
+    expect(placed.to_phone).toBe(phone);
+    expect(await require('../services/call-bridge').activeBridgeCall({ source: 'admin-callback', customerId: null, toPhone: phone }, conn)).toMatchObject({ id: placed.id });
+  });
+
   test.each(['gate', 'version', 'extraction', 'staff_phone'])('%s refusal cannot contact the provider', async (reason) => {
     const row = await seed();
     if (reason === 'gate') process.env.GATE_CALLBACK_CARD = 'false';
@@ -227,6 +246,22 @@ run('callback bridge on PostgreSQL', () => {
       // Kept when the customer leg ended, not when the staff leg was dialed.
       expect(new Date(proof.matched_at).toISOString()).toBe(legEnded);
     } else expect(proof).toBeNull();
+  });
+
+  test.each(['policy', 'legacy'])('gate rollback: a %s Call Log attempt with an unanswered customer leg is judged by its own contract', async (kind) => {
+    const row = await seed();
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      metadata: kind === 'policy'
+        ? { relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'no-answer', duration_seconds: 0 } }
+        : { relatedCallId: row.call_log_id } });
+    process.env.GATE_CALLBACK_CARD = 'false';
+    const source = await conn('call_log').where({ id: row.call_log_id }).first();
+    const proof = await require('../services/call-commitments').resolveFulfillment(conn, row, source);
+    // Under the card policy the unanswered leg is not proof; a pre-policy
+    // attempt keeps the legacy connected-call rule it was placed under.
+    if (kind === 'policy') expect(proof).toBeNull();
+    else expect(proof).toMatchObject({ basis: 'callback_returned_connected_outbound_call' });
   });
 
   test.each(['conversation', 'unanswered', 'voicemail'])('gate rollback retains customer-leg proof: %s', async (evidence) => {

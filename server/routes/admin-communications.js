@@ -1196,7 +1196,16 @@ router.post('/call', async (req, res, next) => {
     const from = TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
     const source = relatedCommitmentId || rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
+    // A callback attempt placed while the card policy is on is stamped so
+    // rollback keeps its strict customer-leg proof and completion action,
+    // whether the UI linked the commitment (card) or the source call (the
+    // existing Call Log action). Pre-policy attempts keep the legacy proof.
     const metadata = relatedCommitmentId ? { relatedCommitmentId } : relatedCallId ? { relatedCallId } : null;
+    const cardPolicy = !!metadata && source === 'admin-callback' && require('../services/callback-cards').enabled();
+    if (cardPolicy) metadata.callback_policy = 'card';
+    // The dial target is persisted canonical so the live-call interlock can
+    // match it exactly.
+    const dialTo = normalizePhone(to) || to;
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
     const toLast10 = normalizePhoneLast10(to);
@@ -1246,8 +1255,11 @@ router.post('/call', async (req, res, next) => {
       : '';
 
     let bridgeClaimId = null;
-    if (relatedCommitmentId) bridgeClaimId = await db.transaction(async (trx) => {
-      if (!require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
+    // Every callback attempt under the card policy takes the customer claim
+    // and live-call interlock — the card AND the existing Call Log action —
+    // so two surfaces cannot ring one customer twice.
+    if (relatedCommitmentId || cardPolicy) bridgeClaimId = await db.transaction(async (trx) => {
+      if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
       // before call_log is inserted, keyed to the CUSTOMER being called
       // (the linked customer, else the dialed number): every card dials
@@ -1261,8 +1273,9 @@ router.post('/call', async (req, res, next) => {
       // The live-call interlock is customer-specific: the linked customer,
       // or the dialed number when the source call never linked one.
       const active = await require('../services/call-bridge').activeBridgeCall(
-        { source, customerId: customer?.id || null, toPhone: customer ? null : normalizePhone(to) }, trx);
+        { source, customerId: customer?.id || null, toPhone: customer ? null : dialTo }, trx);
       if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
+      if (!relatedCommitmentId) return claim.rows[0].id;
       const original = await trx('call_log as cl').whereIn('cl.id', trx('call_commitments').select('call_log_id')
         .where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' })).forUpdate('cl').first('cl.*');
       const promise = original ? await trx('call_commitments as cc').where({ 'cc.id': relatedCommitmentId })
@@ -1294,7 +1307,7 @@ router.post('/call', async (req, res, next) => {
         throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       }
       bridged = await placeBridgeCall({
-        to, bridgePhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
+        to: dialTo, bridgePhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
       });
     } catch (err) {
       // An ambiguous create can already be ringing. Its claim and initiated
