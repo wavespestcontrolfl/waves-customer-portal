@@ -3344,24 +3344,32 @@ const AppointmentReminders = {
                   logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
                   continue;
                 }
-                const emailRes = await withReminderSendFence(r, '24h', () => sendAppointmentNoticeEmail({
-                  kind: '24h',
-                  requestedChannel: channel24,
-                  customerId: r.customer_id,
-                  scheduledServiceId: r.scheduled_service_id,
-                  apptTime: nightCopy ? nightCopy.apptTime : apptTime,
-                  serviceLabel: nightLabel,
-                  cardHoldNote: nightCopy ? nightCopy.holdNote : null,
-                  emailIdempotencyKey: ownsNight ? visitReminderEmailKey('24h', nightClaim.dedupeKey) : null,
-                })) ?? { held: true };
-                // A move-hold at the email handoff is a DEFERRAL (GH codex
-                // r2 P1): finalizing it terminally would mark the whole
+                const emailRes = await withReminderSendFence(r, '24h', async () => {
+                  if (channel24 === 'push') {
+                    const currentPrefs = await getReminderPrefs(r.customer_id);
+                    if (currentPrefs.unavailable || currentPrefs.reminder24hChannel !== 'push') {
+                      return { held: true, reason: 'preferences_changed' };
+                    }
+                  }
+                  return sendAppointmentNoticeEmail({
+                    kind: '24h',
+                    requestedChannel: channel24,
+                    customerId: r.customer_id,
+                    scheduledServiceId: r.scheduled_service_id,
+                    apptTime: nightCopy ? nightCopy.apptTime : apptTime,
+                    serviceLabel: nightLabel,
+                    cardHoldNote: nightCopy ? nightCopy.holdNote : null,
+                    emailIdempotencyKey: ownsNight ? visitReminderEmailKey('24h', nightClaim.dedupeKey) : null,
+                  });
+                }) ?? { held: true };
+                // A move or preference hold at the email handoff is a
+                // deferral: finalizing it terminally would mark the whole
                 // visit's only deliverable leg taken. Release the claim as
                 // retryable, leave the row unmarked, let the post-move
                 // scan re-decide.
                 if (emailRes?.held) {
                   if (ownsNight) await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
-                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} held by a grouped move — claim released, row left unmarked`);
+                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} held at delivery (${emailRes.reason || 'move_hold'}) — claim released, row left unmarked`);
                   continue;
                 }
                 if (ownsNight) {

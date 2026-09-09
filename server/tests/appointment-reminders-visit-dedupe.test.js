@@ -347,6 +347,31 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     } finally { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; gates.smsSendWindow = previousWindowGate; }
   });
 
+  test.each(['sms', 'email', 'both'])('a late App reminder holds when its channel changes to %s during preparation', async (channel) => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    const gates = require('../config/feature-gates').gates;
+    const previousWindowGate = gates.smsSendWindow;
+    gates.smsSendWindow = true;
+    jest.setSystemTime(new Date('2026-05-07T00:30:00Z'));
+    try {
+      const prefsRow = { service_reminder_24h_channel: 'push', email_enabled: true };
+      const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT }, prefsRow });
+      const dedupeKey = `${VISIT}:reminder_24h:2026-05-07`;
+      VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-night', dedupeKey });
+      VisitGroups.renewNotificationLease.mockImplementationOnce(async () => {
+        prefsRow.service_reminder_24h_channel = channel;
+        return true;
+      });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentEmail.sendAppointmentReminderEmail).not.toHaveBeenCalled();
+      expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
+      expect(VisitGroups.finalizeVisitNotification).toHaveBeenCalledWith(
+        VISIT, 'reminder_24h', 'retry', expect.any(Date), 'tok-night', { dedupeKey },
+      );
+    } finally { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; gates.smsSendWindow = previousWindowGate; }
+  });
+
   test('retryable provider failure on the grouped send, no fallback delivery: claim released as retryable, row unmarked — never suppressed (GH codex r6 P1)', async () => {
     const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
     // Twilio 5xx-shaped outcome; the customer has no email on file, so the
