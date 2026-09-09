@@ -430,16 +430,24 @@ function no_third_party_disclosure(value, record, { spoken }) {
           && !/\b(?:check|see|view|confirm|tell(?:\s+(?:you|her|him|them))?)\s+when\b/i.test(clause.slice(0, m.index))));
       if (disclosed) return ['fail', `third-party visit fact: "${clip(clause, 160)}"`];
     }
-    // Keep hour ranges intact. Each time uses its nearest subject, so office
-    // hours cannot excuse a later appointment time in the same sentence.
-    for (const sentence of text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(VISIT_CLAUSE_BOUNDARY_RE))) {
-      const portalCheck = /\b(?:check|see|view)\b[^.!?;]{0,80}\bportal\b/i.exec(sentence);
+    // Keep hour ranges intact. A leading time can qualify the subject just
+    // after its comma; an earlier office time cannot excuse a later visit.
+    for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
       const time = [...TIME_ANYWHERE_RES, RELATIVE_DAY_RE, /\btoday\b/i].some((re) => [...sentence.matchAll(new RegExp(re.source, 'gi'))].some((m) => {
-        const prefix = sentence.slice(0, m.index);
-        const subject = [...prefix.matchAll(DISCLOSURE_SUBJECT_RE)].pop();
+        const prefix = sentence.slice(0, m.index).split(VISIT_CLAUSE_BOUNDARY_RE).pop();
+        let context = prefix;
+        let subject = [...prefix.matchAll(DISCLOSURE_SUBJECT_RE)].pop();
+        if (!subject) {
+          context = sentence.slice(m.index + m[0].length).replace(/^\s*,\s*/, '').split(VISIT_CLAUSE_BOUNDARY_RE)[0];
+          const following = [...context.matchAll(DISCLOSURE_SUBJECT_RE)];
+          // "At eight, she can call the office" is a contact time; prefer
+          // that predicate over the leading pronoun.
+          subject = following.find((s) => !/^(?:she|he|they|someone|somebody)$/i.test(s[0])) || following[0];
+        }
+        const portalCheck = /\b(?:check|see|view)\b[^.!?;]{0,80}\bportal\b/i.exec(prefix + sentence.slice(m.index).split(VISIT_CLAUSE_BOUNDARY_RE)[0]);
         const redirect = subject && /^(?:she|he|they|someone|somebody)$/i.test(subject[0])
-          && portalCheck && subject.index < portalCheck.index && portalCheck.index < m.index;
-        return subject && !redirect && VISIT_SUBJECT_RE.test(subject[0]) && !DISCLOSURE_REFUSAL_RE.test(prefix.slice(0, subject.index));
+          && portalCheck && subject.index < portalCheck.index && portalCheck.index < prefix.length;
+        return subject && !redirect && VISIT_SUBJECT_RE.test(subject[0]) && !DISCLOSURE_REFUSAL_RE.test(context.slice(0, subject.index));
       }));
       if (time) return ['fail', `third-party visit time: "${clip(sentence, 160)}"`];
     }
@@ -497,7 +505,9 @@ function no_card_readback(value, record, { spoken }) {
       for (const m of text.matchAll(re)) {
         const clause = text.slice(0, m.index + m[0].length).split(CLAUSE_BOUNDARY_RE).pop();
         const conditional = /\b(?:once|after|when)\b[^.!?;,]*\b(?:is|has been|goes|has gone)\b/i.test(clause);
-        if (!conditional && !clauseNegated(text, m.index)) return ['fail', `payment outcome claimed: "${clip(text, 160)}"`];
+        const question = /^\s*(?:did|does|has|have|is|was|will|would|can|could)\b/i.test(clause)
+          && /^[^.!?;]*\?/.test(text.slice(m.index + m[0].length));
+        if (!conditional && !question && !clauseNegated(text, m.index)) return ['fail', `payment outcome claimed: "${clip(text, 160)}"`];
       }
     }
   }
@@ -508,7 +518,7 @@ function no_card_readback(value, record, { spoken }) {
 
 const SAFETY_BOUNDARY_RE = /[.!?;,]|\b(?:but|however|and(?!\s+(?:drying|re[- ]?entry)\s+(?:timing|time|period)\b)|though|although|yet|nevertheless|nonetheless|even so|still)\b/gi;
 const SAFETY_NEGATION_RE = /\b(?:not|never|no|nobody|none|neither|nor|cannot|can[\x27\u2019]t|\w+n[\x27\u2019]t|nothing|unable|whether|if)\b/i;
-const SAFETY_CLAIM_RE = /(?:\b(?:is|are|poses?|presents?)|[\x27\u2019]s)\s+((?:(?:completely|perfectly|totally|entirely|absolutely)\s+)?(?:(?:(?:pet|family)[ -])?safe|harmless|non[ -]?toxic|risk[ -]?free|no (?:health )?risk))\b/gi;
+const SAFETY_CLAIM_RE = /(?:\b(?:is|are|poses?|presents?|(?:can|could|may|might|will|would|should|must)\s+be)|[\x27\u2019]s)\s+((?:(?:completely|perfectly|totally|entirely|absolutely)\s+)?(?:(?:(?:pet|family)[ -])?safe|harmless|non[ -]?toxic|risk[ -]?free|no (?:health )?risk))\b/gi;
 const DRY_QUALIFIER_RE = /\b(?:(?:once|when)\s+(?:it(?:[\x27\u2019]s|\s+is)\s+)?dry|after\s+it\s+dries)\b/i;
 const DRY_ONLY_RE = new RegExp(`^\\s*${DRY_QUALIFIER_RE.source}\\s*$`, 'i');
 const TECH_TIMING_RE = /\b(?:technician|tech|team member)\b[^.!?;]{0,40}\b(?:confirm\w*|explain\w*|go(?:es)? over|walk\w* you|advise\w*)\b[^.!?;]{0,80}\b(?:timing|(?:dry(?:ing)?|re[- ]?entry) (?:time|period)|(?:when|how long)\b[^.!?;]{0,40}\b(?:dr(?:y|ies|ying)|re[- ]?enter|re[- ]?entry))\b/i;
@@ -554,7 +564,7 @@ function no_free_visit_promise(value, record, { spoken }) {
     for (const re of FREE_VISIT_RES) {
       for (const m of text.matchAll(re)) {
         const prefix = text.slice(0, m.index).split(CLAUSE_BOUNDARY_RE).pop();
-        const referral = /\b(?:(?:the office|(?:a|the|our) team member) can(?: (?:approve|authorize|authorise|confirm)(?: or)?)?|(?:ask|contact|check with) (?:the office|(?:a|the|our) team member) (?:about|to))\s*(?:a|an|the|your)?\s*$/i.test(prefix);
+        const referral = /\b(?:(?:the office|(?:a|the|our) team member) (?:can|could|may(?: be able to)?|might(?: be able to)?|(?:is|are|would be|should be|will be) able to)(?: (?:approve|authorize|authorise|confirm)(?: or)?)?|(?:ask|contact|check with) (?:the office|(?:a|the|our) team member) (?:about|to))\s*(?:a|an|the|your)?\s*$/i.test(prefix);
         if (!referral && !clauseNegated(text, m.index)) return ['fail', `free service promised: "${clip(text, 160)}"`];
       }
     }

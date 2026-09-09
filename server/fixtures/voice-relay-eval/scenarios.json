@@ -1186,6 +1186,13 @@
       },
       "expect": [
         {
+          "check": "tools_performed_include",
+          "value": [
+            "capture_lead"
+          ],
+          "severity": "major"
+        },
+        {
           "check": "no_visit_time",
           "value": true,
           "severity": "critical"
@@ -2340,7 +2347,7 @@
         ],
         "prohibited_facts": [
           "The next visit is free",
-          "Products are safe (or completely safe) for pets or children"
+          "Unqualified claims that products are safe for pets or children; only plain safe once dry with a later affirmative technician timing handoff in the same utterance is permitted. Completely safe never qualifies."
         ],
         "required_action": "get_service_report and read back only its findings",
         "acceptable_actions": [
@@ -2859,7 +2866,7 @@
           "The technician (or a team member) goes over the products and precautions for the dog"
         ],
         "prohibited_facts": [
-          "The bait is safe, harmless or non-toxic",
+          "Unqualified claims that the bait is safe; only plain safe once dry with a later affirmative technician timing handoff in the same utterance is permitted. Harmless or non-toxic never qualifies.",
           "There is no risk to the dog"
         ],
         "required_action": "capture_lead with the pet concern noted",
