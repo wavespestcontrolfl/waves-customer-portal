@@ -5,11 +5,13 @@
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
 const knexFactory = require('knex');
-// Every migration the run writers depend on, in order: the table, then the
-// scores_adjusted column recordRun always writes (Codex #4149 r5 — the fixture
-// applied only the first and CI's real-PostgreSQL run failed on the insert).
+// Exercise the published table and score migrations followed by the new
+// prompt-context migration, just as an existing preview database upgrades.
+const promptContextMigration = require('../models/migrations/20260909000040_lawn_assessment_runs_prompt_context');
 const migrations = [
   require('../models/migrations/20260908000010_lawn_assessment_runs'),
+  require('../models/migrations/20260908000020_lawn_assessment_runs_scores_adjusted'),
+  promptContextMigration,
 ];
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -60,6 +62,34 @@ const analysis = (overrides = {}) => ({
     }
     expect(columns.assessment_id.nullable).toBe(false);
     expect(columns.status.nullable).toBe(false);
+  });
+
+  test('prompt-context migration upgrades published schemas without rewriting old runs and rolls back only its own columns', async () => {
+    const { customerId, assessment } = await seed();
+    await promptContextMigration.down(db.knex);
+    try {
+      const [run] = await db.knex('lawn_assessment_runs').insert({
+        assessment_id: assessment.id, customer_id: customerId, status: 'complete',
+        prompt_version: 'legacy-test', context_hash: 'a'.repeat(64),
+        scores_adjusted: JSON.stringify({ turf_density: 72 }),
+      }).returning('*');
+      await promptContextMigration.up(db.knex);
+      expect(await visit.loadRun(assessment.id, db.knex)).toMatchObject({
+        id: run.id, scores_adjusted: { turf_density: 72 }, vision_context: null, technician_notes_present: false,
+      });
+      const snapshot = { grassType: 'Zoysia', turfHeightIn: 3 };
+      await db.knex('lawn_assessment_runs').where({ id: run.id }).update({ vision_context: JSON.stringify(snapshot), technician_notes_present: true });
+      await promptContextMigration.up(db.knex);
+      expect(await visit.loadRun(assessment.id, db.knex)).toMatchObject({ vision_context: snapshot, technician_notes_present: true });
+      await promptContextMigration.down(db.knex);
+      await promptContextMigration.down(db.knex);
+      const rolledBack = await visit.loadRun(assessment.id, db.knex);
+      expect(rolledBack).toMatchObject({ id: run.id, scores_adjusted: { turf_density: 72 } });
+      expect(rolledBack).not.toHaveProperty('vision_context');
+      expect(rolledBack).not.toHaveProperty('technician_notes_present');
+    } finally {
+      await promptContextMigration.up(db.knex);
+    }
   });
 
   test('recordRun writes the provenance row; a second run for the same assessment is refused (UNIQUE)', async () => {
