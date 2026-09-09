@@ -125,6 +125,26 @@ const FUTURE = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 describe('schedule-send atomic claim', () => {
   beforeEach(() => jest.clearAllMocks());
 
+  test.each([
+    ['draft', '2099-12-22T05:00:00Z', 409], ['scheduled', '2099-12-22T05:00:00Z', 409],
+    ['send_failed', '2099-12-22T05:00:00Z', 409], ['draft', '2099-12-22T04:59:59Z', 200],
+    ['accepted', '2099-12-22T05:00:00Z', 200],
+  ])('checks a %s sibling against the scheduled send time %s', async (status, scheduledAt, expected) => {
+    const sibling = { id: 'synthetic-bid-sibling', status, pricing_authority: 'SERVER',
+      estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } } };
+    const builder = makeBuilder(estimateRow({ estimate_group_id: 'synthetic-bid-group' }), { selectResult: [sibling] });
+    db.mockImplementation(() => builder);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sendMethod: 'both', scheduledAt }),
+      });
+      expect(res.status).toBe(expected);
+      if (expected === 409) expect(builder.update).not.toHaveBeenCalled();
+      else expect((await res.json()).scheduled).toBe(true);
+    });
+  });
+
   test('schedules through the claim filters when the row is claimable', async () => {
     const builder = makeBuilder(estimateRow(), { updateResult: 1 });
     db.mockImplementation(() => builder);
