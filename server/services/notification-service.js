@@ -166,7 +166,7 @@ const NotificationService = {
     // event skips the bell rather than risking a duplicate.
     // refreshOnDedupe (opt-in): when the keyed bell already exists and this
     // emission's CONTENT differs (a retried run whose failure set changed),
-    // rewrite the standing row's title/body/metadata and surface it unread
+    // rewrite the standing row's title/body/link/metadata and surface it unread
     // again — the office must never keep reading an obsolete error list
     // while the response says the alert has the details. Identical content
     // stays a plain dedupe (no re-bell).
@@ -187,7 +187,7 @@ const NotificationService = {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
     }
     const windowMs = Number(dedupeWindowMs);
-    const metadata = { ...(createOpts.metadata || {}), dedupeKey };
+    const metadata = { ...createOpts.metadata, dedupeKey };
     const dedupeAndInsert = async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
         let existingQuery = trx('notifications')
@@ -202,11 +202,13 @@ const NotificationService = {
           // or an emoji title would read as "changed" on every emission.
           const nextTitle = stripEmoji(title) || title;
           const nextBody = stripEmoji(body) || null;
-          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody)) {
+          const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
+          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
             const existingMeta = typeof existing.metadata === 'string'
               ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
               : (existing.metadata || {});
-            const refreshed = { title: nextTitle, body: nextBody, metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
+            const refreshed = { title: nextTitle, body: nextBody, link: nextLink,
+              metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: { ...existingMeta, ...metadata } }, deduped: true, refreshed: true };
           }
@@ -284,14 +286,14 @@ const NotificationService = {
 
   // Create customer notification
   async notifyCustomer(customerId, category, title, body, opts = {}) {
-    const { preferenceKey, dedupeKey, ...createOpts } = opts;
+    const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOpts } = opts;
 
     if (!(await customerPreferenceEnabled(customerId, preferenceKey))) {
       return { id: null, suppressed: true, reason: 'preference_disabled' };
     }
 
     const metadata = {
-      ...(createOpts.metadata || {}),
+      ...createOpts.metadata,
       ...(dedupeKey ? { dedupeKey } : {}),
     };
     const createArgs = {
@@ -305,6 +307,7 @@ const NotificationService = {
     };
 
     let notification;
+    let deduped = false;
     if (dedupeKey) {
       try {
         const persisted = await db.transaction(async (trx) => {
@@ -318,7 +321,7 @@ const NotificationService = {
             deduped: false,
           };
         });
-        if (persisted.deduped) return { ...persisted.notification, deduped: true, push: null };
+        deduped = persisted.deduped;
         notification = persisted.notification;
       } catch (err) {
         // A failed lock/read cannot safely prove this event is new. Fail closed
@@ -331,6 +334,7 @@ const NotificationService = {
     }
     if (!notification || notification.suppressed) return notification;
 
+    if (!push || (deduped && !awaitPush)) return { ...notification, deduped, push: null };
     let pushQueued = false;
     try {
       const PushService = require('./push-notifications');
@@ -341,8 +345,24 @@ const NotificationService = {
         category,
         notificationId: String(notification.id),
         tag: dedupeKey || `customer-notification:${notification.id}`,
-      });
+        ...(pushOptions.ephemeral ? { ephemeral: true } : {}),
+      }, { ...pushOptions, ...(dedupeKey ? { notificationId: notification.id } : {}) });
       pushQueued = true;
+      // Scheduled advisories can record provider acceptance separately from
+      // bell creation. Request-path callers retain the asynchronous dispatch.
+      if (awaitPush) {
+        const outcome = await dispatch;
+        return { ...notification, deduped, push: {
+          queued: true,
+          subscriptions: outcome.subscriptions,
+          accepted: outcome.sent,
+          failed: outcome.failed,
+          expired: outcome.expired,
+          skipped: outcome.skipped,
+          ...(outcome.reason ? { reason: outcome.reason } : {}),
+          ...(outcome.deduped ? { deduped: true } : {}),
+        } };
+      }
       // The bell is already durable, and request paths such as status changes
       // and estimate acceptance must not wait on external push providers.
       void Promise.resolve(dispatch).catch((err) => {
@@ -352,7 +372,7 @@ const NotificationService = {
       // Preserve the successful bell even if dispatch fails synchronously.
       logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
     }
-    return { ...notification, push: { queued: pushQueued } };
+    return { ...notification, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
   },
 
   // Get notifications for admin

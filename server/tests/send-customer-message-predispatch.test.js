@@ -97,6 +97,66 @@ test('no hook — the legacy pipeline is untouched', async () => {
   expect(sendViaTwilio).toHaveBeenCalledTimes(1);
 });
 
+describe('invoice-specific receipt SMS evidence', () => {
+  const db = require('../models/db');
+  const input = { ...BASE_INPUT, audience: 'customer', customerId: 'c1', invoiceId: 'invoice-1', purpose: 'payment_receipt', metadata: { original_message_type: 'receipt' }, operatorInitiated: true };
+  const accepted = { sent: true, provider: 'twilio', providerMessageId: `SM${'a'.repeat(32)}`, sentAt: '2026-08-30T15:00:00Z' };
+  let query;
+  beforeEach(() => {
+    query = { where: jest.fn().mockReturnThis(), whereIn: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), update: jest.fn(async () => 1) };
+    db.mockImplementation(() => query);
+    sendViaTwilio.mockResolvedValue(accepted);
+  });
+
+  test.each([
+    {},
+    { purpose: 'appointment', metadata: { original_message_type: 'service_complete_paid_receipt' } },
+    { purpose: 'appointment', metadata: { original_message_type: 'service_complete_paid_receipt', scheduled_sms_log_id: 'queue-1' } },
+  ])('records a canonical receipt after acceptance: %j', async (fields) => {
+    expect((await sendCustomerMessage({ ...input, ...fields })).sent).toBe(true);
+    expect(query.where).toHaveBeenCalledWith({ id: 'invoice-1', customer_id: 'c1' });
+    expect(query.whereNull).toHaveBeenCalledWith('receipt_sms_sent_at');
+    expect(query.update).toHaveBeenCalledWith({ receipt_sms_sent_at: new Date(accepted.sentAt) });
+    expect(query.update.mock.invocationCallOrder[0]).toBeLessThan(persistAudit.mock.invocationCallOrder[0]);
+  });
+
+  test.each([
+    { sent: false, error: 'declined' },
+    { sent: true, providerMessageId: 'owner-silence' },
+    { sent: true, provider: 'push', providerMessageId: 'push:delivered' },
+    { sent: true, providerMessageId: null },
+    { sent: true, providerMessageId: 'SM-invalid' },
+  ])('a non-text outcome never proves a texted receipt: %j', async (outcome) => {
+    sendViaTwilio.mockResolvedValue(outcome);
+    await sendCustomerMessage(input);
+    expect(query.update).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { invoiceId: undefined },
+    { purpose: 'conversational' },
+    { metadata: { original_message_type: 'invoice_thank_you' } },
+    { purpose: 'appointment', metadata: { original_message_type: 'service_complete' } },
+  ])('cannot infer receipt delivery from a generic or unlinked send: %j', async (fields) => {
+    await sendCustomerMessage({ ...input, ...fields });
+    expect(query.update).not.toHaveBeenCalled();
+  });
+
+  test('a policy hold never stamps; an evidence write failure cannot retry an accepted text', async () => {
+    sendViaTwilio.mockResolvedValueOnce({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD' });
+    await sendCustomerMessage(input);
+    expect(query.update).not.toHaveBeenCalled();
+    query.update.mockRejectedValueOnce(new Error('evidence write unavailable'));
+    expect((await sendCustomerMessage(input)).sent).toBe(true);
+  });
+
+  test('an audit failure after acceptance leaves the independent delivery fact', async () => {
+    persistAudit.mockRejectedValueOnce(new Error('audit unavailable'));
+    await expect(sendCustomerMessage(input)).rejects.toMatchObject({ providerOutcome: accepted });
+    expect(query.update).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('grouped unit-move hold (MOVE_HOLD) at the canonical chokepoint (codex #3609 r30)', () => {
   const db = require('../models/db');
   const APPT_INPUT = {

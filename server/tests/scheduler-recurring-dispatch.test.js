@@ -10,7 +10,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn() }));
-jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()) }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({ flagUnplacedVisits: jest.fn() }));
 jest.mock('../services/time-tracking-crons', () => ({ initTimeTrackingCrons: jest.fn() }));
@@ -63,7 +63,9 @@ test('the existing IB retention tick purges tasks and threads while their write 
 test.each([false, true])('handoff alerts stay registered with cronJobs off and autoDispatch=%s', async (autoDispatch) => {
   isEnabled.mockImplementation((name) => name === 'autoDispatch' && autoDispatch);
   await tick();
-  expect(cron.schedule).toHaveBeenCalledTimes(1);
+  // Only the handoff tick and the job_health dead-running settle (ledger
+  // maintenance, registered above the cronJobs early return) survive.
+  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['10 4 * * *', '3,18,33,48 * * * *']);
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
   expect(runAutoDispatch).not.toHaveBeenCalled();
 });

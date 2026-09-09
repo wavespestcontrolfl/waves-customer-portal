@@ -10,6 +10,9 @@ const { UUID_RE } = require('./task-context');
 const REQUEST_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 const STATES = new Set(['running', 'responded', 'awaiting_approval', 'needs_information', 'failed', 'outcome_unknown', 'canceled']);
 const leaseExpiry = () => new Date(Date.now() + 120000);
+// Open for the operator: the receipt-derived states that still need attention.
+const OPEN_STATES = new Set(['running', 'awaiting_approval', 'needs_information', 'outcome_unknown', 'partially_completed', 'ready_to_continue']);
+const ATTACHMENTS_LOST = 'Attached images are not kept with a saved request, so it cannot continue without them. Reattach them in a new request.';
 
 function requestHash(request) {
   return crypto.createHash('sha256').update(stableStringify(request)).digest('hex');
@@ -74,9 +77,10 @@ function continuationError(task, receipts, { selectedTarget } = {}) {
   if (receipts.some(r => !['completed', 'provider_accepted'].includes(r.outcome))) {
     return { error: 'Resolve the saved action outcomes before continuing', code: 'steps_unresolved' };
   }
-  if (task.request?.had_images && !task.checkpoint?.length) {
-    return { error: 'The attachments were not saved before this request stopped. Reattach them in a new request.', code: 'attachments_required' };
-  }
+  // Images are never persisted and a checkpoint holds only their text
+  // placeholder, so a continuation could finish without the evidence the
+  // operator attached. An image request is not resumable at any point.
+  if (task.request?.had_images) return { error: ATTACHMENTS_LOST, code: 'attachments_required' };
   if (['responded', 'canceled'].includes(task.state)
       || (task.state === 'needs_information' && !selectedTarget)
       || (task.state === 'awaiting_approval' && !receipts.length)) {
@@ -105,8 +109,7 @@ async function snapshot(task, actorId) {
   return { ...(task.response || {}), taskId: task.id, taskState: exposedTaskState(task, receipts),
     taskTarget: task.target?.target || null, pendingActions, receipts,
     canContinue: !continuationError(task, receipts),
-    response: task.response?.response || (task.request?.had_images && !task.checkpoint?.length
-      ? 'The attachments were not saved before this request stopped. Reattach them in a new request.'
+    response: task.response?.response || (task.request?.had_images ? ATTACHMENTS_LOST
       : 'This request has not returned a final answer. Its saved actions are shown below.'),
   };
 }
@@ -128,13 +131,26 @@ async function get(id, actorId, sessionId) {
 
 async function list(actorId, sessionId) {
   if (!UUID_RE.test(sessionId || '')) return [];
-  const tasks = await db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId })
-    .where('expires_at', '>', db.fn.now()).orderBy('created_at', 'desc').limit(20)
-    .select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at');
+  const scoped = () => db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId }).where('expires_at', '>', db.fn.now());
+  const latest = (await scoped().orderBy('created_at', 'desc').limit(20).select('id')).map(task => task.id);
+  // The latest twenty plus every task still open for the operator, judged by
+  // the same receipt-derived state the client shows: a settled approval
+  // beyond the cap drops out while an older interruption stays reachable.
+  // A raw failed task with no unresolved receipts is resumable (a pre-model
+  // failure such as an unavailable integration), so failed rows stay in the
+  // query and the receipt-derived filter below decides.
+  const tasks = await scoped().where(query => query.whereIn('id', latest).orWhereNotIn('state', ['responded', 'canceled']))
+    .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at',
+      db.raw("(request->>'had_images')::boolean AS had_images"));
   if (!tasks.length) return tasks;
   const actions = await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id));
-  return tasks.map(task => ({ ...task, state: exposedTaskState(task,
-    actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt)) }));
+  const recent = new Set(latest);
+  return tasks.map(task => {
+    const receipts = actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt);
+    const resumableFailure = task.state === 'failed' && !continuationError({ ...task, request: { had_images: task.had_images === true } }, receipts);
+    return { ...task, state: exposedTaskState(task, receipts), resumableFailure };
+  }).filter(task => recent.has(task.id) || OPEN_STATES.has(task.state) || task.resumableFailure)
+    .map(({ resumableFailure, had_images, ...task }) => task);
 }
 
 // Run from the existing IB retention sweep even while the platform gate is off.

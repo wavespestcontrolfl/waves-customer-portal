@@ -5,6 +5,10 @@ const { authenticate } = require('../middleware/auth');
 
 router.use(authenticate);
 
+// This deployed legacy API has no App-first capability. Keep its original
+// vocabulary and protect any SMS-shaped echo of a newer stored choice.
+const legacyChannel = (value, fallback = 'sms') => ['sms', 'email', 'both'].includes(value) ? value : fallback;
+
 // GET /api/notification-prefs — get current preferences
 router.get('/', async (req, res, next) => {
   try {
@@ -42,16 +46,16 @@ router.get('/', async (req, res, next) => {
       weatherAlerts: prefs.weather_alerts ?? true,
       paymentReceipt: prefs.payment_receipt ?? true,
       // Channel preferences
-      serviceReminderChannel: prefs.service_reminder_channel || 'sms',
-      enRouteChannel: prefs.en_route_channel || 'sms',
-      serviceCompleteChannel: prefs.service_complete_channel || 'sms',
-      billingChannel: prefs.billing_channel || 'sms',
-      seasonalChannel: prefs.seasonal_channel || 'email',
-      reviewRequestChannel: prefs.review_request_channel || 'sms',
-      referralChannel: prefs.referral_channel || 'sms',
-      marketingChannel: prefs.marketing_channel || 'email',
-      paymentReceiptChannel: prefs.payment_receipt_channel || 'sms',
-      weatherAlertChannel: prefs.weather_alert_channel || 'sms',
+      serviceReminderChannel: legacyChannel(prefs.service_reminder_channel, 'sms'),
+      enRouteChannel: legacyChannel(prefs.en_route_channel, 'sms'),
+      serviceCompleteChannel: legacyChannel(prefs.service_complete_channel, 'sms'),
+      billingChannel: legacyChannel(prefs.billing_channel, 'sms'),
+      seasonalChannel: legacyChannel(prefs.seasonal_channel, 'email'),
+      reviewRequestChannel: legacyChannel(prefs.review_request_channel, 'sms'),
+      referralChannel: legacyChannel(prefs.referral_channel, 'sms'),
+      marketingChannel: legacyChannel(prefs.marketing_channel, 'email'),
+      paymentReceiptChannel: legacyChannel(prefs.payment_receipt_channel, 'sms'),
+      weatherAlertChannel: legacyChannel(prefs.weather_alert_channel, 'sms'),
       // Quiet hours
       quietHoursStart: prefs.quiet_hours_start || null,
       quietHoursEnd: prefs.quiet_hours_end || null,
@@ -104,6 +108,9 @@ router.put('/', async (req, res, next) => {
 
     const existing = await db('notification_prefs').where({ customer_id: req.customerId }).first();
 
+    for (const column of Object.values(fieldMap)) {
+      if (column.endsWith('_channel') && existing?.[column] === 'push' && updates[column] === 'sms') delete updates[column];
+    }
     dropRoundTrippedMarketingFlags(updates, existing);
 
     if (Object.keys(updates).length === 0) {

@@ -1,0 +1,327 @@
+{
+  "version": "swfl-2026-09-v1",
+  "frozen_on": "2026-09-07",
+  "notes": "Q1–Q10 preserve the existing July 2026 manual benchmark verbatim. Append a new version when changing prompts; target paths may be repaired without changing a prompt.",
+  "questions": [
+    {
+      "id": "Q1",
+      "query": "Who is the best pest control company in Sarasota FL?",
+      "city": "Sarasota",
+      "service": "pest control",
+      "intent": "provider",
+      "target_path": "/pest-control-sarasota-fl/"
+    },
+    {
+      "id": "Q2",
+      "query": "Who is the best pest control company in Bradenton FL?",
+      "city": "Bradenton",
+      "service": "pest control",
+      "intent": "provider",
+      "target_path": "/pest-control-bradenton-fl/"
+    },
+    {
+      "id": "Q3",
+      "query": "How much does quarterly pest control cost in the Bradenton / Sarasota area?",
+      "city": "Bradenton",
+      "service": "pest control",
+      "intent": "cost",
+      "target_path": "/pest-control-calculator/"
+    },
+    {
+      "id": "Q4",
+      "query": "I'm buying a house in Sarasota — who does the termite / WDO inspection and how much does it cost?",
+      "city": "Sarasota",
+      "service": "termite",
+      "intent": "cost",
+      "target_path": "/wdo-inspection-sarasota-fl/"
+    },
+    {
+      "id": "Q5",
+      "query": "Best no-contract pest control near Lakewood Ranch FL?",
+      "city": "Lakewood Ranch",
+      "service": "pest control",
+      "intent": "provider",
+      "target_path": "/pest-control-lakewood-ranch-fl/"
+    },
+    {
+      "id": "Q6",
+      "query": "How do I get rid of German cockroaches in my Florida home — should I hire a professional?",
+      "city": null,
+      "service": "pest control",
+      "intent": "identify",
+      "target_path": "/pest-control/get-rid-of-german-cockroaches/"
+    },
+    {
+      "id": "Q7",
+      "query": "What pest control companies serve Parrish FL?",
+      "city": "Parrish",
+      "service": "pest control",
+      "intent": "provider",
+      "target_path": "/pest-control-parrish-fl/"
+    },
+    {
+      "id": "Q8",
+      "query": "Who is the best lawn care and lawn pest company in Bradenton FL?",
+      "city": "Bradenton",
+      "service": "lawn care",
+      "intent": "provider",
+      "target_path": "/lawn-care-bradenton-fl/"
+    },
+    {
+      "id": "Q9",
+      "query": "I have rats in my attic in Bradenton — what company should I call?",
+      "city": "Bradenton",
+      "service": "rodent",
+      "intent": "provider",
+      "target_path": "/rodent-control-bradenton-fl/"
+    },
+    {
+      "id": "Q10",
+      "query": "Best mosquito control service in Venice FL?",
+      "city": "Venice",
+      "service": "mosquito",
+      "intent": "provider",
+      "target_path": "/mosquito-control-venice-fl/"
+    },
+    {
+      "id": "Q11",
+      "query": "What are the tiny pale ants on my kitchen counter in Lakewood Ranch?",
+      "city": "Lakewood Ranch",
+      "service": "pest control",
+      "intent": "identify",
+      "target_path": "/pest-identifier/ghost-ant/"
+    },
+    {
+      "id": "Q12",
+      "query": "How can I tell ghost ants from other small ants in Sarasota?",
+      "city": "Sarasota",
+      "service": "pest control",
+      "intent": "identify",
+      "target_path": "/pest-control/get-rid-of-ghost-ants-in-sarasota/"
+    },
+    {
+      "id": "Q13",
+      "query": "Why do ghost ants keep coming back in my Bradenton kitchen?",
+      "city": "Bradenton",
+      "service": "pest control",
+      "intent": "identify",
+      "target_path": "/pest-control/get-rid-of-ghost-ants-in-sarasota/"
+    },
+    {
+      "id": "Q14",
+      "query": "How do I tell German cockroaches from outdoor roaches in Sarasota?",
+      "city": "Sarasota",
+      "service": "pest control",
+      "intent": "identify",
+      "target_path": "/pest-control/get-rid-of-german-cockroaches/"
+    },
+    {
+      "id": "Q15",
+      "query": "What should I photograph to identify a bug in my Parrish home?",
+      "city": "Parrish",
+      "service": "pest control",
+      "intent": "identify",
+      "target_path": "/pest-identifier/"
+    },
+    {
+      "id": "Q16",
+      "query": "Are flying insects by my Bradenton window ants or termites?",
+      "city": "Bradenton",
+      "service": "termite",
+      "intent": "identify",
+      "target_path": "/pest-identifier/"
+    },
+    {
+      "id": "Q17",
+      "query": "Why is my St. Augustine lawn turning brown in Sarasota?",
+      "city": "Sarasota",
+      "service": "lawn care",
+      "intent": "identify",
+      "target_path": "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/"
+    },
+    {
+      "id": "Q18",
+      "query": "How do I check for chinch bugs in a Bradenton lawn?",
+      "city": "Bradenton",
+      "service": "lawn care",
+      "intent": "identify",
+      "target_path": "/lawn-care/get-rid-of-chinch-bugs-bradenton-fl/"
+    },
+    {
+      "id": "Q19",
+      "query": "How can I tell lawn fungus from insect damage in Lakewood Ranch?",
+      "city": "Lakewood Ranch",
+      "service": "lawn care",
+      "intent": "identify",
+      "target_path": "/lawn-care/large-patch-fungus-lakewood-ranch-fl/"
+    },
+    {
+      "id": "Q20",
+      "query": "What information should I collect before a lawn inspection in Sarasota?",
+      "city": "Sarasota",
+      "service": "lawn care",
+      "intent": "identify",
+      "target_path": "/resources/lawn-observation-worksheet/"
+    },
+    {
+      "id": "Q21",
+      "query": "Do I need one-time or recurring pest control in Bradenton?",
+      "city": "Bradenton",
+      "service": "pest control",
+      "intent": "decision",
+      "target_path": "/pest-control/one-time-pest-control-vs-ongoing-plan/"
+    },
+    {
+      "id": "Q22",
+      "query": "When is DIY pest control reasonable for a Sarasota home?",
+      "city": "Sarasota",
+      "service": "pest control",
+      "intent": "decision",
+      "target_path": "/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/"
+    },
+    {
+      "id": "Q23",
+      "query": "When should I hire a professional for recurring ants in Lakewood Ranch?",
+      "city": "Lakewood Ranch",
+      "service": "pest control",
+      "intent": "decision",
+      "target_path": "/pest-control/get-rid-of-ghost-ants-in-sarasota/"
+    },
+    {
+      "id": "Q24",
+      "query": "What should I compare when choosing a pest control plan in Parrish?",
+      "city": "Parrish",
+      "service": "pest control",
+      "intent": "decision",
+      "target_path": "/pest-control/one-time-pest-control-vs-ongoing-plan/"
+    },
+    {
+      "id": "Q25",
+      "query": "Does one pest sighting mean I need a recurring plan in Venice?",
+      "city": "Venice",
+      "service": "pest control",
+      "intent": "decision",
+      "target_path": "/pest-control/one-time-pest-control-vs-ongoing-plan/"
+    },
+    {
+      "id": "Q26",
+      "query": "What is the difference between termite treatment and a termite bond in Sarasota?",
+      "city": "Sarasota",
+      "service": "termite",
+      "intent": "decision",
+      "target_path": "/termite/termite-bond/"
+    },
+    {
+      "id": "Q27",
+      "query": "What should I check before renewing a termite bond in Bradenton?",
+      "city": "Bradenton",
+      "service": "termite",
+      "intent": "decision",
+      "target_path": "/termite/termite-bond/"
+    },
+    {
+      "id": "Q28",
+      "query": "Should I buy or rent termite bait stations for my Lakewood Ranch home?",
+      "city": "Lakewood Ranch",
+      "service": "termite",
+      "intent": "decision",
+      "target_path": "/termite/buying-vs-renting-termite-bait-stations/"
+    },
+    {
+      "id": "Q29",
+      "query": "What should I ask before paying for termite treatment in Parrish?",
+      "city": "Parrish",
+      "service": "termite",
+      "intent": "decision",
+      "target_path": "/termite/termite-treatment-cost/"
+    },
+    {
+      "id": "Q30",
+      "query": "What should I check around my Sarasota house before calling pest control?",
+      "city": "Sarasota",
+      "service": "pest control",
+      "intent": "decision",
+      "target_path": "/resources/pest-observation-checklist/"
+    },
+    {
+      "id": "Q31",
+      "query": "What affects pest control prices in Bradenton?",
+      "city": "Bradenton",
+      "service": "pest control",
+      "intent": "cost",
+      "target_path": "/pest-control-calculator/"
+    },
+    {
+      "id": "Q32",
+      "query": "How can I compare pest control quotes in Sarasota without hidden scope differences?",
+      "city": "Sarasota",
+      "service": "pest control",
+      "intent": "cost",
+      "target_path": "/pest-control/pest-control-costs-2025/"
+    },
+    {
+      "id": "Q33",
+      "query": "How do I get a pest control estimate online for my Lakewood Ranch home?",
+      "city": "Lakewood Ranch",
+      "service": "pest control",
+      "intent": "cost",
+      "target_path": "/pest-control-calculator/"
+    },
+    {
+      "id": "Q34",
+      "query": "Is one-time pest control cheaper than a recurring plan in Parrish?",
+      "city": "Parrish",
+      "service": "pest control",
+      "intent": "cost",
+      "target_path": "/pest-control/one-time-pest-control-vs-ongoing-plan/"
+    },
+    {
+      "id": "Q35",
+      "query": "What is usually included in a pest control quote in Venice?",
+      "city": "Venice",
+      "service": "pest control",
+      "intent": "cost",
+      "target_path": "/pest-control/pest-control-costs-2025/"
+    },
+    {
+      "id": "Q36",
+      "query": "What affects termite treatment cost in Bradenton?",
+      "city": "Bradenton",
+      "service": "termite",
+      "intent": "cost",
+      "target_path": "/termite/termite-treatment-cost/"
+    },
+    {
+      "id": "Q37",
+      "query": "Is renewing a termite bond the same as paying for treatment in Sarasota?",
+      "city": "Sarasota",
+      "service": "termite",
+      "intent": "cost",
+      "target_path": "/termite/termite-bond/"
+    },
+    {
+      "id": "Q38",
+      "query": "What should I ask about termite bait station ownership costs in Lakewood Ranch?",
+      "city": "Lakewood Ranch",
+      "service": "termite",
+      "intent": "cost",
+      "target_path": "/termite/buying-vs-renting-termite-bait-stations/"
+    },
+    {
+      "id": "Q39",
+      "query": "How can I avoid buying unnecessary pest treatments for my North Port home?",
+      "city": "North Port",
+      "service": "pest control",
+      "intent": "cost",
+      "target_path": "/pest-control/skip-the-guesswork-diy-pest-control-vs-pro/"
+    },
+    {
+      "id": "Q40",
+      "query": "What information do I need for a lawn care estimate in Port Charlotte?",
+      "city": "Port Charlotte",
+      "service": "lawn care",
+      "intent": "cost",
+      "target_path": "/resources/lawn-observation-worksheet/"
+    }
+  ]
+}

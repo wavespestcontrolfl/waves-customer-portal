@@ -140,6 +140,11 @@ function validateTemplatePayload(body = {}, { partial = false } = {}) {
   }
   if (!partial || Object.prototype.hasOwnProperty.call(body, 'audience')) {
     payload.audience = cleanString(body.audience, 'customer').toLowerCase().replace(/\s+/g, '_');
+    if (payload.audience === 'staff') {
+      const err = new Error('Staff documents must use the controlled Staff document workflow.');
+      err.status = 400;
+      throw err;
+    }
   }
   if (!partial || Object.prototype.hasOwnProperty.call(body, 'variables')) {
     payload.variables = cleanArray(body.variables);

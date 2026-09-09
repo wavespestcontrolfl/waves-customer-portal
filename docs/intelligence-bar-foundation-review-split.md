@@ -228,3 +228,184 @@ coverage/domain/brand gates pass. Shared-shell desktop/mobile recovery is
 rerun against the final integrated parent code with independent A-only database
 read-back. Final GitHub Codex review is pending its shared usage-limit reset;
 all PRs remain drafts and no production or merge action is authorized.
+
+B1 also binds explicit child identifiers in the request, requires a deliberate
+reference for customerless calls, and freshly validates every child owner.
+Emails inherit a converted lead's customer and reject deleted or conflicting
+ownership; an address-only reply requires exactly one matching thread. Relevant
+page hints survive stale auxiliary hints, including compound “this customer and
+that estimate” requests. Name lookup now uses the same punctuation and space
+normalization as request matching. The resulting scope passes 154 unit/write
+boundary cases and 19 rollback-only PostgreSQL cases. No provider was called.
+
+B2 propagates Gmail uncertainty through the native email route and editor.
+The existing tab-scoped draft store saves an attempt before submission, retains
+the guard through reloads and quota failures, and requires explicit Sent-folder
+reconciliation before another send. Gmail acceptance requires its message ID;
+inbox-refresh failure cannot become a send failure. The shared Gmail client
+also rejects ID-less responses as unknown, so the existing outreach claim and
+manual reconciliation path retain their send lock. This closes native-tab retry
+behavior, not cross-device/server idempotency; that remains Phase 3 work.
+
+Controlled desktop (1440) and mobile (390) browser checks covered compose/reply
+uncertainty, reload, both reconciliation verdicts and no duplicate send. Three
+screenshots were inspected; no JavaScript errors or horizontal overflow appeared.
+The provider was stubbed in browser QA. Actual native-route tests and the real
+Google SDK with a controlled transporter separately cover outcome classification.
+The parent-integrated database suites pass 26 rollback-only cases.
+
+C normalizes UUID identity in scalar selectors, nested product fields and bulk
+sets while preserving exact approval parameters and hashes. Legacy keys must
+prove their original canonical input before semantic replay; preview-only
+bindings that cannot be reconstructed require reconciliation. New task actions
+record a hash-bound step-key version so a legitimate distinct successor is
+still possible. The final checks pass 155 unit cases and 33 isolated PostgreSQL
+cases, including pending, accepted and unknown legacy replay. Independent
+review found no actionable issue; no provider or domain send ran.
+
+The next B1 correction generalizes canonical name-selector guards to all
+classified writes, including lead status, and requires explicit current-request
+evidence for customerless appointments. A capped name query preserves its raw
+completeness evidence before filtering incidental matches; incomplete cohorts
+cannot become approved subsets. Independent compound actions retain their
+explicit estimate IDs, while message-body commands grant no record authority.
+Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
+PostgreSQL tests. Independent review closed both additional edge cases before
+the fifth remote review. No provider, customer message or production write ran.
+
+Scoped email history now resolves effective ownership through converted leads
+for search candidates, owned/foreign Gmail thread sets and complete-thread
+read/draft validation. Missing/deleted lead links or conflicting direct and
+lead owners refuse before model egress. The controlled PostgreSQL suite covers
+lead-only success, mixed-thread isolation, contradictory links, ownership
+changes and deletion. Its eight cases pass; the affected email-outcome and
+operational-read units add 16 passes. No live model/provider was called.
+
+The shared outcome classifier now also replaces the older route-local failure
+predicate in B2, so a blocked optimizer preview cannot create an approval card
+and blocked commit/execute results cannot return success. The existing route
+confirmation suite passes 49 cases, including both new outcome regressions.
+This brings the adapter's blocked-result contract forward from D so the smaller
+B2 review unit has the same behavior before downstream route integration.
+
+Post-merge main integration at `a7c689301` records the nine request sites that
+reached main after Part A's final head: the Customer 360 workspace and unread
+conversation hooks from `481ad658f`, and the controlled staff documents from
+`f4b3490f5`. Each is proved against that already-merged revision and retained
+as unsupported/unverified, for 1,753 cumulative sites. Nothing gains coverage;
+this restores the drift gate on main without grandfathering any new action.
+
+Codex review of that integration tightened one matcher: React state setters
+that merely end in `Request` (`setLinkRequest`, `setNewLeadRequest`,
+`setRequest`) perform no request and no longer produce rows, and neither do lazy
+`import()` module loads, for 1,744 cumulative sites. Dynamic and glued-suffix endpoints stay recorded as
+unresolved / `:param` routes pending hand mapping; the scanner is per-file and
+cannot resolve a shared helper's callers or tell a query suffix from a path
+segment, so nothing else left the denominator.
+
+Main integration at `1bd165d6f` (#4016, SMS commitment follow-up) records the
+`OwedCommitmentsSummary` component's two request sites — the collection GET now
+takes the `open` / `sms` collection as a template segment, and the Mark done /
+Dismiss PATCH moved lines — proved against that merged revision and retained
+as unsupported/unverified; the superseded fixed-`open` GET row leaves the
+denominator, which stays at 1,744 cumulative sites. Nothing gains coverage.
+
+## B1 selection follow-up
+
+Target validation #4062 stopped receiving pushes at `600841fa52` after its
+fifth review introduced a new P1: an unmatched explicit customer name could
+accept a stale `selectedTarget` (3948877186). Review history: round 1
+`265f8c4173` had two P1/four P2; round 2 `7c15c116e7` had two P1/three P2;
+round 3 on the same head had two P1/one P2; round 4 `27897bb40c` had two
+P1/one P2; round 5 `600841fa52` had one P1/three P2. `e18a438cf` later merged
+main after catalog #4041 squash-merged (graft merge, no conflicts).
+
+`fix/ib-target-selection` is the focused child of B1 that fixes that P1. Its
+first shape (five heads, `b9b2793b5` … `a4676a38b`) also carried a named-cohort
+grammar ("both A and B", "these customers …", "all of these …": member runs,
+field-set tails, action-clause splits, member matching, merged single-name
+lookups). Rounds 2–5 each found a new P1 in that grammar and none in the
+selection rule, so it hit the round cap. Owner decision 2026-09-08: fail closed
+on named cohorts. The current shape keeps two rules and deletes the grammar:
+
+- A selection is bound to the request's own fresh candidates. It is accepted
+  only as one of the rows this exact request resolved to (duplicate-name
+  disambiguation, the one flow that supplies a selection); a request that
+  named nobody, matched nothing, hit the lookup cap, or asked for a set has
+  no candidate to select and refuses with `context_mismatch`. No
+  stale-selection grammar is load-bearing: an unrecognized phrasing can only
+  over-refuse, never choose a customer.
+- A set quantifier is never a target. Any request containing `both`,
+  `these customers` or `all of these` resolves to no targets and
+  `ambiguous: true`, so the caller asks for one target at a time; write
+  validation and read preparation refuse an ambiguous context, and a selection
+  is refused. This is deliberately literal: first-name cohorts with no fresh
+  match ("text both Alice and Bob"), field pairs ("both the phone and email")
+  and product pairs all refuse, because any evidence-based narrowing is the
+  cohort grammar the round cap retired. Duplicate-name ambiguity stays
+  distinct: an operator selection among complete same-name matches resolves
+  it. Nothing downstream executes on a multi-customer cohort:
+  `prepareReadInput` fills `customer_id` only from exactly one target, and the
+  route reads `targets` solely as read-scope ids.
+
+A capped name lookup refuses any selection, and `prepareReadInput` refuses an
+ambiguous context or an unresolved explicit name (`namesRequested` now travels
+in the context) before the empty-target broad-read fallback, so neither a
+refused cohort nor an unresolved name widens into an unscoped read. An explicit
+email or phone recipient is a contact, never a name. `namesTargetCustomer` no
+longer accepts a name after `both` or `and`, and the
+resolver keeps page errors in the page shape and anchors its recipient/review
+matches, so its structural warning falls below the pre-split level.
+
+The first remote round on the rebuilt head added `set`/`edit`/`mark`/`make`
+to the selector verbs (a stale selection could survive "Set Alice Owner
+inactive"), normalized the quantifier spellings (`those customers`, `all of
+those`, repeated whitespace) on a contact-free clause so `both@example.invalid`
+is a recipient, listed the common field nouns (`status`, `billing`, …) as
+non-names so "Update customer status" keeps a selected customer, and took the
+resolver under the structural threshold by making a broken page hint fail
+closed for a page-referencing request even when a selection is supplied.
+
+The second round added the ordinary set spellings (`all customers`,
+`each`/`every customer`), stripped contact literals before the full-name
+lookup as well, listed every `update_customer` field and the opening
+contractions as non-names, and reads a `null` selection as absent.
+
+The third round added the determiner forms (`all the customers`, `all of the
+customers`, `each of the customers`, `every one of the customers`), made
+`rename`/`relabel` selector verbs, and closed partly resolved compound
+evidence: when one action clause accepted a customer and another clause's
+person reference matches nobody ("update Jhon Smith and text Alice Owner"),
+the request has no target, is ambiguous, and refuses any selection. A request
+that resolved nobody keeps the plain unresolved-name handling, and a resolved
+clause may still carry service nouns. `account`/`profile`/`record` and the
+record nouns (`appointment`, `estimate`, `invoice`, …) are non-names. The
+thing being sent introduces its recipient too (`send the response to`,
+`forward the estimate to`), closing B2's open recipient-phrase thread here.
+
+The fourth round qualified the set grammar (up to two qualifiers between the
+quantifier and the noun: `all active customers`, `each overdue customer`; a
+deictic qualifier such as `all of this customer's fields` still names one
+account), required every person reference in a clause to resolve (a token
+modifying a non-person noun, `flea` in `flea treatment`, is not a person
+reference; `and also`/`and then` open a clause), and made two distinct
+stated recipients refuse any selection while duplicate rows of one stated
+name still accept it. Communication objects (`message`, `receipt`, `text`,
+`link`, …) and the pests and lawn work a request names are non-names.
+
+The fifth round stopped at the cap with two new P1s (`all accounts` missed the
+set grammar; the partial-evidence check pooled name tokens, so `update Alice
+Missing and also text Alice Jones` accepted Alice Jones). Owner decision
+2026-09-09: server-bound selections plus a whole-reference check. A selection
+is now accepted only as one of the request's own candidates (above), the set
+noun takes every customer synonym (`customer`, `account`, `client`,
+`profile`, `record`), and each person reference is the whole name run after
+its selector, resolved only against a customer whose full name it starts with
+or, for a bare single name, whose first or last name it is. Both P1 examples
+fail safely with and without a selection, in the unit and PostgreSQL suites.
+The function words that can follow a selector (`on`, `about`, `after`, …)
+are non-names, which fixes a phone-read over-refusal found downstream.
+
+Validation: 159 target cases pass (135 unit and 24 rollback-only isolated
+PostgreSQL cases). No model, provider, production query, migration, merge or
+gate change occurred.

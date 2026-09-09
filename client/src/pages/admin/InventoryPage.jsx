@@ -411,7 +411,7 @@ export default function InventoryPage() {
             // Shortcut cards into owner-only tabs are hidden for techs —
             // clicking them would land on a tab the role can't open.
           ].filter((s) => isAdminRole || !s.adminOnly).map((s) => (
-            <div
+            <button type="button"
               key={s.label}
               onClick={() => {
                 if (s.action) s.action();
@@ -427,6 +427,8 @@ export default function InventoryPage() {
                 marginBottom: 0,
                 textAlign: "center",
                 cursor: "pointer",
+                font: "inherit",
+                color: "inherit",
               }}
             >
               {" "}
@@ -451,7 +453,7 @@ export default function InventoryPage() {
               >
                 {s.label}
               </div>{" "}
-            </div>
+            </button>
           ))}
         </div>
       )}

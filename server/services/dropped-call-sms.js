@@ -478,9 +478,11 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
       // {callback_clause} in the body); only when it's one of OUR managed
       // numbers AND not the AI-assistant toll-free line — a reply to that
       // line enters the AI chat flow instead of the human comms inbox
-      // (codex P1). Otherwise the location-aware default applies.
+      // (codex P1), and never a per-tech line — automated texts stay on the
+      // location lines (#4053). Otherwise the location-aware default applies.
       ...(call.to_phone
         && call.to_phone !== TWILIO_NUMBERS.tollFree?.number
+        && !TWILIO_NUMBERS.isTechLine(call.to_phone)
         && TWILIO_NUMBERS.findByNumber(call.to_phone)
         ? { fromNumber: call.to_phone } : {}),
     },

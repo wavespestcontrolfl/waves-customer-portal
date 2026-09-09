@@ -15,6 +15,13 @@ test('every tool-bearing module in the existing tool census joins the registry',
   }
 });
 
+test('a proposal-pinned customer id validates for reply_via_sms while a forged one fails', () => {
+  const scope = { role: 'admin', context: 'platform' };
+  const pinned = { email_id: '10000000-0000-4000-8000-000000000001', message: 'On our way', customer_id: '10000000-0000-4000-8000-000000000002' };
+  expect(registry.validateInput('reply_via_sms', pinned, scope)).toBeNull();
+  expect(registry.validateInput('reply_via_sms', { ...pinned, customer_id: 'not-a-uuid' }, scope)).toMatchObject({ code: 'invalid_input' });
+});
+
 test('every existing tool has an explicit valid policy and a concrete executor', () => {
   expect(registry.policyErrors).toEqual([]);
   expect(registry.actions.size).toBe(Object.keys(require('../services/intelligence-bar/action-policy.json')).length);

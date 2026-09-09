@@ -1581,6 +1581,19 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           "Invoice total / Total charged" pair repeated the same figure
           twice right above a button that states it again (owner
           2026-08-31: the price appeared 6-7 times on one page). */}
+      {/* Persistent polite live region: the surcharge / funding quote appears here after "Continue", so it is announced (F0276). */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        id="pay-review-totals"
+        // Empty until a quote exists: taken out of the grid flow (absolute,
+        // 1px, clipped) so it adds no row/gap before the Pay button; it
+        // becomes a normal grid item the moment the totals render.
+        style={(isCardFamily && (displayedSurcharge > 0 || (quoteData && quoteData.funding !== 'credit')))
+          ? undefined
+          : { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}
+      >
       {(isCardFamily && (displayedSurcharge > 0 || (quoteData && quoteData.funding !== 'credit'))) && (
       <div data-glass="soft" style={{
         padding: SP.md,
@@ -1624,6 +1637,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       </div>
       )}
+      </div>
 
       {elementError && (
         <div role="alert" style={{
@@ -1655,7 +1669,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
-      <BrandButton variant="primary" fullWidth onClick={awaitingConfirm ? handleFinalizePayment : handleSubmit} disabled={disabled}>
+      <BrandButton variant="primary" fullWidth onClick={awaitingConfirm ? handleFinalizePayment : handleSubmit} disabled={disabled} aria-describedby="pay-review-totals">
         {processing
           ? 'Processing…'
           : !ready

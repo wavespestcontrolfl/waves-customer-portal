@@ -290,6 +290,11 @@ async function sendMessage(to, subject, body, threadId = null, inReplyTo = null)
 
   try {
     const res = await gmail.users.messages.send(params, { retry: false });
+    if (!res.data?.id) {
+      const err = new Error('Gmail returned no message identifier; reconcile the send before retrying');
+      err.providerOutcome = { outcomeUnknown: true };
+      throw err;
+    }
     return res.data;
   } catch (err) {
     // OAuth refresh can fail inside messages.send before any message POST.

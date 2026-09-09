@@ -26,7 +26,7 @@ import useModalFocus from "../../hooks/useModalFocus";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
-import { ibRequestIdentity, ibSessionId } from "../../utils/ibSession";
+import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
 import { retainTaskReceipt } from "../../utils/ibTaskReceipts";
 import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
@@ -313,6 +313,8 @@ function GlobalCommandPalette({ user }, ref) {
   tasksAvailableRef.current = tasksAvailable;
   const sessionIdRef = useRef(null);
   if (!sessionIdRef.current) sessionIdRef.current = ibSessionId();
+  const identityRef = useRef(null);
+  if (!identityRef.current) identityRef.current = createRequestIdentity(sessionIdRef.current);
   const submittingRef = useRef(false);
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
@@ -463,6 +465,9 @@ function GlobalCommandPalette({ user }, ref) {
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
     setPendingActions([]);
     setToolActivity([]);
+    // A thread from History is not the open task: its card (and Confirm
+    // controls) must not stay attached above another conversation.
+    setActiveTask(null);
     try { localStorage.removeItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
     const lastAssistant = [...hist].reverse().find((t) => t.role === "assistant");
     setResponse(
@@ -549,27 +554,33 @@ function GlobalCommandPalette({ user }, ref) {
       saveRecent(q);
       setRecents(loadRecents());
 
+      const request = {
+        prompt: q,
+        conversationHistory,
+        context,
+        ...(selectedTarget ? { selected_target: selectedTarget } : {}),
+        ...(threadId
+          ? {
+              thread_id: threadId,
+              ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
+            }
+          : {}),
+        pageData: { ...ibPageData, route: location.pathname, search: location.search },
+        ...(attachments.length
+          ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
+          : {}),
+      };
+      // The request key outlives a dropped response: the same request
+      // resubmitted replays the saved task instead of running it again.
+      let answered = false;
+      const identity = identityRef.current.begin(JSON.stringify(request));
       try {
         const data = await adminFetch("/admin/intelligence-bar/query", {
           method: "POST",
-          body: JSON.stringify({
-            prompt: q,
-            conversationHistory,
-            context,
-            ...ibRequestIdentity(sessionIdRef.current),
-            ...(selectedTarget ? { selected_target: selectedTarget } : {}),
-            ...(threadId
-              ? {
-                  thread_id: threadId,
-                  ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
-                }
-              : {}),
-            pageData: { ...ibPageData, route: location.pathname, search: location.search },
-            ...(attachments.length
-              ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
-              : {}),
-          }),
+          body: JSON.stringify({ ...request, ...identity }),
         });
+        identityRef.current.settle(identity);
+        answered = true;
         // "New chat" (or a context reset) while the query was inflight —
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
@@ -603,13 +614,23 @@ function GlobalCommandPalette({ user }, ref) {
           }
         }
       } catch (err) {
+        // Only a definitive 4xx answer settles the identity; a server failure
+        // keeps the key so the retry replays the saved task (see ibSession).
+        if (definitiveFailure(err)) {
+          identityRef.current.settle(identity);
+          answered = true;
+        }
         if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
       }
       if (threadEpochRef.current === epoch) {
         submittingRef.current = false;
         setLoading(false);
-        setPrompt("");
-        resetAttachments();
+        // A failed request keeps its prompt and attachments so a retry is the
+        // same request; only an answered one clears the composer.
+        if (answered) {
+          setPrompt("");
+          resetAttachments();
+        }
       }
     },
     [prompt, loading, conversationHistory, context, threadId, location.pathname, location.search, attachments, resetAttachments, ibPageData],
@@ -658,7 +679,7 @@ function GlobalCommandPalette({ user }, ref) {
   };
   const taskCard = <IntelligenceTaskCard task={activeTask}
     onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}
-    onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved} />;
+    onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved}  variant="dark" />;
   const taskHistory = savedTasks.length > 0 && <div style={{ marginBottom: 12 }}>
     <div style={{ fontSize: 14, marginBottom: 8 }}>Saved requests — clearing a chat does not cancel actions</div>
     {savedTasks.map(task => <button key={task.id} type="button" onClick={() => refreshTask(task.id)}
@@ -854,6 +875,7 @@ function GlobalCommandPalette({ user }, ref) {
             {" "}
             <input
               ref={inputRef}
+              aria-label="Ask Waves AI"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -1049,7 +1071,7 @@ function GlobalCommandPalette({ user }, ref) {
           </div>
         )}
         {loading && (
-          <div style={{ padding: "14px 18px" }}>
+          <div style={{ padding: "14px 18px" }} role="status" aria-live="polite" aria-label="Thinking">
             {[90, 70, 85, 55].map((w, i) => (
               <div
                 key={i}
@@ -1067,7 +1089,7 @@ function GlobalCommandPalette({ user }, ref) {
           </div>
         )}
         {(response || pendingActions.length > 0) && !loading && !showThreads && (
-          <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }}>
+          <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }} aria-live="polite">
             {taskCard}
             {" "}
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" />
@@ -1351,6 +1373,7 @@ function MobileSheet({
             {" "}
             <input
               ref={inputRef}
+              aria-label="Ask Waves AI"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -1555,10 +1578,13 @@ function MobileSheet({
 // Attach (photo) control — square icon button sized to match DictationButton.
 function IntelligenceResponse({ response, activity, task, variant }) {
   const hasActions = task && (task.pendingActions?.length || task.receipts?.length);
-  const prose = <div style={{ fontSize: 14, lineHeight: 1.65, color: '#27272A' }}>{renderMarkdown(response)}</div>;
+  // "dark" is the Tier-2 D palette of the desktop modal; "light" is the
+  // zinc shell used by the shared bar (ToolActivityList reads it the same way).
+  const light = variant === "light";
+  const prose = <div style={{ fontSize: 14, lineHeight: 1.65, color: light ? '#27272A' : D.text }}>{renderMarkdown(response)}</div>;
   return <>
     {!hasActions && prose}
-    {(hasActions || activity.length > 0) && <details style={{ marginTop: 12, fontSize: 14, color: '#52525B' }}>
+    {(hasActions || activity.length > 0) && <details style={{ marginTop: 12, fontSize: 14, color: light ? '#52525B' : D.muted }}>
       <summary style={{ minHeight: 44, cursor: 'pointer', paddingTop: 8 }}>Execution details</summary>
       <ToolActivityList items={activity} variant={variant} />
       {hasActions && prose}

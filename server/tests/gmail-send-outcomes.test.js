@@ -6,16 +6,17 @@ const db = require('../models/db');
 const { google } = require('googleapis');
 const gmail = require('../services/email/gmail-client');
 const OAuth2 = google.auth.OAuth2;
-let requests, providerFailure, expired;
+let requests, providerFailure, expired, acceptedData;
 
 beforeEach(() => {
-  requests = []; expired = false;
+  requests = []; expired = false; acceptedData = undefined;
   db.mockImplementation(() => ({ first: async () => ({ refresh_token: 'synthetic-refresh', access_token: 'synthetic-access',
     token_expires_at: new Date(Date.now() + (expired ? -3600000 : 3600000)) }) }));
   jest.spyOn(google.auth, 'OAuth2').mockImplementation((...args) => {
     const client = new OAuth2(...args);
     client.transporter = { request: async config => {
       requests.push(config);
+      if (acceptedData !== undefined) return { data: acceptedData, status: 200, config };
       const error = Object.assign(new Error('Synthetic provider rejection'), providerFailure, { config });
       if (providerFailure.status) error.response = { status: providerFailure.status, config };
       throw error;
@@ -24,6 +25,19 @@ beforeEach(() => {
   });
 });
 afterEach(() => jest.restoreAllMocks());
+
+test('a valid accepted response retains its provider identifier', async () => {
+  acceptedData = { id: 'synthetic-message', threadId: 'synthetic-thread' };
+  await expect(gmail.sendMessage('fixture@example.test', 'Synthetic', 'Fixture')).resolves.toEqual(acceptedData);
+  expect(requests).toHaveLength(1);
+});
+
+test.each([{}, null])('an accepted response without an id stays uncertain for every caller: %j', async data => {
+  acceptedData = data;
+  await expect(gmail.sendMessage('fixture@example.test', 'Synthetic', 'Fixture'))
+    .rejects.toMatchObject({ providerOutcome: { outcomeUnknown: true } });
+  expect(requests).toHaveLength(1);
+});
 
 test.each([
   ['response timeout', { code: 'ETIMEDOUT' }],

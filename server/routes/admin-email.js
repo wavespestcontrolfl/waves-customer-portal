@@ -322,15 +322,18 @@ router.post('/message/:id/trash', async (req, res) => {
 router.post('/send', async (req, res) => {
   try {
     const { to, subject, body, threadId, inReplyTo } = req.body;
-    if (!to || !body) return res.status(400).json({ error: 'to and body required' });
+    if (!to || !body) return res.status(400).json({ status: 'failed', error: 'to and body required' });
 
     const result = await gmailClient.sendMessage(to, subject || '(no subject)', body, threadId, inReplyTo);
     // Log only the provider message id — no recipient address, even masked.
+    if (!result?.id) return res.status(202).json({ status: 'outcome_unknown', error: 'Check the Sent folder before retrying.' });
     logger.info(`[email] Sent email: ${result.id}`);
-    res.json({ success: true, messageId: result.id });
+    res.json({ success: true, status: 'provider_accepted', messageId: result.id });
   } catch (err) {
-    logger.error(`[email] Send error: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    const unknown = err.providerOutcome?.outcomeUnknown === true;
+    logger.error(`[email] Send outcome: ${unknown ? 'unknown' : 'failed'}`);
+    res.status(unknown ? 202 : 502).json({ status: unknown ? 'outcome_unknown' : 'failed',
+      error: unknown ? 'Check the Sent folder before retrying.' : 'The email was not accepted. Try again.' });
   }
 });
 

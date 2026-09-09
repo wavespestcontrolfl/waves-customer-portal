@@ -2092,3 +2092,129 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 **Context.** PR #4014 put an unread-conversation count on the global Messages nav item (desktop sidebar and mobile bottom bar), styled as the §5.7 inbox marker: dark, not colored. Adam asked for the red badge from the reference mockup, for unread SMS only, on mobile and desktop.
 
 **Decisions.** (1) The badge background is `alert.fg` (`#C8312F`) with white text. An unread inbound text is a genuine alert under the alert-fg rule — a customer is waiting on a reply and nobody has read it — so this is not decoration and does not open the door to colored chrome elsewhere. The §5.7 unread dot on inbox rows stays dark. (2) Nothing else moves: the count is still `GET /admin/communications/unread-count` (inbound SMS only, per conversation, admin phones excluded), still hidden at zero, capped at 99+, 30 s poll plus the read event, one `UnreadBadge` component shared by both breakpoints.
+
+
+## 2026-09-07 — Lawn assessment history: property scope, one resolver, confirm-time baseline (feat/lawn-assessment-property-history)
+
+### Why
+
+Customer-wide assessment histories mixed separate lawns, counted retakes as visits,
+and chose the first attempt as baseline before a technician confirmed it. Reports,
+portal history, prior copy context and delivery fences could disagree. This is PR 1a
+of the lawn workflow foundation; it introduces no UI or model call.
+
+### Decisions
+
+- **P1 — Evidence of property.** Assessment and baseline-reset rows gain nullable
+  property FKs. The reversible backfill copies only a visit's owned property,
+  including the service-record path, with every observed link rechecked in the
+  conditional update. It does not bump assessment activity timestamps. Runtime
+  attribution, legacy history inclusion, water snapshots and mowing readings use
+  one predicate: explicit visit property, or the sole active property with no
+  recorded move and no contradictory stamped address. Standalone rows require
+  that same sole/no-move evidence. Cross-customer and conflicting links are excluded.
+  The post-analysis turf fence withholds fallback attribution after a concurrent
+  move; confirmation validates it again.
+- **P2 — Canonical visit.** Direct service and service-record links resolve to the
+  same appointment or are excluded. Identity falls back from visit to record to
+  assessment; display history dates fall back from appointment to record to run.
+  Existing assessment-date weather freezes keep their original evidence date.
+- **P3 — Installed row.** Confirmed record-linked attempts take precedence, then
+  confirmation time descending with NULLS LAST, creation time and deterministic id.
+  PostgreSQL microseconds survive JS conversion. Each visit contributes one row.
+  A valid explicit assessment pin substitutes its row only for that render.
+- **P4 — Atomic baseline.** Confirmation and reset share the customer-level
+  `lawn-baseline` transaction advisory lock. Confirmation stamps `clock_timestamp()`
+  after acquiring it, then elects the first installed visit in scope. Backlinks can
+  change installed priority, so completion takes the same lock before its existing
+  customer/visit locks, and confirmation/recovery backlinks refresh flags in the
+  same transaction as the link. Confirming an unlinked retake leaves a record-linked
+  row installed; if the existing backlink subsequently installs the retake into
+  that record group, its flag changes with that link. No delivery side effects move
+  into these transactions. Flags describe the active reset window; reconfirming an
+  old visit cannot undo a newer reset. Historical renders resolve their own window.
+- **P5 — Historical reset windows.** A property-specific or legacy customer-wide
+  reset applies only when both its creation's Eastern calendar date and boundary
+  are no later than the report visit. The boundary is the replacement baseline's
+  visit date, or the reset's Eastern creation date when no replacement exists.
+  History stops at the rendered visit. No provable property means the current
+  assessment alone, with no invented previous delta.
+- **P6 — Dark rollout and rollback.** `GATE_LAWN_PROPERTY_HISTORY` defaults off in
+  every environment. Each operation reads `gateEnvValue` at call time and passes
+  its decision through; the registered boolean is for gate status logging only.
+  Gate-off branches retain their legacy queries, ordering and fences. Unsetting
+  the gate reverts reads and resumes `/assess`'s legacy count rule. Baseline flags
+  written while enabled remain valid installed-visit data; the kill switch does
+  not erase them. Property attribution continues independently of the read gate.
+
+The PDF signature includes resolver version, scope/eligibility, applicable reset,
+and ordered installed rows with confirmation evidence. Rendering reuses that
+history. The existing signed `asig` can carry an authenticated history identity,
+so the browser's separate `/data` request refuses an intervening history change
+with the existing generic pin-unavailable response. Existing signatures remain
+valid, and URL parameter names and public payload keys are unchanged.
+
+The later flip PR removes legacy read branches after owner-authorized sizing.
+That sizing read needs a separately authorized restricted production role, or a
+dev/preview database; this PR does not query production. Adam alone flips the gate.
+Internal follow-up callers: `agronomic-wiki.js`, `assessment-analytics.js`,
+`ai-assistant/tools-expanded.js`, and the remaining admin assessment analytics.
+Unconfirmed-required lookups and fleet-wide analytics retain their existing scope.
+
+### Verification
+
+Both actual migration modules completed up/down/up inside a rolled-back transaction
+on the explicitly permitted local `waves_portal` database. Nullable UUID columns,
+indexes and backfill state were inspected; that empty local dataset linked zero
+rows. Real PostgreSQL suites use isolated schemas and synthetic rows to exercise
+FK actions, Source A/B and compare-and-swap races, deduplication, property/move
+exclusions, concurrent confirmation/reset, backlink priority, historical windows,
+and report/water/mowing scope. Regression tests cover unchanged payload keys,
+history-only PDF invalidation, authenticated pin tampering and rejection after a
+history or gate change. Exact local/CI/preview and deployment results belong in
+the PR body. No test invokes confirm or completion routes against real customers;
+no customer communications are sent by this work.
+
+Review verification also covers empty scoped/global resets (both preserve null
+baseline IDs and permit the next confirm) and every portal dashboard date field.
+The PDF history identity includes the sorted eligible visit IDs, including visits
+with only water or mowing evidence; the render uses that same resolved set.
+A reassignment of an ancillary-only visit therefore invalidates the cached PDF.
+
+The specified SET NULL reset FK needs follow-up before activation: deleting a
+property currently converts its scoped reset to a legacy/global reset. The
+approved P6 rollback retains per-property flags and the unordered legacy
+customer-wide baseline lookup; rollback does not collapse those flags. Both
+limitations are explicit in the PR review, and the gate remains off.
+
+Delivery verification carries the signed PDF history identity through the existing
+email/send fence and re-resolves it after rendering, before dispatch. Missing,
+changed or unreadable history defers through the existing retry path, including
+reports pinned to no assessment. The operation carries one gate decision through
+selection, rendering and the final check. Live portal/context/score history is
+capped at the current Eastern date. The unconfirmed-inclusive admin inventory
+remains available; its completion-card client must adopt target-property scope
+in the later UI PR, which is a documented P2 deferral here.
+
+## 2026-09-07 — Customer 360 workspace inside the admin shell
+
+**Context.** Adam approved the live directory-and-profile design and requested the implementation, including Safari and the bookmarked admin app on phones.
+
+**Decisions.** The Customers route opts in with `?customer360=workspace`; selecting a customer retains that parameter and adds the existing `customerId`. Removing `customer360` is the kill switch. Customer 360 embeds in the admin content area, with a persistent directory at wide desktop widths and a customer drawer below 1280px. Other entry points retain the existing profile sheet. The seven sections use a sticky, horizontally scrollable strip. The Activity list renders every event returned by the existing timeline endpoint, with category filtering and expandable descriptions; no source, date cutoff, or backend contract changes. Existing customer actions, billing controls, metrics, authorization checks, and loading/error paths remain authoritative.
+
+**Safari.** The workspace inherits the admin shell's `useAdminViewport` sizing. The directory drawer accounts for visual viewport offsets and safe areas; form inputs are at least 16px. Contract forms respond to the profile container width so the Waves sidebar does not force tablet overflow.
+
+**Verification.** Synthetic fixtures rendered the real Customers route and Waves shell at desktop, phone, and tablet widths in Chromium and WebKit. All sections, full history, directory selection/filtering, modal dismissal, and simulated keyboard viewport changes passed; screenshots were inspected. Focused client tests and the production build passed. No migrations or database integration checks were run. Physical iPhone home-screen behavior was not device-tested. This entry records a local implementation, not a deployment.
+
+
+### Customer directory controls and numeric scores (2026-09-07)
+
+Directory, Map, and Outreach & Upsells use a compact outlined toolbar with their existing icons. A single responsive search and Filter row replaces separate desktop/mobile controls. Customer names show the recorded numeric health score in a circle using the existing score color bands; zero and missing values remain distinct, and stored letter grades remain filterable.
+
+### 2026-09-07 — Lawn completion defaults from the appointment plan
+
+The retained `CompletionPanel` uses the existing treatment-plan GET/build endpoints behind `GATE_LAWN_COMPLETION_DEFAULTS` plus `GATE_LAWN_PROPERTY_HISTORY` and the existing per-user completion flag. The canonical planner also serves the job card; an assigned protocol key/version/window survives a reschedule while restrictions use the actual service date. Completion uses eligible default products from that resolved plan, replacing its static lawn action dropdown while enabled. Optional and conditional products remain explicit choices.
+
+Saved customer turf area seeds only a proven matching service property. A visit-only area edit refreshes untouched quantities from verified planner math; manual quantities and product-area overrides remain technician-owned. Front/back/side selections inherit to products, and removals and overrides persist in the existing draft. Choosing partial zones clears unmeasured whole-lawn area. Unverified or blocked suggestions leave an actual-amount input. The property progress card uses the shared confirmed, installed, one-result-per-visit resolver, including baseline resets. This keeps the panel's inline monochrome style and existing completion serialization. Property templates, broader actuals-ledger coverage and assessment/report generation remain subsequent work.
+
+Exact assigned protocol versions remain usable after archival; unassigned selection still requires an active protocol. Catalog formulation distinguishes spreader granules from weighed spray concentrates. Selected default products keep their bookkeeping and safety metadata, with plan blocks still suppressing unverified quantities. The editable visit area travels in the existing `lawnProtocolCompletion.treatedSqft` field to the completion planner, protocol record and nutrient writer; square footage stays an integer and never updates the saved profile.

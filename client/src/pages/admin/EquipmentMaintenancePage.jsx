@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { BarChart3, Truck } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { etDateString } from "../../lib/timezone";
@@ -114,7 +115,6 @@ const SEV_COLORS = {
   medium: D.amber,
   low: D.teal,
 };
-const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
 const FLEET_SECTIONS = [
   { key: "fleet", label: "Fleet Overview", Icon: Truck },
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
@@ -397,6 +397,7 @@ function FleetTab({
   showToast,
   loadFleet,
 }) {
+  const isMobile = useIsMobile(768);
   if (loading)
     return (
       <div style={{ color: D.muted, textAlign: "center", padding: 40 }}>
@@ -573,6 +574,7 @@ function FleetTab({
 // EQUIPMENT CARD + EXPANDED DETAIL
 // ═══════════════════════════════════════════════════════════════════
 function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
+  const isMobile = useIsMobile(768);
   const [detail, setDetail] = useState(null);
   const [mileage, setMileage] = useState(null);
   const [recordForm, setRecordForm] = useState(false);
@@ -1408,6 +1410,7 @@ function InfoRow({ label, value }) {
 // RECORD MAINTENANCE FORM
 // ═══════════════════════════════════════════════════════════════════
 function MaintenanceForm({ equipmentId, schedules, onDone }) {
+  const isMobile = useIsMobile(768);
   const [form, setForm] = useState({
     scheduleId: "",
     maintenanceType: "scheduled",
@@ -1773,6 +1776,7 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
 // LOG MILEAGE FORM
 // ═══════════════════════════════════════════════════════════════════
 function MileageForm({ vehicleId, currentMiles, onDone }) {
+  const isMobile = useIsMobile(768);
   const today = etDateString();
   const [form, setForm] = useState({
     logDate: today,

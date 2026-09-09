@@ -26,6 +26,8 @@ async function main() {
   let refreshedEmail = false;
   let blockedSenders = [];
   let gmailConnected = true;
+  let receiptAvailable = true;
+  let receiptLinksEnabled = true;
   async function openPage(role = 'admin', width = 1440) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
@@ -69,9 +71,19 @@ async function main() {
       else if (api === '/admin/communications/stats') body = {};
       else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
       else if (api === '/admin/communications/agent-draft') body = { draft: null };
-      else if (api === '/admin/communications/link-library') body = { links: [
+      else if (api === '/admin/communications/link-library') body = { receiptLinksEnabled, links: [
         { key: 'fixture-quote', name: 'Request a quote', category: 'booking', url: 'https://www.wavespestcontrol.com/quote/' },
       ] };
+      else if (api === '/admin/communications/customer-link' && request.method() === 'POST') {
+        const submitted = request.postDataJSON();
+        assert.equal(submitted.kind, 'receipt');
+        assert.equal(submitted.customerId, guideCustomer.id);
+        status = receiptAvailable ? 200 : 404;
+        const url = `portal.wavespestcontrol.com/receipt/${'a'.repeat(64)}`;
+        body = receiptAvailable
+          ? { kind: 'receipt', url, line: `Here is your receipt for invoice QA-RECEIPT: ${url}\n\n`, firstName: 'Guide', customerId: guideCustomer.id, immediateOnly: true, receipt: { invoiceNumber: 'QA-RECEIPT', paidAt: '2026-08-30', status: 'paid' } }
+          : { error: 'No previously texted receipt is available on this account' };
+      }
       else if (api === '/admin/communications/send-prep' && request.method() === 'POST') {
         const submitted = request.postDataJSON();
         assert.equal(submitted.customerId, guideCustomer.id);
@@ -97,6 +109,42 @@ async function main() {
     server = await previewServer(root);
     browser = await launchBrowser();
     for (const width of [1440, 390]) {
+      await scenario(`Receipt Quick Link insertion and send restrictions at ${width}`, async () => {
+        receiptLinksEnabled = false;
+        const dark = await openPage('admin', width);
+        await dark.goto(`${server.baseUrl}/admin/communications#tab=sms`);
+        await dark.getByPlaceholder('Search by name or enter phone number…').fill('Guide');
+        await dark.getByText('Guide Fixture', { exact: true }).click();
+        await dark.getByRole('button', { name: 'Quick Links', exact: true }).click();
+        await dark.getByRole('button', { name: /^Request a quote/ }).waitFor();
+        assert.equal(await dark.getByRole('button', { name: /^Latest receipt link/ }).count(), 0);
+        await dark.close();
+        receiptLinksEnabled = true;
+        const sms = await openPage('admin', width);
+        await sms.goto(`${server.baseUrl}/admin/communications#tab=sms`);
+        await sms.getByPlaceholder('Search by name or enter phone number…').fill('Guide');
+        await sms.getByText('Guide Fixture', { exact: true }).click();
+        await sms.getByRole('button', { name: 'Quick Links', exact: true }).click();
+        const picker = sms.getByRole('dialog', { name: 'Quick Links', exact: true });
+        await picker.getByRole('searchbox').fill('receipt');
+        await shot(sms, `quick-links-receipt-picker-${width}`);
+        receiptAvailable = false;
+        await picker.getByRole('button', { name: /^Latest receipt link/ }).click();
+        await sms.getByText('No previously texted receipt is available on this account', { exact: true }).waitFor();
+        assert.equal(await sms.getByPlaceholder('Type your message…', { exact: true }).inputValue(), '');
+        receiptAvailable = true;
+        await sms.getByRole('button', { name: 'Quick Links', exact: true }).click();
+        await picker.getByRole('searchbox').fill('receipt');
+        await picker.getByRole('button', { name: /^Latest receipt link/ }).click();
+        await sms.getByText('Receipt link added — invoice QA-RECEIPT, paid 2026-08-30.', { exact: true }).waitFor();
+        assert.ok((await sms.getByPlaceholder('Type your message…', { exact: true }).inputValue()).includes(`/receipt/${'a'.repeat(64)}`));
+        await shot(sms, `quick-links-receipt-inserted-${width}`);
+        await sms.locator('select').filter({ has: sms.locator('option[value="tomorrow_8"]') }).selectOption('tomorrow_8');
+        await sms.getByRole('button', { name: 'Schedule', exact: true }).click();
+        await sms.getByText('Latest receipt links are re-checked at delivery — send now, or remove that link first.', { exact: true }).waitFor();
+        assert.equal(report.requests.filter((request) => request.stage === stage && /\/(sms|schedule-sms)$/.test(request.path)).length, 0);
+        await sms.close();
+      });
       await scenario(`Quick Links consolidates SMS guides at ${width}`, async () => {
         const sms = await openPage('admin', width);
         await sms.goto(`${server.baseUrl}/admin/communications#tab=sms`);
@@ -421,7 +469,7 @@ async function main() {
     assert.deepEqual(report.unmatched, []);
     assert.deepEqual(report.pageErrors, []);
     assert.deepEqual(report.requests.filter((r) => r.method !== 'GET'
-      && r.path !== '/admin/email/send' && r.path !== '/admin/communications/send-prep'
+      && r.path !== '/admin/email/send' && r.path !== '/admin/communications/send-prep' && r.path !== '/admin/communications/customer-link'
       && r.path !== `/admin/email/message/${a.id}/ai-draft`), []);
     assert.equal(report.requests.filter((r) => r.path === '/admin/communications/send-prep').length, 4);
     report.passed = true;
