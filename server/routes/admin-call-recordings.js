@@ -282,7 +282,7 @@ router.get('/follow-through', async (req, res, next) => {
     if (callbacksEnabled) {
       const { refreshFulfillment } = require('../services/call-commitments');
       let changed = 0;
-      for (const callId of new Set(callbacks.map((row) => row.call_log_id))) {
+      for (const callId of rotatingRefreshWindow([...new Set(callbacks.map((row) => row.call_log_id))])) {
         const result = await refreshFulfillment(db, callId).catch(() => ({}));
         changed += (result.fulfilled || 0) + (result.hinted || 0) + (result.cleared || 0);
       }

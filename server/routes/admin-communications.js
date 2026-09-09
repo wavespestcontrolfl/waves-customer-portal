@@ -1255,7 +1255,7 @@ router.post('/call', async (req, res, next) => {
       if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
       const promise = await trx('call_commitments').where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' }).forUpdate().first();
       const original = promise?.call_log_id ? await trx('call_log').where({ id: promise.call_log_id }).first() : null;
-      const target = original?.direction === 'outbound' ? original.to_phone : original?.from_phone;
+      const target = String(original?.direction || '').startsWith('outbound') ? original.to_phone : original?.from_phone;
       if (!promise || promise.status !== 'open' || !original || normalizePhone(target) !== normalizePhone(to)
         || (original.customer_id || null) !== (customer?.id || null)) {
         throw Object.assign(new Error('This callback changed. Refresh before calling.'), { status: 409 });
