@@ -5357,7 +5357,14 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     const supportsApp = prefs.appPreferencesAvailable && APP_CHANNEL_KEYS.includes(p.channelKey);
                     const emailOptions = hasEmail && p.channelKey !== 'serviceCompleteChannel' ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
                     const opts = supportsApp ? [...emailOptions, APP_OPTION] : emailOptions;
-                    const selectable = isOn && opts.length > 1;
+                    // With per-property texts active the on/off answer for the
+                    // five appointment alerts is the SELECTED house's, so its
+                    // delivery choice stays selectable when the house enables an
+                    // alert the profile row has off (GitHub codex #4299 r3 P2).
+                    const alertOn = perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key)
+                      ? shownTextsEntry?.preferences?.[p.key] !== false
+                      : isOn;
+                    const selectable = alertOn && opts.length > 1;
                     return (
                       <select
                         value={prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
@@ -5383,7 +5390,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                         this row keeps only the account-level delivery choice
                         (GitHub codex #4299 r2 P2). */}
                     {perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key) ? (
-                      <span data-testid={`per-property-${p.key}`} style={{ fontSize: 13, fontWeight: 700, color: muted, whiteSpace: 'nowrap' }}>Set per property below</span>
+                      <span data-testid={`per-property-${p.key}`} style={{ fontSize: 14, fontWeight: 700, color: muted, whiteSpace: 'nowrap' }}>Set per property below</span>
                     ) : (
                       <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
                     )}

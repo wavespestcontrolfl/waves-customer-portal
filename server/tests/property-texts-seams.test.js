@@ -151,3 +151,16 @@ describe('direct appointment notices (visitPrefsRow)', () => {
   });
 });
 
+describe('safeSendAppointment on an unreadable preferences row', () => {
+  const { safeSendAppointment } = require('../services/appointment-reminders');
+  const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
+  test('is a RETRYABLE non-send: nothing rendered, sendOutcome.retryable set', async () => {
+    const renderBody = jest.fn();
+    const sendOutcome = {};
+    const sent = await safeSendAppointment({ id: 'c1', phone: '+19415550100', first_name: 'Pat' }, PREFS_UNAVAILABLE, renderBody, 'appointment_cancelled', 'appointment_cancelled', {}, { sendOutcome });
+    expect(sent).toBe(false);
+    expect(renderBody).not.toHaveBeenCalled();
+    expect(sendOutcome).toMatchObject({ retryable: true, lastCode: 'PREFERENCES_UNAVAILABLE' });
+  });
+});
+

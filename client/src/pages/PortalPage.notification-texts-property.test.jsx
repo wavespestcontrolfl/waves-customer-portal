@@ -86,4 +86,14 @@ describe('Appointment texts per saved property', () => {
     expect(await screen.findByTestId('per-property-techEnRoute')).toBeInTheDocument();
     expect(screen.queryByRole('switch', { name: 'Tech En Route Alert' })).not.toBeInTheDocument();
   });
+  it('keeps the delivery choice selectable when the HOUSE enables an alert the profile row has off', async () => {
+    api.getNotificationPrefs.mockResolvedValue({ preferences: { ...prefsOf(true), techEnRoute: false, appPreferencesAvailable: false } });
+    api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [propertyPrefs[0], { ...propertyPrefs[1], preferences: { ...prefsOf(false), techEnRoute: true } }] });
+    render(<ScheduleTab customer={{ ...customer, email: 'pat@example.com' }} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
+    await screen.findByTestId('per-property-techEnRoute');
+    const row = screen.getByTestId('per-property-techEnRoute').closest('[data-reminder-row]');
+    const select = row.querySelector('select');
+    expect(select).not.toBeNull();
+    expect(select.disabled).toBe(false);
+  });
 });

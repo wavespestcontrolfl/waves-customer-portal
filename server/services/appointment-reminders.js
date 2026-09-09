@@ -1600,6 +1600,21 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
 }
 
 async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}, sendOptions = {}) {
+  // An UNREADABLE preferences row (a failed notification_prefs read, or a
+  // saved property whose toggles could not be read under
+  // GATE_APP_PROPERTY_TEXTS) is a RETRYABLE non-send, never a definitive
+  // one: the direct cancellation / series / reschedule callers classify on
+  // `sendOutcome.retryable` and must not finalize their durable claims as
+  // suppressed on a transient miss (GitHub codex #4299 r3 P1). Fail closed
+  // here — no service-contact fan-out on unknown settings either.
+  if (require('./customer-contact').prefsUnavailable(prefs)) {
+    if (sendOptions.sendOutcome && typeof sendOptions.sendOutcome === 'object') {
+      sendOptions.sendOutcome.retryable = true;
+      sendOptions.sendOutcome.lastCode = 'PREFERENCES_UNAVAILABLE';
+    }
+    logger.warn(`[appt-remind] notification preferences unreadable for customer ${customer?.id || 'unknown'} — ${messageType} held for retry`);
+    return false;
+  }
   const contacts = getAppointmentContacts(customer, prefs);
   if (!contacts.length) {
     logger.warn(`[appt-remind] No appointment contact for customer ${customer?.id || 'unknown'}, skipping SMS`);
