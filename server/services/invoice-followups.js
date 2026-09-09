@@ -924,6 +924,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     // leaves the sequence armed instead of pausing it.
     smsSkipReason = 'collections_policy_denied';
   } else if (customer?.phone) {
+    const messageType = mdPending ? 'bank_verification_incomplete' : 'invoice_followup';
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
           first_name: ctx.name,
@@ -963,7 +964,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         // it (an operator clicked THIS touch at this moment); the 10:16 ET
         // cron path stays fenced.
         ...(operatorInitiated ? { operatorInitiated: true } : {}),
-        metadata: { original_message_type: 'invoice_followup' },
+        metadata: {
+          original_message_type: messageType,
+          notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
+        },
       }) : null;
       if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });
@@ -971,7 +975,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         // Send-window block (this cron runs hourly, incl. nights): not a
         // delivery failure — remember the window open so the no-channel
         // branch below defers the touch instead of pausing the sequence.
-        if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.nextAllowedAt) {
+        if (sendResult.deferred && sendResult.nextAllowedAt) {
           const at = new Date(sendResult.nextAllowedAt);
           if (!Number.isNaN(at.getTime())) smsDeferUntil = at;
           // Email already carried this touch: the no-channel defer below
@@ -993,9 +997,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                 message_body: body,
                 status: 'scheduled',
                 scheduled_for: smsDeferUntil,
-                message_type: 'invoice_followup',
+                message_type: messageType,
                 metadata: JSON.stringify({
                   entry_point: 'invoice_followup_deferred',
+                  original_message_type: messageType,
                   invoice_id: row.invoice_id,
                   customer_id: customer.id,
                   // Minted ONCE at enqueue: the replay's delivery-time
@@ -1003,6 +1008,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   // of this same queued row can never double-count.
                   ledger_reservation_key: require('crypto').randomUUID(),
                   followup_sequence_id: row.id,
+                  notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
                   original_block_code: sendResult.code,
                   replay_purpose: 'payment_link',
                   // The amount the frozen body NAMES (codex r27): credit

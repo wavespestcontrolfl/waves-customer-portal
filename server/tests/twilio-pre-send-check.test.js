@@ -34,6 +34,7 @@ jest.mock('../services/sms-guard', () => ({
 jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(() => Promise.resolve()),
 }));
+jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => {}) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -134,5 +135,72 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     });
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
     expect(result.success).toBe(true);
+  });
+
+  test('handoff locks enclose only the SDK call; log time follows lock acquisition', async () => {
+    const events = [];
+    const acquiredAt = new Date('2026-01-01T15:00:02Z');
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-01-01T15:00:00Z'));
+    require('../models/db').mockImplementation(table => ({ insert: async row => {
+      events.push(table);
+      expect(row.created_at).toEqual(acquiredAt);
+    } }));
+    mockTwilioCreate.mockImplementation(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+        withSmsHandoff: async dispatch => {
+          events.push('locked');
+          jest.setSystemTime(acquiredAt);
+          await dispatch();
+          events.push('released');
+          return { ok: true };
+        },
+      });
+      expect(result.success).toBe(true);
+      expect(events).toEqual(['locked', 'sdk', 'released', 'sms_log']);
+    } finally { jest.useRealTimers(); require('../models/db').mockReset(); }
+  });
+
+  test('a stale subject refuses the SDK handoff', async () => {
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async () => ({ ok: false, code: 'LEAD_SUBJECT_CHANGED' }),
+    });
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'LEAD_SUBJECT_CHANGED' });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+  });
+
+  test('a guard failure after acceptance preserves the send result', async () => {
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async dispatch => { await dispatch(); throw new Error('commit connection lost'); },
+    });
+    expect(result).toMatchObject({ success: true, sid: 'SM_ok' });
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test('an authority lookup error blocks retryably without a provider failure alert', async () => {
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async () => { throw Object.assign(new Error('connection unavailable'), { code: '08006' }); },
+    });
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'SMS_HANDOFF_CHECK_FAILED', retryable: true });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(require('../services/twilio-failure-alerts').alertTwilioFailure).not.toHaveBeenCalled();
+  });
+
+  test('an actual SDK failure still follows provider failure handling', async () => {
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('provider unavailable'), { status: 503 }));
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+      withSmsHandoff: async dispatch => { await dispatch(); return { ok: true }; },
+    })).rejects.toMatchObject({ status: 503 });
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+    expect(require('../services/twilio-failure-alerts').alertTwilioFailure).toHaveBeenCalledTimes(1);
+  });
+
+  test('a guarded send cannot escape through explicit push routing', async () => {
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+      explicitPushOnly: true, withSmsHandoff: jest.fn(),
+    });
+    expect(result).toMatchObject({ success: false, code: 'UNSUPPORTED_SMS_HANDOFF' });
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
   });
 });

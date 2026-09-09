@@ -190,11 +190,17 @@ async function sendCustomerMessage(input) {
   }
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
-  //    form. preDispatchCheck stays local — it is a caller closure, not
-  //    message state, and must not ride into providers/audit.
-  const { preDispatchCheck, ...inputRest } = input;
+  //    form. Caller closures stay outside message state and audit payloads.
+  const { preDispatchCheck, withSmsHandoff, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
+  // Request lifecycle email companions have no text leg. Keep their App
+  // intent even when the saved choice or gate changes before dispatch.
+  if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
+  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms'
+    || input.audience !== 'lead' || input.purpose !== 'conversational' || input.entryPoint !== 'lead_response_auto_reply')) {
+    return { sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies' };
+  }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
   // Typographic punctuation (curly quotes, em dashes, real ellipses) forces
@@ -357,16 +363,18 @@ async function sendCustomerMessage(input) {
     }
   }
 
-  // 6.5 Caller-supplied final recheck — the last caller-visible abort point
-  //     before dispatch (only the provider-internal send-window boundary
-  //     re-check runs later), so callers with race-sensitive sends (clarify
+  // 6.5 Caller-supplied recheck before provider preparation. Assigned lead
+  //     replies additionally guard the actual SDK request withSmsHandoff.
+  //     Callers with race-sensitive sends (clarify
   //     asks: an answer can arrive while the validators above run) get
   //     their freshest possible abort point inside the canonical path.
   //     Fail closed: a throwing check blocks the send.
   if (typeof preDispatchCheck === 'function') {
     let verdict;
     try {
-      verdict = await preDispatchCheck();
+      // Resolve the actual leg before caller guards run: an App attempt and
+      // its SMS fallback have different transport requirements.
+      verdict = await preDispatchCheck({ channel: sendInput.channel });
     } catch (err) {
       verdict = { ok: false, code: 'PRE_DISPATCH_CHECK_FAILED', reason: err.message };
     }
@@ -408,6 +416,21 @@ async function sendCustomerMessage(input) {
   // deferral contract as the pipeline block; cheap (pure clock math) and a
   // no-op for exempt inputs.
   const providerOutcome = await dispatchToProvider(sendInput, {
+    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async trx => {
+      // Lock acquisition may wait past an opt-out commit. Reuse the canonical
+      // validators with fresh state on that same connection, before the SDK.
+      const currentState = await loadSuppressionState(sendInput, await loadContactState(sendInput, trx), trx);
+      if (currentState.lookupFailed || currentState.suppressionLoaded !== true) {
+        return { ok: false, code: currentState.lookupFailed ? 'CONSENT_LOOKUP_FAILED' : 'SUPPRESSION_LOOKUP_FAILED',
+          reason: 'SMS consent or suppression could not be rechecked before handoff', retryable: true };
+      }
+      const suppression = await checkSuppression(sendInput, policy, currentState);
+      if (!suppression.ok) return suppression;
+      const consent = await checkConsentForPurpose(sendInput, policy, currentState);
+      if (!consent.ok) return consent;
+      await dispatch();
+      return { ok: true };
+    })),
     preSendCheck: async () => {
       const windowVerdict = checkSendWindow(sendInput, policy, contactState);
       if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;
@@ -475,6 +498,15 @@ async function sendCustomerMessage(input) {
   }
 
   if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
+    if (sendInput.metadata?.appOnly === true) {
+      return { sent: false, blocked: true, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
+    }
+    if (providerOutcome.error === 'preference_changed'
+      && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
+      // The scan captured App; Email/Both now require a different set of
+      // legs. Leave its reminder open so the next scan reads that choice.
+      return { sent: false, blocked: true, code: 'REMINDER_PREFERENCES_HOLD', reason: 'Reminder channel changed', retryable: true, deferred: true, auditLogId: audit.id };
+    }
     // Re-enter the complete pipeline for an allowed backup, using fresh
     // consent/suppression state. Never clear an opt-out to enable fallback.
     const fallback = await sendCustomerMessage({

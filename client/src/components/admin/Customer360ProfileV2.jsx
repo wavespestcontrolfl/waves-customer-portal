@@ -83,11 +83,16 @@ import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
 import { formatAddress } from "../../utils/format-address";
-import {
+import { Textarea,
   Card,
   CardBody,
   Badge,
   Button,
+  buttonStyles,
+  UiSurface,
+  useUiDensity,
+  inputStyles,
+  ActionFeedback,
   Input,
   Select,
   Switch,
@@ -102,6 +107,30 @@ import {
   TD,
   cn,
 } from "../ui";
+
+// Invoice status tone, shared by the Overview list and the Billing table.
+// alert-fg is reserved for overdue (header contract); paid/prepaid read
+// strong; draft and void are neutral, not alarms. Nothing flips a stored
+// status to 'overdue' — the late-payment checker treats a sent/viewed
+// invoice as overdue by due_date (created_at when due_date is null) past a
+// 7-day grace, so this mirrors that predicate on the raw rows.
+const OVERDUE_GRACE_MS = 7 * 86400000;
+export function invoiceStatusTone(inv, now = Date.now()) {
+  const status = inv?.status;
+  if (status === "paid" || status === "prepaid") return "strong";
+  if (status === "overdue") return "alert";
+  if (status === "sent" || status === "viewed") {
+    const ref = inv.due_date || inv.created_at;
+    const t = ref ? new Date(ref).getTime() : NaN;
+    if (Number.isFinite(t) && t <= now - OVERDUE_GRACE_MS) return "alert";
+  }
+  return "neutral";
+}
+const INVOICE_STATUS_TEXT = {
+  alert: "text-alert-fg",
+  strong: "text-zinc-900",
+  neutral: "text-ink-secondary",
+};
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
@@ -596,7 +625,7 @@ function StageBadgeV2({ stage }) {
 // ─── Section title ───────────────────────────────────────────────
 function SectionTitle({ children, className }) {
   return (
-    <div className={cn("u-label text-ink-secondary mb-2", className)}>
+    <div className={cn("c360-section-heading ui-label text-ink-secondary mb-2", className)}>
       {children}
     </div>
   );
@@ -607,7 +636,7 @@ function StatCardV2({ label, value, alert }) {
   return (
     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-center">
       {" "}
-      <div className="u-label text-ink-secondary mb-1">{label}</div>{" "}
+      <div className="ui-label text-ink-secondary mb-1">{label}</div>{" "}
       <div
         className={cn(
           "u-nums text-16 font-medium tracking-tight",
@@ -674,8 +703,8 @@ function ContractMeta({ label, value }) {
   return (
     <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
       {" "}
-      <div className="u-label text-ink-tertiary mb-1">{label}</div>{" "}
-      <div className="text-13 text-zinc-900 break-words">
+      <div className="ui-label text-ink-tertiary mb-1">{label}</div>{" "}
+      <div className="text-ui-body text-zinc-900 break-words">
         {value || "—"}
       </div>{" "}
     </div>
@@ -1169,7 +1198,7 @@ function ElectronicAuthorizationContractV2({
                           <span
                             key={step.key}
                             className={cn(
-                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-ui-caption ui-label",
                               step.done
                                 ? "bg-zinc-50 border-zinc-200 text-zinc-900"
                                 : "bg-zinc-50 border-zinc-200 text-ink-secondary",
@@ -1274,7 +1303,7 @@ function ElectronicAuthorizationContractV2({
             </div>{" "}
           </div>
         ) : (
-          <div className="mb-5 text-13 text-ink-secondary">
+          <div className="mb-5 text-ui-body text-ink-secondary">
             No contract records created yet.
           </div>
         )}
@@ -1285,7 +1314,7 @@ function ElectronicAuthorizationContractV2({
                 <SectionTitle>
                   Delivery Audit
                 </SectionTitle>
-                <div className="text-12 text-ink-secondary">
+                <div className="text-ui-label text-ink-secondary">
                   {auditContract?.title || "Contract"} · {auditLoading ? "Loading events" : `${auditEvents.length} event${auditEvents.length === 1 ? "" : "s"}`}
                 </div>
               </div>
@@ -1303,7 +1332,7 @@ function ElectronicAuthorizationContractV2({
               </Button>
             </div>
             {auditErr && (
-              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
+              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-ui-label text-red-900">
                 {auditErr}
               </div>
             )}
@@ -1312,7 +1341,7 @@ function ElectronicAuthorizationContractV2({
                 <span
                   key={step.key}
                   className={cn(
-                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-ui-caption ui-label",
                     step.done
                       ? "bg-zinc-900 border-zinc-900 text-white"
                       : "bg-zinc-50 border-zinc-200 text-ink-secondary",
@@ -1325,28 +1354,28 @@ function ElectronicAuthorizationContractV2({
             </div>
             <div className="divide-y divide-zinc-100 rounded-sm border-hairline border-zinc-200">
               {auditEvents.map((event) => (
-                <div key={event.id} className="grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
-                  <div className="text-12 font-medium text-zinc-900">
+                <div key={event.id} className="c360-contract-grid grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
+                  <div className="text-ui-label font-medium text-zinc-900">
                     {contractEventLabel(event.eventType)}
                   </div>
-                  <div className="min-w-0 text-12 text-ink-secondary">
+                  <div className="min-w-0 text-ui-label text-ink-secondary">
                     {event.actorType || "system"}
                     {event.ip ? ` · ${event.ip}` : ""}
                     {event.metadata?.templateKey ? ` · ${event.metadata.templateKey}` : ""}
                     {event.metadata?.reason ? ` · ${event.metadata.reason}` : ""}
                   </div>
-                  <div className="u-nums text-11 text-ink-secondary md:text-right">
+                  <div className="u-nums text-ui-caption text-ink-secondary md:text-right">
                     {fmtDate(event.createdAt)}
                   </div>
                 </div>
               ))}
               {!auditLoading && auditEvents.length === 0 && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
+                <div className="px-3 py-4 text-ui-label text-ink-secondary">
                   No audit events recorded for this contract.
                 </div>
               )}
               {auditLoading && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
+                <div className="px-3 py-4 text-ui-label text-ink-secondary">
                   Loading audit events...
                 </div>
               )}
@@ -1356,21 +1385,21 @@ function ElectronicAuthorizationContractV2({
       </div>
       </ContractSection>
       <ContractSection title={"Auto Pay authorization"} description="Payment authorization and signing links.">
-      <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
+      <div className="c360-contract-form mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
         {" "}
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+        <div className="c360-contract-form-header flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
           {" "}
-          <div>
+          <div className="c360-contract-form-duplicate-title">
             {" "}
             <div className="text-16 font-medium text-zinc-900">
               AutoPay Authorization
             </div>{" "}
-            <div className="text-12 text-ink-secondary mt-1">
+            <div className="text-ui-label text-ink-secondary mt-1">
               Create, share, sign, and audit saved-payment authorization
               contracts.
             </div>{" "}
           </div>{" "}
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="c360-contract-form-actions flex flex-wrap items-center justify-end gap-2">
             {" "}
             <Button
               size="sm"
@@ -1418,7 +1447,7 @@ function ElectronicAuthorizationContractV2({
         {setupLinkResult ? (
           <div
             className={cn(
-              "px-4 py-2 text-12 border-b border-hairline border-zinc-200",
+              "px-4 py-2 text-ui-label border-b border-hairline border-zinc-200",
               describeAutopaySetupLinkResult(setupLinkResult).tone === "bad"
                 ? "text-alert-fg"
                 : "text-ink-secondary",
@@ -1430,7 +1459,7 @@ function ElectronicAuthorizationContractV2({
             ) : null}
           </div>
         ) : null}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
+        <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
           {" "}
           <ContractMeta label="Recipient" value={signerName} />{" "}
           <ContractMeta label="Contract name" value="AutoPay Authorization" />{" "}
@@ -1447,13 +1476,13 @@ function ElectronicAuthorizationContractV2({
             value={paymentMethodLabel(selectedPaymentMethod)}
           />{" "}
         </div>{" "}
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_0.8fr] gap-3 px-4 pb-4">
+        <div className="c360-contract-grid grid grid-cols-1 md:grid-cols-[1fr_0.8fr] gap-3 px-4 pb-4">
           {" "}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
             {" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Payment method
               </div>{" "}
               <Select
@@ -1461,7 +1490,7 @@ function ElectronicAuthorizationContractV2({
                 onChange={(e) =>
                   updateContractForm("paymentMethodId", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               >
                 {cards.length === 0 && (
                   <option value="">No saved payment method</option>
@@ -1475,53 +1504,53 @@ function ElectronicAuthorizationContractV2({
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service name
               </div>{" "}
-              <input
+              <Input
                 value={contractForm.serviceName}
                 onChange={(e) =>
                   updateContractForm("serviceName", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Renewal date
               </div>{" "}
-              <input
+              <Input
                 type="date"
                 value={contractForm.renewalDate}
                 onChange={(e) =>
                   updateContractForm("renewalDate", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Cancellation deadline
               </div>{" "}
-              <input
+              <Input
                 type="date"
                 value={contractForm.cancellationDeadline}
                 onChange={(e) =>
                   updateContractForm("cancellationDeadline", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
           </div>{" "}
           <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
             {" "}
-            <div className="u-label text-ink-secondary mb-2">Signing Link</div>
+            <div className="ui-label text-ink-secondary mb-2">Signing Link</div>
             {signingUrl ? (
               <div className="space-y-2">
                 {" "}
-                <div className="break-all text-12 text-zinc-900 leading-5">
+                <div className="break-all text-ui-label text-zinc-900 leading-5">
                   {signingUrl}
                 </div>{" "}
                 <Button size="sm" variant="secondary" onClick={copySigningUrl}>
@@ -1531,39 +1560,39 @@ function ElectronicAuthorizationContractV2({
                 </Button>{" "}
               </div>
             ) : (
-              <div className="text-12 text-ink-secondary leading-5">
+              <div className="text-ui-label text-ink-secondary leading-5">
                 Create a link to send manually. SMS templates are seeded but
                 inactive, so this will not send automatically.
               </div>
             )}
             {!canCreateContract && (
-              <div className="mt-2 text-11 text-alert-fg">
+              <div className="mt-2 text-ui-caption text-alert-fg">
                 Add a saved payment method before creating an authorization
                 contract.
               </div>
             )}
             {contractAction && (
-              <div className="mt-2 text-11 text-zinc-900">{contractAction}</div>
+              <div className="mt-2 text-ui-caption text-zinc-900">{contractAction}</div>
             )}
             {contractErr && (
-              <div className="mt-2 text-11 text-alert-fg">{contractErr}</div>
+              <div className="mt-2 text-ui-caption text-alert-fg">{contractErr}</div>
             )}
           </div>{" "}
         </div>{" "}
       </div>{" "}
       </ContractSection>
       <ContractSection title={"Create a document"} description="Service agreements, notices, and reusable templates.">
-      <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
-          <div>
+      <div className="c360-contract-form mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
+        <div className="c360-contract-form-header flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+          <div className="c360-contract-form-duplicate-title">
             <div className="text-16 font-medium text-zinc-900">
               Reusable documents
             </div>
-            <div className="text-12 text-ink-secondary mt-1">
+            <div className="text-ui-label text-ink-secondary mt-1">
               Send service agreements, notices, prep forms, and WDO acknowledgements through the e-sign workflow.
             </div>
           </div>
-          <Button
+          <Button className="c360-contract-form-actions"
             size="sm"
             onClick={createDocumentLink}
             disabled={!canCreateDocument || documentTemplatesLoading}
@@ -1572,16 +1601,16 @@ function ElectronicAuthorizationContractV2({
             {creatingDocument ? "Creating..." : "Create Link"}
           </Button>
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-3 p-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="c360-contract-grid grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-3 p-4">
+          <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Template
               </div>
               <Select
                 value={selectedDocumentTemplateKey}
                 onChange={(e) => setSelectedDocumentTemplateKey(e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
                 disabled={documentTemplatesLoading}
               >
                 {documentTemplates.length === 0 && (
@@ -1595,52 +1624,52 @@ function ElectronicAuthorizationContractV2({
               </Select>
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service name
               </div>
-              <input
+              <Input
                 value={documentValues.serviceName}
                 onChange={(e) => updateDocumentValue("serviceName", e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Agreement start
               </div>
-              <input
+              <Input
                 type="date"
                 value={documentValues.agreementStartDate}
                 onChange={(e) => updateDocumentValue("agreementStartDate", e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service / inspection date
               </div>
-              <input
+              <Input
                 type="date"
                 value={documentValues.serviceDate || documentValues.inspectionDate}
                 onChange={(e) => {
                   updateDocumentValue("serviceDate", e.target.value);
                   updateDocumentValue("inspectionDate", e.target.value);
                 }}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block sm:col-span-2">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Property address (optional)
               </div>
-              <input
+              <Input
                 value={documentPropertyAddress}
                 onChange={(e) => setDocumentPropertyAddress(e.target.value)}
                 placeholder="Overrides the customer's primary address on the document"
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
-            <label className="sm:col-span-2 inline-flex min-h-8 items-center gap-2 text-12 font-medium text-zinc-900">
+            <label className="sm:col-span-2 inline-flex min-h-8 items-center gap-2 text-ui-label font-medium text-zinc-900">
               <input
                 type="checkbox"
                 checked={documentAllowUnresolved}
@@ -1651,15 +1680,15 @@ function ElectronicAuthorizationContractV2({
             </label>
           </div>
           <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
-            <div className="u-label text-ink-secondary mb-2">Document link</div>
-            <div className="text-12 text-ink-secondary leading-5">
+            <div className="ui-label text-ink-secondary mb-2">Document link</div>
+            <div className="text-ui-label text-ink-secondary leading-5">
               {selectedDocumentTemplate
                 ? `${selectedDocumentTemplate.name} will be rendered with this customer's name, address, and the values entered here.`
                 : "Select an active template to create a document link."}
             </div>
             {documentSigningUrl && (
               <div className="mt-3 space-y-2">
-                <div className="break-all text-12 text-zinc-900 leading-5">
+                <div className="break-all text-ui-label text-zinc-900 leading-5">
                   {documentSigningUrl}
                 </div>
                 <Button size="sm" variant="secondary" onClick={copyDocumentSigningUrl}>
@@ -1669,17 +1698,17 @@ function ElectronicAuthorizationContractV2({
               </div>
             )}
             {documentAction && (
-              <div className="mt-2 text-11 text-zinc-900">{documentAction}</div>
+              <div className="mt-2 text-ui-caption text-zinc-900">{documentAction}</div>
             )}
             {documentErr && (
-              <div className="mt-2 text-11 text-alert-fg">{documentErr}</div>
+              <div className="mt-2 text-ui-caption text-alert-fg">{documentErr}</div>
             )}
           </div>
         </div>
       </div>
       </ContractSection>
       <ContractSection title={"Authorization preview & signature"} description="Full terms, selected clauses, and signing evidence.">
-      <div className="grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
+      <div className="c360-contract-grid grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
         {" "}
         <Card>
           {" "}
@@ -1698,7 +1727,7 @@ function ElectronicAuthorizationContractV2({
                   <div className="text-18 font-medium tracking-tight text-zinc-900">
                     Electronic Payment Authorization
                   </div>{" "}
-                  <div className="text-12 text-ink-secondary mt-1">
+                  <div className="text-ui-label text-ink-secondary mt-1">
                     Waves Pest Control, LLC
                   </div>{" "}
                 </div>{" "}
@@ -1728,17 +1757,17 @@ function ElectronicAuthorizationContractV2({
                   {" "}
                   <div>
                     {" "}
-                    <div className="text-13 font-medium text-zinc-900">
+                    <div className="text-ui-body font-medium text-zinc-900">
                       AutoPay Authorization - Initials required
                     </div>{" "}
-                    <div className="text-12 leading-5 text-ink-secondary mt-2">
+                    <div className="text-ui-label leading-5 text-ink-secondary mt-2">
                       {displayedText}
                     </div>{" "}
                   </div>{" "}
                   <Badge tone="neutral">Clause</Badge>{" "}
                 </div>{" "}
               </div>{" "}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+              <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
                 {" "}
                 <ContractMeta label="Customer" value={signerName} />{" "}
                 <ContractMeta
@@ -1761,7 +1790,7 @@ function ElectronicAuthorizationContractV2({
                     <div className="text-15 font-medium text-zinc-900">
                       Waves Pest Control
                     </div>{" "}
-                    <div className="text-12 text-ink-secondary mt-1">
+                    <div className="text-ui-label text-ink-secondary mt-1">
                       Signature requested on {requestedLabel}
                     </div>{" "}
                   </div>{" "}
@@ -1786,11 +1815,11 @@ function ElectronicAuthorizationContractV2({
                   <div className="text-18 font-medium text-zinc-900 mb-3">
                     AutoPay Authorization
                   </div>{" "}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-12">
+                  <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3 text-ui-label">
                     {" "}
                     <div>
                       {" "}
-                      <div className="u-label text-ink-secondary mb-1">
+                      <div className="ui-label text-ink-secondary mb-1">
                         Business
                       </div>{" "}
                       <div className="text-zinc-900">Waves Pest Control</div>{" "}
@@ -1803,7 +1832,7 @@ function ElectronicAuthorizationContractV2({
                     </div>{" "}
                     <div>
                       {" "}
-                      <div className="u-label text-ink-secondary mb-1">
+                      <div className="ui-label text-ink-secondary mb-1">
                         Recipient
                       </div>{" "}
                       <div className="text-zinc-900">{signerName}</div>{" "}
@@ -1815,25 +1844,25 @@ function ElectronicAuthorizationContractV2({
                       </div>{" "}
                     </div>{" "}
                   </div>{" "}
-                  <div className="mt-4 text-12 leading-5 text-zinc-900">
+                  <div className="mt-4 text-ui-label leading-5 text-zinc-900">
                     This contract is between Waves Pest Control (the Business)
                     and {signerName} (the Client) dated {contractDate}.
                   </div>{" "}
                 </div>{" "}
                 <div className="py-4 border-b border-hairline border-zinc-200">
                   {" "}
-                  <div className="u-label text-ink-secondary mb-2">
+                  <div className="ui-label text-ink-secondary mb-2">
                     Terms
                   </div>{" "}
-                  <div className="text-13 font-medium text-zinc-900 mb-2">
+                  <div className="text-ui-body font-medium text-zinc-900 mb-2">
                     AutoPay Authorization
                   </div>{" "}
-                  <p className="text-13 leading-6 text-zinc-900 m-0 whitespace-pre-line">
+                  <p className="text-ui-body leading-6 text-zinc-900 m-0 whitespace-pre-line">
                     {displayedContractText}
                   </p>{" "}
                   <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
                     {" "}
-                    <div className="u-label text-ink-secondary mb-1">
+                    <div className="ui-label text-ink-secondary mb-1">
                       Recipient Initial
                     </div>{" "}
                     <div className="h-7 rounded-sm border-hairline border-zinc-300 bg-white" />{" "}
@@ -1841,15 +1870,15 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
                 <div className="pt-4">
                   {" "}
-                  <div className="u-label text-ink-secondary mb-2">
+                  <div className="ui-label text-ink-secondary mb-2">
                     Signatures
                   </div>{" "}
-                  <div className="text-12 text-ink-secondary leading-5 mb-4">
+                  <div className="text-ui-label text-ink-secondary leading-5 mb-4">
                     Electronic signatures count as original for all purposes. By
                     typing their names as signatures below, both parties agree
                     to the terms and provisions of this agreement.
                   </div>{" "}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     <ContractMeta
                       label="Business signature"
@@ -1873,7 +1902,7 @@ function ElectronicAuthorizationContractV2({
                   </div>{" "}
                 </div>{" "}
               </div>{" "}
-              <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-ink-secondary leading-5">
+              <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-label text-ink-secondary leading-5">
                 This authorization covers saved-payment use only. Service scope,
                 visit frequency, renewal terms, and cancellation policy remain
                 controlled by the customer&apos;s service agreement and account
@@ -1882,31 +1911,31 @@ function ElectronicAuthorizationContractV2({
               <div className="mt-5">
                 {" "}
                 <SectionTitle>Florida Compliance Reference</SectionTitle>{" "}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {FLORIDA_COMPLIANCE_ITEMS.map((item) => (
                     <div
                       key={item.title}
                       className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3"
                     >
                       {" "}
-                      <div className="text-12 font-medium text-zinc-900">
+                      <div className="text-ui-label font-medium text-zinc-900">
                         {item.title}
                       </div>{" "}
-                      <div className="text-12 text-ink-secondary leading-5 mt-1">
+                      <div className="text-ui-label text-ink-secondary leading-5 mt-1">
                         {item.body}
                       </div>{" "}
                       <a
                         href={item.href}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex mt-2 text-11 u-label text-zinc-900 hover:underline"
+                        className="inline-flex mt-2 text-ui-caption ui-label text-zinc-900 hover:underline"
                       >
                         {item.citation}
                       </a>{" "}
                     </div>
                   ))}
                 </div>{" "}
-                <div className="mt-2 text-11 text-ink-tertiary leading-5">
+                <div className="mt-2 text-ui-caption text-ink-tertiary leading-5">
                   Internal compliance reference only. Final customer-facing
                   contract language should be reviewed by counsel before use.
                 </div>{" "}
@@ -1926,7 +1955,7 @@ function ElectronicAuthorizationContractV2({
               </div>{" "}
             </div>
             {latestContract?.signedAt ? (
-              <div className="space-y-2 text-12">
+              <div className="space-y-2 text-ui-label">
                 {" "}
                 <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
                   {" "}
@@ -1972,7 +2001,7 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
               </div>
             ) : latest ? (
-              <div className="space-y-2 text-12">
+              <div className="space-y-2 text-ui-label">
                 {" "}
                 <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
                   {" "}
@@ -2011,7 +2040,7 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
               </div>
             ) : (
-              <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-ink-secondary leading-5">
+              <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-label text-ink-secondary leading-5">
                 No signed saved-payment authorization is recorded for this
                 customer yet.
               </div>
@@ -2025,10 +2054,10 @@ function ElectronicAuthorizationContractV2({
               />{" "}
               <div>
                 {" "}
-                <div className="text-12 font-medium text-zinc-900">
+                <div className="text-ui-label font-medium text-zinc-900">
                   {paymentMethodLabel(methodForSummary)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary mt-0.5">
+                <div className="text-ui-caption text-ink-secondary mt-0.5">
                   {latest?.isDefault || defaultCard?.is_default
                     ? "Default payment method"
                     : "Saved payment method"}
@@ -2049,36 +2078,36 @@ function ElectronicAuthorizationContractV2({
           <div className="overflow-x-auto">
             {" "}
             <Table>
-              {" "}
+
               <THead>
-                {" "}
+
                 <TR>
-                  {" "}
+
                   <TH>Accepted</TH>
                   <TH>Source</TH>
                   <TH>Method</TH>
-                  <TH>Version</TH>{" "}
-                </TR>{" "}
-              </THead>{" "}
+                  <TH>Version</TH>
+                </TR>
+              </THead>
               <TBody>
                 {consents.map((consent) => (
                   <TR key={consent.id}>
-                    {" "}
+
                     <TD className="u-nums">
                       {fmtDate(consent.createdAt)}
-                    </TD>{" "}
-                    <TD>{sourceLabel(consent.source)}</TD>{" "}
-                    <TD>{paymentMethodLabel(consent)}</TD>{" "}
+                    </TD>
+                    <TD>{sourceLabel(consent.source)}</TD>
+                    <TD>{paymentMethodLabel(consent)}</TD>
                     <TD className="u-nums">
                       {consent.consentTextVersion || "—"}
-                    </TD>{" "}
+                    </TD>
                   </TR>
                 ))}
-              </TBody>{" "}
+              </TBody>
             </Table>{" "}
           </div>
         ) : (
-          <div className="text-13 text-ink-secondary">
+          <div className="text-ui-body text-ink-secondary">
             No saved-payment authorizations recorded.
           </div>
         )}
@@ -2112,10 +2141,10 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
   return (
     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm overflow-hidden mb-1.5">
       {" "}
-      <button
+      <button data-ui-text-action
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex justify-between items-center px-3.5 py-2.5 text-13 u-focus-ring hover:bg-zinc-100 transition-colors"
+        className="w-full flex justify-between items-center px-3.5 py-2.5 text-ui-body u-focus-ring hover:bg-zinc-100 transition-colors"
       >
         {" "}
         <span className="font-medium text-zinc-900 text-left">
@@ -2130,7 +2159,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
           )}
           <span className="text-ink-secondary">{fmtDateOnly(s.service_date)}</span>{" "}
           <span
-            className="text-ink-secondary text-12 transition-transform"
+            className="text-ink-secondary text-ui-label transition-transform"
             style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
           >
             ▾
@@ -2138,7 +2167,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
         </span>{" "}
       </button>
       {expanded && (
-        <div className="px-3.5 py-2.5 border-t border-hairline border-zinc-200 text-12 space-y-1">
+        <div className="px-3.5 py-2.5 border-t border-hairline border-zinc-200 text-ui-label space-y-1">
           {isProjectCompletion && (
             <div className="mb-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5">
               {" "}
@@ -2712,11 +2741,11 @@ function PropertyZonesPanel({ customerId }) {
       {open && (
         <div className="mt-3">
           {loading && (
-            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+            <div className="text-ui-body text-ink-secondary">Loading the satellite view…</div>
           )}
           {!loading && map && !map.available && (
             <div className="flex items-center gap-3">
-              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+              <span className={cn("text-ui-body", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
                 {map.reason === "load_failed"
                   ? err || "Failed to load the property map"
                   : `Satellite view unavailable (${map.reason || "unknown"}).`}
@@ -2737,7 +2766,7 @@ function PropertyZonesPanel({ customerId }) {
             </div>
           )}
           {!loading && map?.available && !zones.length && (
-            <div className="text-13 text-ink-secondary">
+            <div className="text-ui-body text-ink-secondary">
               No zones yet — zones are created when a visit is completed with
               treated areas.
             </div>
@@ -2746,14 +2775,14 @@ function PropertyZonesPanel({ customerId }) {
             <div>
               {lineOptions.length > 1 && (
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-12 text-ink-secondary">Service line</span>
+                  <span className="text-ui-label text-ink-secondary">Service line</span>
                   {lineOptions.map((opt) => (
-                    <button
+                    <button data-ui-text-action
                       key={opt}
                       type="button"
                       onClick={() => setLine(opt)}
                       className={cn(
-                        "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                        "text-ui-label px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
                         opt === line
                           ? "border-zinc-900 bg-zinc-900 text-white"
                           : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
@@ -2765,7 +2794,7 @@ function PropertyZonesPanel({ customerId }) {
                 </div>
               )}
               {areas.some((label) => staleKeys.has(normalizeZoneKey(label))) && (
-                <div className="text-12 text-zinc-700 mb-2">
+                <div className="text-ui-label text-zinc-700 mb-2">
                   Some zones have marks that no longer match the current
                   satellite image (the property was re-geocoded) — they show
                   as unmarked below. Redraw them, or clear everything to
@@ -2793,13 +2822,13 @@ function PropertyZonesPanel({ customerId }) {
                       : "Save zone marks"}
                 </Button>
                 {!saveable && dirtyCount > 0 && (
-                  <span className="text-12 text-ink-secondary">
+                  <span className="text-ui-label text-ink-secondary">
                     Mark every zone on this line (or clear them all) to save.
                   </span>
                 )}
-                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {msg && <span className="text-ui-label text-zinc-700">{msg}</span>}
                 {err && map && (
-                  <span className="text-12 text-alert-fg">{err}</span>
+                  <span className="text-ui-label text-alert-fg">{err}</span>
                 )}
               </div>
             </div>
@@ -3041,11 +3070,11 @@ function TermiteStationsPanel({ customerId }) {
       {open && (
         <div className="mt-3">
           {loading && (
-            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+            <div className="text-ui-body text-ink-secondary">Loading the satellite view…</div>
           )}
           {!loading && map && !map.available && (
             <div className="flex items-center gap-3">
-              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+              <span className={cn("text-ui-body", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
                 {map.reason === "load_failed"
                   ? err || "Failed to load the property map"
                   : `Satellite view unavailable (${map.reason || "unknown"}).`}
@@ -3068,16 +3097,16 @@ function TermiteStationsPanel({ customerId }) {
           {!loading && map?.available && (
             <div>
               <div className="flex items-center gap-2 mb-2">
-                <span className="text-12 text-ink-secondary">Program</span>
+                <span className="text-ui-label text-ink-secondary">Program</span>
                 {["termite", "rodent", "trapping"].map((opt) => (
-                  <button
+                  <button data-ui-text-action
                     key={opt}
                     type="button"
                     disabled={saving || (dirtyCount > 0 && opt !== program)}
                     title={dirtyCount > 0 && opt !== program ? "Save or discard this program's edits first" : undefined}
                     onClick={() => switchProgram(opt)}
                     className={cn(
-                      "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                      "text-ui-label px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
                       opt === program
                         ? "border-zinc-900 bg-zinc-900 text-white"
                         : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
@@ -3105,9 +3134,9 @@ function TermiteStationsPanel({ customerId }) {
                 <Button size="sm" onClick={save} disabled={!dirtyCount || saving}>
                   {saving ? "Saving…" : "Save stations"}
                 </Button>
-                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {msg && <span className="text-ui-label text-zinc-700">{msg}</span>}
                 {err && map && (
-                  <span className="text-12 text-alert-fg">{err}</span>
+                  <span className="text-ui-label text-alert-fg">{err}</span>
                 )}
               </div>
             </div>
@@ -3172,45 +3201,46 @@ export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate,
       {" "}
       <CardBody className="p-4">
         {" "}
-        <div className="u-label text-ink-secondary mb-1">
+        <label htmlFor={`billing-mode-${customerId}`} className="block ui-label text-ink-secondary mb-1">
           How this customer pays
-        </div>{" "}
+        </label>{" "}
         <div className="flex items-center gap-2 flex-wrap">
           {" "}
-          <select
+          <Select
+            id={`billing-mode-${customerId}`}
             value={mode}
             disabled={!canEdit || saving}
             onChange={(e) => save(e.target.value)}
-            className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1.5 bg-white"
+            className="min-w-0 max-w-full"
           >
             {BILLING_LANE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
             ))}
-          </select>{" "}
-          {saving && <span className="text-12 text-ink-secondary">Saving…</span>}{" "}
+          </Select>{" "}
+          {saving && <span className="text-ui-label text-ink-secondary">Saving…</span>}{" "}
         </div>
         {!mode && (
-          <div className="text-12 text-ink-secondary mt-1.5">
+          <div className="text-ui-label text-ink-secondary mt-1.5">
             Unset — currently behaves as{" "}
             <span className="text-zinc-900">{inferred}</span> (inferred from
             tier + monthly rate).
           </div>
         )}
         {mode === "monthly_membership" && (
-          <div className="text-12 text-ink-secondary mt-1.5">
+          <div className="text-ui-label text-ink-secondary mt-1.5">
             Dues on the 1st cover recurring plan visits — completions never
             invoice them.
           </div>
         )}
         {msg && (
-          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">
+          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-ui-label">
             {msg}
           </div>
         )}
         {err && (
-          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {err}
           </div>
         )}
@@ -3229,6 +3259,10 @@ function AdminAutopayPanelV2({
   const [charging, setCharging] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  const outcomeRef = useRef(null);
+  useEffect(() => {
+    if (msg || err) outcomeRef.current?.scrollIntoView?.({ block: "center" });
+  }, [msg, err]);
 
   const load = () => {
     fetch(`${API_BASE}/admin/customers/${customerId}/autopay-state`, {
@@ -3257,11 +3291,20 @@ function AdminAutopayPanelV2({
     setErr("");
     setMsg("");
     try {
-      await adminFetch(`/admin/customers/${customerId}/charge-now`, {
+      const result = await adminFetch(`/admin/customers/${customerId}/charge-now`, {
         method: "POST",
         body: JSON.stringify({}),
       });
-      setMsg(`Charged $${amt.toFixed(2)} successfully`);
+      const payment = result?.payment;
+      const collected = Number.parseFloat(payment?.amount);
+      const amountLabel = Number.isFinite(collected) ? ` $${collected.toFixed(2)}` : "";
+      if (payment?.status === "paid") {
+        setMsg(`Payment${amountLabel} completed`);
+      } else if (payment?.status === "processing") {
+        setMsg(`Payment${amountLabel} is processing. Settlement is pending.`);
+      } else {
+        setMsg("Payment status is not confirmed. Check payment history before trying again.");
+      }
       load();
     } catch (e) {
       setErr(e.message || "Charge failed");
@@ -3281,7 +3324,7 @@ function AdminAutopayPanelV2({
           {" "}
           <div>
             {" "}
-            <div className="u-label text-ink-secondary mb-1">Auto-pay</div>{" "}
+            <div className="ui-label text-ink-secondary mb-1">Auto-pay</div>{" "}
             <div className="flex items-center gap-2">
               {" "}
               <span
@@ -3299,7 +3342,7 @@ function AdminAutopayPanelV2({
               </span>{" "}
             </div>
             {state && (
-              <div className="text-12 text-ink-secondary mt-1.5 leading-relaxed">
+              <div className="text-ui-label text-ink-secondary mt-1.5 leading-relaxed">
                 Next charge:{" "}
                 <span className="u-nums text-zinc-900">
                   {state.next_charge_date || "—"}
@@ -3325,25 +3368,25 @@ function AdminAutopayPanelV2({
           )}
         </div>
         {msg && (
-          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">
+          <div ref={outcomeRef} role="status" className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-14">
             {msg}
           </div>
         )}
         {err && (
-          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div ref={outcomeRef} role="alert" className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-14">
             {err}
           </div>
         )}
         {state?.recent_events?.length > 0 && (
           <div className="mt-3 border-t border-hairline border-zinc-200 pt-2.5">
             {" "}
-            <div className="u-label text-ink-secondary mb-1.5">
+            <div className="ui-label text-ink-secondary mb-1.5">
               Recent events
             </div>
             {state.recent_events.slice(0, 5).map((ev) => (
               <div
                 key={ev.id}
-                className="text-11 text-ink-secondary py-0.5 flex justify-between gap-2"
+                className="text-ui-caption text-ink-secondary py-0.5 flex justify-between gap-2"
               >
                 {" "}
                 <span className="u-nums text-zinc-900">
@@ -3466,18 +3509,18 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   };
 
   const inputClass =
-    "block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900";
+    "block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900";
 
   return (
     <Card className="mb-5">
       <CardBody className="p-4">
         <div className="flex justify-between items-start gap-3 flex-wrap mb-3">
           <div>
-            <div className="u-label text-ink-secondary mb-1">Account credit</div>
+            <div className="ui-label text-ink-secondary mb-1">Account credit</div>
             <div className="text-22 text-zinc-900 u-nums leading-none">
               {loaded ? fmtCurrency(balance) : loadError ? "—" : "…"}
             </div>
-            <div className="text-12 text-ink-tertiary mt-1">
+            <div className="text-ui-label text-ink-tertiary mt-1">
               {loadError && !loaded
                 ? "Balance unavailable"
                 : "Available to apply to invoices"}
@@ -3496,9 +3539,9 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
         </div>
 
         {loadError && !loaded && (
-          <div className="text-12 text-alert-fg mb-3 flex items-center gap-2">
+          <div className="text-ui-label text-alert-fg mb-3 flex items-center gap-2">
             <span>Couldn't load the credit balance.</span>
-            <button
+            <button data-ui-text-action
               type="button"
               className="underline"
               onClick={load}
@@ -3512,19 +3555,19 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
           <div className="border-hairline border-zinc-200 rounded-sm p-3 mb-3 bg-zinc-50">
             <div className="grid grid-cols-2 gap-2 mb-2">
               <label className="block">
-                <span className="u-label text-ink-tertiary block mb-1">Direction</span>
-                <select
+                <span className="ui-label text-ink-tertiary block mb-1">Direction</span>
+                <Select
                   value={direction}
                   onChange={(e) => setDirection(e.target.value)}
                   className={inputClass}
                 >
                   <option value="add">Add credit</option>
                   <option value="deduct">Deduct credit</option>
-                </select>
+                </Select>
               </label>
               <label className="block">
-                <span className="u-label text-ink-tertiary block mb-1">Amount</span>
-                <input
+                <span className="ui-label text-ink-tertiary block mb-1">Amount</span>
+                <Input
                   type="number"
                   min="0"
                   step="0.01"
@@ -3538,20 +3581,20 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
             {direction === "add" ? (
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <label className="block">
-                  <span className="u-label text-ink-tertiary block mb-1">Funding</span>
-                  <select
+                  <span className="ui-label text-ink-tertiary block mb-1">Funding</span>
+                  <Select
                     value={fundKind}
                     onChange={(e) => setFundKind(e.target.value)}
                     className={inputClass}
                   >
                     <option value="prepayment">Prepayment (money received)</option>
                     <option value="goodwill">Goodwill / courtesy (no money)</option>
-                  </select>
+                  </Select>
                 </label>
                 {fundKind === "prepayment" && (
                   <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">Method</span>
-                    <select
+                    <span className="ui-label text-ink-tertiary block mb-1">Method</span>
+                    <Select
                       value={method}
                       onChange={(e) => setMethod(e.target.value)}
                       className={inputClass}
@@ -3562,30 +3605,30 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
                       <option value="venmo">Venmo</option>
                       <option value="paypal">PayPal</option>
                       <option value="other">Other</option>
-                    </select>
+                    </Select>
                   </label>
                 )}
               </div>
             ) : (
-              <div className="text-12 text-ink-tertiary mb-2">
+              <div className="text-ui-label text-ink-tertiary mb-2">
                 Recorded as an adjustment / correction (no payment booked).
               </div>
             )}
-            <div className="text-11 text-ink-tertiary mb-2 leading-snug">
+            <div className="text-ui-caption text-ink-tertiary mb-2 leading-snug">
               {direction === "add" && fundKind === "prepayment"
                 ? "Books a payment now (counts as collected revenue at receipt)."
                 : "No payment booked — does not count as revenue."}
             </div>
             <label className="block mb-2">
-              <span className="u-label text-ink-tertiary block mb-1">Note (optional)</span>
-              <input
+              <span className="ui-label text-ink-tertiary block mb-1">Note (optional)</span>
+              <Input
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 placeholder="e.g. Q3 quarterly prepay collected by check"
                 className={inputClass}
               />
             </label>
-            {err && <div className="text-12 text-alert-fg mb-2">{err}</div>}
+            {err && <div className="text-ui-label text-alert-fg mb-2">{err}</div>}
             <Button size="sm" variant="primary" disabled={saving || !loaded} onClick={submit}>
               {saving
                 ? "Saving…"
@@ -3603,7 +3646,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
               return (
                 <div
                   key={row.id}
-                  className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
+                  className="py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
                 >
                   <span className={cn("u-nums", delta < 0 ? "text-ink-secondary" : "text-zinc-900")}>
                     {delta >= 0 ? "+" : "−"}
@@ -3622,7 +3665,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
             })}
           </div>
         ) : loaded ? (
-          <div className="text-12 text-ink-tertiary">No credit history yet</div>
+          <div className="text-ui-label text-ink-tertiary">No credit history yet</div>
         ) : null}
       </CardBody>
     </Card>
@@ -3635,23 +3678,23 @@ function AnnualPrepayPanelV2({ activeTerm, onOpen, onSendInvoice }) {
       <CardBody className="p-4">
         <div className="flex justify-between items-start gap-3 flex-wrap">
           <div>
-            <div className="u-label text-ink-secondary mb-1">Annual prepay</div>
+            <div className="ui-label text-ink-secondary mb-1">Annual prepay</div>
             {activeTerm ? (
               <>
                 <div className="text-14 font-medium text-zinc-900">
                   {activeTerm.planLabel || "Annual Prepay"}
                 </div>
-                <div className="text-12 text-ink-secondary mt-1">
+                <div className="text-ui-label text-ink-secondary mt-1">
                   {fmtDate(activeTerm.termStart)} to {fmtDate(activeTerm.termEnd)} · {String(activeTerm.status || "").replace(/_/g, " ")}
                 </div>
                 {activeTerm.coverageServiceType && (
-                  <div className="text-11 text-ink-secondary mt-1">
+                  <div className="text-ui-caption text-ink-secondary mt-1">
                     Covers {activeTerm.coverageVisitCount || 4} {activeTerm.coverageServiceType} visit{Number(activeTerm.coverageVisitCount || 4) === 1 ? "" : "s"}
                   </div>
                 )}
               </>
             ) : (
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 No annual prepay term on this account.
               </div>
             )}
@@ -3665,7 +3708,7 @@ function AnnualPrepayPanelV2({ activeTerm, onOpen, onSendInvoice }) {
             </Button>
           </div>
         </div>
-        <div className="text-11 text-ink-secondary mt-2">
+        <div className="text-ui-caption text-ink-secondary mt-2">
           Send an invoice to request payment, or record a payment already collected.
         </div>
       </CardBody>
@@ -3728,19 +3771,19 @@ function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
 
   return <>
     <label className="block sm:col-span-2">
-      <div className="u-label text-ink-secondary mb-1">Service plan</div>
-      <select
+      <div className="ui-label text-ink-secondary mb-1">Service plan</div>
+      <Select
         value={selected?.value || "__custom__"}
         onChange={(e) => onChange(e.target.value === "__custom__" ? "" : e.target.value)}
         className="w-full h-9 px-2.5 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
       >
         {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         <option value="__custom__">Custom label</option>
-      </select>
+      </Select>
     </label>
     <label className="block sm:col-span-2">
-      <div className="u-label text-ink-secondary mb-1">Service covered</div>
-      <input
+      <div className="ui-label text-ink-secondary mb-1">Service covered</div>
+      <Input
         value={serviceType}
         onChange={(e) => onChange(e.target.value)}
         list={listId}
@@ -3759,6 +3802,7 @@ function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
 }
 
 export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], estimateSuggestion = null, onClose, onSaved }) {
+  const density = useUiDensity();
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   // For a brand-new customer (no options, no term, no prepaid plans) the
@@ -4016,7 +4060,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4034,9 +4078,9 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-15 font-medium text-zinc-900">Record collected annual prepay</div>
-            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+            <div className="text-ui-caption text-ink-secondary mt-0.5">{customerName}</div>
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !saving && onClose?.()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4046,7 +4090,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
         </div>
         <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           {activeTermEnd && (
-            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
@@ -4056,50 +4100,50 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
             onChange={handleServiceTypeChange}
           />
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Cadence</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Cadence</div>
+            <Select
               value={coverageCadence}
               onChange={(e) => handleCadenceChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Applications covered</div>
+            <Input
               type="number"
               min="1"
               max="24"
               step="1"
               value={visitCount}
               onChange={(e) => handleVisitCountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">
+            <div className="ui-label text-ink-secondary mb-1">
               {isCommercialCustomer ? "Pre-tax service amount collected" : "Amount collected"}
             </div>
-            <input
+            <Input
               type="number"
               min="0"
               step="0.01"
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
             {perVisit > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
               </div>
             )}
             {estimateSuggestionMatchesService(estimateSuggestion, serviceType, coverageCadence, visitCount) && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 From estimate #{estimateSuggestion.shortRef} — quoted prepay
                 year {fmtCurrency(Number(estimateSuggestion.amount))}
                 {Number(estimateSuggestion.discount) > 0
@@ -4108,69 +4152,69 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
               </div>
             )}
             {estimateSuggestion?.blocked && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Estimate #{estimateSuggestion.shortRef}: {estimateSuggestion.blockReason} —
                 enter the amount collected.
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Commercial: ~7% county sales tax is added at invoicing — total
                 recorded as paid ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Payment already collected by</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Payment already collected by</div>
+            <Select
               value={method}
               onChange={(e) => setMethod(e.target.value)}
-              className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {methodOptions.map(([value, label]) => (
                 <option key={value} value={value}>{label}</option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term starts</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term starts</div>
+            <Input
               type="date"
               value={termStart}
               onChange={(e) => handleStartChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term ends</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term ends</div>
+            <Input
               type="date"
               value={termEnd}
               onChange={(e) => setTermEnd(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Reference</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Reference</div>
+            <Input
               value={reference}
               onChange={(e) => setReference(e.target.value)}
               placeholder="Receipt, check, Zelle, or Stripe reference"
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Note</div>
-            <textarea
+            <div className="ui-label text-ink-secondary mb-1">Note</div>
+            <Textarea
               rows={3}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
         </div>
         {error && (
-          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {error}
           </div>
         )}
@@ -4193,6 +4237,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
 // amount inference) instead of maintaining a parallel modal. See
 // schedule/AnnualPrepayLauncher.
 export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved, allowChargeInPerson = false, onChargeInPerson }) {
+  const density = useUiDensity();
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
@@ -4452,7 +4497,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4470,9 +4515,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-15 font-medium text-zinc-900">Send annual prepay invoice</div>
-            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+            <div className="text-ui-caption text-ink-secondary mt-0.5">{customerName}</div>
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !saving && onClose?.()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4482,12 +4527,12 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         </div>
         <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           {activeTermEnd && (
-            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
           {depositCredit && depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
               {depositCredit.estimateSlug ? ` (estimate ${depositCredit.estimateSlug})` : ""} — NOT
               applied here: this customer's invoices bill to a third party, and the homeowner's
@@ -4495,7 +4540,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             </div>
           )}
           {depositCredit && !depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               <label className="flex items-start gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -4520,85 +4565,85 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             onChange={handleServiceTypeChange}
           />
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Cadence</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Cadence</div>
+            <Select
               value={coverageCadence}
               onChange={(e) => handleCadenceChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Applications covered</div>
+            <Input
               type="number"
               min="1"
               max="24"
               step="1"
               value={visitCount}
               onChange={(e) => handleVisitCountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">
+            <div className="ui-label text-ink-secondary mb-1">
               {isCommercialCustomer ? "Pre-tax service amount" : "Invoice amount"}
             </div>
-            <input
+            <Input
               type="number"
               min="0"
               step="0.01"
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
             {perVisit > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Commercial: ~7% county sales tax is added — customer is invoiced
                 ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term starts</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term starts</div>
+            <Input
               type="date"
               value={termStart}
               onChange={(e) => handleStartChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term ends</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term ends</div>
+            <Input
               type="date"
               value={termEnd}
               onChange={(e) => setTermEnd(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Invoice due</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Invoice due</div>
+            <Input
               type="date"
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">First visit (optional)</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">First visit (optional)</div>
+            <Input
               type="date"
               value={firstVisitDate}
               onChange={(e) => {
@@ -4610,38 +4655,38 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               }}
               min={termStart || undefined}
               max={termEnd || undefined}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
-            <div className="text-11 text-ink-secondary mt-1">
+            <div className="text-ui-caption text-ink-secondary mt-1">
               {firstVisitDateError || "Date you already promised the customer. Blank starts coverage at the term start."}
             </div>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">First visit time</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">First visit time</div>
+            <Input
               type="time"
               step={3600}
               value={firstVisitWindowStart}
               onChange={(e) => setFirstVisitWindowStart(e.target.value)}
               disabled={!firstVisitDate}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
             />
-            <div className="text-11 text-ink-secondary mt-1">
+            <div className="text-ui-caption text-ink-secondary mt-1">
               {firstVisitTimeError || "Arrival time for visit 1, on the hour. Needs a first-visit date."}
             </div>
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Invoice note</div>
-            <textarea
+            <div className="ui-label text-ink-secondary mb-1">Invoice note</div>
+            <Textarea
               rows={3}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
         </div>
         {error && (
-          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {error}
           </div>
         )}
@@ -4672,6 +4717,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
 // blocked. The server re-checks eligibility on confirm.
 // ============================================================================
 export function CancelSignupModal({ customer, onClose, onDone }) {
+  const density = useUiDensity();
   const [preview, setPreview] = useState(null);
   const [loadErr, setLoadErr] = useState("");
   const [running, setRunning] = useState(false);
@@ -4713,7 +4759,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !running && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4732,7 +4778,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
           <div className="text-15 font-medium text-zinc-900">
             Cancel signup &amp; refund deposit
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !running && onClose()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4740,12 +4786,12 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
             ×
           </button>
         </div>
-        <div className="p-4 text-13 text-zinc-900">
+        <div className="p-4 text-ui-body text-zinc-900">
           {!preview && !loadErr && (
             <div className="text-ink-secondary">Checking eligibility…</div>
           )}
           {loadErr && (
-            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{loadErr}</div>
+            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{loadErr}</div>
           )}
           {preview && !preview.eligible && !result && (
             <div>
@@ -4760,7 +4806,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
               {/* First-run lesson (2026-07-15): the preview reads "done"
                   enough that the owner closed it here thinking the run had
                   fired. State the not-yet-ness explicitly. */}
-              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-13 text-zinc-900">
+              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-ui-body text-zinc-900">
                 <span className="font-medium">Preview only — nothing has happened yet.</span>{" "}
                 <span className="text-ink-secondary">
                   No refund is issued and nothing is cancelled until you press the red button below.
@@ -4786,7 +4832,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
                 <li>Refund the <span className="font-medium u-nums">{fmtCurrency(preview.refundTotal)}</span> deposit to the original payment method</li>
                 <li>Email the customer a cancellation + refund confirmation</li>
               </ul>
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 The refund is issued through Stripe and typically lands in 5–10 business days.
               </div>
             </div>
@@ -4809,29 +4855,29 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
                 </li>
               </ul>
               {result.refundSkipped && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.refundSkipped}
                 </div>
               )}
               {result.refundIncomplete && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.refundIncomplete}
                 </div>
               )}
               {result.visitFailures?.length > 0 && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.visitFailures.length} visit(s) could not be cancelled — handle them on the Schedule page.
                 </div>
               )}
               {result.unresolvedInvoices?.length > 0 && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   Open visit invoice(s) could not be voided: {result.unresolvedInvoices.join(", ")} — resolve on the Invoices page.
                 </div>
               )}
             </div>
           )}
           {runErr && (
-            <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{runErr}</div>
+            <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{runErr}</div>
           )}
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
@@ -4878,6 +4924,7 @@ function paymentRefundState(p) {
 }
 
 export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
+  const density = useUiDensity();
   const { refundedCents, remainingCents } = paymentRefundState(payment);
   // The entered amount is BASE dollars: the server adds the prorated share
   // of the recorded card surcharge on top and caps the gross at the
@@ -4987,7 +5034,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !running && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -5004,7 +5051,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div className="text-15 font-medium text-zinc-900">Refund payment</div>
-          <button
+          <button data-ui-text-action
             onClick={() => !running && onClose()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -5012,7 +5059,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
             ×
           </button>
         </div>
-        <div className="p-4 text-13 text-zinc-900">
+        <div className="p-4 text-ui-body text-zinc-900">
           {done ? (
             <div>
               <div className="mb-2 font-medium">
@@ -5023,11 +5070,11 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
                   : ""}
                 .
               </div>
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 Issued through Stripe — it typically lands in 5–10 business days.
               </div>
               {done.refreshErr && (
-                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {done.refreshErr}
                 </div>
               )}
@@ -5056,7 +5103,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
               </div>
               <label
                 htmlFor="refund-amount"
-                className="block text-12 text-ink-secondary mb-1"
+                className="block text-ui-label text-ink-secondary mb-1"
               >
                 Refund amount
               </label>
@@ -5072,24 +5119,24 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
                 onChange={(e) => setAmountStr(e.target.value)}
               />
               {amountStr !== "" && !amountValid && (
-                <div className="mt-1.5 text-12 text-alert-fg">
+                <div className="mt-1.5 text-ui-label text-alert-fg">
                   Enter an amount between $0.01 and{" "}
                   {fmtCurrency(maxEntryCents / 100)}.
                 </div>
               )}
               {remainingSurchargeCents > 0 && (
-                <div className="mt-2 text-12 text-ink-secondary">
+                <div className="mt-2 text-ui-label text-ink-secondary">
                   The {fmtCurrency(remainingSurchargeCents / 100)} card-surcharge
                   share is returned automatically on top — in full with a full
                   refund, prorated with a partial amount.
                 </div>
               )}
-              <div className="mt-2 text-12 text-ink-secondary">
+              <div className="mt-2 text-ui-label text-ink-secondary">
                 Issued through Stripe — refunds typically land in 5–10 business
                 days.
               </div>
               {err && (
-                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {err}
                 </div>
               )}
@@ -5123,133 +5170,3335 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
-function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTab, onMessage, onSendLink, menuOpen, setMenuOpen, menuRef }) {
+function CustomerWorkspaceHeader({
+  c,
+  isAdmin,
+  unreadConversations,
+  onEdit,
+  onTab,
+  onMessage,
+  onSendLink,
+  menuOpen,
+  setMenuOpen,
+  menuRef,
+}) {
   const menuId = useId();
-  const name = [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || "Unnamed customer";
+  const name =
+    [c.firstName, c.lastName].filter(Boolean).join(" ").trim() ||
+    "Unnamed customer";
   const address = c.address ? formatAddress(c.address) : "";
-  const contacts = ["", "2", "3"].map((suffix) => ({
-    name: c[`serviceContact${suffix}Name`],
-    phone: c[`serviceContact${suffix}Phone`],
-    email: c[`serviceContact${suffix}Email`],
-  })).filter((contact) => contact.phone || contact.email);
+  const contacts = ["", "2", "3"]
+    .map((suffix) => ({
+      name: c[`serviceContact${suffix}Name`],
+      phone: c[`serviceContact${suffix}Phone`],
+      email: c[`serviceContact${suffix}Email`],
+    }))
+    .filter((contact) => contact.phone || contact.email);
   const actions = [
-    ...(isAdmin ? [
-      { label: "Book appointment", href: `/admin/schedule?customer=${c.id}` },
-      { label: "Invoices", href: `/admin/invoices?customer=${c.id}` },
-    ] : []),
+    ...(isAdmin
+      ? [
+          {
+            label: "Book appointment",
+            href: `/admin/schedule?customer=${c.id}`,
+          },
+          { label: "Invoices", href: `/admin/invoices?customer=${c.id}` },
+        ]
+      : []),
     { label: "Activity & notes", onClick: () => onTab("comms") },
-    ...(c.phone && isAdmin ? [{ label: "Send link", onClick: onSendLink }] : []),
+    ...(c.phone && isAdmin
+      ? [{ label: "Send link", onClick: onSendLink }]
+      : []),
     ...(isAdmin ? [{ label: "Edit customer", onClick: onEdit }] : []),
   ];
-  return <header className="c360-workspace-header">
-    <div className="c360-workspace-identity">
-      <div className="c360-workspace-name">
-        <div className="c360-workspace-name-row"><h1>{name}</h1><StageBadgeV2 stage={c.pipelineStage} /></div>
-        <div className="c360-workspace-meta"><TierBadgeV2 tier={c.tier} />{c.memberSince && <span>Customer since {formatETDateOnly(c.memberSince, { month: "short", year: "numeric" })}</span>}{c.profileLabel && <Badge className="normal-case tracking-normal">{c.profileLabel}</Badge>}{c.contactRole && c.contactRole !== "owner" && <Badge className="normal-case tracking-normal" title={contactRoleTitle(c.contactRole)}>{contactRoleLabel(c.contactRole)}</Badge>}</div>
+  return (
+    <header className="c360-workspace-header">
+      <div className="c360-workspace-identity">
+        <div className="c360-workspace-name">
+          <div className="c360-workspace-name-row">
+            <h1 className="ui-record-title">{name}</h1>
+            <StageBadgeV2 stage={c.pipelineStage} />
+          </div>
+          <div className="c360-workspace-meta">
+            <TierBadgeV2 tier={c.tier} />
+            {c.memberSince && (
+              <span>
+                Customer since{" "}
+                {formatETDateOnly(c.memberSince, {
+                  month: "short",
+                  year: "numeric",
+                })}
+              </span>
+            )}
+            {c.profileLabel && (
+              <Badge className="normal-case tracking-normal">
+                {c.profileLabel}
+              </Badge>
+            )}
+            {c.contactRole && c.contactRole !== "owner" && (
+              <Badge
+                className="normal-case tracking-normal"
+                title={contactRoleTitle(c.contactRole)}
+              >
+                {contactRoleLabel(c.contactRole)}
+              </Badge>
+            )}
+          </div>
+        </div>
       </div>
-    </div>
-    <div className="c360-workspace-actions">
-      {c.phone && <Button className="c360-message-action" onClick={onMessage}><MessageSquare size={16} />Message{unreadConversations > 0 && <span className="c360-unread-count" aria-label={`${unreadConversations} unread conversations`}>{unreadConversations}</span>}</Button>}
-      {isAdmin && <a className="u-focus-ring" href={customerEstimateHref({ ...c, address })}><FileText size={16} />Create estimate</a>}
-      <div className="c360-more-action" ref={menuRef} onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { event.stopPropagation(); setMenuOpen(false); menuRef.current?.querySelector("button")?.focus(); } }}>
-        <Button variant="ghost" className="c360-icon-button" aria-label="More customer actions" aria-expanded={menuOpen} aria-controls={menuId} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setMenuOpen((open) => !open); }}><MoreHorizontal size={20} /></Button>
-        {menuOpen && <div id={menuId} className="c360-workspace-action-menu">{actions.map((action) => action.href ? <a key={action.label} className="u-focus-ring" href={action.href}>{action.label}</a> : <button key={action.label} type="button" className="u-focus-ring" onClick={() => { menuRef.current?.querySelector("button")?.focus(); setMenuOpen(false); action.onClick(); }}>{action.label}</button>)}</div>}
+      <div className="c360-workspace-actions ui-record-actions">
+        {c.phone && (
+          <Button className="c360-message-action" aria-haspopup="dialog" onClick={(event) => {
+            event.currentTarget.focus({ preventScroll: true });
+            onMessage();
+          }}>
+            <MessageSquare size={16} />
+            Message
+            {unreadConversations > 0 && (
+              <span
+                className="c360-unread-count"
+                aria-label={`${unreadConversations} unread conversations`}
+              >
+                {unreadConversations}
+              </span>
+            )}
+          </Button>
+        )}
+        {isAdmin && (
+          <a
+            className={buttonStyles({ variant: "secondary", density: "comfortable" })}
+            href={customerEstimateHref({ ...c, address })}
+          >
+            <FileText size={16} />
+            Create estimate
+          </a>
+        )}
+        <div
+          className="c360-more-action"
+          ref={menuRef}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && menuOpen) {
+              event.stopPropagation();
+              setMenuOpen(false);
+              menuRef.current?.querySelector("button")?.focus();
+            }
+          }}
+        >
+          <Button
+            variant="ghost"
+            className="ui-icon-action"
+            aria-label="More customer actions"
+            aria-expanded={menuOpen}
+            aria-controls={menuId}
+            onClick={(event) => {
+              event.currentTarget.focus({ preventScroll: true });
+              setMenuOpen((open) => !open);
+            }}
+          >
+            <MoreHorizontal size={20} />
+          </Button>
+          {menuOpen && (
+            <div id={menuId} className="ui-action-menu">
+              {actions.map((action) =>
+                action.href ? (
+                  <a
+                    key={action.label}
+                    className={buttonStyles({ variant: "ghost", density: "comfortable", className: "ui-menu-action" })}
+                    href={action.href}
+                  >
+                    {action.label}
+                  </a>
+                ) : (
+                  <Button
+                    key={action.label}
+                    type="button"
+                    variant="ghost"
+                    className="ui-menu-action"
+                    onClick={() => {
+                      menuRef.current?.querySelector("button")?.focus();
+                      setMenuOpen(false);
+                      action.onClick();
+                    }}
+                  >
+                    {action.label}
+                  </Button>
+                ),
+              )}
+            </div>
+          )}
+        </div>
       </div>
-    </div>
-    <div className="c360-workspace-contact" aria-label="Contact details">
-      {c.phone && <div><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><span>{c.phone}</span></div>}
-      {c.email && <div><a className="c360-outline-link u-focus-ring" href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer"><Mail size={16} />Email</a><span>{c.email}</span></div>}
-      {address && <div><a className="c360-outline-link u-focus-ring" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} />Address</a><span>{address}</span></div>}
-    </div>
-    {contacts.length > 0 && <details className="c360-additional-contacts"><summary>Service contacts ({contacts.length})</summary>{contacts.map((contact, index) => <div key={index}><span>{contact.name || `Service contact ${index + 1}`}</span>{contact.phone && <CallBridgeLink phone={contact.phone} customerName={contact.name || name}>{contact.phone}</CallBridgeLink>}{contact.email && <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}`} target="_blank" rel="noopener noreferrer">{contact.email}</a>}</div>)}</details>}
-  </header>;
+      <div className="c360-workspace-contact" aria-label="Contact details">
+        {c.phone && (
+          <div>
+            <Button
+              variant="secondary"
+              className="c360-contact-action"
+              onClick={() => callViaBridge(c.phone, name)}
+            >
+              <Phone size={16} />
+              Call
+            </Button>
+            <span>{c.phone}</span>
+          </div>
+        )}
+        {c.email && (
+          <div>
+            <a
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "c360-contact-action" })}
+              href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <Mail size={16} />
+              Email
+            </a>
+            <span>{c.email}</span>
+          </div>
+        )}
+        {address && (
+          <div>
+            <a
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "c360-contact-action" })}
+              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <MapPin size={16} />
+              Address
+            </a>
+            <span>{address}</span>
+          </div>
+        )}
+      </div>
+      {contacts.length > 0 && (
+        <details className="c360-additional-contacts">
+          <summary>Service contacts ({contacts.length})</summary>
+          {contacts.map((contact, index) => (
+            <div key={index}>
+              <span>{contact.name || `Service contact ${index + 1}`}</span>
+              {contact.phone && (
+                <CallBridgeLink
+                  phone={contact.phone}
+                  customerName={contact.name || name}
+                >
+                  {contact.phone}
+                </CallBridgeLink>
+              )}
+              {contact.email && (
+                <a
+                  href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {contact.email}
+                </a>
+              )}
+            </div>
+          ))}
+        </details>
+      )}
+    </header>
+  );
 }
 
-export default function Customer360ProfileV2({
+function CustomerContactLinks({
+  phone,
+  email,
+  customerName,
+  phoneClassName,
+  emailClassName,
+}) {
+  return (
+    <>
+      {phone && (
+        <CallBridgeLink
+          phone={phone}
+          customerName={customerName}
+          className={phoneClassName}
+        >
+          {phone}
+        </CallBridgeLink>
+      )}
+      {email && (
+        <a
+          href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={emailClassName}
+        >
+          {email}
+        </a>
+      )}
+    </>
+  );
+}
+function CustomerContactRoleBadge({ role }) {
+  if (!role || role === "owner") return null;
+  return (
+    <Badge
+      tone="neutral"
+      className="normal-case tracking-normal"
+      title={contactRoleTitle(role)}
+    >
+      {contactRoleLabel(role)}
+    </Badge>
+  );
+}
+function CustomerAddressLink({ address, mobile = false }) {
+  const parts = [
+    address?.line1,
+    address?.line2,
+    address?.city,
+    address?.state,
+    address?.zip,
+  ].filter(Boolean);
+  const visible = mobile ? address?.line1 || address?.city : parts.length > 0;
+  if (!visible) return null;
+  const label = mobile ? parts.join(", ") : formatAddress(address);
+  return (
+    <a
+      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(label)}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={
+        mobile
+          ? "block text-ui-body text-ink-secondary no-underline hover:text-zinc-900 mb-2 truncate"
+          : "text-zinc-900 hover:underline"
+      }
+    >
+      {label}
+    </a>
+  );
+}
+function CustomerMessageTime({ message, inverted = false }) {
+  return (
+    <div
+      className={cn(
+        "text-ui-caption mt-1 text-right",
+        inverted ? "text-zinc-300" : "text-ink-secondary",
+      )}
+    >
+      {timeAgo(message.createdAt)}
+    </div>
+  );
+}
+function CustomerSmsMessage({ message: m, embedded }) {
+  const inbound = m.direction === "inbound";
+  return (
+    <div
+      className={cn(
+        "max-w-[75%] px-3 py-2 text-ui-body leading-relaxed border-hairline",
+        inbound
+          ? "self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs"
+          : "self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs",
+      )}
+    >
+      {" "}
+      <div>{m.body}</div>
+      {embedded && m.media?.length > 0 && (
+        <Suspense fallback={<span>Loading attachments…</span>}>
+          <CustomerMessageMedia
+            media={m.media}
+            inverted={m.direction === "outbound"}
+          />
+        </Suspense>
+      )}{" "}
+      <CustomerMessageTime message={m} inverted={!inbound} />
+    </div>
+  );
+}
+function CustomerCallMessage({ message: m }) {
+  const inbound = m.direction === "inbound"; // voice
+  const rec = (m.media || []).find((x) => x.type === "recording");
+  const duration = fmtDur(m.durationSeconds ?? rec?.duration_seconds);
+  const summary = m.aiSummary || m.body;
+
+  const recordingId =
+    (rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid);
+  return (
+    <div
+      className={cn(
+        "max-w-[85%] px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm",
+        inbound ? "self-start" : "self-end",
+      )}
+    >
+      {" "}
+      <div className="flex items-center gap-2 mb-1">
+        {" "}
+        <span className="text-ui-caption font-medium tracking-label uppercase text-ink-secondary">
+          {inbound ? "Call in" : "Call out"}
+        </span>
+        {duration && (
+          <span className="text-ui-caption u-nums text-zinc-900">{duration}</span>
+        )}
+        {m.answeredBy && (
+          <span className="text-ui-caption text-ink-secondary">· {m.answeredBy}</span>
+        )}
+      </div>
+      {summary && (
+        <div className="text-ui-label text-zinc-900 leading-relaxed">{summary}</div>
+      )}
+      {recordingId && (
+        <AuthenticatedCallAudio
+          recordingId={recordingId}
+          className="mt-1.5 w-full h-8"
+        />
+      )}
+      <CustomerMessageTime message={m} />{" "}
+    </div>
+  );
+}
+
+function CustomerOverlayHeader({
+  c,
+  isAdmin,
+  openEditModal,
+  score,
+  onClose,
+  customerId,
+  setAnnualPrepayInvoiceOpen,
+  setActiveTab,
+}) {
+  const customerName = [c.firstName, c.lastName]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  return (
+    <>
+      {/* ZONE 1 — STICKY HEADER */}
+      <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200">
+        {/* Desktop header (>= 768px) */}
+        <div className="c360-header-desktop px-6 py-4">
+          {" "}
+          <div className="flex justify-between items-start mb-2">
+            {" "}
+            <div className="flex items-center gap-3 flex-wrap">
+              {" "}
+              <div className="text-22 font-medium tracking-tight text-zinc-900">
+                {c.firstName} {c.lastName}
+              </div>
+              {c.profileLabel && (
+                <Badge className="normal-case tracking-normal">
+                  {c.profileLabel}
+                </Badge>
+              )}
+              <CustomerContactRoleBadge role={c.contactRole} />
+              <HealthCircle score={score} /> <TierBadgeV2 tier={c.tier} />{" "}
+              <StageBadgeV2 stage={c.pipelineStage} />{" "}
+            </div>{" "}
+            <button data-ui-text-action
+              onClick={onClose}
+              aria-label="Close"
+              className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
+            >
+              ×
+            </button>{" "}
+          </div>
+          {(c.phone || c.email) && (
+            <div className="flex gap-4 items-center flex-wrap text-ui-label text-ink-secondary mb-1.5">
+              <CustomerContactLinks
+                phone={c.phone}
+                email={c.email}
+                customerName={customerName}
+                phoneClassName="u-nums text-zinc-900 hover:underline"
+                emailClassName="text-zinc-900 hover:underline"
+              />
+            </div>
+          )}
+          {[
+            {
+              key: "1",
+              label: "Service contact:",
+              name: c.serviceContactName,
+              phone: c.serviceContactPhone,
+              email: c.serviceContactEmail,
+            },
+            {
+              key: "2",
+              label: "Service contact 2:",
+              name: c.serviceContact2Name,
+              phone: c.serviceContact2Phone,
+              email: c.serviceContact2Email,
+            },
+            {
+              key: "3",
+              label: "Service contact 3:",
+              name: c.serviceContact3Name,
+              phone: c.serviceContact3Phone,
+              email: c.serviceContact3Email,
+            },
+          ]
+            .filter((slot) => slot.phone || slot.email)
+            .map((slot) => (
+              <div key={slot.key} className="text-ui-label text-ink-secondary mb-1.5">
+                {" "}
+                <span className="text-ink-tertiary mr-1">{slot.label}</span>
+                {slot.name && (
+                  <span className="text-zinc-900 mr-2">{slot.name}</span>
+                )}
+                <CustomerContactLinks
+                  phone={slot.phone}
+                  email={slot.email}
+                  customerName={slot.name || customerName}
+                  phoneClassName="u-nums text-zinc-900 hover:underline mr-3"
+                  emailClassName="text-zinc-900 hover:underline"
+                />
+              </div>
+            ))}
+          <div className="flex gap-4 items-center flex-wrap text-ui-label text-ink-secondary mb-2.5">
+            <CustomerAddressLink address={c.address} />
+            <span className="u-nums text-zinc-900">
+              {fmtCurrency(c.monthlyRate)}/mo
+            </span>{" "}
+            <span className="u-nums">{fmtCurrency(c.annualValue)}/yr</span>
+            {c.memberSince && <span>Since {fmtDate(c.memberSince)}</span>}
+          </div>{" "}
+          <div className="flex gap-2 flex-wrap">
+            {c.phone && (
+              <>
+                {" "}
+                <a
+                  href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
+                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                >
+                  Text
+                </a>{" "}
+                <button data-ui-text-action
+                  type="button"
+                  onClick={() =>
+                    callViaBridge(
+                      c.phone,
+                      `${c.firstName || ""} ${c.lastName || ""}`.trim(),
+                    )
+                  }
+                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                >
+                  Call
+                </button>{" "}
+              </>
+            )}
+            <a
+              href={`/admin/schedule?customer=${customerId}`}
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+            >
+              Book Appt
+            </a>{" "}
+            <a
+              href={`/admin/invoices?customer=${customerId}`}
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+            >
+              Invoice
+            </a>
+            {isAdmin && (
+              <button data-ui-text-action
+                type="button"
+                onClick={() => setAnnualPrepayInvoiceOpen(true)}
+                className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+              >
+                Prepay Invoice
+              </button>
+            )}
+            <button data-ui-text-action
+              onClick={() => setActiveTab("comms")}
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+            >
+              Add Note
+            </button>
+            {isAdmin && (
+              <button data-ui-text-action
+                onClick={openEditModal}
+                className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+              >
+                Edit
+              </button>
+            )}
+          </div>{" "}
+        </div>
+        {/* Mobile header (< 768px) — per mobile-admin-audit PR #3 item 2:
+              back / menu / Text pills on top, large name, three-stat row */}
+        <div className="c360-header-mobile px-4 pb-3">
+          {" "}
+          {/* Spacer reserving the fixed top action bar's height (8px top
+                pad + 44px controls + 8px bottom pad = 60px, plus the iPhone
+                safe-area inset) so the name/stats start below it. */}
+          <div
+            aria-hidden="true"
+            style={{
+              height: "calc(60px + env(safe-area-inset-top, 0px))",
+            }}
+          />
+          <div className="text-26 font-medium tracking-tight text-zinc-900 leading-tight mb-1">
+            {c.firstName} {c.lastName}
+          </div>
+          <CustomerAddressLink address={c.address} mobile />
+          {/* Contact — listed on mobile (desktop shows these in its header) */}
+          {(c.phone || c.email) && (
+            <div className="flex flex-col gap-1 mb-3 text-ui-body">
+              <CustomerContactLinks
+                phone={c.phone}
+                email={c.email}
+                customerName={customerName}
+                phoneClassName="u-nums text-ink-secondary hover:text-zinc-900 no-underline self-start"
+                emailClassName="text-ink-secondary hover:text-zinc-900 no-underline truncate"
+              />
+            </div>
+          )}
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            {" "}
+            <TierBadgeV2 tier={c.tier} />{" "}
+            <StageBadgeV2 stage={c.pipelineStage} />{" "}
+            <CustomerContactRoleBadge role={c.contactRole} />
+          </div>{" "}
+          <div className="flex items-stretch gap-3 pt-3 border-t border-hairline border-zinc-200">
+            {" "}
+            <div className="flex-1">
+              {" "}
+              <div className="ui-label text-ink-tertiary">Monthly</div>{" "}
+              <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">
+                {fmtCurrency(c.monthlyRate)}
+              </div>{" "}
+            </div>{" "}
+            <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
+              {" "}
+              <div className="ui-label text-ink-tertiary">Annual</div>{" "}
+              <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">
+                {fmtCurrency(c.annualValue)}
+              </div>{" "}
+            </div>{" "}
+            <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
+              {" "}
+              <div className="ui-label text-ink-tertiary">Health</div>{" "}
+              <div
+                className={cn(
+                  "u-nums text-15 font-medium mt-0.5",
+                  score != null && score < 40
+                    ? "text-alert-fg"
+                    : "text-zinc-900",
+                )}
+              >
+                {score != null ? score : "—"}
+              </div>{" "}
+            </div>{" "}
+          </div>{" "}
+        </div>{" "}
+      </div>
+    </>
+  );
+}
+
+function CustomerProfileAlerts({ alerts }) {
+  return (
+    alerts.length > 0 && (
+      <div className="c360-alerts flex flex-wrap gap-2 px-6 py-3 bg-zinc-50 border-b border-hairline border-zinc-200">
+        {alerts.map((a, i) => (
+          <div
+            key={i}
+            className={cn(
+              "inline-flex items-center gap-1.5 h-6 px-2 text-ui-caption font-medium rounded-xs border-hairline",
+              a.alert
+                ? "bg-alert-bg border-alert-fg text-alert-fg"
+                : "bg-white border-zinc-200 text-zinc-700",
+            )}
+          >
+            {" "}
+            <span className="ui-label text-ui-caption">
+              {a.label}
+            </span>{" "}
+            <span className="normal-case">{a.text}</span>{" "}
+          </div>
+        ))}
+      </div>
+    )
+  );
+}
+
+function CustomerWorkspaceNavigation({
+  tabsAnchorRef,
+  c,
+  activeTab,
+  changeWorkspaceTab,
+  profileContentId,
+  workspaceSections,
+}) {
+  return (
+    <>
+      <div ref={tabsAnchorRef} className="c360-tabs-anchor" />
+      <div className="c360-sticky-identity">
+        {c.firstName} {c.lastName}
+      </div>
+      <Customer360Sections
+        active={activeTab}
+        onChange={changeWorkspaceTab}
+        contentId={profileContentId}
+        sections={workspaceSections}
+      />
+    </>
+  );
+}
+function CustomerOverlayNavigation({
+  activeTab,
+  setActiveTab,
+  activeTabButtonRef,
+}) {
+  return (
+    <>
+      {/* ZONE 3 — TAB BAR */}
+      {/* shrink-0: this is an overflow-x scroll container, so its flex
+            auto-minimum-size is 0 — without it the column flex collapses the
+            bar to ~0px on mobile (tall content), hiding every section tab. */}
+      <div className="flex shrink-0 bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
+        {CUSTOMER_360_SECTIONS.filter(
+          (section) => section.key !== "estimates",
+        ).map((t) => (
+          <button data-ui-text-action
+            key={t.key}
+            ref={activeTab === t.key ? activeTabButtonRef : null}
+            aria-pressed={activeTab === t.key}
+            onClick={() => setActiveTab(t.key)}
+            className={cn(
+              "h-11 px-4 text-ui-label ui-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
+              activeTab === t.key
+                ? "text-zinc-900 border-zinc-900"
+                : "text-ink-secondary border-transparent hover:text-zinc-900",
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function CustomerProfileOverview({
+  embedded,
+  isAdmin,
+  c,
+  upcomingFuture,
+  services,
+  comms,
+  commsLoading,
+  commsErr,
+  data,
+  unreadConversations,
+  prefs,
+  alerts,
+  openMessages,
+  changeWorkspaceTab,
+  viewServiceRecords,
+  discounts,
+  referral,
+  customerId,
+  accountProperties,
+  onSelectCustomer,
+  addressNeighbors,
+  setData,
+  setProfileActionErr,
+  billingSummary,
+}) {
+  return (
+    <div className="c360-overview-content">
+      {embedded && (
+        <Customer360Summary
+          isAdmin={isAdmin}
+          customer={c}
+          upcoming={upcomingFuture}
+          services={services}
+          comms={comms}
+          commsLoading={commsLoading}
+          commsError={
+            isAdmin ? commsErr : "Message history requires admin access"
+          }
+          balance={data.billingSummary}
+          unread={unreadConversations}
+          preferences={prefs}
+          alerts={alerts}
+          onMessage={openMessages}
+          onTab={changeWorkspaceTab}
+          onViewServices={viewServiceRecords}
+          discounts={discounts}
+          referral={referral}
+        />
+      )}
+      <CustomerRequestsPanel customerId={customerId} />
+      {/* both customer-scoped zone endpoints are requireAdmin — a
+                  technician session would only 403 on expand */}
+      {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
+      {!embedded && isAdmin && <TermiteStationsGate customerId={customerId} />}
+      {accountProperties.length > 0 && (
+        <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
+          {" "}
+          <SectionTitle>Other Properties For This Customer</SectionTitle>{" "}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {accountProperties.map((p) => {
+              const addr = [
+                p.address?.line1,
+                p.address?.line2,
+                p.address?.city,
+                p.address?.state,
+                p.address?.zip,
+              ]
+                .filter(Boolean)
+                .join(", ");
+              const className =
+                "text-left rounded-sm border-hairline border-zinc-200 bg-zinc-50 hover:bg-zinc-100 u-focus-ring p-2.5";
+              const content = (
+                <>
+                  {" "}
+                  <div className="text-ui-body font-medium text-zinc-900">
+                    {p.profileLabel || "Service property"}
+                  </div>{" "}
+                  <div className="text-ui-label text-ink-secondary truncate">
+                    {addr || "No address on file"}
+                  </div>{" "}
+                  <div className="text-ui-caption text-ink-tertiary mt-1">
+                    {fmtCurrency(p.monthlyRate || 0)}/mo
+                  </div>{" "}
+                </>
+              );
+              if (!onSelectCustomer) {
+                return (
+                  <a
+                    key={p.id}
+                    href={`/admin/customers?customerId=${encodeURIComponent(p.id)}`}
+                    className={cn(className, "block no-underline")}
+                  >
+                    {content}
+                  </a>
+                );
+              }
+              return (
+                <button data-ui-text-action
+                  key={p.id}
+                  type="button"
+                  onClick={() => onSelectCustomer?.(p.id)}
+                  className={className}
+                >
+                  {content}
+                </button>
+              );
+            })}
+          </div>{" "}
+        </div>
+      )}
+      {addressNeighbors.length > 0 && (
+        <div
+          className="mb-4 pb-3 border-b border-hairline border-zinc-200"
+          data-testid="address-neighbors"
+        >
+          {" "}
+          <SectionTitle>Others at this address</SectionTitle>{" "}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {addressNeighbors.map((n) => {
+              const name =
+                `${n.firstName || ""} ${n.lastName || ""}`.trim() ||
+                "(no name)";
+              const addr = [n.address?.line1, n.address?.line2]
+                .filter(Boolean)
+                .join(", ");
+              const className =
+                "text-left rounded-sm border-hairline border-zinc-200 bg-zinc-50 hover:bg-zinc-100 u-focus-ring p-2.5";
+              const content = (
+                <>
+                  {" "}
+                  <div className="text-14 font-medium text-zinc-900">
+                    {name}
+                  </div>{" "}
+                  <div className="text-14 text-ink-secondary truncate">
+                    {[n.phone, STAGE_LABELS[n.pipelineStage] || n.pipelineStage]
+                      .filter(Boolean)
+                      .join(" · ") || "No contact on file"}
+                  </div>{" "}
+                  <div className="text-ui-label text-ink-tertiary mt-1 truncate">
+                    {addr || "Address on file"}
+                    {n.matchedVia === "property" ? " · secondary property" : ""}
+                  </div>{" "}
+                </>
+              );
+              if (!onSelectCustomer) {
+                return (
+                  <a
+                    key={n.id}
+                    href={`/admin/customers?customerId=${encodeURIComponent(n.id)}`}
+                    className={cn(className, "block no-underline")}
+                  >
+                    {content}
+                  </a>
+                );
+              }
+              return (
+                <button data-ui-text-action
+                  key={n.id}
+                  type="button"
+                  onClick={() => onSelectCustomer?.(n.id)}
+                  className={className}
+                >
+                  {content}
+                </button>
+              );
+            })}
+          </div>{" "}
+        </div>
+      )}
+      <div className="flex items-center justify-between mb-4 pb-3 border-b border-hairline border-zinc-200">
+        {" "}
+        <div>
+          {" "}
+          <div className="text-ui-body font-medium text-zinc-900">
+            Already left a Google review
+          </div>{" "}
+          <div className="text-ui-caption text-ink-secondary">
+            When on, this customer is excluded from review-request and 48h
+            followup SMS.
+          </div>
+          {c.reviewMarkedAt && c.hasLeftGoogleReview && (
+            <div className="text-ui-caption text-ink-tertiary mt-0.5 u-nums">
+              Marked {fmtDate(c.reviewMarkedAt)}
+            </div>
+          )}
+        </div>{" "}
+        <Switch
+          id="has-left-review-v2"
+          checked={!!c.hasLeftGoogleReview}
+          disabled={!isAdmin}
+          onChange={async (val) => {
+            const previousHasLeftGoogleReview = !!c.hasLeftGoogleReview;
+            const previousReviewMarkedAt = c.reviewMarkedAt || null;
+            setData((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    customer: {
+                      ...prev.customer,
+                      hasLeftGoogleReview: val,
+                      reviewMarkedAt: val ? new Date().toISOString() : null,
+                    },
+                  }
+                : prev,
+            );
+            try {
+              await adminFetch(`/admin/customers/${customerId}`, {
+                method: "PUT",
+                body: JSON.stringify({ hasLeftGoogleReview: val }),
+              });
+            } catch (err) {
+              setData((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      customer: {
+                        ...prev.customer,
+                        hasLeftGoogleReview: previousHasLeftGoogleReview,
+                        reviewMarkedAt: previousReviewMarkedAt,
+                      },
+                    }
+                  : prev,
+              );
+              setProfileActionErr(
+                err.message || "Review status failed to save",
+              );
+            }
+          }}
+        />{" "}
+      </div>{" "}
+      {!embedded && (
+        <>
+          <div className="c360-overview-grid grid grid-cols-3 gap-5">
+            {/* Col 1: Services */}
+            <div className="c360-overview-services">
+              {" "}
+              <SectionTitle>
+                Upcoming Appointments ({upcomingFuture.length})
+              </SectionTitle>
+              {upcomingFuture.length > 0 ? (
+                upcomingFuture.slice(0, 3).map((s, i) => (
+                  <div
+                    key={i}
+                    className="c360-upcoming-appointment bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+                  >
+                    {" "}
+                    <div className="text-ui-body font-medium text-zinc-900">
+                      {s.service_type}
+                    </div>{" "}
+                    <div className="text-ui-label text-ink-secondary">
+                      {fmtDateOnly(s.scheduled_date)} · {s.status}
+                    </div>{" "}
+                  </div>
+                ))
+              ) : (
+                <div className="text-ui-label text-ink-secondary mb-3">
+                  No upcoming appointments
+                </div>
+              )}
+              <SectionTitle>Recent Services ({services.length})</SectionTitle>
+              {services.slice(0, 5).map((s, i) => {
+                const recentNotes = parseStructuredNotes(s.structured_notes);
+                return (
+                  <div
+                    key={i}
+                    className="c360-recent-service py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
+                  >
+                    {" "}
+                    <span className="text-zinc-900 flex items-center gap-1.5">
+                      {s.service_type}
+                      {recentNotes.projectCompletion === true && (
+                        <Badge tone="neutral">Project</Badge>
+                      )}
+                    </span>{" "}
+                    <span className="text-ink-secondary">
+                      {fmtDateOnly(s.service_date)}
+                    </span>{" "}
+                  </div>
+                );
+              })}
+              {services.length === 0 && (
+                <div className="text-ui-label text-ink-secondary">
+                  No services recorded
+                </div>
+              )}
+            </div>
+            {/* Col 2: Billing snapshot */}
+            {!embedded && billingSummary}
+            {/* Col 3: Health + Referral + Discounts */}
+            <div className="c360-overview-health">
+              {referral && (
+                <div className="mt-4">
+                  {" "}
+                  <SectionTitle>Referral Stats</SectionTitle>{" "}
+                  <div className="text-ui-label text-zinc-900">
+                    Code: <span className="u-nums">{c.referralCode}</span>{" "}
+                  </div>
+                  {referral.total_referrals != null && (
+                    <div className="text-ui-label text-ink-secondary">
+                      Referrals: {referral.total_referrals}
+                    </div>
+                  )}
+                  {referral.total_earned != null && (
+                    <div className="text-ui-label text-zinc-900">
+                      Earned:{" "}
+                      <span className="u-nums">
+                        {fmtCurrency(referral.total_earned)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+              {discounts.length > 0 && (
+                <div className="mt-4">
+                  {" "}
+                  <SectionTitle>Active Discounts</SectionTitle>
+                  {discounts.map((d, i) => (
+                    <div key={i} className="text-ui-label text-zinc-900 py-0.5">
+                      {d.discount_name || "Discount"}:{" "}
+                      <span className="u-nums">
+                        {d.discount_type === "percentage"
+                          ? `${d.discount_value}%`
+                          : fmtCurrency(d.discount_value)}
+                      </span>{" "}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>{" "}
+          </div>{" "}
+        </>
+      )}
+    </div>
+  );
+}
+
+function CustomerProfileBilling({
+  balanceOwed,
+  overdueBalance,
+  c,
+  embedded,
+  displayedAnnualPrepayTerm,
+  data,
+  billingSummary,
+  isAdmin,
+  setAnnualPrepayOpen,
+  setAnnualPrepayInvoiceOpen,
+  invoices,
+  payments,
+  setRefundPayment,
+  cards,
+  setCancelSignupOpen,
+  setCancelPlanOpen,
+}) {
+  return (
+    <div className="c360-billing-content">
+      {" "}
+      <div className="c360-billing-grid grid grid-cols-4 gap-3 mb-5">
+        {" "}
+        <StatCardV2
+          label="Open balance"
+          value={fmtCurrency(balanceOwed)}
+          alert={balanceOwed > 0}
+        />{" "}
+        <StatCardV2
+          label="Overdue balance"
+          value={fmtCurrency(overdueBalance)}
+          alert={overdueBalance > 0}
+        />
+        <StatCardV2
+          label={
+            c.billingMode === "monthly_membership"
+              ? "Monthly rate"
+              : "Billing arrangement"
+          }
+          value={
+            c.billingMode === "monthly_membership"
+              ? fmtCurrency(c.monthlyRate)
+              : {
+                  per_visit: "Per application",
+                  per_application: "Per application",
+                  annual_prepay: "Annual prepay",
+                  one_time: "One-time",
+                }[c.billingMode] || "Not set"
+          }
+        />
+        <StatCardV2
+          label="Lifetime Revenue"
+          value={fmtCurrency(c.lifetimeRevenue)}
+        />{" "}
+      </div>{" "}
+      {embedded && (
+        <>
+          <div className="c360-billing-actions">
+            <a
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })}
+              href={`/admin/invoices?customer=${c.id}`}
+            >
+              Manage invoices
+              <ArrowUpRight size={15} />
+            </a>
+          </div>
+          {(c.servicePausedAt ||
+            displayedAnnualPrepayTerm ||
+            data.prepaidPlans?.length > 0) &&
+            billingSummary}
+          <Customer360Estimates estimates={data.estimates || []} />
+        </>
+      )}
+      <BillingLanePanelV2
+        customerId={c.id}
+        billingMode={c.billingMode}
+        tier={c.tier}
+        monthlyRate={c.monthlyRate}
+        canEdit={isAdmin}
+      />{" "}
+      <AdminAutopayPanelV2
+        customerId={c.id}
+        monthlyRate={c.monthlyRate}
+        customerName={`${c.firstName} ${c.lastName}`}
+        canCharge={isAdmin}
+      />{" "}
+      <AccountCreditPanelV2
+        customerId={c.id}
+        customerName={`${c.firstName} ${c.lastName}`}
+        canEdit={isAdmin}
+      />{" "}
+      {isAdmin && (
+        <AnnualPrepayPanelV2
+          customer={c}
+          activeTerm={displayedAnnualPrepayTerm}
+          onOpen={() => setAnnualPrepayOpen(true)}
+          onSendInvoice={() => setAnnualPrepayInvoiceOpen(true)}
+        />
+      )}
+      {embedded ? (
+        <div className="c360-invoices-heading">
+          <SectionTitle>Recent invoices ({invoices.length})</SectionTitle>
+          <a
+            className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })}
+            href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}`}
+          >
+            All invoices
+          </a>
+        </div>
+      ) : (
+        <SectionTitle>Invoices ({invoices.length})</SectionTitle>
+      )}
+      {invoices.length > 0 ? (
+        <Table className="mb-5">
+
+          <THead>
+
+            <TR>
+
+              {embedded && <TH>Invoice</TH>}
+              <TH>Date</TH>
+              <TH align="right">Amount</TH>
+              <TH align="right">Paid</TH>
+              <TH>Status</TH>
+            </TR>
+          </THead>
+          <TBody>
+            {invoices.map((inv, i) => (
+              <TR key={i}>
+                {embedded && (
+                  <TD>
+                    <a
+                      className="c360-invoice-reference u-focus-ring"
+                      href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}&invoice=${encodeURIComponent(inv.id)}`}
+                    >
+                      #{inv.invoice_number || inv.id.slice(0, 8)}
+                    </a>
+                  </TD>
+                )}
+                <TD>{fmtDate(inv.created_at || inv.invoice_date)}</TD>
+                <TD align="right" className="u-nums">
+                  {fmtCurrency(inv.amount_due)}
+                </TD>
+                <TD align="right" className="u-nums">
+                  {fmtCurrency(inv.amount_paid)}
+                </TD>
+                <TD>
+                  {" "}
+                  <Badge tone={invoiceStatusTone(inv)}>
+                    {inv.status}
+                  </Badge>{" "}
+                </TD>
+              </TR>
+            ))}
+          </TBody>
+        </Table>
+      ) : (
+        <div className="text-ui-body text-ink-secondary mb-5">No invoices</div>
+      )}
+      <SectionTitle>Payment History ({payments.length})</SectionTitle>
+      {payments.slice(0, 10).map((p, i) => {
+        const refundState = paymentRefundState(p);
+        const isFailed = p.status === "failed";
+        return (
+          <div
+            key={i}
+            className="py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
+          >
+            {" "}
+            <span
+              className={cn(
+                "u-nums",
+                refundState.full ? "text-ink-secondary" : "text-zinc-900",
+              )}
+            >
+              {fmtCurrency(p.amount)}
+            </span>{" "}
+            <span className="text-ink-secondary">
+              {p.card_brand} …{p.last_four}
+            </span>{" "}
+            <span className="text-ink-secondary">
+              {fmtDateOnly(p.payment_date)}
+            </span>{" "}
+            <Badge
+              tone={
+                refundState.full || refundState.partial || isFailed
+                  ? "alert"
+                  : "neutral"
+              }
+            >
+              {refundState.full
+                ? "Refunded"
+                : refundState.partial
+                  ? "Partial refund"
+                  : (p.status || "").toUpperCase()}
+            </Badge>
+            {isAdmin &&
+              p.processor === "stripe" &&
+              p.status === "paid" &&
+              !refundState.full &&
+              refundState.remainingCents > 0 && (
+                <Button
+                  size="sm"
+                  variant="danger"
+                  onClick={() => setRefundPayment(p)}
+                >
+                  Refund
+                </Button>
+              )}
+          </div>
+        );
+      })}
+      {cards.length > 0 && (
+        <div className="mt-5">
+          {" "}
+          <SectionTitle>Cards on File ({cards.length})</SectionTitle>
+          {cards.map((cd, i) => (
+            <div
+              key={i}
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-ui-body flex justify-between items-center"
+            >
+              {" "}
+              <span className="text-zinc-900">
+                {cd.card_brand} ending {cd.last_four}
+              </span>
+              {cd.exp_month && (
+                <span className="u-nums text-ink-secondary">
+                  {cd.exp_month}/{cd.exp_year}
+                </span>
+              )}
+              {cd.is_default && (
+                <Badge
+                  tone={embedded ? "neutral" : "strong"}
+                  className="c360-payment-method-default"
+                >
+                  Default
+                </Badge>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {isAdmin && (
+        <div className="mt-5 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
+          {" "}
+          <div className="text-ui-label text-ink-secondary">
+            Customer cancelling at the deposit stage? This voids the signup
+            invoice, cancels visits, and refunds the deposit.
+          </div>{" "}
+          <Button
+            size="sm"
+            variant="danger"
+            onClick={() => setCancelSignupOpen(true)}
+          >
+            Cancel signup…
+          </Button>{" "}
+        </div>
+      )}
+      {isAdmin && data.cancelPlanEnabled && (
+        <div className="mt-3 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
+          {" "}
+          <div className="text-ui-label text-ink-secondary">
+            Cancelling an active plan? Same engine the customer portal uses:
+            pulls visits, stops billing, records the case, and confirms to the
+            customer.
+          </div>{" "}
+          <Button
+            size="sm"
+            variant="danger"
+            onClick={() => setCancelPlanOpen(true)}
+          >
+            Cancel plan…
+          </Button>{" "}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CustomerProfileServices({
+  expanded,
+  services,
+  initialScheduledServiceId,
+  upcomingScheduled,
+  photos,
+}) {
+  return (
+    <details className="c360-service-records" open={expanded}>
+      <summary>Service records, reports & photos</summary>{" "}
+      <SectionTitle>Service History ({services.length})</SectionTitle>
+      {services.length === 0 ? (
+        <div className="text-ui-body text-ink-secondary">No service records</div>
+      ) : (
+        <div className="flex flex-col">
+          {services.map((s, i) => (
+            <ServiceRowV2
+              key={i}
+              service={s}
+              initiallyExpanded={
+                !!initialScheduledServiceId &&
+                String(s.scheduled_service_id || "") ===
+                  String(initialScheduledServiceId)
+              }
+            />
+          ))}
+        </div>
+      )}
+      {upcomingScheduled.length > 0 && (
+        <div className="mt-5">
+          {" "}
+          <SectionTitle>
+            Scheduled Services ({upcomingScheduled.length})
+          </SectionTitle>
+          {upcomingScheduled.map((s, i) => (
+            <div
+              key={i}
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-ui-body"
+            >
+              {" "}
+              <span className="font-medium text-zinc-900">
+                {s.service_type}
+              </span>{" "}
+              <span className="text-ink-secondary">
+                {fmtDateOnly(s.scheduled_date)}
+              </span>{" "}
+              <span
+                className={cn(
+                  "text-ui-caption ui-label font-medium",
+                  s.status === "confirmed"
+                    ? "text-zinc-900"
+                    : "text-ink-secondary",
+                )}
+              >
+                {s.status}
+              </span>{" "}
+            </div>
+          ))}
+        </div>
+      )}
+      {photos.length > 0 && (
+        <div className="mt-5">
+          {" "}
+          <SectionTitle>Service Photos ({photos.length})</SectionTitle>{" "}
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2">
+            {photos.map((p, i) => (
+              <div
+                key={i}
+                className="rounded-sm overflow-hidden bg-zinc-50 border-hairline border-zinc-200 aspect-square"
+              >
+                {" "}
+                <img
+                  src={p.url || ""}
+                  alt={p.caption || ""}
+                  className="w-full h-full object-cover"
+                  onError={(e) => {
+                    e.target.style.display = "none";
+                  }}
+                />{" "}
+              </div>
+            ))}
+          </div>{" "}
+        </div>
+      )}
+    </details>
+  );
+}
+
+function CustomerProfileProperty({
+  embedded,
+  recipientDetails,
+  isAdmin,
+  customerId,
+  c,
+  profileVersion,
+  reloadCustomer,
+  prefs,
+}) {
+  return (
+    <div className="c360-details-content">
+      {embedded && recipientDetails}
+      {embedded && isAdmin && (
+        <details className="c360-service-records">
+          <summary>Property service tools & historical maps</summary>
+          <PropertyZonesPanel customerId={customerId} />
+          <TermiteStationsGate customerId={customerId} />
+        </details>
+      )}
+      {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
+                  (it lists every address on the account), so a technician
+                  token would only ever see a 403 card here. */}
+      {isAdmin && (
+        <CustomerPropertiesPanelV2
+          key={customerId}
+          customerId={customerId}
+          primaryAddress={c.address}
+          contactRole={c.contactRole}
+          // Every profile reload (any Edit save, address changed or
+          // not) re-syncs the primary customer_properties row server-side
+          // — refetch on the reload counter, never on the address tuple.
+          refreshToken={profileVersion}
+          onChanged={reloadCustomer}
+          canEdit
+        />
+      )}
+      {(c.satelliteUrl || c.address?.line1) && (
+        <div className="mb-5 rounded-md overflow-hidden border-hairline border-zinc-200 max-h-[200px]">
+          {c.satelliteUrl ? (
+            <img
+              src={c.satelliteUrl}
+              alt="Satellite view"
+              className="w-full h-[200px] object-cover"
+              onError={(e) => {
+                e.target.style.display = "none";
+              }}
+            />
+          ) : (
+            <a
+              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(formatAddress(c.address))}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block p-5 bg-zinc-50 text-center text-ui-body text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+            >
+              View on Google Maps
+            </a>
+          )}
+        </div>
+      )}
+      <div className="c360-property-grid grid grid-cols-2 gap-5">
+        {" "}
+        <div>
+          {" "}
+          <SectionTitle>Property Details</SectionTitle>
+          {[
+            ["Type", c.property?.type],
+            ["Lawn Type", c.property?.lawnType],
+            [
+              "Property Sqft",
+              c.property?.sqft
+                ? `${parseInt(c.property.sqft).toLocaleString()} sqft`
+                : null,
+            ],
+            [
+              "Lot Sqft",
+              c.property?.lotSqft
+                ? `${parseInt(c.property.lotSqft).toLocaleString()} sqft`
+                : null,
+            ],
+            ["Palm Count", c.property?.palmCount],
+            ["Pool", prefs.has_pool ? "Yes" : null],
+            ["Irrigation", prefs.has_irrigation ? "Yes" : null],
+          ].map(
+            ([label, val]) =>
+              val && (
+                <div
+                  key={label}
+                  className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60"
+                >
+                  {" "}
+                  <span className="text-ink-secondary">{label}</span>{" "}
+                  <span className="text-zinc-900 u-nums">{val}</span>{" "}
+                </div>
+              ),
+          )}
+        </div>{" "}
+        <div>
+          {" "}
+          <SectionTitle>Access &amp; Preferences</SectionTitle>
+          {[
+            ["Property Gate Code", prefs.property_gate_code],
+            ["Neighborhood Gate", prefs.neighborhood_gate_code],
+            ["Parking Instructions", prefs.parking_instructions],
+            ["Interior Access", prefs.interior_access_instructions],
+            ["Pet Details", prefs.pet_details],
+            ["Chemical Sensitivities", prefs.chemical_sensitivities],
+            ["Preferred Time", prefs.preferred_service_time],
+            ["Preferred Tech", prefs.preferred_technician],
+            ["Special Instructions", prefs.special_instructions],
+          ].map(
+            ([label, val]) =>
+              val && (
+                <div
+                  key={label}
+                  className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60 gap-2"
+                >
+                  {" "}
+                  <span className="text-ink-secondary flex-shrink-0">
+                    {label}
+                  </span>{" "}
+                  <span className="text-zinc-900 text-right max-w-[200px] break-words">
+                    {val}
+                  </span>{" "}
+                </div>
+              ),
+          )}
+        </div>{" "}
+      </div>{" "}
+    </div>
+  );
+}
+
+function CustomerProfileCompliance({
+  showLawnData,
+  compliance,
+  nutrientSummary,
+  nutrientLedger,
+  nutrientRows,
+}) {
+  return (
+    <div>
+      {" "}
+      {showLawnData && (
+        <>
+          <SectionTitle>Nutrient Ledger YTD</SectionTitle>{" "}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+            {" "}
+            <Card>
+              {" "}
+              <CardBody className="p-4">
+                {" "}
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
+                  Nitrogen
+                </div>{" "}
+                <div className="u-nums text-22 font-medium text-zinc-900">
+                  {fmtNumber(nutrientSummary.nApplied)}
+                </div>{" "}
+                <div className="text-ui-caption text-ink-secondary">
+                  lb N / 1k sqft
+                </div>{" "}
+              </CardBody>{" "}
+            </Card>{" "}
+            <Card>
+              {" "}
+              <CardBody className="p-4">
+                {" "}
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
+                  Phosphorus
+                </div>{" "}
+                <div className="u-nums text-22 font-medium text-zinc-900">
+                  {fmtNumber(nutrientSummary.pApplied)}
+                </div>{" "}
+                <div className="text-ui-caption text-ink-secondary">
+                  lb P / 1k sqft
+                </div>{" "}
+              </CardBody>{" "}
+            </Card>{" "}
+            <Card>
+              {" "}
+              <CardBody className="p-4">
+                {" "}
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
+                  Potassium
+                </div>{" "}
+                <div className="u-nums text-22 font-medium text-zinc-900">
+                  {fmtNumber(nutrientSummary.kApplied)}
+                </div>{" "}
+                <div className="text-ui-caption text-ink-secondary">
+                  lb K / 1k sqft
+                </div>{" "}
+              </CardBody>{" "}
+            </Card>{" "}
+            <Card>
+              {" "}
+              <CardBody className="p-4">
+                {" "}
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
+                  Entries
+                </div>{" "}
+                <div className="u-nums text-22 font-medium text-zinc-900">
+                  {nutrientSummary.entries || 0}
+                </div>{" "}
+                <div className="text-ui-caption text-ink-secondary">
+                  {nutrientLedger.year || new Date().getFullYear()}
+                </div>{" "}
+              </CardBody>{" "}
+            </Card>{" "}
+          </div>
+          {nutrientRows.length > 0 && (
+            <Table className="mb-5">
+
+              <THead>
+
+                <TR>
+
+                  <TH>Date</TH>
+                  <TH>Product</TH>
+                  <TH>Analysis</TH>
+                  <TH>N/P/K per 1k</TH>
+                  <TH>Blackout</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {nutrientRows.map((r) => (
+                  <TR key={r.id}>
+
+                    <TD>{fmtDate(r.application_date)}</TD>
+                    <TD className="text-zinc-900">{r.product_name}</TD>
+                    <TD className="u-nums">{r.analysis || "—"}</TD>
+                    <TD className="u-nums">
+                      {fmtNumber(r.n_applied_per_1000)} /{" "}
+                      {fmtNumber(r.p_applied_per_1000)} /{" "}
+                      {fmtNumber(r.k_applied_per_1000)}
+                    </TD>
+                    <TD>{r.blackout_status || "—"}</TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          )}
+        </>
+      )}
+      <SectionTitle>Application History ({compliance.length})</SectionTitle>
+      {compliance.length > 0 ? (
+        <Table className="mb-5">
+
+          <THead>
+
+            <TR>
+
+              <TH>Date</TH>
+              <TH>Product</TH>
+              <TH>Rate</TH>
+              <TH>Area</TH>
+              <TH>Technician</TH>
+            </TR>
+          </THead>
+          <TBody>
+            {compliance.map((r, i) => (
+              <TR key={i}>
+
+                <TD>{fmtDate(r.applied_at)}</TD>
+                <TD className="text-zinc-900">
+                  {r.product_name || r.product_id}
+                </TD>
+                <TD className="u-nums">
+                  {r.rate_per_1000_sqft
+                    ? `${r.rate_per_1000_sqft}/1k sqft`
+                    : "—"}
+                </TD>
+                <TD>{r.area_treated || "—"}</TD>
+                <TD>{r.technician_name || "—"}</TD>
+              </TR>
+            ))}
+          </TBody>
+        </Table>
+      ) : (
+        <div className="text-ui-body text-ink-secondary">No application records</div>
+      )}
+      {showLawnData && (
+        <Card className="mt-5">
+          {" "}
+          <CardBody className="p-4">
+            {" "}
+            <SectionTitle>Product usage</SectionTitle>{" "}
+            <div className="text-ui-label text-ink-secondary space-y-1">
+              {" "}
+              <div>
+                Celsius entries in the history shown:{" "}
+                <span className="u-nums text-zinc-900">
+                  {
+                    compliance.filter((r) =>
+                      (r.product_name || "").toLowerCase().includes("celsius"),
+                    ).length
+                  }
+                </span>
+              </div>{" "}
+              <div>
+                Total nitrogen applied YTD:{" "}
+                <span className="u-nums text-zinc-900">
+                  {fmtNumber(nutrientSummary.nApplied)}
+                </span>
+                lb N / 1k sqft
+              </div>{" "}
+            </div>{" "}
+          </CardBody>{" "}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function CustomerProfileTimeline({
+  isAdmin,
+  timelineError,
+  filteredTimeline,
+  setTimelineFilter,
+  timelineFilter,
+  retryTimeline,
+  timelineRetrying,
+}) {
+  return (
+    isAdmin && (
+      <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
+        {" "}
+        <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">
+          {" "}
+          <SectionTitle className="mb-0">
+            Timeline{!timelineError && ` (${filteredTimeline.length})`}
+          </SectionTitle>{" "}
+          <div className="flex gap-1 flex-wrap">
+            {[
+              {
+                key: "all",
+                label: "All",
+              },
+              {
+                key: "sms",
+                label: "SMS",
+              },
+              {
+                key: "call",
+                label: "Calls",
+              },
+              {
+                key: "service",
+                label: "Services",
+              },
+              {
+                key: "payment",
+                label: "Payments",
+              },
+              {
+                key: "notes",
+                label: "Notes",
+              },
+            ].map((f) => (
+              <button data-ui-text-action
+                key={f.key}
+                onClick={() => setTimelineFilter(f.key)}
+                disabled={timelineError}
+                className={cn(
+                  "h-6 px-2.5 text-ui-caption ui-label font-medium rounded-xs border-hairline u-focus-ring transition-colors",
+                  timelineFilter === f.key
+                    ? "bg-zinc-900 text-white border-zinc-900"
+                    : "bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-100",
+                )}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>{" "}
+        </div>{" "}
+        {/* On mobile the timeline grows inline (panel handles the scroll) so
+              a nested 250px scroll region doesn't trap touch; capped on desktop. */}
+        <div className="md:max-h-[250px] md:overflow-y-auto flex flex-col">
+          {filteredTimeline.slice(0, 30).map((item, i) => {
+            const TYPE_LABEL = {
+              sms: "SMS",
+              call: "CALL",
+              service: "SVC",
+              payment: "PAY",
+              review: "REV",
+              scheduled_service: "SCHED",
+              interaction: "NOTE",
+              activity: "ACT",
+            };
+            return (
+              <div
+                key={i}
+                className="flex gap-2.5 py-1.5 border-b border-hairline border-zinc-200/60 text-ui-label items-center"
+              >
+                {" "}
+                <Badge tone="neutral">
+                  {TYPE_LABEL[item.type] || "EVT"}
+                </Badge>{" "}
+                <div className="flex-1 min-w-0">
+                  {" "}
+                  <span className="font-medium text-zinc-900">
+                    {item.title}
+                  </span>
+                  {item.description && (
+                    <span className="text-ink-secondary ml-1.5">
+                      {item.description.substring(0, 80)}
+                    </span>
+                  )}
+                </div>{" "}
+                <span className="text-ink-secondary text-ui-caption u-nums flex-shrink-0">
+                  {timeAgo(item.date)}
+                </span>{" "}
+              </div>
+            );
+          })}
+          {timelineError && (
+            <div className="flex flex-col items-center gap-3 py-4">
+              <p role="alert" className="text-14 text-alert-fg">
+                Could not load customer history.
+              </p>
+              <Button
+                variant="secondary"
+                aria-label="Retry customer history"
+                onClick={retryTimeline}
+                disabled={timelineRetrying}
+              >
+                {timelineRetrying ? "Retrying…" : "Retry"}
+              </Button>
+            </div>
+          )}
+          {!timelineError && filteredTimeline.length === 0 && (
+            <div className="text-ink-secondary text-ui-label text-center py-4">
+              No timeline events
+            </div>
+          )}
+        </div>{" "}
+      </div>
+    )
+  );
+}
+
+function CustomerProfileMobileActions({
+  onClose,
+  c,
+  isAdmin,
+  openEditModal,
+  menuRef,
+  menuButtonRef,
+  setMenuOpen,
+  menuOpen,
+  setAnnualPrepayInvoiceOpen,
+  setAnnualPrepayOpen,
+  setActiveTab,
+  customerId,
+}) {
+  return (
+    <>
+      {/* Mobile sticky action bar (mirrors desktop pills) */}
+      {/* Mobile top action bar — rendered here as a sibling of the scrolling
+          .c360-panel (NOT inside it), exactly like the fixed bottom
+          CustomerActionBar below. iOS WebKit only honors position:fixed when
+          the element is NOT nested inside an overflow-scroll ancestor; #2125
+          set position:fixed but left this row inside .c360-panel, so on iOS
+          the Back / Text / Call / ⋯ row still scrolled out of reach and
+          wasn't tappable (it worked in desktop Chrome, which is why it
+          slipped through). Shown/hidden at the <=768px boundary via the
+          .c360-mobile-actionbar rule in the panel's <style> block (no
+          Tailwind md:hidden, which would blank it at exactly 768px / iPad
+          portrait). stopPropagation so taps on the bar (esp. the ⋯ menu)
+          don't bubble to the overlay's close handler. */}
+      <div
+        className="c360-mobile-actionbar fixed left-0 right-0 z-[1001] items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          // Track the Safari-bookmark visual viewport (keyboard / URL bar)
+          // like the AdminLayoutV2 header; 0px until the shell sets the var.
+          top: "var(--vv-offset-top, 0px)",
+          paddingTop: "calc(0.5rem + env(safe-area-inset-top, 0px))",
+        }}
+      >
+        {" "}
+        <button data-ui-text-action
+          onClick={onClose}
+          aria-label="Back"
+          className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+        >
+          {" "}
+          <ChevronLeft size={18} strokeWidth={1.75} />{" "}
+        </button>{" "}
+        <div className="flex items-center gap-2">
+          {c.phone && (
+            <a
+              href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+            >
+              Text
+            </a>
+          )}
+          {c.phone && (
+            <CallBridgeLink
+              phone={c.phone}
+              customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
+              styledButton
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+            >
+              Call
+            </CallBridgeLink>
+          )}
+          {isAdmin && (
+            <button data-ui-text-action
+              onClick={openEditModal}
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+            >
+              Edit
+            </button>
+          )}
+          <div ref={menuRef} className="relative">
+            {" "}
+            <button data-ui-text-action
+              ref={menuButtonRef}
+              onClick={() => setMenuOpen((v) => !v)}
+              aria-label="More"
+              aria-expanded={menuOpen}
+              className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+            >
+              {" "}
+              <MoreHorizontal size={18} strokeWidth={1.75} />{" "}
+            </button>
+            {menuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
+              >
+                {isAdmin && (
+                  <button data-ui-text-action
+                    role="menuitem"
+                    onClick={() => {
+                      menuButtonRef.current?.focus();
+                      openEditModal();
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Edit customer
+                  </button>
+                )}
+                {isAdmin && (
+                  <button data-ui-text-action
+                    role="menuitem"
+                    onClick={() => {
+                      menuButtonRef.current?.focus();
+                      setAnnualPrepayInvoiceOpen(true);
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Send prepay invoice
+                  </button>
+                )}
+                {isAdmin && (
+                  <button data-ui-text-action
+                    role="menuitem"
+                    onClick={() => {
+                      menuButtonRef.current?.focus();
+                      setAnnualPrepayOpen(true);
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Record collected prepay
+                  </button>
+                )}
+                <button data-ui-text-action
+                  role="menuitem"
+                  onClick={() => {
+                    setActiveTab("comms");
+                    setMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                >
+                  Add note
+                </button>{" "}
+              </div>
+            )}
+          </div>{" "}
+        </div>{" "}
+      </div>{" "}
+      <CustomerActionBar
+        customer={{
+          id: customerId,
+          phone: c.phone,
+          email: c.email,
+          firstName: c.firstName,
+          lastName: c.lastName,
+          address: c.address
+            ? [
+                c.address.line1,
+                c.address.line2,
+                c.address.city,
+                c.address.state,
+                c.address.zip,
+              ]
+                .filter(Boolean)
+                .join(", ")
+            : "",
+        }}
+        standalone
+      />
+    </>
+  );
+}
+
+function CustomerProfileEditor({
+  editOpen,
+  savingEdit,
+  setEditOpen,
+  editModalRef,
+  editForm,
+  setEditForm,
+  editAddressRef,
+  editErr,
+  deletingCustomer,
+  setDeletingCustomer,
+  setEditErr,
   customerId,
   onClose,
-  onSelectCustomer,
-  initialTab = "overview",
-  initialScheduledServiceId = null,
-  embedded = false,
+  setSavingEdit,
+  initialEditForm,
+  reloadCustomer,
 }) {
+  const density = useUiDensity();
+  return (
+    editOpen && (
+      <div
+        className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!savingEdit) setEditOpen(false);
+        }}
+      >
+        {" "}
+        <div
+          ref={editModalRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Edit customer"
+          className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {" "}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
+            {" "}
+            <div className="text-15 font-medium text-zinc-900">
+              Edit customer
+            </div>{" "}
+            <button data-ui-text-action
+              onClick={() => !savingEdit && setEditOpen(false)}
+              aria-label="Close"
+              className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
+            >
+              ×
+            </button>{" "}
+          </div>{" "}
+          <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {[
+              { key: "firstName", label: "First name" },
+              { key: "lastName", label: "Last name" },
+              { key: "email", label: "Email", type: "email" },
+              { key: "phone", label: "Phone", type: "tel" },
+              { key: "profileLabel", label: "Property label", full: true },
+              { key: "addressLine1", label: "Address", full: true },
+              { key: "addressLine2", label: "Address line 2", full: true },
+              { key: "city", label: "City" },
+              { key: "state", label: "State" },
+              { key: "zip", label: "ZIP" },
+              { key: "monthlyRate", label: "Monthly rate", type: "number" },
+            ].map((f) => (
+              <div key={f.key} className={f.full ? "sm:col-span-2" : ""}>
+                {" "}
+                <label htmlFor={`customer-edit-${f.key}`} className="ui-label text-ink-secondary block mb-1">
+                  {f.label}
+                </label>{" "}
+                {f.key === "addressLine1" ? (
+                  <AddressAutocomplete
+                    id="customer-edit-addressLine1"
+                    aria-label="Address"
+                    enabled={
+                      import.meta.env.VITE_GATE_ADMIN_ADDRESS_AUTOCOMPLETE ===
+                      "true"
+                    }
+                    appearance="admin"
+                    geocodeOnBlur={false}
+                    placeholder="Start typing an address…"
+                    value={editForm.addressLine1}
+                    onChange={(value) =>
+                      setEditForm((p) => ({ ...p, addressLine1: value }))
+                    }
+                    onSelect={(parts) => {
+                      const previous = editAddressRef.current;
+                      editAddressRef.current = {
+                        line1: parts.line1 || editForm.addressLine1,
+                        city: parts.city || editForm.city,
+                        state: parts.state || editForm.state,
+                        zip: parts.zip || editForm.zip,
+                      };
+                      setEditForm((p) => ({
+                        ...p,
+                        addressLine1: parts.line1 || p.addressLine1,
+                        addressLine2:
+                          parts.line2 ||
+                          (!previous || sameAutocompleteAddress(previous, parts)
+                            ? p.addressLine2
+                            : ""),
+                        city: parts.city || p.city,
+                        state: parts.state || p.state,
+                        zip: parts.zip || p.zip,
+                      }));
+                      document
+                        .getElementById("customer-edit-addressLine2")
+                        ?.focus();
+                    }}
+                    className={inputStyles({ density, className: "w-full h-10 px-2.5 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring" })}
+                  />
+                ) : (
+                  <Input
+                    id={`customer-edit-${f.key}`}
+                    aria-label={f.label}
+                    type={f.type || "text"}
+                    value={editForm[f.key] ?? ""}
+                    onChange={(e) =>
+                      setEditForm((p) => ({ ...p, [f.key]: e.target.value }))
+                    }
+                    className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                  />
+                )}{" "}
+              </div>
+            ))}
+            <div>
+              {" "}
+              <label htmlFor="c360-edit-tier" className="ui-label text-ink-secondary block mb-1">
+                Tier
+              </label>{" "}
+              <Select id="c360-edit-tier"
+                value={editForm.tier || ""}
+                onChange={(e) =>
+                  setEditForm((p) => ({ ...p, tier: e.target.value }))
+                }
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              >
+                {" "}
+                <option value="">No Plan</option>{" "}
+                <option value="Platinum">Platinum</option>{" "}
+                <option value="Gold">Gold</option>{" "}
+                <option value="Silver">Silver</option>{" "}
+                <option value="Bronze">Bronze</option>{" "}
+                <option value="One-Time">One-Time</option>{" "}
+              </Select>{" "}
+            </div>{" "}
+            <div>
+              {" "}
+              <label
+                className="ui-label text-ink-secondary block mb-1"
+                htmlFor="c360-edit-contact-role"
+              >
+                Contact role
+              </label>{" "}
+              <Select
+                id="c360-edit-contact-role"
+                value={editForm.contactRole || ""}
+                onChange={(e) =>
+                  setEditForm((p) => ({ ...p, contactRole: e.target.value }))
+                }
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              >
+                {CONTACT_ROLE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </Select>{" "}
+            </div>{" "}
+            <div>
+              {" "}
+              <label htmlFor="c360-edit-stage" className="ui-label text-ink-secondary block mb-1">
+                Stage
+              </label>{" "}
+              <Select id="c360-edit-stage"
+                value={editForm.pipelineStage || ""}
+                onChange={(e) =>
+                  setEditForm((p) => ({
+                    ...p,
+                    pipelineStage: e.target.value,
+                  }))
+                }
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              >
+                {Object.entries(STAGE_LABELS).map(([k, label]) => (
+                  <option key={k} value={k}>
+                    {label}
+                  </option>
+                ))}
+              </Select>{" "}
+            </div>{" "}
+          </div>
+          {editErr && (
+            <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
+              {editErr}
+            </div>
+          )}
+          <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
+            {" "}
+            <button data-ui-text-action
+              type="button"
+              onClick={async () => {
+                if (deletingCustomer || savingEdit) return;
+                const name =
+                  [editForm.firstName, editForm.lastName]
+                    .filter(Boolean)
+                    .join(" ")
+                    .trim() || "this customer";
+                const ok = window.confirm(
+                  `Delete ${name}?\n\nThis removes them from the active customer list. Their history (services, invoices, payments) is preserved and can be restored.`,
+                );
+                if (!ok) return;
+                setDeletingCustomer(true);
+                setEditErr("");
+                try {
+                  await adminFetch(`/admin/customers/${customerId}`, {
+                    method: "DELETE",
+                  });
+                  setEditOpen(false);
+                  onClose?.();
+                } catch (e) {
+                  setEditErr(e.message || "Delete failed");
+                }
+                setDeletingCustomer(false);
+              }}
+              disabled={deletingCustomer || savingEdit}
+              aria-label="Delete customer"
+              title="Delete this customer (soft-delete, restorable)"
+              className="inline-flex items-center justify-center h-9 w-9 border-hairline border-alert-fg/60 rounded-sm text-alert-fg bg-white hover:bg-alert-bg disabled:opacity-50 disabled:cursor-not-allowed u-focus-ring"
+            >
+              {" "}
+              <Trash2 size={16} strokeWidth={1.75} />{" "}
+            </button>{" "}
+            <div className="flex gap-2">
+              {" "}
+              <Button
+                variant="secondary"
+                onClick={() => setEditOpen(false)}
+                disabled={savingEdit || deletingCustomer}
+              >
+                Cancel
+              </Button>{" "}
+              <Button
+                onClick={async () => {
+                  setSavingEdit(true);
+                  setEditErr("");
+                  try {
+                    // Keep address resaves for the server's mirror repair, but
+                    // don't re-submit unchanged contacts or billing settings:
+                    // legacy shared contacts can block an unrelated city edit.
+                    const addressFields = [
+                      "addressLine1",
+                      "addressLine2",
+                      "city",
+                      "state",
+                      "zip",
+                    ];
+                    const payload = Object.fromEntries(
+                      Object.entries(editForm).filter(
+                        ([key, value]) =>
+                          addressFields.includes(key) ||
+                          value !== initialEditForm.current[key],
+                      ),
+                    );
+                    if ("monthlyRate" in payload)
+                      payload.monthlyRate =
+                        payload.monthlyRate === ""
+                          ? null
+                          : parseFloat(payload.monthlyRate);
+                    if ("tier" in payload) payload.tier = payload.tier || null;
+                    if ("contactRole" in payload)
+                      payload.contactRole = payload.contactRole || null;
+                    await adminFetch(`/admin/customers/${customerId}`, {
+                      method: "PUT",
+                      body: JSON.stringify(payload),
+                    });
+                    await reloadCustomer();
+                    setEditOpen(false);
+                  } catch (e) {
+                    setEditErr(e.body?.message || e.message || "Save failed");
+                  }
+                  setSavingEdit(false);
+                }}
+                disabled={savingEdit || deletingCustomer}
+              >
+                {savingEdit ? "Saving…" : "Save"}
+              </Button>{" "}
+            </div>{" "}
+          </div>{" "}
+        </div>{" "}
+      </div>
+    )
+  );
+}
+
+function CustomerBillingPause({
+  c,
+  isAdmin,
+  resumeBilling,
+  resumingBilling,
+  resumeBillingErr,
+  resumeBillingNote,
+}) {
+  const copy =
+    c.servicePauseReason === "autopay_final_failure"
+      ? {
+          reason: " — autopay failed three times",
+          policy:
+            "The pause clears on its own when a payment from this customer succeeds; clearing",
+        }
+      : {
+          reason: "",
+          policy:
+            "This pause was set manually and only clears manually; clearing",
+        };
+  return (
+    <>
+      {" "}
+      {c.servicePausedAt && (
+        <div role="alert" className="mb-3 rounded border border-hairline p-2.5">
+          <div className="text-ui-label font-medium text-alert-fg">
+            {/* servicePausedOn is the ET calendar date; the raw
+                            servicePausedAt timestamp would render in the
+                            browser's timezone and land on the wrong day. */}
+            Billing paused since{" "}
+            {fmtDate(c.servicePausedOn || c.servicePausedAt)}
+          </div>
+          <div className="text-ui-label text-ink-secondary mt-0.5">
+            Monthly dues are not being collected
+            {copy.reason}. Visits are unaffected. {copy.policy} it removes this
+            block only — other billing guards (autopay state, plan type, prepaid
+            coverage) still apply — and the paused months are never back-billed.
+          </div>
+          {isAdmin && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="mt-2"
+              onClick={resumeBilling}
+              disabled={resumingBilling}
+            >
+              {resumingBilling ? "Clearing…" : "Clear billing pause"}
+            </Button>
+          )}
+          {resumeBillingErr && (
+            <div className="text-ui-label text-alert-fg mt-1">{resumeBillingErr}</div>
+          )}
+        </div>
+      )}
+      {/* Outside the banner: the pause is cleared by now, so the
+                      banner is gone, but dues still will not run and that is
+                      the whole reason someone clicked. */}
+      {resumeBillingNote && (
+        <div
+          role="status"
+          className="mb-3 rounded border border-hairline p-2.5 text-ui-label text-ink-secondary"
+        >
+          {resumeBillingNote}
+        </div>
+      )}
+    </>
+  );
+}
+
+function CustomerBillingSummary({
+  embedded,
+  c,
+  isAdmin,
+  resumeBilling,
+  resumingBilling,
+  resumeBillingErr,
+  resumeBillingNote,
+  balanceOwed,
+  cards,
+  payments,
+  displayedAnnualPrepayTerm,
+  setAnnualPrepayOpen,
+  data,
+  invoices,
+}) {
+  return (
+    <div className="c360-overview-billing">
+      {" "}
+      <SectionTitle>
+        {embedded ? "Billing status & prepay" : "Billing Summary"}
+      </SectionTitle>{" "}
+      <CustomerBillingPause
+        c={c}
+        isAdmin={isAdmin}
+        resumeBilling={resumeBilling}
+        resumingBilling={resumingBilling}
+        resumeBillingErr={resumeBillingErr}
+        resumeBillingNote={resumeBillingNote}
+      />
+      {!embedded && (
+        <>
+          <div className="grid grid-cols-2 gap-2 mb-3">
+            {" "}
+            <StatCardV2
+              label="Open balance"
+              value={fmtCurrency(balanceOwed)}
+              alert={balanceOwed > 0}
+            />{" "}
+            <StatCardV2
+              label="Lifetime Rev"
+              value={fmtCurrency(c.lifetimeRevenue)}
+            />{" "}
+          </div>
+          <div className="text-ui-label text-ink-secondary mb-1.5">
+            {cards.length > 0
+              ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
+              : "No card on file"}
+          </div>
+          <div className="mb-3">
+            <SectionTitle>Recent Transactions ({payments.length})</SectionTitle>
+            {payments.length > 0 ? (
+              payments.slice(0, 3).map((p, i) => {
+                // Grey only FULLY refunded rows — a partial refund
+                // still holds collected money (status stays 'paid') —
+                // but flag partials with a chip so the gross amount
+                // doesn't read as fully collected.
+                const rowRefund = paymentRefundState(p);
+                const isRefund = rowRefund.full;
+                // Non-collected rows (upcoming/processing/failed) were
+                // indistinguishable from paid ones, so the list read as
+                // more collected revenue than Lifetime Rev counts.
+                const isCollected = !p.status || p.status === "paid";
+                return (
+                  <div
+                    key={i}
+                    className="py-1 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
+                  >
+                    {" "}
+                    <span
+                      className={cn(
+                        "u-nums flex-shrink-0",
+                        isRefund || !isCollected
+                          ? "text-ink-secondary"
+                          : "text-zinc-900",
+                      )}
+                    >
+                      {fmtCurrency(p.amount)}
+                    </span>{" "}
+                    {(rowRefund.partial || (!isCollected && !isRefund)) && (
+                      <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-ui-caption text-ink-secondary uppercase">
+                        {rowRefund.partial
+                          ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
+                          : p.status}
+                      </span>
+                    )}{" "}
+                    <span className="text-ink-secondary truncate">
+                      {p.card_brand
+                        ? `${p.card_brand} …${p.last_four}`
+                        : p.method || p.processor || ""}
+                    </span>{" "}
+                    <span className="text-ink-secondary flex-shrink-0">
+                      {fmtDateOnly(p.payment_date)}
+                    </span>{" "}
+                  </div>
+                );
+              })
+            ) : (
+              <div className="text-ui-label text-ink-secondary">
+                No transactions yet
+              </div>
+            )}
+          </div>
+        </>
+      )}
+      {displayedAnnualPrepayTerm && (
+        <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
+          <div className="text-ui-label font-medium text-zinc-900">
+            {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
+          </div>
+          <div className="text-ui-caption text-ink-secondary mt-0.5">
+            Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
+            {" · "}
+            {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
+            {displayedAnnualPrepayTerm.lastScheduledServiceDate
+              ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
+              : ""}
+          </div>
+          {displayedAnnualPrepayTerm.renewalDecision && (
+            <div className="text-ui-caption text-ink-secondary mt-0.5">
+              Decision:{" "}
+              {displayedAnnualPrepayTerm.renewalDecision.replace("_", " ")}
+            </div>
+          )}
+        </div>
+      )}
+      {isAdmin && !embedded && (
+        <Button
+          size="sm"
+          onClick={() => setAnnualPrepayOpen(true)}
+          className="mb-3"
+        >
+          Record prepay already collected
+        </Button>
+      )}
+      {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
+        <div className="mb-3">
+          <SectionTitle>Prepaid Plans</SectionTitle>
+          {data.prepaidPlans.map((plan) => {
+            const active = plan.remainingVisits > 0;
+            return (
+              <div
+                key={plan.seriesParentId}
+                className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-ui-label font-medium text-zinc-900 truncate">
+                    {plan.serviceType}
+                    {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
+                  </div>
+                  <Badge tone={active ? "strong" : "neutral"}>
+                    {active ? "Active" : "Used"}
+                  </Badge>
+                </div>
+                <div className="text-ui-caption text-ink-secondary mt-1">
+                  {plan.usedVisits} of {plan.paidVisits} used
+                  {active ? ` · ${plan.remainingVisits} remaining` : ""}
+                  {" · "}${plan.perVisitAmount.toFixed(2)}/visit
+                </div>
+                <div className="text-ui-caption text-ink-secondary mt-0.5">
+                  Total ${plan.seriesTotal.toFixed(2)}
+                  {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
+                  {plan.nextVisitDate
+                    ? ` · next ${fmtDate(plan.nextVisitDate)}`
+                    : ""}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!embedded && (
+        <>
+          <SectionTitle>Recent Invoices</SectionTitle>
+          {invoices.slice(0, 3).map((inv, i) => (
+            <div
+              key={i}
+              className="py-1 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between"
+            >
+              {" "}
+              <span className="u-nums text-zinc-900">
+                {fmtCurrency(inv.amount_due)}
+              </span>{" "}
+              <span
+                className={cn(
+                  "font-medium ui-label text-ui-caption",
+                  INVOICE_STATUS_TEXT[invoiceStatusTone(inv)],
+                )}
+              >
+                {inv.status}
+              </span>{" "}
+              <span className="text-ink-secondary">
+                {fmtDate(inv.created_at)}
+              </span>{" "}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function CustomerPayerEditor({ c, isAdmin, payer }) {
+  const {
+    payerSaving,
+    handlePayerSelect,
+    payers,
+    showNewPayer,
+    newPayer,
+    setNewPayer,
+    newPayerError,
+    saveNewPayer,
+    newPayerSaving,
+    setShowNewPayer,
+    setNewPayerError,
+    newPayerNotice,
+  } = payer;
+  return (
+    <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+      <div className="text-ui-caption ui-label text-ink-tertiary mb-1">
+        Default Bill-To (third-party payer)
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <Select
+          aria-label="Default bill-to"
+          value={c.payerId ? String(c.payerId) : ""}
+          disabled={payerSaving || !isAdmin}
+          onChange={(e) => handlePayerSelect(e.target.value)}
+          className="h-9 px-3 text-ui-body bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
+        >
+          <option value="">Customer pays (self)</option>
+          {payers.map((p) => (
+            <option key={p.id} value={String(p.id)}>
+              {p.display_name}
+              {p.company_name && p.company_name !== p.display_name
+                ? ` — ${p.company_name}`
+                : ""}
+            </option>
+          ))}
+          {isAdmin && <option value="__new__">＋ New payer…</option>}
+        </Select>
+        {payerSaving && (
+          <span className="text-ui-label text-ink-tertiary">Saving…</span>
+        )}
+      </div>
+      {showNewPayer && isAdmin && (
+        <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
+          <div className="text-ui-label font-medium text-zinc-900 mb-2">
+            New payer
+          </div>
+          {[
+            {
+              key: "displayName",
+              label: "Payer name *",
+              type: "text",
+              placeholder: "e.g. tenant, builder, or property manager name",
+            },
+            { key: "companyName", label: "Company (optional)", type: "text" },
+            {
+              key: "apEmail",
+              label: "Invoice email (AP)",
+              type: "email",
+              placeholder: "Where this payer's invoices are emailed",
+            },
+            { key: "apPhone", label: "Phone (optional)", type: "tel" },
+          ].map((field) => (
+            <div key={field.key}>
+              <label
+                className={
+                  field.key === "apEmail" ? "block mb-1" : "block mb-2"
+                }
+              >
+                <span className="ui-label text-ink-tertiary block mb-1">
+                  {field.label}
+                </span>
+                <Input
+                  type={field.type}
+                  value={newPayer[field.key]}
+                  onChange={(e) =>
+                    setNewPayer((p) => ({ ...p, [field.key]: e.target.value }))
+                  }
+                  placeholder={field.placeholder}
+                  className="w-full h-9 px-3 text-ui-body bg-white border-hairline border-zinc-300 rounded-sm"
+                />
+              </label>
+              {field.key === "apEmail" && (
+                <div className="text-ui-label text-ink-secondary mb-2">
+                  Without an email, invoices to this payer can’t be delivered
+                  until one is added in Finance → Payers.
+                </div>
+              )}
+            </div>
+          ))}
+          {newPayerError && (
+            <div className="text-ui-label text-alert-fg mb-2">{newPayerError}</div>
+          )}
+          <div className="flex items-center gap-2">
+            <button data-ui-text-action
+              type="button"
+              onClick={saveNewPayer}
+              disabled={newPayerSaving || !newPayer.displayName.trim()}
+              className="h-9 px-3 text-ui-body font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
+            >
+              {newPayerSaving ? "Saving…" : "Create & select"}
+            </button>
+            <button data-ui-text-action
+              type="button"
+              onClick={() => {
+                setShowNewPayer(false);
+                setNewPayerError("");
+              }}
+              className="h-9 px-3 text-ui-body text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {newPayerNotice && (
+        <div className="text-ui-label text-ink-secondary mt-1.5">
+          {newPayerNotice}
+        </div>
+      )}
+      <div className="text-ui-label text-ink-secondary mt-1.5">
+        Routes every invoice for this account to a builder / property manager
+        instead of the customer. A single job can override this on the
+        appointment. Manage payers in Finance → Payers.
+      </div>
+    </div>
+  );
+}
+function CustomerRecipientDetails({
+  c,
+  payer,
+  recipientRoutesDiffer,
+  isAdmin,
+  recipientPrefsDraft,
+  setRecipientPrefsDraft,
+  saveRecipientPrefs,
+  recipientPrefsSaving,
+  recipientPrefsDirty,
+  recipientPrefsErr,
+  embedded,
+  notificationPrefs,
+  updateNotificationPrefs,
+}) {
+  return (
+    <div className="mt-4">
+      {" "}
+      <SectionTitle>Contacts &amp; Recipients</SectionTitle>
+      <p className="text-14 text-ink-secondary">
+        Account contact: {[c.firstName, c.lastName].filter(Boolean).join(" ")}
+        {c.email ? ` · ${c.email}` : " · No email on file"}
+      </p>
+      <details
+        className="c360-recipient-overrides"
+        open={recipientRoutesDiffer}
+      >
+        <summary>View routing & override recipients</summary>
+        <CustomerPayerEditor c={c} isAdmin={isAdmin} payer={payer} />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+          {[
+            {
+              label: "Account owner / payer",
+              names: [
+                [c.firstName, c.lastName].filter(Boolean).join(" "),
+                c.companyName,
+                "Customer",
+              ],
+              contacts: [c.email, "No email"],
+            },
+            {
+              label: "On-location contact",
+              names: [c.serviceContactName, "Primary customer"],
+              contacts: [
+                c.serviceContactEmail,
+                c.serviceContactPhone,
+                c.email,
+                "No contact",
+              ],
+            },
+            {
+              label: "Invoice email",
+              names: [
+                recipientPrefsDraft.billingContactName,
+                "Billing recipient",
+              ],
+              contacts: [recipientPrefsDraft.billingEmail, c.email, "No email"],
+            },
+          ].map(({ label, names, contacts }) => (
+            <div
+              key={label}
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm"
+            >
+              <div className="text-ui-caption ui-label text-ink-tertiary">
+                {label}
+              </div>
+              <div className="text-ui-label font-medium text-zinc-900 mt-1">
+                {names.find(Boolean)}
+              </div>
+              <div className="text-ui-label text-ink-secondary break-all">
+                {contacts.find(Boolean)}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+          <label className="block">
+            <span className="ui-label text-ink-tertiary block mb-1">
+              Billing contact name
+            </span>
+            <Input
+              id="c360-billing-contact-name"
+              name="billingContactName"
+              value={recipientPrefsDraft.billingContactName}
+              disabled={!isAdmin}
+              onChange={(e) =>
+                setRecipientPrefsDraft((prev) => ({
+                  ...prev,
+                  billingContactName: e.target.value,
+                }))
+              }
+              placeholder="Landlord, AP contact, property manager"
+              className="block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+            />
+          </label>
+          <label className="block">
+            <span className="ui-label text-ink-tertiary block mb-1">
+              Billing recipient email
+            </span>
+            <Input
+              id="c360-billing-recipient-email"
+              name="billingEmail"
+              value={recipientPrefsDraft.billingEmail}
+              disabled={!isAdmin}
+              onChange={(e) =>
+                setRecipientPrefsDraft((prev) => ({
+                  ...prev,
+                  billingEmail: e.target.value,
+                }))
+              }
+              type="email"
+              placeholder={c.email || "billing@example.com"}
+              className="block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+            />
+          </label>
+        </div>
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="text-ui-label text-ink-secondary">
+            Invoices and receipts use the billing email when set. Appointment
+            reminders and service reports use the on-location contact when
+            present.
+          </div>
+          <Button
+            onClick={saveRecipientPrefs}
+            disabled={recipientPrefsSaving || !isAdmin || !recipientPrefsDirty}
+            className="shrink-0"
+          >
+            {recipientPrefsSaving
+              ? "Saving…"
+              : recipientPrefsDirty
+                ? "Save recipients"
+                : "Recipients saved"}
+          </Button>
+        </div>
+        {recipientPrefsErr && (
+          <div className="mb-3 text-ui-label text-alert-fg">{recipientPrefsErr}</div>
+        )}
+        {!embedded &&
+          [
+            {
+              id: "c360-appointment-notify-primary",
+              name: "appointmentNotifyPrimary",
+              key: "appointment_notify_primary",
+              defaultOn: true,
+              title: <>Also send appointment SMS to the account owner</>,
+              description: (
+                <>
+                  On by default. On-location contacts receive appointment
+                  reminders too. Turn this off only if the account owner should
+                  stop receiving them.
+                </>
+              ),
+            },
+            {
+              id: "c360-service-report-notify-primary",
+              name: "serviceReportNotifyPrimary",
+              key: "service_report_notify_primary",
+              defaultOn: true,
+              title: <>Also email service reports to the account owner</>,
+              description: (
+                <>
+                  On by default. Turn this off only if the account owner should
+                  stop receiving reports — a distinct service-contact email then
+                  receives them instead.
+                </>
+              ),
+            },
+            {
+              id: "c360-service-report-notify-billing",
+              name: "serviceReportNotifyBilling",
+              key: "service_report_notify_billing",
+              defaultOn: false,
+              title: <>Also email service reports to the billing recipient</>,
+              description: (
+                <>
+                  Copies the billing recipient email (landlord, AP contact) on
+                  post-service reports. Requires a billing recipient email
+                  above; invoices are unaffected.
+                </>
+              ),
+            },
+            {
+              id: "c360-auto-flip-en-route",
+              name: "autoFlipEnRoute",
+              key: "auto_flip_en_route",
+              defaultOn: true,
+              title: <>Auto-flip en route SMS</>,
+              description: (
+                <>
+                  When the tech&apos;s vehicle leaves a previous job area and
+                  the next job is this customer, fire the &quot;on the way&quot;
+                  SMS automatically. Off here = customer keeps manual en-route
+                  SMS but skips auto-flip.
+                </>
+              ),
+            },
+          ].map((field) => (
+            <label
+              key={field.key}
+              className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer"
+            >
+              <input
+                id={field.id}
+                name={field.name}
+                type="checkbox"
+                disabled={!isAdmin}
+                className="mt-0.5"
+                checked={
+                  field.defaultOn
+                    ? notificationPrefs[field.key] !== false
+                    : notificationPrefs[field.key] === true
+                }
+                onChange={(e) =>
+                  updateNotificationPrefs({
+                    [field.name]: e.target.checked,
+                    [field.key]: e.target.checked,
+                  })
+                }
+              />
+              <div>
+                <div className="text-ui-label font-medium text-zinc-900">
+                  {field.title}
+                </div>
+                <div className="text-ui-label text-ink-secondary">
+                  {field.description}
+                </div>
+              </div>
+            </label>
+          ))}
+      </details>
+    </div>
+  );
+}
+
+function CustomerConversation({
+  customerId,
+  comms,
+  commsLoading,
+  commsErr,
+  embedded,
+  commsLoaded,
+  c,
+  commsComposerReady,
+  isAdmin,
+  messageOpen,
+  linkRequest,
+  commsReadScope,
+  setCommsLoaded,
+  reloadCustomer,
+  retryTimeline,
+  smsReply,
+  setSmsReply,
+  smsErr,
+  setSmsErr,
+  sendSms,
+  sendingSms,
+  recipientDetails,
+  data,
+}) {
+  const interactions = data.interactions || [];
+  return (
+    <div className="c360-conversation flex flex-col">
+      {" "}
+      <OwedCommitmentsSummary customerId={customerId} />
+      {!embedded && (
+        <OwedCommitmentsSummary customerId={customerId} source="sms" />
+      )}
+      <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
+      <div className="flex flex-col gap-1.5 mb-3">
+        {commsLoading && (
+          <div className="text-ink-secondary text-ui-body text-center py-5">
+            Loading messages…
+          </div>
+        )}
+        {commsErr && (
+          <div className="text-alert-fg text-ui-body text-center py-5">
+            {commsErr}
+          </div>
+        )}
+        {[...comms].reverse().map((message, i) => {
+          const Message =
+            message.channel === "sms"
+              ? CustomerSmsMessage
+              : CustomerCallMessage;
+          return (
+            <Message
+              key={message.id || i}
+              message={message}
+              embedded={embedded}
+            />
+          );
+        })}
+        {!commsLoading && !commsErr && commsLoaded && comms.length === 0 && (
+          <div className="text-ink-secondary text-ui-body text-center py-5">
+            No messages
+          </div>
+        )}
+      </div>
+      {embedded && c.phone && (commsComposerReady || !isAdmin) && (
+        <Suspense
+          fallback={
+            <p className="py-3 text-14 text-ink-secondary">
+              Loading message tools…
+            </p>
+          }
+        >
+          <CustomerSmsComposer
+            key={`${c.id}:${c.phone}`}
+            active={messageOpen}
+            linkRequest={linkRequest}
+            customer={c}
+            customerMessages={comms}
+            customerReadScope={commsReadScope}
+            onSent={async () => {
+              setCommsLoaded(false);
+              await Promise.allSettled([
+                reloadCustomer(),
+                ...(isAdmin ? [retryTimeline()] : []),
+              ]);
+            }}
+          />
+        </Suspense>
+      )}
+      {!embedded && c.phone && (
+        <div className="py-3 border-t border-hairline border-zinc-200">
+          {" "}
+          <div className="flex gap-2">
+            {" "}
+            <Input
+              id="c360-sms-reply"
+              name="smsReply"
+              value={smsReply}
+              onChange={(e) => {
+                setSmsReply(e.target.value);
+                if (smsErr) setSmsErr("");
+              }}
+              placeholder="Type a message…"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendSms();
+                }
+              }}
+              className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-ui-body text-zinc-900 u-focus-ring"
+            />{" "}
+            <Button onClick={sendSms} disabled={sendingSms || !smsReply.trim()}>
+              {sendingSms ? "…" : "Send"}
+            </Button>{" "}
+          </div>
+          {smsErr && (
+            <div className="mt-1.5 text-ui-label text-alert-fg">{smsErr}</div>
+          )}
+        </div>
+      )}
+      {!embedded && recipientDetails}
+      {!embedded && (
+        <div className="mt-4">
+          {" "}
+          <SectionTitle>
+            Notes &amp; Interactions ({interactions.length})
+          </SectionTitle>
+          {interactions.slice(0, 10).map((n, i) => (
+            <div
+              key={i}
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-ui-label"
+            >
+              {" "}
+              <div className="flex justify-between mb-1">
+                {" "}
+                <span className="font-medium text-zinc-900">
+                  {n.interaction_type}: {n.subject}
+                </span>{" "}
+                <span className="text-ink-secondary text-ui-caption">
+                  {timeAgo(n.created_at)}
+                </span>{" "}
+              </div>
+              {n.body && (
+                <div className="text-ink-secondary">
+                  {n.body.substring(0, 200)}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CustomerProfileStyles() {
+  return (
+    <style>{`
+          @media (max-width: 768px) {
+            .c360-overview-grid { grid-template-columns: 1fr !important; }
+            .c360-billing-grid { grid-template-columns: 1fr 1fr !important; }
+            .c360-property-grid { grid-template-columns: 1fr !important; }
+            .c360-panel { width: 100% !important; max-width: 100% !important; }
+            .c360-header-desktop { display: none !important; }
+            .c360-header-mobile { display: block !important; }
+            .c360-mobile-actionbar { display: flex !important; }
+            .c360-mobile-footer-spacer { display: block !important; }
+          }
+          .c360-header-mobile { display: none; }
+          .c360-mobile-actionbar { display: none; }
+          .c360-mobile-footer-spacer { display: none; }
+        `}</style>
+  );
+}
+function CustomerProfileActionError({ error }) {
+  return (
+    error && (
+      <ActionFeedback
+        error
+        className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm"
+      >
+        {error}
+      </ActionFeedback>
+    )
+  );
+}
+
+// The record state remains in Customer360ProfileV2. These presentations own
+// section membership and DOM placement, so opening a drawer never remounts it.
+function CustomerWorkspacePresentation({
+  panelRef,
+  headerPast,
+  headerProps,
+  activeTab,
+  tabsAnchorRef,
+  profileContentId,
+  workspaceSections,
+  sections,
+  messageOpened,
+  messageOpen,
+  setMessageOpen,
+  hasLawnHistory,
+  hasCompliance,
+  profileActionErr,
+  dialogs,
+}) {
+  const {
+    c,
+    isAdmin,
+    unreadConversations,
+    openEditModal,
+    changeWorkspaceTab,
+    openMessages,
+    setLinkRequest,
+    menuOpen,
+    setMenuOpen,
+    menuRef,
+    customerId,
+  } = headerProps;
+  return (
+    <UiSurface density="comfortable" className="c360-embedded">
+      <div
+        ref={panelRef}
+        onClick={(e) => e.stopPropagation()}
+        className={cn(
+          "c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900",
+          headerPast && "c360-header-past",
+        )}
+      >
+        <CustomerProfileStyles />
+        <CustomerWorkspaceHeader
+          c={c}
+          isAdmin={isAdmin}
+          unreadConversations={unreadConversations}
+          onEdit={openEditModal}
+          onTab={changeWorkspaceTab}
+          onMessage={openMessages}
+          onSendLink={() => {
+            setLinkRequest((value) => value + 1);
+            openMessages();
+          }}
+          menuOpen={menuOpen}
+          setMenuOpen={setMenuOpen}
+          menuRef={menuRef}
+        />
+        <CustomerWorkspaceNavigation
+          tabsAnchorRef={tabsAnchorRef}
+          c={c}
+          activeTab={activeTab}
+          changeWorkspaceTab={changeWorkspaceTab}
+          profileContentId={profileContentId}
+          workspaceSections={workspaceSections}
+        />
+        <div
+          className="c360-tab-content p-6 flex-1"
+          id={profileContentId}
+          role="tabpanel"
+          aria-label={
+            CUSTOMER_WORKSPACE_SECTIONS.find(
+              (section) => section.key === activeTab,
+            )?.label
+          }
+        >
+          <CustomerProfileActionError error={profileActionErr} />
+          {activeTab === "overview" && sections.overview}
+          {activeTab === "billing" && sections.billing}
+          {messageOpened && (
+            <Sheet
+              open={messageOpen}
+              keepMounted
+              onClose={() => setMessageOpen(false)}
+              width="lg"
+              className="admin-shell-v2 c360-message-sheet"
+              ariaLabel={`Conversation with ${c.firstName} ${c.lastName}`}
+            >
+              <SheetHeader>
+                <div>
+                  <strong>
+                    {c.firstName} {c.lastName}
+                  </strong>
+                  <p className="text-14 text-ink-secondary">{c.phone}</p>
+                </div>
+                <Button
+                  variant="secondary"
+                  onClick={() => setMessageOpen(false)}
+                >
+                  Back to customer
+                </Button>
+              </SheetHeader>
+              <SheetBody>{sections.conversation}</SheetBody>
+            </Sheet>
+          )}
+          {activeTab === "comms" && (
+            <>
+              {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
+              <OwedCommitmentsSummary customerId={customerId} source="sms" />
+              {isAdmin && sections.activity}
+              {sections.services}
+            </>
+          )}
+          {activeTab === "property" && (
+            <>
+              {sections.property}
+              {(hasLawnHistory || hasCompliance) && sections.compliance}
+              {sections.contracts}
+            </>
+          )}
+        </div>
+      </div>
+      {dialogs}
+    </UiSurface>
+  );
+}
+
+function CustomerOverlayPresentation({
+  panelRef,
+  activeTabButtonRef,
+  headerProps,
+  activeTab,
+  profileContentId,
+  sections,
+  alerts,
+  profileActionErr,
+  actions,
+  dialogs,
+}) {
+  const density = useUiDensity();
+  const { onClose, setActiveTab } = headerProps;
+  return createPortal(
+    <div data-ui-density={density}
+      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
+      onClick={onClose}
+    >
+      <div
+        ref={panelRef}
+        onClick={(e) => e.stopPropagation()}
+        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
+      >
+        <CustomerProfileStyles />
+        <CustomerOverlayHeader {...headerProps} />
+        <CustomerProfileAlerts alerts={alerts} />
+        <CustomerOverlayNavigation
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          activeTabButtonRef={activeTabButtonRef}
+        />
+        <div className="c360-tab-content p-6 flex-1" id={profileContentId}>
+          <CustomerProfileActionError error={profileActionErr} />
+          {activeTab === "overview" && sections.overview}
+          {activeTab === "billing" && sections.billing}
+          {activeTab === "comms" && sections.conversation}
+          {activeTab === "services" && sections.services}
+          {activeTab === "property" && sections.property}
+          {activeTab === "compliance" && sections.compliance}
+          {activeTab === "contracts" && sections.contracts}
+        </div>
+        {sections.timeline}
+        <div
+          className="c360-mobile-footer-spacer shrink-0"
+          style={{
+            height:
+              "calc(56px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))",
+          }}
+          aria-hidden="true"
+        />
+      </div>
+      {actions}
+      {dialogs}
+    </div>,
+    document.body,
+  );
+}
+
+function useCustomerProfileRecord({ customerId, customerIdRef, isAdmin }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [profileLoadError, setProfileLoadError] = useState("");
   const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [profileActionErr, setProfileActionErr] = useState("");
-  const [requestedTab, setActiveTab] = useState(initialTab);
-  const [timelineFilter, setTimelineFilter] = useState("all");
-  const [timelineSearch, setTimelineSearch] = useState("");
   const [timeline, setTimeline] = useState([]);
   const [timelineMissingSources, setTimelineMissingSources] = useState([]);
   const [timelineError, setTimelineError] = useState(false);
   const [timelineRetrying, setTimelineRetrying] = useState(false);
-  const [comms, setComms] = useState([]);
-  const [commsReadScope, setCommsReadScope] = useState(null);
-  const [commsLoaded, setCommsLoaded] = useState(false);
-  const [commsComposerReady, setCommsComposerReady] = useState(false);
-  const [commsLoading, setCommsLoading] = useState(false);
-  const [commsErr, setCommsErr] = useState("");
-  const [smsReply, setSmsReply] = useState("");
-  const [sendingSms, setSendingSms] = useState(false);
-  const [smsErr, setSmsErr] = useState("");
-  const [messageOpen, setMessageOpen] = useState(false);
-  const [messageOpened, setMessageOpened] = useState(false);
-  const [linkRequest, setLinkRequest] = useState(0);
-  const openMessages = () => { setCommsLoaded(false); setMessageOpened(true); setMessageOpen(true); };
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
-  const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
-  const [annualPrepayInvoiceOpen, setAnnualPrepayInvoiceOpen] = useState(false);
-  const [cancelSignupOpen, setCancelSignupOpen] = useState(false);
-  const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
-  const [refundPayment, setRefundPayment] = useState(null);
-  const [editForm, setEditForm] = useState({});
-  const editAddressRef = useRef(null);
-  const initialEditForm = useRef({});
-  const [savingEdit, setSavingEdit] = useState(false);
-  const [editErr, setEditErr] = useState("");
-  const [recipientPrefsDraft, setRecipientPrefsDraft] = useState({
-    billingContactName: "",
-    billingEmail: "",
-  });
-  const [recipientPrefsSaving, setRecipientPrefsSaving] = useState(false);
-  const [recipientPrefsErr, setRecipientPrefsErr] = useState("");
-  const [deletingCustomer, setDeletingCustomer] = useState(false);
-  const [payers, setPayers] = useState([]);
-  const [payerSaving, setPayerSaving] = useState(false);
-  // Inline "New payer" quick-add for the default Bill-To select.
-  const [showNewPayer, setShowNewPayer] = useState(false);
-  const [newPayer, setNewPayer] = useState({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
-  const [newPayerSaving, setNewPayerSaving] = useState(false);
-  const [newPayerError, setNewPayerError] = useState("");
-  const [newPayerNotice, setNewPayerNotice] = useState("");
-  const panelRef = useRef(null);
-  const activeTabButtonRef = useRef(null);
-  const [headerPast, setHeaderPast] = useState(false);
-  const editModalRef = useModalFocus(editOpen, () => { if (!savingEdit) setEditOpen(false); });
-  const tabsAnchorRef = useRef(null);
-  const profileContentId = useId();
-  const menuRef = useRef(null);
-  // The More (⋯) button outlives its menu items; modals launched from the
-  // menu focus it first so useModalFocus can return focus somewhere that
-  // still exists when the modal closes (the menu item unmounts on click).
-  const menuButtonRef = useRef(null);
-  const commsSeqRef = useRef(0);
-  const commsAbortRef = useRef(null);
   const profileSeqRef = useRef(0);
   const profileAbortRef = useRef(null);
-  const customerIdRef = useRef(customerId);
-  customerIdRef.current = customerId;
-  const isAdmin = getAdminRole() === "admin";
-  const workspaceSections = CUSTOMER_WORKSPACE_SECTIONS.filter((section) => isAdmin || section.key !== "billing");
-  const activeTab = embedded && !isAdmin && requestedTab === "billing" ? "overview" : requestedTab;
-  useEffect(() => {
-    if (!loading) activeTabButtonRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
-  }, [loading, activeTab]);
-  const unreadConversations = useUnreadConversations(embedded && isAdmin, customerId);
-
   // Bumped on every successful profile reload. The properties panel keys its
   // refetch on this, NOT on the address tuple: the PUT path re-syncs the
   // primary customer_properties row on PRESENCE of address fields (an
@@ -5257,40 +8506,116 @@ export default function Customer360ProfileV2({
   // signal would leave the panel stale exactly when the server fixed it.
   const [profileVersion, setProfileVersion] = useState(0);
   const reloadCustomer = () =>
-    adminFetch(`/admin/customers/${customerId}`)
-      .then((detail) => {
-        if (String(customerIdRef.current) === String(customerId)) {
-          setData(detail);
-          setProfileVersion((v) => v + 1);
-        }
-        return detail;
-      });
-
+    adminFetch(`/admin/customers/${customerId}`).then((detail) => {
+      if (String(customerIdRef.current) === String(customerId)) {
+        setData(detail);
+        setProfileVersion((v) => v + 1);
+      }
+      return detail;
+    });
   useEffect(() => {
-    adminFetch("/admin/payers")
-      .then((r) => setPayers(Array.isArray(r?.payers) ? r.payers : []))
-      .catch(() => setPayers([]));
-  }, []);
+    const seq = profileSeqRef.current + 1;
+    profileSeqRef.current = seq;
+    if (profileAbortRef.current) profileAbortRef.current.abort();
+    const ctrl = new AbortController();
+    profileAbortRef.current = ctrl;
+    setLoading(true);
+    setData(null);
+    setProfileLoadError("");
+    setTimelineRetrying(false);
+    setProfileActionErr("");
+    Promise.all([
+      adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
+      isAdmin
+        ? adminFetch(`/admin/customers/${customerId}/timeline`, {
+            signal: ctrl.signal,
+          }).catch((err) => {
+            if (err.name === "AbortError") throw err;
+            return null;
+          })
+        : Promise.resolve({ timeline: [] }),
+    ])
+      .then(([detail, tl]) => {
+        if (seq !== profileSeqRef.current) return;
+        setData(detail);
+        setTimeline(tl?.timeline || []);
+        setTimelineMissingSources(tl?.missingSources || []);
+        setTimelineError(tl === null);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (err.name === "AbortError" || seq !== profileSeqRef.current) return;
+        setProfileLoadError(err.message || "Failed to load customer");
+        setLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [customerId, profileReloadKey, isAdmin]);
+  const retryTimeline = async () => {
+    const seq = profileSeqRef.current;
+    const signal = profileAbortRef.current.signal;
+    setTimelineRetrying(true);
+    try {
+      const result = await adminFetch(
+        `/admin/customers/${customerId}/timeline`,
+        { signal },
+      );
+      if (signal.aborted || seq !== profileSeqRef.current) return;
+      setTimeline(result.timeline || []);
+      setTimelineMissingSources(result.missingSources || []);
+      setTimelineError(false);
+    } catch {
+      // Keep the loaded profile and recovery action when history is still unavailable.
+    } finally {
+      if (!signal.aborted && seq === profileSeqRef.current)
+        setTimelineRetrying(false);
+    }
+  };
 
-  // Clearing a billing pause. billing-cron sets service_paused_at when
-  // autopay's 3-retry ladder exhausts and then skips that customer forever;
-  // nothing in the product could clear it before this, so the only remedy
-  // was editing the row by hand.
-  const [resumingBilling, setResumingBilling] = useState(false);
-  const [resumeBillingErr, setResumeBillingErr] = useState("");
-  const [resumeBillingNote, setResumeBillingNote] = useState("");
-  const resumeSeqRef = useRef(0);
+  return {
+    profileReloadKey,
+    reloadCustomer,
+    setProfileActionErr,
+    loading:
+      loading ||
+      Boolean(
+        data?.customer && String(data.customer.id) !== String(customerId),
+      ),
+    data,
+    profileLoadError,
+    setProfileReloadKey,
+    setData,
+    timeline,
+    retryTimeline,
+    profileVersion,
+    timelineMissingSources,
+    timelineError,
+    timelineRetrying,
+    profileActionErr,
+  };
+}
 
+// Clearing a billing pause. billing-cron sets service_paused_at when
+// autopay's 3-retry ladder exhausts and then skips that customer forever;
+// nothing in the product could clear it before this, so the only remedy
+// was editing the row by hand.
+function useCustomerBillingPause({
+  customerId,
+  customerIdRef,
+  reloadCustomer,
+}) {
   // These three are shared component state, so switching customers has to
   // clear them: an in-flight resume for A whose response is discarded (see
   // stillViewing below) would otherwise leave B's Resume button stuck
   // disabled forever, and A's error/note reading as B's.
+  const [resumingBilling, setResumingBilling] = useState(false);
+  const [resumeBillingErr, setResumeBillingErr] = useState("");
+  const [resumeBillingNote, setResumeBillingNote] = useState("");
+  const resumeSeqRef = useRef(0);
   useEffect(() => {
     setResumingBilling(false);
     setResumeBillingErr("");
     setResumeBillingNote("");
   }, [customerId]);
-
   const resumeBilling = async () => {
     // Everything below writes shared component state, so pin THIS attempt:
     // an admin who starts a resume for A and switches to B must not see A's
@@ -5302,8 +8627,8 @@ export default function Customer360ProfileV2({
     const seq = resumeSeqRef.current;
     const forCustomerId = customerId;
     const stillViewing = () =>
-      resumeSeqRef.current === seq
-      && String(customerIdRef.current) === String(forCustomerId);
+      resumeSeqRef.current === seq &&
+      String(customerIdRef.current) === String(forCustomerId);
 
     setResumingBilling(true);
     setResumeBillingErr("");
@@ -5352,6 +8677,38 @@ export default function Customer360ProfileV2({
     }
   };
 
+  return {
+    resumeBilling,
+    resumingBilling,
+    resumeBillingErr,
+    resumeBillingNote,
+  };
+}
+
+function useCustomerPayer({
+  setProfileActionErr,
+  customerId,
+  reloadCustomer,
+  isAdmin,
+}) {
+  const [payers, setPayers] = useState([]);
+  const [payerSaving, setPayerSaving] = useState(false);
+  // Inline "New payer" quick-add for the default Bill-To select.
+  const [showNewPayer, setShowNewPayer] = useState(false);
+  const [newPayer, setNewPayer] = useState({
+    displayName: "",
+    companyName: "",
+    apEmail: "",
+    apPhone: "",
+  });
+  const [newPayerSaving, setNewPayerSaving] = useState(false);
+  const [newPayerError, setNewPayerError] = useState("");
+  const [newPayerNotice, setNewPayerNotice] = useState("");
+  useEffect(() => {
+    adminFetch("/admin/payers")
+      .then((r) => setPayers(Array.isArray(r?.payers) ? r.payers : []))
+      .catch(() => setPayers([]));
+  }, []);
   const savePayer = async (payerId) => {
     setPayerSaving(true);
     setProfileActionErr("");
@@ -5367,7 +8724,6 @@ export default function Customer360ProfileV2({
       setPayerSaving(false);
     }
   };
-
   const handlePayerSelect = (value) => {
     if (!isAdmin) {
       setProfileActionErr("Admin access is required to change Bill-To.");
@@ -5381,7 +8737,6 @@ export default function Customer360ProfileV2({
     }
     savePayer(value);
   };
-
   const saveNewPayer = async () => {
     const displayName = newPayer.displayName.trim();
     if (!displayName) {
@@ -5413,11 +8768,18 @@ export default function Customer360ProfileV2({
             ? list
             : [...list, created]
           ).sort((a, b) =>
-            String(a.display_name || "").localeCompare(String(b.display_name || "")),
+            String(a.display_name || "").localeCompare(
+              String(b.display_name || ""),
+            ),
           ),
         );
         setShowNewPayer(false);
-        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+        setNewPayer({
+          displayName: "",
+          companyName: "",
+          apEmail: "",
+          apPhone: "",
+        });
         setNewPayerNotice(
           r?.deduped
             ? `Matched existing payer "${created.display_name}" by AP email — selected it instead.`
@@ -5433,152 +8795,35 @@ export default function Customer360ProfileV2({
     setNewPayerSaving(false);
   };
 
-  useEffect(() => {
-    setMessageOpen(false);
-    setMessageOpened(false);
-    setLinkRequest(0);
-    commsSeqRef.current += 1;
-    if (commsAbortRef.current) commsAbortRef.current.abort();
-    const seq = profileSeqRef.current + 1;
-    profileSeqRef.current = seq;
-    if (profileAbortRef.current) profileAbortRef.current.abort();
-    const ctrl = new AbortController();
-    profileAbortRef.current = ctrl;
-    setLoading(true);
-    setData(null);
-    setProfileLoadError("");
-    setTimelineRetrying(false);
-    setProfileActionErr("");
-    setCommsLoading(false);
-    setCommsReadScope(null);
-    setMenuOpen(false);
-    setEditOpen(false);
-    setEditForm({});
-    setEditErr("");
-    setSavingEdit(false);
-    setDeletingCustomer(false);
-    setAnnualPrepayOpen(false);
-    setAnnualPrepayInvoiceOpen(false);
-    setCancelSignupOpen(false);
-    setCancelPlanOpen(false);
-    setRefundPayment(null);
-    Promise.all([
-      adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
-      isAdmin ? adminFetch(`/admin/customers/${customerId}/timeline`, {
-        signal: ctrl.signal,
-      }).catch((err) => {
-        if (err.name === "AbortError") throw err;
-        return null;
-      }) : Promise.resolve({ timeline: [] }),
-    ])
-      .then(([detail, tl]) => {
-        if (seq !== profileSeqRef.current) return;
-        setData(detail);
-        setTimeline(tl?.timeline || []);
-        setTimelineMissingSources(tl?.missingSources || []);
-        setTimelineError(tl === null);
-        setComms([]);
-        setCommsLoaded(false);
-        setCommsComposerReady(false);
-        setCommsErr("");
-        setLoading(false);
-      })
-      .catch((err) => {
-        if (err.name === "AbortError" || seq !== profileSeqRef.current) return;
-        setProfileLoadError(err.message || "Failed to load customer");
-        setLoading(false);
-      });
-    return () => ctrl.abort();
-  }, [customerId, profileReloadKey, isAdmin]);
-
-  const retryTimeline = async () => {
-    const seq = profileSeqRef.current;
-    const signal = profileAbortRef.current.signal;
-    setTimelineRetrying(true);
-    try {
-      const result = await adminFetch(`/admin/customers/${customerId}/timeline`, { signal });
-      if (signal.aborted || seq !== profileSeqRef.current) return;
-      setTimeline(result.timeline || []);
-      setTimelineMissingSources(result.missingSources || []);
-      setTimelineError(false);
-    } catch {
-      // Keep the loaded profile and recovery action when history is still unavailable.
-    } finally {
-      if (!signal.aborted && seq === profileSeqRef.current) setTimelineRetrying(false);
-    }
+  return {
+    payerSaving,
+    handlePayerSelect,
+    payers,
+    showNewPayer,
+    newPayer,
+    setNewPayer,
+    newPayerError,
+    saveNewPayer,
+    newPayerSaving,
+    setShowNewPayer,
+    setNewPayerError,
+    newPayerNotice,
   };
+}
 
-  useEffect(() => {
-    if (!isAdmin || (!embedded && activeTab !== "comms") || commsLoaded || commsLoading) return;
-    const seq = commsSeqRef.current + 1;
-    commsSeqRef.current = seq;
-    if (commsAbortRef.current) commsAbortRef.current.abort();
-    const ctrl = new AbortController();
-    commsAbortRef.current = ctrl;
-    setCommsLoading(true);
-    setCommsErr("");
-    adminFetch(`/admin/customers/${customerId}/comms`, { signal: ctrl.signal })
-      .then((data) => {
-        if (seq !== commsSeqRef.current) return;
-        setComms(data.comms || []);
-        setCommsReadScope(data.readScope || null);
-        setCommsLoaded(true);
-        setCommsComposerReady(true);
-      })
-      .catch((err) => {
-        if (err.name === "AbortError" || seq !== commsSeqRef.current) return;
-        setCommsErr(err.message || "Failed to load messages");
-        setCommsLoaded(true);
-        setCommsComposerReady(true);
-      })
-      .finally(() => {
-        if (seq === commsSeqRef.current) setCommsLoading(false);
-      });
-  }, [activeTab, customerId, commsLoaded, commsLoading, embedded, isAdmin]);
-
-  useEffect(
-    () => () => {
-      if (commsAbortRef.current) commsAbortRef.current.abort();
-      if (profileAbortRef.current) profileAbortRef.current.abort();
-    },
-    [],
-  );
-
-  // Every sub-modal owns Escape while it is open (ui/Dialog and the
-  // hand-rolled modals each close themselves through useModalFocus); the
-  // profile only closes when nothing sits above it — otherwise one keypress
-  // discarded an in-progress edit, refund or prepay form AND the profile.
-  const subModalOpen =
-    editOpen ||
-    annualPrepayOpen ||
-    annualPrepayInvoiceOpen ||
-    cancelSignupOpen ||
-    cancelPlanOpen ||
-    !!refundPayment;
-  useEffect(() => {
-    if (embedded) return undefined;
-    const handler = (e) => {
-      if (e.key !== "Escape" || subModalOpen) return;
-      onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose, embedded, subModalOpen]);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const handler = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target))
-        setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("touchstart", handler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("touchstart", handler);
-    };
-  }, [menuOpen]);
-
+function useCustomerRecipientPreferences({
+  data,
+  isAdmin,
+  setProfileActionErr,
+  setData,
+  customerId,
+}) {
+  const [recipientPrefsDraft, setRecipientPrefsDraft] = useState({
+    billingContactName: "",
+    billingEmail: "",
+  });
+  const [recipientPrefsSaving, setRecipientPrefsSaving] = useState(false);
+  const [recipientPrefsErr, setRecipientPrefsErr] = useState("");
   useEffect(() => {
     const prefs = data?.notificationPrefs || {};
     setRecipientPrefsDraft({
@@ -5591,159 +8836,11 @@ export default function Customer360ProfileV2({
     data?.notificationPrefs?.billing_contact_name,
     data?.notificationPrefs?.billing_email,
   ]);
-
-  const renderProfile = (content) => embedded ? content : createPortal(content, document.body);
-  const wrapperClass = embedded ? "c360-embedded" : "admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans";
-  const changeWorkspaceTab = (next) => {
-    setActiveTab(next);
-    requestAnimationFrame(() => {
-      if (panelRef.current && tabsAnchorRef.current) {
-        panelRef.current.scrollTo({ top: tabsAnchorRef.current.offsetTop + 1, behavior: "instant" });
-      }
-    });
-  };
-
-  useEffect(() => {
-    if (!embedded || loading || typeof IntersectionObserver === "undefined") return undefined;
-    const header = panelRef.current?.querySelector(".c360-workspace-header");
-    if (!header) return undefined;
-    const observer = new IntersectionObserver(([entry]) => setHeaderPast(entry.intersectionRatio === 0), { root: panelRef.current, threshold: 0 });
-    observer.observe(header);
-    return () => observer.disconnect();
-  }, [embedded, loading, data?.customer?.id]);
-
-  const viewServiceRecords = () => {
-    setActiveTab("comms");
-    requestAnimationFrame(() => {
-      const records = panelRef.current?.querySelector(".c360-service-records");
-      if (records) { records.open = true; records.scrollIntoView({ block: "start", behavior: "instant" }); }
-    });
-  };
-
-  const loadedCustomerMatches = data?.customer
-    && String(data.customer.id) === String(customerId);
-
-  if (loading || (data?.customer && !loadedCustomerMatches))
-    return renderProfile(
-      <div
-        className={wrapperClass}
-        onClick={embedded ? undefined : onClose}
-      >
-        {" "}
-        <div
-          className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {" "}
-          <div className="text-ink-secondary text-center py-16 text-13">
-            Loading customer profile…
-          </div>{" "}
-        </div>{" "}
-      </div>
-    );
-
-  if (!data || !data.customer)
-    return renderProfile(
-      <div
-        className={wrapperClass}
-        onClick={embedded ? undefined : onClose}
-      >
-        {" "}
-        <div
-          className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {" "}
-          <div className="flex-1 flex items-center justify-center p-6">
-            <div className="text-center max-w-sm">
-              <div className="text-alert-fg text-14 mb-2">
-                Failed to load customer
-              </div>
-              <div className="text-14 text-ink-secondary mb-5">
-                {profileLoadError || "The customer profile could not be loaded."}
-              </div>
-              <div className="flex items-center justify-center gap-2">
-                <Button variant="secondary" onClick={onClose}>Close</Button>
-                <Button onClick={() => setProfileReloadKey((key) => key + 1)}>
-                  Retry
-                </Button>
-              </div>
-            </div>
-          </div>{" "}
-        </div>{" "}
-      </div>
-    );
-
-  const c = data.customer;
-  // Single seeding path for the edit-customer modal — the desktop pill, the
-  // mobile Edit pill, and the ⋯ menu item must prefill identical fields (the
-  // menu copy once dropped profileLabel, so the mobile modal showed it blank).
-  const openEditModal = () => {
-    editAddressRef.current = c.address;
-    const form = {
-      firstName: c.firstName || "",
-      lastName: c.lastName || "",
-      email: c.email || "",
-      phone: c.phone || "",
-      profileLabel: c.profileLabel || "",
-      addressLine1: c.address?.line1 || "",
-      addressLine2: c.address?.line2 || "",
-      city: c.address?.city || "",
-      state: c.address?.state || "",
-      zip: c.address?.zip || "",
-      monthlyRate: c.monthlyRate ?? "",
-      tier: c.tier || "",
-      pipelineStage: c.pipelineStage || "new_lead",
-      contactRole: c.contactRole || "",
-    };
-    initialEditForm.current = form;
-    setEditForm(form);
-    setEditErr("");
-    setEditOpen(true);
-  };
-  const notificationPrefs = data.notificationPrefs || {};
-  const prefs = data.preferences || {};
-  const hs = data.healthScore || {};
-  const score = hs.overall_score ?? hs.health_score ?? hs.score ?? null;
-  const invoices = data.invoices || [];
-  const cards = data.cards || [];
-  const paymentMethodConsents = data.paymentMethodConsents || [];
-  const contracts = data.contracts || [];
-  const photos = data.photos || [];
-  const referral = data.referralInfo;
-  const discounts = data.customerDiscounts || [];
-  const compliance = data.complianceRecords || [];
-  const nutrientLedger = data.nutrientLedger || {};
-  const nutrientSummary = nutrientLedger.summary || {};
-  const nutrientRows = nutrientLedger.rows || [];
-  const services = data.services || [];
-  const payments = data.payments || [];
-  const scheduled = data.scheduled || [];
-  // Upcoming, active-only list from the server; data.scheduled is full history
-  // (past + future) and limited, so use this for next-service selection.
-  const upcomingScheduled = data.upcomingScheduled || scheduled;
-  const accountProperties = data.accountProperties || [];
-  const addressNeighbors = data.addressNeighbors || [];
-  const annualPrepayTerms = data.annualPrepayTerms || [];
-  const activeAnnualPrepayTerm = annualPrepayTerms.find((t) => ['active', 'renewal_pending'].includes(t.status)) || null;
-  // What the profile shows/acts on: a truly active term, else a still-outstanding
-  // (sent-but-unpaid) prepay invoice, else a renewal-decided term (renewed /
-  // switch_plan) or a renewal-lapsed paid term (cancelled with a 'cancel'
-  // decision) whose paid window still covers today — all of which the server
-  // overlap guard rejects with 409 — so the admin sees the current term instead
-  // of being offered a duplicate. Never falls through to an arbitrary refunded /
-  // expired term.
-  const displayedAnnualPrepayTerm = activeAnnualPrepayTerm
-    || annualPrepayTerms.find((t) => t.status === 'payment_pending')
-    || annualPrepayTerms.find((t) =>
-      (['renewed', 'switch_plan'].includes(t.status)
-        || (t.status === 'cancelled' && t.renewalDecision === 'cancel'))
-      && dateInputValue(t.termEnd) >= todayDateInput())
-    || null;
-
   const updateNotificationPrefs = async (patch) => {
     if (!isAdmin) {
-      setProfileActionErr("Admin access is required to change notification routing.");
+      setProfileActionErr(
+        "Admin access is required to change notification routing.",
+      );
       return;
     }
     const previous = data.notificationPrefs || {};
@@ -5770,7 +8867,9 @@ export default function Customer360ProfileV2({
       );
       if (response?.notificationPrefs) {
         setData((prev) =>
-          prev ? { ...prev, notificationPrefs: response.notificationPrefs } : prev,
+          prev
+            ? { ...prev, notificationPrefs: response.notificationPrefs }
+            : prev,
         );
       }
     } catch (err) {
@@ -5786,10 +8885,11 @@ export default function Customer360ProfileV2({
         });
         return { ...prev, notificationPrefs };
       });
-      setProfileActionErr(err.message || "Notification preference failed to save");
+      setProfileActionErr(
+        err.message || "Notification preference failed to save",
+      );
     }
   };
-
   const saveRecipientPrefs = async () => {
     if (!isAdmin) {
       setRecipientPrefsErr("Admin access is required to change recipients");
@@ -5810,120 +8910,197 @@ export default function Customer360ProfileV2({
       );
       if (response?.notificationPrefs) {
         setData((prev) =>
-          prev ? { ...prev, notificationPrefs: response.notificationPrefs } : prev,
+          prev
+            ? { ...prev, notificationPrefs: response.notificationPrefs }
+            : prev,
         );
       }
     } catch (err) {
-      setRecipientPrefsErr(err.message || "Recipient preferences failed to save");
+      setRecipientPrefsErr(
+        err.message || "Recipient preferences failed to save",
+      );
     } finally {
       setRecipientPrefsSaving(false);
     }
   };
+  const c = data?.customer || {};
+  const notificationPrefs = data?.notificationPrefs || {};
+  const recipientRoutesDiffer =
+    !!c.payerId ||
+    [
+      c.serviceContactEmail,
+      c.serviceContact2Email,
+      c.serviceContact3Email,
+      notificationPrefs.billing_email,
+    ]
+      .filter(Boolean)
+      .some((email) => email.toLowerCase() !== (c.email || "").toLowerCase());
 
-  const handleAnnualPrepaySaved = async () => {
-    await reloadCustomer();
-    setAnnualPrepayOpen(false);
-    setAnnualPrepayInvoiceOpen(false);
-    setActiveTab("billing");
+  const recipientPrefsDirty =
+    recipientPrefsDraft.billingContactName !==
+      (data?.notificationPrefs?.billing_contact_name || "") ||
+    recipientPrefsDraft.billingEmail !==
+      (data?.notificationPrefs?.billing_email || "");
+
+  return {
+    recipientRoutesDiffer,
+    recipientPrefsDraft,
+    setRecipientPrefsDraft,
+    saveRecipientPrefs,
+    recipientPrefsSaving,
+    recipientPrefsDirty,
+    recipientPrefsErr,
+    updateNotificationPrefs,
   };
+}
 
-  const balanceOwed = data.billingSummary?.complete ? data.billingSummary.openBalance : null;
-  const overdueBalance = data.billingSummary?.complete ? data.billingSummary.overdueBalance : null;
-  const hasLawnHistory = nutrientRows.length > 0 || compliance.some((row) => /fertiliz|herbicide/.test(row.category || "")) || [...services, ...scheduled].some((service) => /lawn|fertiliz|turf|shrub/i.test(service.service_type || ""));
-  const recipientRoutesDiffer = !!c.payerId || [c.serviceContactEmail, c.serviceContact2Email, c.serviceContact3Email, notificationPrefs.billing_email].filter(Boolean).some((email) => email.toLowerCase() !== (c.email || "").toLowerCase());
-  const recipientPrefsDirty = recipientPrefsDraft.billingContactName !== (notificationPrefs.billing_contact_name || "") || recipientPrefsDraft.billingEmail !== (notificationPrefs.billing_email || "");
-  const today = todayDateInput();
-  const inactiveNextServiceStatuses = new Set([
-    "cancelled",
-    "canceled",
-    "completed",
-    "rescheduled",
-    "skipped",
-    "no_show",
-  ]);
-  const isUpcomingAppt = (s) => {
-    const status = String(s.status || "").toLowerCase();
-    return (
-      !inactiveNextServiceStatuses.has(status) &&
-      dateInputValue(s.scheduled_date) >= today
-    );
-  };
-  const upcomingFuture = upcomingScheduled
-    .filter(isUpcomingAppt)
-    .sort((a, b) =>
-      dateInputValue(a.scheduled_date) < dateInputValue(b.scheduled_date)
-        ? -1
-        : 1,
-    );
-
-  const expiringCard = cards.find((cd) => {
-    if (!cd.exp_month || !cd.exp_year) return false;
-    const exp = new Date(cd.exp_year, cd.exp_month, 0);
-    const diff = (exp - new Date()) / 86400000;
-    return diff < 60 && diff > -30;
+function useCustomerProfileEditor({
+  profileReloadKey,
+  data,
+  customerId,
+  isAdmin,
+}) {
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm, setEditForm] = useState({});
+  const editAddressRef = useRef(null);
+  const initialEditForm = useRef({});
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editErr, setEditErr] = useState("");
+  const [deletingCustomer, setDeletingCustomer] = useState(false);
+  const editModalRef = useModalFocus(editOpen, () => {
+    if (!savingEdit) setEditOpen(false);
   });
+  // Single seeding path for the edit-customer modal — the desktop pill, the
+  // mobile Edit pill, and the ⋯ menu item must prefill identical fields (the
+  // menu copy once dropped profileLabel, so the mobile modal showed it blank).
+  const openEditModal = () => {
+    const c = data.customer;
+    editAddressRef.current = c.address;
+    const form = {
+      firstName: c.firstName || "",
+      lastName: c.lastName || "",
+      email: c.email || "",
+      phone: c.phone || "",
+      profileLabel: c.profileLabel || "",
+      addressLine1: c.address?.line1 || "",
+      addressLine2: c.address?.line2 || "",
+      city: c.address?.city || "",
+      state: c.address?.state || "",
+      zip: c.address?.zip || "",
+      monthlyRate: c.monthlyRate ?? "",
+      tier: c.tier || "",
+      pipelineStage: c.pipelineStage || "new_lead",
+      contactRole: c.contactRole || "",
+    };
+    initialEditForm.current = form;
+    setEditForm(form);
+    setEditErr("");
+    setEditOpen(true);
+  };
+  useEffect(() => {
+    setEditOpen(false);
+    setEditForm({});
+    setEditErr("");
+    setSavingEdit(false);
+    setDeletingCustomer(false);
+  }, [customerId, profileReloadKey, isAdmin]);
+  return {
+    editOpen,
+    openEditModal,
+    savingEdit,
+    setEditOpen,
+    editModalRef,
+    editForm,
+    setEditForm,
+    editAddressRef,
+    editErr,
+    deletingCustomer,
+    setDeletingCustomer,
+    setEditErr,
+    setSavingEdit,
+    initialEditForm,
+  };
+}
 
-  // Alerts — alert-fg only for $/card, otherwise neutral
-  const alerts = [];
-  if (prefs.pet_details)
-    alerts.push({
-      alert: false,
-      label: "PET",
-      text: `Pet: ${prefs.pet_details}`,
-    });
-  if (prefs.property_gate_code)
-    alerts.push({
-      alert: false,
-      label: "GATE",
-      text: `Property gate: ${prefs.property_gate_code}`,
-    });
-  if (prefs.neighborhood_gate_code)
-    alerts.push({
-      alert: false,
-      label: "GATE",
-      text: `Neighborhood gate: ${prefs.neighborhood_gate_code}`,
-    });
-  if (balanceOwed > 0)
-    alerts.push({
-      alert: true,
-      label: "$",
-      text: `Open balance: ${fmtCurrency(balanceOwed)}`,
-    });
-  if (expiringCard)
-    alerts.push({
-      alert: true,
-      label: "CARD",
-      text: `Card ending ${expiringCard.last_four} expiring ${expiringCard.exp_month}/${expiringCard.exp_year}`,
-    });
-  if (activeAnnualPrepayTerm?.status === "renewal_pending")
-    alerts.push({
-      alert: true,
-      label: "PREPAY",
-      text: `Annual prepay renewal due ${fmtDate(activeAnnualPrepayTerm.termEnd)}`,
-    });
-  if (prefs.chemical_sensitivities)
-    alerts.push({
-      alert: false,
-      label: "CHEM",
-      text: `Chemical sensitivity: ${prefs.chemical_sensitivities}`,
-    });
-  if (prefs.special_instructions)
-    alerts.push({
-      alert: false,
-      label: "NOTE",
-      text: prefs.special_instructions,
-    });
-
-  const filteredTimeline =
-    timelineFilter === "all"
-      ? timeline
-      : timeline.filter(
-          (t) =>
-            t.type === timelineFilter ||
-            (timelineFilter === "notes" && t.type === "interaction"),
-        );
-
+function useCustomerMessages({
+  profileReloadKey,
+  loading,
+  isAdmin,
+  embedded,
+  activeTab,
+  customerId,
+  data,
+  setData,
+}) {
+  const [comms, setComms] = useState([]);
+  const [commsReadScope, setCommsReadScope] = useState(null);
+  const [commsLoaded, setCommsLoaded] = useState(false);
+  const [commsComposerReady, setCommsComposerReady] = useState(false);
+  const [commsLoading, setCommsLoading] = useState(false);
+  const [commsErr, setCommsErr] = useState("");
+  const [smsReply, setSmsReply] = useState("");
+  const [sendingSms, setSendingSms] = useState(false);
+  const [smsErr, setSmsErr] = useState("");
+  const [messageOpen, setMessageOpen] = useState(false);
+  const [messageOpened, setMessageOpened] = useState(false);
+  const [linkRequest, setLinkRequest] = useState(0);
+  const openMessages = () => {
+    setCommsLoaded(false);
+    setMessageOpened(true);
+    setMessageOpen(true);
+  };
+  const commsSeqRef = useRef(0);
+  const commsAbortRef = useRef(null);
+  useEffect(() => {
+    if (
+      loading ||
+      !isAdmin ||
+      (!embedded && activeTab !== "comms") ||
+      commsLoaded ||
+      commsLoading
+    )
+      return;
+    const seq = commsSeqRef.current + 1;
+    commsSeqRef.current = seq;
+    if (commsAbortRef.current) commsAbortRef.current.abort();
+    const ctrl = new AbortController();
+    commsAbortRef.current = ctrl;
+    setCommsLoading(true);
+    setCommsErr("");
+    adminFetch(`/admin/customers/${customerId}/comms`, { signal: ctrl.signal })
+      .then((data) => {
+        if (seq !== commsSeqRef.current) return;
+        setComms(data.comms || []);
+        setCommsReadScope(data.readScope || null);
+        setCommsLoaded(true);
+        setCommsComposerReady(true);
+      })
+      .catch((err) => {
+        if (err.name === "AbortError" || seq !== commsSeqRef.current) return;
+        setCommsErr(err.message || "Failed to load messages");
+        setCommsLoaded(true);
+        setCommsComposerReady(true);
+      })
+      .finally(() => {
+        if (seq === commsSeqRef.current) setCommsLoading(false);
+      });
+  }, [
+    activeTab,
+    customerId,
+    commsLoaded,
+    commsLoading,
+    embedded,
+    isAdmin,
+    loading,
+  ]);
+  useEffect(
+    () => () => {
+      if (commsAbortRef.current) commsAbortRef.current.abort();
+    },
+    [],
+  );
   const sendSms = async () => {
+    const c = data.customer;
     if (sendingSms || !smsReply.trim() || !c.phone) return;
     setSendingSms(true);
     setSmsErr("");
@@ -5953,2631 +9130,943 @@ export default function Customer360ProfileV2({
     }
     setSendingSms(false);
   };
-
-  const fmtDur = (s) => {
-    if (!s && s !== 0) return null;
-    const mins = Math.floor(s / 60),
-      secs = s % 60;
-    return mins ? `${mins}m ${secs}s` : `${secs}s`;
+  useEffect(() => {
+    setMessageOpen(false);
+    setMessageOpened(false);
+    setLinkRequest(0);
+    commsSeqRef.current += 1;
+    if (commsAbortRef.current) commsAbortRef.current.abort();
+    setCommsLoading(false);
+    setCommsReadScope(null);
+    setComms([]);
+    setCommsLoaded(false);
+    setCommsComposerReady(false);
+    setCommsErr("");
+  }, [customerId, profileReloadKey, isAdmin]);
+  return {
+    comms,
+    commsLoading,
+    commsErr,
+    commsLoaded,
+    commsComposerReady,
+    messageOpen,
+    linkRequest,
+    commsReadScope,
+    setCommsLoaded,
+    smsReply,
+    setSmsReply,
+    smsErr,
+    setSmsErr,
+    sendSms,
+    sendingSms,
+    openMessages,
+    setLinkRequest,
+    messageOpened,
+    setMessageOpen,
   };
+}
 
+function useCustomerProfileNavigation({
+  timeline,
+  profileReloadKey,
+  initialTab,
+  embedded,
+  isAdmin,
+  editOpen,
+  onClose,
+  loading,
+  data,
+  reloadCustomer,
+  customerId,
+}) {
+  const [requestedTab, setActiveTab] = useState(initialTab);
+  const [timelineFilter, setTimelineFilter] = useState("all");
+  const [timelineSearch, setTimelineSearch] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
+  const [annualPrepayInvoiceOpen, setAnnualPrepayInvoiceOpen] = useState(false);
+  const [cancelSignupOpen, setCancelSignupOpen] = useState(false);
+  const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
+  const [refundPayment, setRefundPayment] = useState(null);
+  const panelRef = useRef(null);
+  const activeTabButtonRef = useRef(null);
+  const [headerPast, setHeaderPast] = useState(false);
+  const tabsAnchorRef = useRef(null);
+  const profileContentId = useId();
+  const menuRef = useRef(null);
+  // The More (⋯) button outlives its menu items; modals launched from the
+  // menu focus it first so useModalFocus can return focus somewhere that
+  // still exists when the modal closes (the menu item unmounts on click).
+  const menuButtonRef = useRef(null);
+  const activeTab =
+    embedded && !isAdmin && requestedTab === "billing"
+      ? "overview"
+      : requestedTab;
+  useEffect(() => {
+    if (!loading)
+      activeTabButtonRef.current?.scrollIntoView?.({
+        block: "nearest",
+        inline: "nearest",
+      });
+  }, [loading, activeTab]);
+  // Every sub-modal owns Escape while it is open (ui/Dialog and the
+  // hand-rolled modals each close themselves through useModalFocus); the
+  // profile only closes when nothing sits above it — otherwise one keypress
+  // discarded an in-progress edit, refund or prepay form AND the profile.
+  const subModalOpen =
+    editOpen ||
+    annualPrepayOpen ||
+    annualPrepayInvoiceOpen ||
+    cancelSignupOpen ||
+    cancelPlanOpen ||
+    !!refundPayment;
+  useEffect(() => {
+    if (embedded) return undefined;
+    const handler = (e) => {
+      if (e.key !== "Escape" || subModalOpen) return;
+      onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose, embedded, subModalOpen]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target))
+        setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("touchstart", handler);
+    };
+  }, [menuOpen]);
+  const changeWorkspaceTab = (next) => {
+    setActiveTab(next);
+    requestAnimationFrame(() => {
+      if (panelRef.current && tabsAnchorRef.current) {
+        panelRef.current.scrollTo({
+          top: tabsAnchorRef.current.offsetTop + 1,
+          behavior: "instant",
+        });
+      }
+    });
+  };
+  useEffect(() => {
+    if (!embedded || loading || typeof IntersectionObserver === "undefined")
+      return undefined;
+    const header = panelRef.current?.querySelector(".c360-workspace-header");
+    if (!header) return undefined;
+    const observer = new IntersectionObserver(
+      ([entry]) => setHeaderPast(entry.intersectionRatio === 0),
+      { root: panelRef.current, threshold: 0 },
+    );
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [embedded, loading, data?.customer?.id]);
+  const viewServiceRecords = () => {
+    setActiveTab("comms");
+    requestAnimationFrame(() => {
+      const records = panelRef.current?.querySelector(".c360-service-records");
+      if (records) {
+        records.open = true;
+        records.scrollIntoView({ block: "start", behavior: "instant" });
+      }
+    });
+  };
+  const handleAnnualPrepaySaved = async () => {
+    await reloadCustomer();
+    setAnnualPrepayOpen(false);
+    setAnnualPrepayInvoiceOpen(false);
+    setActiveTab("billing");
+  };
+  useEffect(() => {
+    setMenuOpen(false);
+    setAnnualPrepayOpen(false);
+    setAnnualPrepayInvoiceOpen(false);
+    setCancelSignupOpen(false);
+    setCancelPlanOpen(false);
+    setRefundPayment(null);
+  }, [customerId, profileReloadKey, isAdmin]);
+  const filteredTimeline =
+    timelineFilter === "all"
+      ? timeline
+      : timeline.filter(
+          (t) =>
+            t.type === timelineFilter ||
+            (timelineFilter === "notes" && t.type === "interaction"),
+        );
 
+  return {
+    filteredTimeline,
+    activeTab,
+    timelineFilter,
+    setAnnualPrepayOpen,
+    changeWorkspaceTab,
+    viewServiceRecords,
+    setAnnualPrepayInvoiceOpen,
+    setRefundPayment,
+    setCancelSignupOpen,
+    setCancelPlanOpen,
+    setTimelineFilter,
+    timelineSearch,
+    setTimelineSearch,
+    panelRef,
+    activeTabButtonRef,
+    headerPast,
+    menuOpen,
+    setMenuOpen,
+    menuRef,
+    setActiveTab,
+    tabsAnchorRef,
+    profileContentId,
+    menuButtonRef,
+    annualPrepayOpen,
+    handleAnnualPrepaySaved,
+    annualPrepayInvoiceOpen,
+    cancelSignupOpen,
+    cancelPlanOpen,
+    refundPayment,
+  };
+}
 
+function customerProfileValues(data) {
+  const defaults = {
+    notificationPrefs: {},
+    preferences: {},
+    healthScore: {},
+    invoices: [],
+    cards: [],
+    paymentMethodConsents: [],
+    contracts: [],
+    photos: [],
+    customerDiscounts: [],
+    complianceRecords: [],
+    nutrientLedger: {},
+    services: [],
+    payments: [],
+    scheduled: [],
+    accountProperties: [],
+    addressNeighbors: [],
+    annualPrepayTerms: [],
+    prepaidPlans: [],
+    annualPrepayEstimateSuggestion: null,
+  };
+  const values = Object.fromEntries(
+    Object.entries(defaults).map(([key, fallback]) => [
+      key,
+      data[key] || fallback,
+    ]),
+  );
+  return {
+    ...values,
+    prefs: values.preferences,
+    score:
+      values.healthScore.overall_score ??
+      values.healthScore.health_score ??
+      values.healthScore.score ??
+      null,
+    referral: data.referralInfo,
+    discounts: values.customerDiscounts,
+    compliance: values.complianceRecords,
+    nutrientSummary: values.nutrientLedger.summary || {},
+    nutrientRows: values.nutrientLedger.rows || [],
+    // The server's upcoming list is active-only and not truncated by past history.
+    upcomingScheduled: data.upcomingScheduled || values.scheduled,
+  };
+}
+
+function customerBillingFacts(annualPrepayTerms, billingSummary) {
+  const activeAnnualPrepayTerm =
+    annualPrepayTerms.find((t) =>
+      ["active", "renewal_pending"].includes(t.status),
+    ) || null;
+  // What the profile shows/acts on: a truly active term, else a still-outstanding
+  // (sent-but-unpaid) prepay invoice, else a renewal-decided term (renewed /
+  // switch_plan) or a renewal-lapsed paid term (cancelled with a 'cancel'
+  // decision) whose paid window still covers today — all of which the server
+  // overlap guard rejects with 409 — so the admin sees the current term instead
+  // of being offered a duplicate. Never falls through to an arbitrary refunded /
+  // expired term.
+  const displayedAnnualPrepayTerm =
+    activeAnnualPrepayTerm ||
+    annualPrepayTerms.find((t) => t.status === "payment_pending") ||
+    annualPrepayTerms.find(
+      (t) =>
+        (["renewed", "switch_plan"].includes(t.status) ||
+          (t.status === "cancelled" && t.renewalDecision === "cancel")) &&
+        dateInputValue(t.termEnd) >= todayDateInput(),
+    ) ||
+    null;
+
+  const balanceOwed = billingSummary?.complete
+    ? billingSummary.openBalance
+    : null;
+  const overdueBalance = billingSummary?.complete
+    ? billingSummary.overdueBalance
+    : null;
+
+  return {
+    activeAnnualPrepayTerm,
+    displayedAnnualPrepayTerm,
+    balanceOwed,
+    overdueBalance,
+  };
+}
+
+function customerServiceFacts({
+  nutrientRows,
+  compliance,
+  services,
+  scheduled,
+  upcomingScheduled,
+}) {
+  const hasLawnHistory =
+    nutrientRows.length > 0 ||
+    compliance.some((row) => /fertiliz|herbicide/.test(row.category || "")) ||
+    [...services, ...scheduled].some((service) =>
+      /lawn|fertiliz|turf|shrub/i.test(service.service_type || ""),
+    );
+  const today = todayDateInput();
+  const inactiveNextServiceStatuses = new Set([
+    "cancelled",
+    "canceled",
+    "completed",
+    "rescheduled",
+    "skipped",
+    "no_show",
+  ]);
+  const isUpcomingAppt = (s) => {
+    const status = String(s.status || "").toLowerCase();
+    return (
+      !inactiveNextServiceStatuses.has(status) &&
+      dateInputValue(s.scheduled_date) >= today
+    );
+  };
+  const upcomingFuture = upcomingScheduled
+    .filter(isUpcomingAppt)
+    .sort((a, b) =>
+      dateInputValue(a.scheduled_date) < dateInputValue(b.scheduled_date)
+        ? -1
+        : 1,
+    );
+
+  return { hasLawnHistory, upcomingFuture };
+}
+
+function customerProfileAlerts({
+  cards,
+  prefs,
+  balanceOwed,
+  activeAnnualPrepayTerm,
+}) {
+  const expiringCard = cards.find((cd) => {
+    if (!cd.exp_month || !cd.exp_year) return false;
+    const exp = new Date(cd.exp_year, cd.exp_month, 0);
+    const diff = (exp - new Date()) / 86400000;
+    return diff < 60 && diff > -30;
+  });
+
+  const preferenceAlert = (key, label, prefix = "") => ({
+    present: prefs[key],
+    alert: false,
+    label,
+    text: `${prefix}${prefs[key]}`,
+  });
+  return [
+    preferenceAlert("pet_details", "PET", "Pet: "),
+    preferenceAlert("property_gate_code", "GATE", "Property gate: "),
+    preferenceAlert("neighborhood_gate_code", "GATE", "Neighborhood gate: "),
+    {
+      present: balanceOwed > 0,
+      alert: true,
+      label: "$",
+      text: `Open balance: ${fmtCurrency(balanceOwed)}`,
+    },
+    {
+      present: expiringCard,
+      alert: true,
+      label: "CARD",
+      text: `Card ending ${expiringCard?.last_four} expiring ${expiringCard?.exp_month}/${expiringCard?.exp_year}`,
+    },
+    {
+      present: activeAnnualPrepayTerm?.status === "renewal_pending",
+      alert: true,
+      label: "PREPAY",
+      text: `Annual prepay renewal due ${fmtDate(activeAnnualPrepayTerm?.termEnd)}`,
+    },
+    preferenceAlert("chemical_sensitivities", "CHEM", "Chemical sensitivity: "),
+    preferenceAlert("special_instructions", "NOTE"),
+  ].filter((item) => item.present);
+}
+const fmtDur = (s) => {
+  if (!s && s !== 0) return null;
+  const mins = Math.floor(s / 60),
+    secs = s % 60;
+  return mins ? `${mins}m ${secs}s` : `${secs}s`;
+};
+
+function CustomerProfilePending({
+  embedded,
+  onClose,
+  loading,
+  profileLoadError,
+  onRetry,
+}) {
+  const content = (
+    <div
+      className={
+        embedded
+          ? "c360-embedded"
+          : "admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
+      }
+      onClick={embedded ? undefined : onClose}
+    >
+      <div
+        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {loading ? (
+          <div className="text-ink-secondary text-center py-16 text-ui-body">
+            Loading customer profile…
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-center p-6">
+            <div className="text-center max-w-sm">
+              <div className="text-alert-fg text-14 mb-2">
+                Failed to load customer
+              </div>
+              <div className="text-14 text-ink-secondary mb-5">
+                {profileLoadError ||
+                  "The customer profile could not be loaded."}
+              </div>
+              <div className="flex items-center justify-center gap-2">
+                <Button variant="secondary" onClick={onClose}>
+                  Close
+                </Button>
+                <Button onClick={onRetry}>Retry</Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+  return embedded ? content : createPortal(content, document.body);
+}
+
+export default function Customer360ProfileV2({
+  customerId,
+  onClose,
+  onSelectCustomer,
+  initialTab = "overview",
+  initialScheduledServiceId = null,
+  embedded = false,
+}) {
+  const customerIdRef = useRef(customerId);
+  customerIdRef.current = customerId;
+  const isAdmin = getAdminRole() === "admin";
+  const {
+    profileReloadKey,
+    reloadCustomer,
+    setProfileActionErr,
+    loading,
+    data,
+    profileLoadError,
+    setProfileReloadKey,
+    setData,
+    timeline,
+    retryTimeline,
+    profileVersion,
+    timelineMissingSources,
+    timelineError,
+    timelineRetrying,
+    profileActionErr,
+  } = useCustomerProfileRecord({ customerId, customerIdRef, isAdmin });
+  const {
+    resumeBilling,
+    resumingBilling,
+    resumeBillingErr,
+    resumeBillingNote,
+  } = useCustomerBillingPause({ customerId, customerIdRef, reloadCustomer });
+  const payer = useCustomerPayer({
+    setProfileActionErr,
+    customerId,
+    reloadCustomer,
+    isAdmin,
+  });
+  const {
+    recipientRoutesDiffer,
+    recipientPrefsDraft,
+    setRecipientPrefsDraft,
+    saveRecipientPrefs,
+    recipientPrefsSaving,
+    recipientPrefsDirty,
+    recipientPrefsErr,
+    updateNotificationPrefs,
+  } = useCustomerRecipientPreferences({
+    data,
+    isAdmin,
+    setProfileActionErr,
+    setData,
+    customerId,
+  });
+  const {
+    editOpen,
+    openEditModal,
+    savingEdit,
+    setEditOpen,
+    editModalRef,
+    editForm,
+    setEditForm,
+    editAddressRef,
+    editErr,
+    deletingCustomer,
+    setDeletingCustomer,
+    setEditErr,
+    setSavingEdit,
+    initialEditForm,
+  } = useCustomerProfileEditor({ profileReloadKey, data, customerId, isAdmin });
+  const {
+    filteredTimeline,
+    activeTab,
+    timelineFilter,
+    setAnnualPrepayOpen,
+    changeWorkspaceTab,
+    viewServiceRecords,
+    setAnnualPrepayInvoiceOpen,
+    setRefundPayment,
+    setCancelSignupOpen,
+    setCancelPlanOpen,
+    setTimelineFilter,
+    timelineSearch,
+    setTimelineSearch,
+    panelRef,
+    activeTabButtonRef,
+    headerPast,
+    menuOpen,
+    setMenuOpen,
+    menuRef,
+    setActiveTab,
+    tabsAnchorRef,
+    profileContentId,
+    menuButtonRef,
+    annualPrepayOpen,
+    handleAnnualPrepaySaved,
+    annualPrepayInvoiceOpen,
+    cancelSignupOpen,
+    cancelPlanOpen,
+    refundPayment,
+  } = useCustomerProfileNavigation({
+    timeline,
+    profileReloadKey,
+    initialTab,
+    embedded,
+    isAdmin,
+    editOpen,
+    onClose,
+    loading,
+    data,
+    reloadCustomer,
+    customerId,
+  });
+  const {
+    comms,
+    commsLoading,
+    commsErr,
+    commsLoaded,
+    commsComposerReady,
+    messageOpen,
+    linkRequest,
+    commsReadScope,
+    setCommsLoaded,
+    smsReply,
+    setSmsReply,
+    smsErr,
+    setSmsErr,
+    sendSms,
+    sendingSms,
+    openMessages,
+    setLinkRequest,
+    messageOpened,
+    setMessageOpen,
+  } = useCustomerMessages({
+    profileReloadKey,
+    loading,
+    isAdmin,
+    embedded,
+    activeTab,
+    customerId,
+    data,
+    setData,
+  });
+
+  const workspaceSections = CUSTOMER_WORKSPACE_SECTIONS.filter(
+    (section) => isAdmin || section.key !== "billing",
+  );
+
+  const unreadConversations = useUnreadConversations(
+    embedded && isAdmin,
+    customerId,
+  );
+
+  if (loading || !data?.customer)
+    return (
+      <CustomerProfilePending
+        embedded={embedded}
+        onClose={onClose}
+        loading={loading}
+        profileLoadError={profileLoadError}
+        onRetry={() => setProfileReloadKey((key) => key + 1)}
+      />
+    );
+  const c = data.customer;
+  const {
+    notificationPrefs,
+    prefs,
+    score,
+    invoices,
+    cards,
+    paymentMethodConsents,
+    contracts,
+    photos,
+    referral,
+    discounts,
+    compliance,
+    nutrientLedger,
+    nutrientSummary,
+    nutrientRows,
+    services,
+    payments,
+    scheduled,
+    upcomingScheduled,
+    accountProperties,
+    addressNeighbors,
+    annualPrepayTerms,
+    prepaidPlans,
+    annualPrepayEstimateSuggestion,
+  } = customerProfileValues(data);
+  const {
+    activeAnnualPrepayTerm,
+    displayedAnnualPrepayTerm,
+    balanceOwed,
+    overdueBalance,
+  } = customerBillingFacts(annualPrepayTerms, data.billingSummary);
+  const { hasLawnHistory, upcomingFuture } = customerServiceFacts({
+    nutrientRows,
+    compliance,
+    services,
+    scheduled,
+    upcomingScheduled,
+  });
+  const alerts = customerProfileAlerts({
+    cards,
+    prefs,
+    balanceOwed,
+    activeAnnualPrepayTerm,
+  });
   const billingSummary = (
-    <div className="c360-overview-billing">
-                  {" "}
-                  <SectionTitle>{embedded ? "Billing status & prepay" : "Billing Summary"}</SectionTitle>{" "}
-                  {c.servicePausedAt && (
-                    <div
-                      role="alert"
-                      className="mb-3 rounded border border-hairline p-2.5"
-                    >
-                      <div className="text-12 font-medium text-alert-fg">
-                        {/* servicePausedOn is the ET calendar date; the raw
-                            servicePausedAt timestamp would render in the
-                            browser's timezone and land on the wrong day. */}
-                        Billing paused since{" "}
-                        {fmtDate(c.servicePausedOn || c.servicePausedAt)}
-                      </div>
-                      <div className="text-12 text-ink-secondary mt-0.5">
-                        Monthly dues are not being collected
-                        {c.servicePauseReason === "autopay_final_failure"
-                          ? " — autopay failed three times"
-                          : ""}
-                        . Visits are unaffected.{" "}
-                        {c.servicePauseReason === "autopay_final_failure"
-                          ? "The pause clears on its own when a payment from this customer succeeds; clearing"
-                          : "This pause was set manually and only clears manually; clearing"}{" "}
-                        it removes this block only — other billing guards
-                        (autopay state, plan type, prepaid coverage) still
-                        apply — and the paused months are never back-billed.
-                      </div>
-                      {isAdmin && (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          className="mt-2"
-                          onClick={resumeBilling}
-                          disabled={resumingBilling}
-                        >
-                          {resumingBilling ? "Clearing…" : "Clear billing pause"}
-                        </Button>
-                      )}
-                      {resumeBillingErr && (
-                        <div className="text-12 text-alert-fg mt-1">
-                          {resumeBillingErr}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {/* Outside the banner: the pause is cleared by now, so the
-                      banner is gone, but dues still will not run and that is
-                      the whole reason someone clicked. */}
-                  {resumeBillingNote && (
-                    <div
-                      role="status"
-                      className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
-                    >
-                      {resumeBillingNote}
-                    </div>
-                  )}
-                  {!embedded && <>
-                  <div className="grid grid-cols-2 gap-2 mb-3">
-                    {" "}
-                    <StatCardV2
-                      label="Open balance"
-                      value={fmtCurrency(balanceOwed)}
-                      alert={balanceOwed > 0}
-                    />{" "}
-                    <StatCardV2
-                      label="Lifetime Rev"
-                      value={fmtCurrency(c.lifetimeRevenue)}
-                    />{" "}
-                  </div>
-                  <div className="text-12 text-ink-secondary mb-1.5">
-                    {cards.length > 0
-                      ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
-                      : "No card on file"}
-                  </div>
-                  <div className="mb-3">
-                    <SectionTitle>
-                      Recent Transactions ({payments.length})
-                    </SectionTitle>
-                    {payments.length > 0 ? (
-                      payments.slice(0, 3).map((p, i) => {
-                        // Grey only FULLY refunded rows — a partial refund
-                        // still holds collected money (status stays 'paid') —
-                        // but flag partials with a chip so the gross amount
-                        // doesn't read as fully collected.
-                        const rowRefund = paymentRefundState(p);
-                        const isRefund = rowRefund.full;
-                        // Non-collected rows (upcoming/processing/failed) were
-                        // indistinguishable from paid ones, so the list read as
-                        // more collected revenue than Lifetime Rev counts.
-                        const isCollected = !p.status || p.status === "paid";
-                        return (
-                          <div
-                            key={i}
-                            className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
-                          >
-                            {" "}
-                            <span
-                              className={cn(
-                                "u-nums flex-shrink-0",
-                                isRefund || !isCollected
-                                  ? "text-ink-secondary"
-                                  : "text-zinc-900",
-                              )}
-                            >
-                              {fmtCurrency(p.amount)}
-                            </span>{" "}
-                            {(rowRefund.partial ||
-                              (!isCollected && !isRefund)) && (
-                              <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
-                                {rowRefund.partial
-                                  ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
-                                  : p.status}
-                              </span>
-                            )}{" "}
-                            <span className="text-ink-secondary truncate">
-                              {p.card_brand
-                                ? `${p.card_brand} …${p.last_four}`
-                                : p.method || p.processor || ""}
-                            </span>{" "}
-                            <span className="text-ink-secondary flex-shrink-0">
-                              {fmtDateOnly(p.payment_date)}
-                            </span>{" "}
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div className="text-12 text-ink-secondary">
-                        No transactions yet
-                      </div>
-                    )}
-                  </div>
-                  </>}
-                  {displayedAnnualPrepayTerm && (
-                    <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-                      <div className="text-12 font-medium text-zinc-900">
-                        {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
-                      </div>
-                      <div className="text-11 text-ink-secondary mt-0.5">
-                        Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
-                        {" · "}
-                        {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
-                        {displayedAnnualPrepayTerm.lastScheduledServiceDate
-                          ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
-                          : ""}
-                      </div>
-                      {displayedAnnualPrepayTerm.renewalDecision && (
-                        <div className="text-11 text-ink-secondary mt-0.5">
-                          Decision:{" "}
-                          {displayedAnnualPrepayTerm.renewalDecision.replace(
-                            "_",
-                            " ",
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {isAdmin && !embedded && (
-                    <Button
-                      size="sm"
-                      onClick={() => setAnnualPrepayOpen(true)}
-                      className="mb-3"
-                    >
-                      Record prepay already collected
-                    </Button>
-                  )}
-                  {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
-                    <div className="mb-3">
-                      <SectionTitle>Prepaid Plans</SectionTitle>
-                      {data.prepaidPlans.map((plan) => (
-                        <div
-                          key={plan.seriesParentId}
-                          className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="text-12 font-medium text-zinc-900 truncate">
-                              {plan.serviceType}
-                              {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
-                            </div>
-                            <span
-                              className="inline-flex items-center rounded-full text-10 font-medium uppercase tracking-label"
-                              style={{
-                                height: 18,
-                                padding: "0 8px",
-                                background: plan.remainingVisits > 0 ? "#DCFCE7" : "#F4F4F5",
-                                color: plan.remainingVisits > 0 ? "#166534" : "#52525B",
-                              }}
-                            >
-                              {plan.remainingVisits > 0 ? "Active" : "Used"}
-                            </span>
-                          </div>
-                          <div className="text-11 text-ink-secondary mt-1">
-                            {plan.usedVisits} of {plan.paidVisits} used
-                            {plan.remainingVisits > 0
-                              ? ` · ${plan.remainingVisits} remaining`
-                              : ""}
-                            {" · "}${plan.perVisitAmount.toFixed(2)}/visit
-                          </div>
-                          <div className="text-11 text-ink-secondary mt-0.5">
-                            Total ${plan.seriesTotal.toFixed(2)}
-                            {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
-                            {plan.nextVisitDate ? ` · next ${fmtDate(plan.nextVisitDate)}` : ""}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {!embedded && <>
-                  <SectionTitle>Recent Invoices</SectionTitle>
-                  {invoices.slice(0, 3).map((inv, i) => (
-                    <div
-                      key={i}
-                      className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between"
-                    >
-                      {" "}
-                      <span className="u-nums text-zinc-900">
-                        {fmtCurrency(inv.amount_due)}
-                      </span>{" "}
-                      <span
-                        className={cn(
-                          "font-medium uppercase tracking-label text-10",
-                          inv.status === "paid"
-                            ? "text-zinc-900"
-                            : "text-alert-fg",
-                        )}
-                      >
-                        {inv.status}
-                      </span>{" "}
-                      <span className="text-ink-secondary">
-                        {fmtDate(inv.created_at)}
-                      </span>{" "}
-                    </div>
-                  ))}
-                  </>}
-                </div>
+    <CustomerBillingSummary
+      embedded={embedded}
+      c={c}
+      isAdmin={isAdmin}
+      resumeBilling={resumeBilling}
+      resumingBilling={resumingBilling}
+      resumeBillingErr={resumeBillingErr}
+      resumeBillingNote={resumeBillingNote}
+      balanceOwed={balanceOwed}
+      cards={cards}
+      payments={payments}
+      displayedAnnualPrepayTerm={displayedAnnualPrepayTerm}
+      setAnnualPrepayOpen={setAnnualPrepayOpen}
+      data={data}
+      invoices={invoices}
+    />
   );
 
   const recipientDetails = (
-    <div className="mt-4">
-                {" "}
-                <SectionTitle>Contacts &amp; Recipients</SectionTitle>
-                <p className="text-14 text-ink-secondary">Account contact: {[c.firstName, c.lastName].filter(Boolean).join(" ")}{c.email ? ` · ${c.email}` : " · No email on file"}</p>
-                <details className="c360-recipient-overrides" open={recipientRoutesDiffer}><summary>View routing & override recipients</summary>
-                <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                  <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
-                    Default Bill-To (third-party payer)
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Select aria-label="Default bill-to"
-                      value={c.payerId ? String(c.payerId) : ""}
-                      disabled={payerSaving || !isAdmin}
-                      onChange={(e) => handlePayerSelect(e.target.value)}
-                      className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
-                    >
-                      <option value="">Customer pays (self)</option>
-                      {payers.map((p) => (
-                        <option key={p.id} value={String(p.id)}>
-                          {p.display_name}
-                          {p.company_name && p.company_name !== p.display_name
-                            ? ` — ${p.company_name}`
-                            : ""}
-                        </option>
-                      ))}
-                      {isAdmin && <option value="__new__">＋ New payer…</option>}
-                    </Select>
-                    {payerSaving && (
-                      <span className="text-12 text-ink-tertiary">Saving…</span>
-                    )}
-                  </div>
-                  {showNewPayer && isAdmin && (
-                    <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
-                      <div className="text-12 font-medium text-zinc-900 mb-2">
-                        New payer
-                      </div>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Payer name *
-                        </span>
-                        <input
-                          type="text"
-                          value={newPayer.displayName}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
-                          placeholder="e.g. tenant, builder, or property manager name"
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Company (optional)
-                        </span>
-                        <input
-                          type="text"
-                          value={newPayer.companyName}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <label className="block mb-1">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Invoice email (AP)
-                        </span>
-                        <input
-                          type="email"
-                          value={newPayer.apEmail}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
-                          placeholder="Where this payer's invoices are emailed"
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <div className="text-12 text-ink-secondary mb-2">
-                        Without an email, invoices to this payer can’t be
-                        delivered until one is added in Finance → Payers.
-                      </div>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Phone (optional)
-                        </span>
-                        <input
-                          type="tel"
-                          value={newPayer.apPhone}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      {newPayerError && (
-                        <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
-                      )}
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={saveNewPayer}
-                          disabled={newPayerSaving || !newPayer.displayName.trim()}
-                          className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
-                        >
-                          {newPayerSaving ? "Saving…" : "Create & select"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setShowNewPayer(false);
-                            setNewPayerError("");
-                          }}
-                          className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {newPayerNotice && (
-                    <div className="text-12 text-ink-secondary mt-1.5">
-                      {newPayerNotice}
-                    </div>
-                  )}
-                  <div className="text-12 text-ink-secondary mt-1.5">
-                    Routes every invoice for this account to a builder /
-                    property manager instead of the customer. A single job can
-                    override this on the appointment. Manage payers in Finance →
-                    Payers.
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      Account owner / payer
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {[c.firstName, c.lastName].filter(Boolean).join(" ") ||
-                        c.companyName ||
-                        "Customer"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {c.email || "No email"}
-                    </div>
-                  </div>
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      On-location contact
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {c.serviceContactName || "Primary customer"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {c.serviceContactEmail ||
-                        c.serviceContactPhone ||
-                        c.email ||
-                        "No contact"}
-                    </div>
-                  </div>
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      Invoice email
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {recipientPrefsDraft.billingContactName || "Billing recipient"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {recipientPrefsDraft.billingEmail || c.email || "No email"}
-                    </div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
-                  <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">
-                      Billing contact name
-                    </span>
-                    <input
-                      id="c360-billing-contact-name"
-                      name="billingContactName"
-                      value={recipientPrefsDraft.billingContactName}
-                      disabled={!isAdmin}
-                      onChange={(e) =>
-                        setRecipientPrefsDraft((prev) => ({
-                          ...prev,
-                          billingContactName: e.target.value,
-                        }))
-                      }
-                      placeholder="Landlord, AP contact, property manager"
-                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">
-                      Billing recipient email
-                    </span>
-                    <input
-                      id="c360-billing-recipient-email"
-                      name="billingEmail"
-                      value={recipientPrefsDraft.billingEmail}
-                      disabled={!isAdmin}
-                      onChange={(e) =>
-                        setRecipientPrefsDraft((prev) => ({
-                          ...prev,
-                          billingEmail: e.target.value,
-                        }))
-                      }
-                      type="email"
-                      placeholder={c.email || "billing@example.com"}
-                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
-                    />
-                  </label>
-                </div>
-                <div className="flex items-center justify-between gap-3 mb-3">
-                  <div className="text-12 text-ink-secondary">
-                    Invoices and receipts use the billing email when set.
-                    Appointment reminders and service reports use the
-                    on-location contact when present.
-                  </div>
-                  <Button
-                    onClick={saveRecipientPrefs}
-                    disabled={recipientPrefsSaving || !isAdmin || !recipientPrefsDirty}
-                    className="shrink-0"
-                  >
-                    {recipientPrefsSaving ? "Saving…" : recipientPrefsDirty ? "Save recipients" : "Recipients saved"}
-                  </Button>
-                </div>
-                {recipientPrefsErr && (
-                  <div className="mb-3 text-12 text-alert-fg">
-                    {recipientPrefsErr}
-                  </div>
-                )}
-                {!embedded && <>
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-appointment-notify-primary"
-                    name="appointmentNotifyPrimary"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.appointment_notify_primary !== false}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        appointmentNotifyPrimary: e.target.checked,
-                        appointment_notify_primary: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also send appointment SMS to the account owner
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      On by default. On-location contacts receive appointment
-                      reminders too. Turn this off only if the account owner
-                      should stop receiving them.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-service-report-notify-primary"
-                    name="serviceReportNotifyPrimary"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.service_report_notify_primary !== false}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        serviceReportNotifyPrimary: e.target.checked,
-                        service_report_notify_primary: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also email service reports to the account owner
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      On by default. Turn this off only if the account owner
-                      should stop receiving reports — a distinct
-                      service-contact email then receives them instead.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-service-report-notify-billing"
-                    name="serviceReportNotifyBilling"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.service_report_notify_billing === true}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        serviceReportNotifyBilling: e.target.checked,
-                        service_report_notify_billing: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also email service reports to the billing recipient
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      Copies the billing recipient email (landlord, AP contact)
-                      on post-service reports. Requires a billing recipient
-                      email above; invoices are unaffected.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-auto-flip-en-route"
-                    name="autoFlipEnRoute"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={
-                      notificationPrefs.auto_flip_en_route !== false
-                    }
-                    onChange={(e) => {
-                      const next = e.target.checked;
-                      updateNotificationPrefs({
-                        autoFlipEnRoute: next,
-                        auto_flip_en_route: next,
-                      });
-                    }}
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Auto-flip en route SMS
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      When the tech&apos;s vehicle leaves a previous job area
-                      and the next job is this customer, fire the &quot;on the
-                      way&quot; SMS automatically. Off here = customer keeps
-                      manual en-route SMS but skips auto-flip.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                </>}
-                </details>
-              </div>
+    <CustomerRecipientDetails
+      payer={payer}
+      c={c}
+      recipientRoutesDiffer={recipientRoutesDiffer}
+      isAdmin={isAdmin}
+      recipientPrefsDraft={recipientPrefsDraft}
+      setRecipientPrefsDraft={setRecipientPrefsDraft}
+      saveRecipientPrefs={saveRecipientPrefs}
+      recipientPrefsSaving={recipientPrefsSaving}
+      recipientPrefsDirty={recipientPrefsDirty}
+      recipientPrefsErr={recipientPrefsErr}
+      embedded={embedded}
+      notificationPrefs={notificationPrefs}
+      updateNotificationPrefs={updateNotificationPrefs}
+    />
   );
 
   const conversation = (
-            <div className="c360-conversation flex flex-col">
-              {" "}
-              <OwedCommitmentsSummary customerId={customerId} />
-              {!embedded && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
-              <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
-              <div className="flex flex-col gap-1.5 mb-3">
-                {commsLoading && (
-                  <div className="text-ink-secondary text-13 text-center py-5">
-                    Loading messages…
-                  </div>
-                )}
-                {commsErr && (
-                  <div className="text-alert-fg text-13 text-center py-5">
-                    {commsErr}
-                  </div>
-                )}
-                {[...comms].reverse().map((m, i) => {
-                  const inbound = m.direction === "inbound";
-                  if (m.channel === "sms") {
-                    return (
-                      <div
-                        key={m.id || i}
-                        className={cn(
-                          "max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline",
-                          inbound
-                            ? "self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs"
-                            : "self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs",
-                        )}
-                      >
-                        {" "}
-                        <div>{m.body}</div>
-                        {embedded && m.media?.length > 0 && <Suspense fallback={<span>Loading attachments…</span>}><CustomerMessageMedia media={m.media} inverted={m.direction === "outbound"} /></Suspense>}{" "}
-                        <div
-                          className={cn(
-                            "text-10 mt-1 text-right",
-                            inbound ? "text-ink-secondary" : "text-zinc-300",
-                          )}
-                        >
-                          {timeAgo(m.createdAt)}
-                        </div>{" "}
-                      </div>
-                    );
-                  }
-                  // voice
-                  const rec = (m.media || []).find(
-                    (x) => x.type === "recording",
-                  );
-                  const duration = fmtDur(
-                    m.durationSeconds ?? rec?.duration_seconds,
-                  );
-                  const summary = m.aiSummary || m.body;
-                  return (
-                    <div
-                      key={m.id || i}
-                      className={cn(
-                        "max-w-[85%] px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm",
-                        inbound ? "self-start" : "self-end",
-                      )}
-                    >
-                      {" "}
-                      <div className="flex items-center gap-2 mb-1">
-                        {" "}
-                        <span className="text-10 font-medium tracking-label uppercase text-ink-secondary">
-                          {inbound ? "Call in" : "Call out"}
-                        </span>
-                        {duration && (
-                          <span className="text-11 u-nums text-zinc-900">
-                            {duration}
-                          </span>
-                        )}
-                        {m.answeredBy && (
-                          <span className="text-10 text-ink-secondary">
-                            · {m.answeredBy}
-                          </span>
-                        )}
-                      </div>
-                      {summary && (
-                        <div className="text-12 text-zinc-900 leading-relaxed">
-                          {summary}
-                        </div>
-                      )}
-                      {(rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid) && (
-                        <AuthenticatedCallAudio
-                          recordingId={rec?.sid || m.recordingSid}
-                          className="mt-1.5 w-full h-8"
-                        />
-                      )}
-                      <div className="text-10 mt-1 text-right text-ink-secondary">
-                        {timeAgo(m.createdAt)}
-                      </div>{" "}
-                    </div>
-                  );
-                })}
-                {!commsLoading &&
-                  !commsErr &&
-                  commsLoaded &&
-                  comms.length === 0 && (
-                    <div className="text-ink-secondary text-13 text-center py-5">
-                      No messages
-                    </div>
-                  )}
-              </div>
-              {embedded && c.phone && (commsComposerReady || !isAdmin) && <Suspense fallback={<p className="py-3 text-14 text-ink-secondary">Loading message tools…</p>}>
-                <CustomerSmsComposer key={`${c.id}:${c.phone}`} active={embedded ? messageOpen : activeTab === "comms"} linkRequest={linkRequest} customer={c} customerMessages={comms} customerReadScope={commsReadScope} onSent={async () => {
-                  setCommsLoaded(false);
-                  await Promise.allSettled([reloadCustomer(), ...(isAdmin ? [retryTimeline()] : [])]);
-                }} />
-              </Suspense>}
-              {!embedded && c.phone && (
-                <div className="py-3 border-t border-hairline border-zinc-200">
-                  {" "}
-                  <div className="flex gap-2">
-                    {" "}
-                    <input
-                      id="c360-sms-reply"
-                      name="smsReply"
-                      value={smsReply}
-                      onChange={(e) => {
-                        setSmsReply(e.target.value);
-                        if (smsErr) setSmsErr("");
-                      }}
-                      placeholder="Type a message…"
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          sendSms();
-                        }
-                      }}
-                      className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
-                    />{" "}
-                    <Button
-                      onClick={sendSms}
-                      disabled={sendingSms || !smsReply.trim()}
-                    >
-                      {sendingSms ? "…" : "Send"}
-                    </Button>{" "}
-                  </div>
-                  {smsErr && (
-                    <div className="mt-1.5 text-12 text-alert-fg">{smsErr}</div>
-                  )}
-                </div>
-              )}
-              {!embedded && recipientDetails}
-              {!embedded && <div className="mt-4">
-                {" "}
-                <SectionTitle>
-                  Notes &amp; Interactions ({(data.interactions || []).length})
-                </SectionTitle>
-                {(data.interactions || []).slice(0, 10).map((n, i) => (
-                  <div
-                    key={i}
-                    className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-12"
-                  >
-                    {" "}
-                    <div className="flex justify-between mb-1">
-                      {" "}
-                      <span className="font-medium text-zinc-900">
-                        {n.interaction_type}: {n.subject}
-                      </span>{" "}
-                      <span className="text-ink-secondary text-10">
-                        {timeAgo(n.created_at)}
-                      </span>{" "}
-                    </div>
-                    {n.body && (
-                      <div className="text-ink-secondary">
-                        {n.body.substring(0, 200)}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>}
-            </div>
+    <CustomerConversation
+      customerId={customerId}
+      comms={comms}
+      commsLoading={commsLoading}
+      commsErr={commsErr}
+      embedded={embedded}
+      commsLoaded={commsLoaded}
+      c={c}
+      commsComposerReady={commsComposerReady}
+      isAdmin={isAdmin}
+      messageOpen={messageOpen}
+      linkRequest={linkRequest}
+      commsReadScope={commsReadScope}
+      setCommsLoaded={setCommsLoaded}
+      reloadCustomer={reloadCustomer}
+      retryTimeline={retryTimeline}
+      smsReply={smsReply}
+      setSmsReply={setSmsReply}
+      smsErr={smsErr}
+      setSmsErr={setSmsErr}
+      sendSms={sendSms}
+      sendingSms={sendingSms}
+      recipientDetails={recipientDetails}
+      data={data}
+    />
   );
 
-  return renderProfile(
-    <div
-      // Portaled to <body>, so the overlay leaves the admin shell's DOM
-      // scope — restate .admin-shell-v2 here to keep the forced-Roboto and
-      // border-box form-control rules from index.css applying inside it.
-      className={wrapperClass}
-      onClick={embedded ? undefined : onClose}
-    >
-      {" "}
-      <div
-        ref={panelRef}
-        onClick={(e) => e.stopPropagation()}
-        className={cn("c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900", headerPast && "c360-header-past")}
-      >
-        {" "}
-        <style>{`
-          @media (max-width: 768px) {
-            .c360-overview-grid { grid-template-columns: 1fr !important; }
-            .c360-billing-grid { grid-template-columns: 1fr 1fr !important; }
-            .c360-property-grid { grid-template-columns: 1fr !important; }
-            .c360-panel { width: 100% !important; max-width: 100% !important; }
-            .c360-header-desktop { display: none !important; }
-            .c360-header-mobile { display: block !important; }
-            .c360-mobile-actionbar { display: flex !important; }
-            .c360-mobile-footer-spacer { display: block !important; }
-          }
-          .c360-header-mobile { display: none; }
-          .c360-mobile-actionbar { display: none; }
-          .c360-mobile-footer-spacer { display: none; }
-        `}</style>
-        {embedded ? <CustomerWorkspaceHeader c={c} isAdmin={isAdmin} unreadConversations={unreadConversations} onEdit={openEditModal} onTab={changeWorkspaceTab} onMessage={openMessages} onSendLink={() => { setLinkRequest((value) => value + 1); openMessages(); }} menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} /> : <>
-        {/* ZONE 1 — STICKY HEADER */}
-        <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200">
-          {/* Desktop header (>= 768px) */}
-          <div className="c360-header-desktop px-6 py-4">
-            {" "}
-            <div className="flex justify-between items-start mb-2">
-              {" "}
-              <div className="flex items-center gap-3 flex-wrap">
-                {" "}
-                <div className="text-22 font-medium tracking-tight text-zinc-900">
-                  {c.firstName} {c.lastName}
-                </div>
-                {c.profileLabel && (
-                  <Badge className="normal-case tracking-normal">
-                    {c.profileLabel}
-                  </Badge>
-                )}
-                {c.contactRole && c.contactRole !== "owner" && (
-                  <Badge
-                    tone="neutral"
-                    className="normal-case tracking-normal"
-                    title={contactRoleTitle(c.contactRole)}
-                  >
-                    {contactRoleLabel(c.contactRole)}
-                  </Badge>
-                )}
-                <HealthCircle score={score} /> <TierBadgeV2 tier={c.tier} />{" "}
-                <StageBadgeV2 stage={c.pipelineStage} />{" "}
-              </div>{" "}
-              <button
-                onClick={onClose}
-                aria-label="Close"
-                className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
-              >
-                ×
-              </button>{" "}
-            </div>
-            {(c.phone || c.email) && (
-              <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-1.5">
-                {c.phone && (
-                  <CallBridgeLink
-                    phone={c.phone}
-                    customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
-                    className="u-nums text-zinc-900 hover:underline"
-                  >
-                    {c.phone}
-                  </CallBridgeLink>
-                )}
-                {c.email && (
-                  <a
-                    href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-zinc-900 hover:underline"
-                  >
-                    {c.email}
-                  </a>
-                )}
-              </div>
-            )}
-            {[
-              {
-                key: "1",
-                label: "Service contact:",
-                name: c.serviceContactName,
-                phone: c.serviceContactPhone,
-                email: c.serviceContactEmail,
-              },
-              {
-                key: "2",
-                label: "Service contact 2:",
-                name: c.serviceContact2Name,
-                phone: c.serviceContact2Phone,
-                email: c.serviceContact2Email,
-              },
-              {
-                key: "3",
-                label: "Service contact 3:",
-                name: c.serviceContact3Name,
-                phone: c.serviceContact3Phone,
-                email: c.serviceContact3Email,
-              },
-            ]
-              .filter((slot) => slot.phone || slot.email)
-              .map((slot) => (
-                <div key={slot.key} className="text-12 text-ink-secondary mb-1.5">
-                  {" "}
-                  <span className="text-ink-tertiary mr-1">{slot.label}</span>
-                  {slot.name && (
-                    <span className="text-zinc-900 mr-2">{slot.name}</span>
-                  )}
-                  {slot.phone && (
-                    <CallBridgeLink
-                      phone={slot.phone}
-                      customerName={
-                        slot.name ||
-                        `${c.firstName || ""} ${c.lastName || ""}`.trim()
-                      }
-                      className="u-nums text-zinc-900 hover:underline mr-3"
-                    >
-                      {slot.phone}
-                    </CallBridgeLink>
-                  )}
-                  {slot.email && (
-                    <a
-                      href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(slot.email)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-zinc-900 hover:underline"
-                    >
-                      {slot.email}
-                    </a>
-                  )}
-                </div>
-              ))}
-            <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
-              {(() => {
-                const parts = [
-                  c.address?.line1,
-                  c.address?.line2,
-                  c.address?.city,
-                  c.address?.state,
-                  c.address?.zip,
-                ].filter(Boolean);
-                if (!parts.length) return null;
-                const full = formatAddress(c.address);
-                return (
-                  <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-zinc-900 hover:underline"
-                  >
-                    {full}
-                  </a>
-                );
-              })()}
-              <span className="u-nums text-zinc-900">
-                {fmtCurrency(c.monthlyRate)}/mo
-              </span>{" "}
-              <span className="u-nums">{fmtCurrency(c.annualValue)}/yr</span>
-              {c.memberSince && <span>Since {fmtDate(c.memberSince)}</span>}
-            </div>{" "}
-            <div className="flex gap-2 flex-wrap">
-              {c.phone && (
-                <>
-                  {" "}
-                  <a
-                    href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                    className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-                  >
-                    Text
-                  </a>{" "}
-                  <button
-                    type="button"
-                    onClick={() =>
-                      callViaBridge(
-                        c.phone,
-                        `${c.firstName || ""} ${c.lastName || ""}`.trim(),
-                      )
-                    }
-                    className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-                  >
-                    Call
-                  </button>{" "}
-                </>
-              )}
-              <a
-                href={`/admin/schedule?customer=${customerId}`}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-              >
-                Book Appt
-              </a>{" "}
-              <a
-                href={`/admin/invoices?customer=${customerId}`}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-              >
-                Invoice
-              </a>
-              {isAdmin && (
-                <button
-                  type="button"
-                  onClick={() => setAnnualPrepayInvoiceOpen(true)}
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-                >
-                  Prepay Invoice
-                </button>
-              )}
-              <button
-                onClick={() => setActiveTab("comms")}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-              >
-                Add Note
-              </button>
-              {isAdmin && (
-                <button
-                  onClick={openEditModal}
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
-                >
-                  Edit
-                </button>
-              )}
-            </div>{" "}
-          </div>
-          {/* Mobile header (< 768px) — per mobile-admin-audit PR #3 item 2:
-              back / menu / Text pills on top, large name, three-stat row */}
-          <div className="c360-header-mobile px-4 pb-3">
-            {" "}
-            {/* Spacer reserving the fixed top action bar's height (8px top
-                pad + 44px controls + 8px bottom pad = 60px, plus the iPhone
-                safe-area inset) so the name/stats start below it. */}
-            <div
-              aria-hidden="true"
-              style={{ height: "calc(60px + env(safe-area-inset-top, 0px))" }}
-            />
-            <div className="text-26 font-medium tracking-tight text-zinc-900 leading-tight mb-1">
-              {c.firstName} {c.lastName}
-            </div>
-            {(c.address?.line1 || c.address?.city) &&
-              (() => {
-                const parts = [
-                  c.address?.line1,
-                  c.address?.line2,
-                  c.address?.city,
-                  c.address?.state,
-                  c.address?.zip,
-                ].filter(Boolean);
-                const label = parts.join(", ");
-                const query = encodeURIComponent(label);
-                return (
-                  <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${query}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block text-13 text-ink-secondary no-underline hover:text-zinc-900 mb-2 truncate"
-                  >
-                    {label}
-                  </a>
-                );
-              })()}
-            {/* Contact — listed on mobile (desktop shows these in its header) */}
-            {(c.phone || c.email) && (
-              <div className="flex flex-col gap-1 mb-3 text-13">
-                {c.phone && (
-                  <CallBridgeLink
-                    phone={c.phone}
-                    customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
-                    className="u-nums text-ink-secondary hover:text-zinc-900 no-underline self-start"
-                  >
-                    {c.phone}
-                  </CallBridgeLink>
-                )}
-                {c.email && (
-                  <a
-                    href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-ink-secondary hover:text-zinc-900 no-underline truncate"
-                  >
-                    {c.email}
-                  </a>
-                )}
-              </div>
-            )}
-            <div className="flex items-center gap-2 flex-wrap mb-3">
-              {" "}
-              <TierBadgeV2 tier={c.tier} />{" "}
-              <StageBadgeV2 stage={c.pipelineStage} />{" "}
-              {c.contactRole && c.contactRole !== "owner" && (
-                <Badge
-                  tone="neutral"
-                  className="normal-case tracking-normal"
-                  title={contactRoleTitle(c.contactRole)}
-                >
-                  {contactRoleLabel(c.contactRole)}
-                </Badge>
-              )}
-            </div>{" "}
-            <div className="flex items-stretch gap-3 pt-3 border-t border-hairline border-zinc-200">
-              {" "}
-              <div className="flex-1">
-                {" "}
-                <div className="u-label text-ink-tertiary">Monthly</div>{" "}
-                <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">
-                  {fmtCurrency(c.monthlyRate)}
-                </div>{" "}
-              </div>{" "}
-              <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
-                {" "}
-                <div className="u-label text-ink-tertiary">Annual</div>{" "}
-                <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">
-                  {fmtCurrency(c.annualValue)}
-                </div>{" "}
-              </div>{" "}
-              <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
-                {" "}
-                <div className="u-label text-ink-tertiary">Health</div>{" "}
-                <div
-                  className={cn(
-                    "u-nums text-15 font-medium mt-0.5",
-                    score != null && score < 40
-                      ? "text-alert-fg"
-                      : "text-zinc-900",
-                  )}
-                >
-                  {score != null ? score : "—"}
-                </div>{" "}
-              </div>{" "}
-            </div>{" "}
-          </div>{" "}
-        </div>
-        </>}
-        {/* ZONE 2 — ALERT BANNERS */}
-        {!embedded && alerts.length > 0 && (
-          <div className="c360-alerts flex flex-wrap gap-2 px-6 py-3 bg-zinc-50 border-b border-hairline border-zinc-200">
-            {alerts.map((a, i) => (
-              <div
-                key={i}
-                className={cn(
-                  "inline-flex items-center gap-1.5 h-6 px-2 text-11 font-medium rounded-xs border-hairline",
-                  a.alert
-                    ? "bg-alert-bg border-alert-fg text-alert-fg"
-                    : "bg-white border-zinc-200 text-zinc-700",
-                )}
-              >
-                {" "}
-                <span className="uppercase tracking-label text-10">
-                  {a.label}
-                </span>{" "}
-                <span className="normal-case">{a.text}</span>{" "}
-              </div>
-            ))}
-          </div>
-        )}
-        {embedded ? <><div ref={tabsAnchorRef} className="c360-tabs-anchor" /><div className="c360-sticky-identity">{c.firstName} {c.lastName}</div><Customer360Sections active={activeTab} onChange={changeWorkspaceTab} contentId={profileContentId} sections={workspaceSections} /></> : <>
-        {/* ZONE 3 — TAB BAR */}
-        {/* shrink-0: this is an overflow-x scroll container, so its flex
-            auto-minimum-size is 0 — without it the column flex collapses the
-            bar to ~0px on mobile (tall content), hiding every section tab. */}
-        <div className="flex shrink-0 bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
-          {CUSTOMER_360_SECTIONS.filter((section) => section.key !== "estimates").map((t) => (
-            <button
-              key={t.key}
-              ref={activeTab === t.key ? activeTabButtonRef : null}
-              aria-pressed={activeTab === t.key}
-              onClick={() => setActiveTab(t.key)}
-              className={cn(
-                "h-11 px-4 text-12 uppercase tracking-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
-                activeTab === t.key
-                  ? "text-zinc-900 border-zinc-900"
-                  : "text-ink-secondary border-transparent hover:text-zinc-900",
-              )}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-        </>}
-        {/* TAB CONTENT */}
-        <div className="c360-tab-content p-6 flex-1" id={profileContentId} role={embedded ? "tabpanel" : undefined} aria-label={embedded ? CUSTOMER_WORKSPACE_SECTIONS.find((section) => section.key === activeTab)?.label : undefined}>
-          {profileActionErr && (
-            <div role="alert" className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm">
-              {profileActionErr}
-            </div>
-          )}
-          {/* OVERVIEW */}
-          {activeTab === "overview" && (
-            <div className="c360-overview-content">
-              {embedded && <Customer360Summary isAdmin={isAdmin} customer={c} upcoming={upcomingFuture} services={services} comms={comms} commsLoading={commsLoading} commsError={isAdmin ? commsErr : "Message history requires admin access"} balance={data.billingSummary} unread={unreadConversations} preferences={prefs} alerts={alerts} onMessage={openMessages} onTab={changeWorkspaceTab} onViewServices={viewServiceRecords} discounts={discounts} referral={referral} />}
-
-              <CustomerRequestsPanel customerId={customerId} />
-              {/* both customer-scoped zone endpoints are requireAdmin — a
-                  technician session would only 403 on expand */}
-              {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
-              {!embedded && isAdmin && <TermiteStationsGate customerId={customerId} />}
-              {accountProperties.length > 0 && (
-                <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
-                  {" "}
-                  <SectionTitle>
-                    Other Properties For This Customer
-                  </SectionTitle>{" "}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {accountProperties.map((p) => {
-                      const addr = [
-                        p.address?.line1,
-                        p.address?.line2,
-                        p.address?.city,
-                        p.address?.state,
-                        p.address?.zip,
-                      ]
-                        .filter(Boolean)
-                        .join(", ");
-                      const className =
-                        "text-left rounded-sm border-hairline border-zinc-200 bg-zinc-50 hover:bg-zinc-100 u-focus-ring p-2.5";
-                      const content = (
-                        <>
-                          {" "}
-                          <div className="text-13 font-medium text-zinc-900">
-                            {p.profileLabel || "Service property"}
-                          </div>{" "}
-                          <div className="text-12 text-ink-secondary truncate">
-                            {addr || "No address on file"}
-                          </div>{" "}
-                          <div className="text-11 text-ink-tertiary mt-1">
-                            {fmtCurrency(p.monthlyRate || 0)}/mo
-                          </div>{" "}
-                        </>
-                      );
-                      if (!onSelectCustomer) {
-                        return (
-                          <a
-                            key={p.id}
-                            href={`/admin/customers?customerId=${encodeURIComponent(p.id)}`}
-                            className={cn(className, "block no-underline")}
-                          >
-                            {content}
-                          </a>
-                        );
-                      }
-                      return (
-                        <button
-                          key={p.id}
-                          type="button"
-                          onClick={() => onSelectCustomer?.(p.id)}
-                          className={className}
-                        >
-                          {content}
-                        </button>
-                      );
-                    })}
-                  </div>{" "}
-                </div>
-              )}
-              {addressNeighbors.length > 0 && (
-                <div
-                  className="mb-4 pb-3 border-b border-hairline border-zinc-200"
-                  data-testid="address-neighbors"
-                >
-                  {" "}
-                  <SectionTitle>Others at this address</SectionTitle>{" "}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {addressNeighbors.map((n) => {
-                      const name =
-                        `${n.firstName || ""} ${n.lastName || ""}`.trim() ||
-                        "(no name)";
-                      const addr = [n.address?.line1, n.address?.line2]
-                        .filter(Boolean)
-                        .join(", ");
-                      const className =
-                        "text-left rounded-sm border-hairline border-zinc-200 bg-zinc-50 hover:bg-zinc-100 u-focus-ring p-2.5";
-                      const content = (
-                        <>
-                          {" "}
-                          <div className="text-14 font-medium text-zinc-900">
-                            {name}
-                          </div>{" "}
-                          <div className="text-14 text-ink-secondary truncate">
-                            {[n.phone, STAGE_LABELS[n.pipelineStage] || n.pipelineStage]
-                              .filter(Boolean)
-                              .join(" · ") || "No contact on file"}
-                          </div>{" "}
-                          <div className="text-12 text-ink-tertiary mt-1 truncate">
-                            {addr || "Address on file"}
-                            {n.matchedVia === "property" ? " · secondary property" : ""}
-                          </div>{" "}
-                        </>
-                      );
-                      if (!onSelectCustomer) {
-                        return (
-                          <a
-                            key={n.id}
-                            href={`/admin/customers?customerId=${encodeURIComponent(n.id)}`}
-                            className={cn(className, "block no-underline")}
-                          >
-                            {content}
-                          </a>
-                        );
-                      }
-                      return (
-                        <button
-                          key={n.id}
-                          type="button"
-                          onClick={() => onSelectCustomer?.(n.id)}
-                          className={className}
-                        >
-                          {content}
-                        </button>
-                      );
-                    })}
-                  </div>{" "}
-                </div>
-              )}
-              <div className="flex items-center justify-between mb-4 pb-3 border-b border-hairline border-zinc-200">
-                {" "}
-                <div>
-                  {" "}
-                  <div className="text-13 font-medium text-zinc-900">
-                    Already left a Google review
-                  </div>{" "}
-                  <div className="text-11 text-ink-secondary">
-                    When on, this customer is excluded from review-request and
-                    48h followup SMS.
-                  </div>
-                  {c.reviewMarkedAt && c.hasLeftGoogleReview && (
-                    <div className="text-10 text-ink-tertiary mt-0.5 u-nums">
-                      Marked {fmtDate(c.reviewMarkedAt)}
-                    </div>
-                  )}
-                </div>{" "}
-                <Switch
-                  id="has-left-review-v2"
-                  checked={!!c.hasLeftGoogleReview}
-                  disabled={!isAdmin}
-                  onChange={async (val) => {
-                    const previousHasLeftGoogleReview = !!c.hasLeftGoogleReview;
-                    const previousReviewMarkedAt = c.reviewMarkedAt || null;
-                    setData((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            customer: {
-                              ...prev.customer,
-                              hasLeftGoogleReview: val,
-                              reviewMarkedAt: val
-                                ? new Date().toISOString()
-                                : null,
-                            },
-                          }
-                        : prev,
-                    );
-                    try {
-                      await adminFetch(`/admin/customers/${customerId}`, {
-                        method: "PUT",
-                        body: JSON.stringify({ hasLeftGoogleReview: val }),
-                      });
-                    } catch (err) {
-                      setData((prev) =>
-                        prev
-                          ? {
-                              ...prev,
-                              customer: {
-                                ...prev.customer,
-                                hasLeftGoogleReview: previousHasLeftGoogleReview,
-                                reviewMarkedAt: previousReviewMarkedAt,
-                              },
-                            }
-                          : prev,
-                      );
-                      setProfileActionErr(err.message || "Review status failed to save");
-                    }
-                  }}
-                />{" "}
-              </div>{" "}
-              {!embedded && <>
-              <div className="c360-overview-grid grid grid-cols-3 gap-5">
-                {/* Col 1: Services */}
-                <div className="c360-overview-services">
-                  {" "}
-                  <SectionTitle>
-                    Upcoming Appointments ({upcomingFuture.length})
-                  </SectionTitle>
-                  {upcomingFuture.length > 0 ? (
-                    upcomingFuture.slice(0, 3).map((s, i) => (
-                      <div
-                        key={i}
-                        className="c360-upcoming-appointment bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
-                      >
-                        {" "}
-                        <div className="text-13 font-medium text-zinc-900">
-                          {s.service_type}
-                        </div>{" "}
-                        <div className="text-12 text-ink-secondary">
-                          {fmtDateOnly(s.scheduled_date)} · {s.status}
-                        </div>{" "}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="text-12 text-ink-secondary mb-3">
-                      No upcoming appointments
-                    </div>
-                  )}
-                  <SectionTitle>
-                    Recent Services ({services.length})
-                  </SectionTitle>
-                  {services.slice(0, 5).map((s, i) => {
-                    const recentNotes = parseStructuredNotes(s.structured_notes);
-                    return (
-                      <div
-                        key={i}
-                        className="c360-recent-service py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
-                      >
-                        {" "}
-                        <span className="text-zinc-900 flex items-center gap-1.5">
-                          {s.service_type}
-                          {recentNotes.projectCompletion === true && (
-                            <Badge tone="neutral">Project</Badge>
-                          )}
-                        </span>{" "}
-                        <span className="text-ink-secondary">
-                          {fmtDateOnly(s.service_date)}
-                        </span>{" "}
-                      </div>
-                    );
-                  })}
-                  {services.length === 0 && (
-                    <div className="text-12 text-ink-secondary">
-                      No services recorded
-                    </div>
-                  )}
-                </div>
-                {/* Col 2: Billing snapshot */}
-                {!embedded && billingSummary}
-                {/* Col 3: Health + Referral + Discounts */}
-                <div className="c360-overview-health">
-                  {referral && (
-                    <div className="mt-4">
-                      {" "}
-                      <SectionTitle>Referral Stats</SectionTitle>{" "}
-                      <div className="text-12 text-zinc-900">
-                        Code:{" "}
-                        <span className="u-nums">{c.referralCode}</span>{" "}
-                      </div>
-                      {referral.total_referrals != null && (
-                        <div className="text-12 text-ink-secondary">
-                          Referrals: {referral.total_referrals}
-                        </div>
-                      )}
-                      {referral.total_earned != null && (
-                        <div className="text-12 text-zinc-900">
-                          Earned:{" "}
-                          <span className="u-nums">
-                            {fmtCurrency(referral.total_earned)}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {discounts.length > 0 && (
-                    <div className="mt-4">
-                      {" "}
-                      <SectionTitle>Active Discounts</SectionTitle>
-                      {discounts.map((d, i) => (
-                        <div key={i} className="text-12 text-zinc-900 py-0.5">
-                          {d.discount_name || "Discount"}:{" "}
-                          <span className="u-nums">
-                            {d.discount_type === "percentage"
-                              ? `${d.discount_value}%`
-                              : fmtCurrency(d.discount_value)}
-                          </span>{" "}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>{" "}
-              </div>{" "}
-              </>}
-            </div>
-          )}
-
-          {/* BILLING */}
-          {activeTab === "billing" && (
-            <div className="c360-billing-content">
-              {" "}
-              <div className="c360-billing-grid grid grid-cols-4 gap-3 mb-5">
-                {" "}
-                <StatCardV2
-                  label="Open balance"
-                  value={fmtCurrency(balanceOwed)}
-                  alert={balanceOwed > 0}
-                />{" "}
-                <StatCardV2 label="Overdue balance" value={fmtCurrency(overdueBalance)} alert={overdueBalance > 0} />
-                <StatCardV2 label={c.billingMode === "monthly_membership" ? "Monthly rate" : "Billing arrangement"} value={c.billingMode === "monthly_membership" ? fmtCurrency(c.monthlyRate) : ({ per_visit: "Per application", per_application: "Per application", annual_prepay: "Annual prepay", one_time: "One-time" }[c.billingMode] || "Not set")} />
-                <StatCardV2
-                  label="Lifetime Revenue"
-                  value={fmtCurrency(c.lifetimeRevenue)}
-                />{" "}
-              </div>{" "}
-              {embedded && <>
-                <div className="c360-billing-actions">
-                  <a className="c360-outline-link u-focus-ring" href={`/admin/invoices?customer=${c.id}`}>Manage invoices<ArrowUpRight size={15} /></a>
-
-                </div>
-                {(c.servicePausedAt || displayedAnnualPrepayTerm || data.prepaidPlans?.length > 0) && billingSummary}
-                <Customer360Estimates estimates={data.estimates || []} />
-              </>}
-              <BillingLanePanelV2
-                customerId={c.id}
-                billingMode={c.billingMode}
-                tier={c.tier}
-                monthlyRate={c.monthlyRate}
-                canEdit={isAdmin}
-              />{" "}
-              <AdminAutopayPanelV2
-                customerId={c.id}
-                monthlyRate={c.monthlyRate}
-                customerName={`${c.firstName} ${c.lastName}`}
-                canCharge={isAdmin}
-              />{" "}
-              <AccountCreditPanelV2
-                customerId={c.id}
-                customerName={`${c.firstName} ${c.lastName}`}
-                canEdit={isAdmin}
-              />{" "}
-              {isAdmin && (
-                <AnnualPrepayPanelV2
-                  customer={c}
-                  activeTerm={displayedAnnualPrepayTerm}
-                  onOpen={() => setAnnualPrepayOpen(true)}
-                  onSendInvoice={() => setAnnualPrepayInvoiceOpen(true)}
-                />
-              )}
-              {embedded ? <div className="c360-invoices-heading">
-                <SectionTitle>Recent invoices ({invoices.length})</SectionTitle>
-                <a className="c360-outline-link u-focus-ring" href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}`}>All invoices</a>
-              </div> : <SectionTitle>Invoices ({invoices.length})</SectionTitle>}
-              {invoices.length > 0 ? (
-                <Table className="mb-5">
-                  {" "}
-                  <THead>
-                    {" "}
-                    <TR>
-                      {" "}
-                      {embedded && <TH>Invoice</TH>}
-                      <TH>Date</TH>
-                      <TH align="right">Amount</TH>
-                      <TH align="right">Paid</TH>
-                      <TH>Status</TH>{" "}
-                    </TR>{" "}
-                  </THead>{" "}
-                  <TBody>
-                    {invoices.map((inv, i) => (
-                      <TR key={i}>
-                        {embedded && <TD><a className="c360-invoice-reference u-focus-ring" href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}&invoice=${encodeURIComponent(inv.id)}`}>#{inv.invoice_number || inv.id.slice(0, 8)}</a></TD>}
-                        {" "}
-                        <TD>
-                          {fmtDate(inv.created_at || inv.invoice_date)}
-                        </TD>{" "}
-                        <TD align="right" className="u-nums">
-                          {fmtCurrency(inv.amount_due)}
-                        </TD>{" "}
-                        <TD align="right" className="u-nums">
-                          {fmtCurrency(inv.amount_paid)}
-                        </TD>{" "}
-                        <TD>
-                          {" "}
-                          <Badge
-                            tone={
-                              inv.status === "paid" || inv.status === "prepaid"
-                                ? "strong"
-                                : "alert"
-                            }
-                          >
-                            {inv.status}
-                          </Badge>{" "}
-                        </TD>{" "}
-                      </TR>
-                    ))}
-                  </TBody>{" "}
-                </Table>
-              ) : (
-                <div className="text-13 text-ink-secondary mb-5">
-                  No invoices
-                </div>
-              )}
-              <SectionTitle>Payment History ({payments.length})</SectionTitle>
-              {payments.slice(0, 10).map((p, i) => {
-                const refundState = paymentRefundState(p);
-                const isFailed = p.status === "failed";
-                return (
-                  <div
-                    key={i}
-                    className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
-                  >
-                    {" "}
-                    <span
-                      className={cn(
-                        "u-nums",
-                        refundState.full ? "text-ink-secondary" : "text-zinc-900",
-                      )}
-                    >
-                      {fmtCurrency(p.amount)}
-                    </span>{" "}
-                    <span className="text-ink-secondary">
-                      {p.card_brand} …{p.last_four}
-                    </span>{" "}
-                    <span className="text-ink-secondary">
-                      {fmtDateOnly(p.payment_date)}
-                    </span>{" "}
-                    <Badge
-                      tone={
-                        refundState.full || refundState.partial || isFailed
-                          ? "alert"
-                          : "neutral"
-                      }
-                    >
-                      {refundState.full
-                        ? "Refunded"
-                        : refundState.partial
-                          ? "Partial refund"
-                          : (p.status || "").toUpperCase()}
-                    </Badge>
-                    {isAdmin &&
-                      p.processor === "stripe" &&
-                      p.status === "paid" &&
-                      !refundState.full &&
-                      refundState.remainingCents > 0 && (
-                        <Button
-                          size="sm"
-                          variant="danger"
-                          onClick={() => setRefundPayment(p)}
-                        >
-                          Refund
-                        </Button>
-                      )}
-                  </div>
-                );
-              })}
-              {cards.length > 0 && (
-                <div className="mt-5">
-                  {" "}
-                  <SectionTitle>Cards on File ({cards.length})</SectionTitle>
-                  {cards.map((cd, i) => (
-                    <div
-                      key={i}
-                      className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-13 flex justify-between items-center"
-                    >
-                      {" "}
-                      <span className="text-zinc-900">
-                        {cd.card_brand} ending {cd.last_four}
-                      </span>
-                      {cd.exp_month && (
-                        <span className="u-nums text-ink-secondary">
-                          {cd.exp_month}/{cd.exp_year}
-                        </span>
-                      )}
-                      {cd.is_default && <Badge tone={embedded ? "neutral" : "strong"} className="c360-payment-method-default">Default</Badge>}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {isAdmin && (
-                <div className="mt-5 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
-                  {" "}
-                  <div className="text-12 text-ink-secondary">
-                    Customer cancelling at the deposit stage? This voids the
-                    signup invoice, cancels visits, and refunds the deposit.
-                  </div>{" "}
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={() => setCancelSignupOpen(true)}
-                  >
-                    Cancel signup…
-                  </Button>{" "}
-                </div>
-              )}
-              {isAdmin && data.cancelPlanEnabled && (
-                <div className="mt-3 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
-                  {" "}
-                  <div className="text-12 text-ink-secondary">
-                    Cancelling an active plan? Same engine the customer portal
-                    uses: pulls visits, stops billing, records the case, and
-                    confirms to the customer.
-                  </div>{" "}
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={() => setCancelPlanOpen(true)}
-                  >
-                    Cancel plan…
-                  </Button>{" "}
-                </div>
-              )}
-            </div>
-          )}
-
-          {embedded ? (messageOpened && <Sheet open={messageOpen} keepMounted onClose={() => setMessageOpen(false)} width="lg" className="admin-shell-v2 c360-message-sheet" ariaLabel={`Conversation with ${c.firstName} ${c.lastName}`}>
-            <SheetHeader><div><strong>{c.firstName} {c.lastName}</strong><p className="text-14 text-ink-secondary">{c.phone}</p></div><Button variant="secondary" onClick={() => setMessageOpen(false)}>Back to customer</Button></SheetHeader>
-            <SheetBody>{conversation}</SheetBody>
-          </Sheet>) : (activeTab === "comms" && conversation)}
-
-          {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
-          {embedded && activeTab === "comms" && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
-
-          {embedded && isAdmin && activeTab === "comms" && <Customer360Activity missingSources={timelineMissingSources} timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
-
-          {/* SERVICES */}
-          {(embedded ? activeTab === "comms" : activeTab === "services") && (
-            <details className="c360-service-records" open={embedded ? undefined : true}>
-              <summary>Service records, reports & photos</summary>
-              {" "}
-              <SectionTitle>Service History ({services.length})</SectionTitle>
-              {services.length === 0 ? (
-                <div className="text-13 text-ink-secondary">
-                  No service records
-                </div>
-              ) : (
-                <div className="flex flex-col">
-                  {services.map((s, i) => (
-                    <ServiceRowV2
-                      key={i}
-                      service={s}
-                      initiallyExpanded={
-                        !!initialScheduledServiceId &&
-                        String(s.scheduled_service_id || "") ===
-                          String(initialScheduledServiceId)
-                      }
-                    />
-                  ))}
-                </div>
-              )}
-              {upcomingScheduled.length > 0 && (
-                <div className="mt-5">
-                  {" "}
-                  <SectionTitle>
-                    Scheduled Services ({upcomingScheduled.length})
-                  </SectionTitle>
-                  {upcomingScheduled.map((s, i) => (
-                    <div
-                      key={i}
-                      className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-13"
-                    >
-                      {" "}
-                      <span className="font-medium text-zinc-900">
-                        {s.service_type}
-                      </span>{" "}
-                      <span className="text-ink-secondary">
-                        {fmtDateOnly(s.scheduled_date)}
-                      </span>{" "}
-                      <span
-                        className={cn(
-                          "text-11 uppercase tracking-label font-medium",
-                          s.status === "confirmed"
-                            ? "text-zinc-900"
-                            : "text-ink-secondary",
-                        )}
-                      >
-                        {s.status}
-                      </span>{" "}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {photos.length > 0 && (
-                <div className="mt-5">
-                  {" "}
-                  <SectionTitle>
-                    Service Photos ({photos.length})
-                  </SectionTitle>{" "}
-                  <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2">
-                    {photos.map((p, i) => (
-                      <div
-                        key={i}
-                        className="rounded-sm overflow-hidden bg-zinc-50 border-hairline border-zinc-200 aspect-square"
-                      >
-                        {" "}
-                        <img
-                          src={p.url || ""}
-                          alt={p.caption || ""}
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            e.target.style.display = "none";
-                          }}
-                        />{" "}
-                      </div>
-                    ))}
-                  </div>{" "}
-                </div>
-              )}
-            </details>
-          )}
-
-          {/* PROPERTY */}
-          {activeTab === "property" && (
-            <div className="c360-details-content">
-              {embedded && recipientDetails}
-              {embedded && isAdmin && <details className="c360-service-records"><summary>Property service tools & historical maps</summary><PropertyZonesPanel customerId={customerId} /><TermiteStationsGate customerId={customerId} /></details>}
-              {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
-                  (it lists every address on the account), so a technician
-                  token would only ever see a 403 card here. */}
-              {isAdmin && (
-                <CustomerPropertiesPanelV2
-                  key={customerId}
-                  customerId={customerId}
-                  primaryAddress={c.address}
-                  contactRole={c.contactRole}
-                  // Every profile reload (any Edit save, address changed or
-                  // not) re-syncs the primary customer_properties row server-side
-                  // — refetch on the reload counter, never on the address tuple.
-                  refreshToken={profileVersion}
-                  onChanged={reloadCustomer}
-                  canEdit
-                />
-              )}
-              {(c.satelliteUrl || c.address?.line1) && (
-                <div className="mb-5 rounded-md overflow-hidden border-hairline border-zinc-200 max-h-[200px]">
-                  {c.satelliteUrl ? (
-                    <img
-                      src={c.satelliteUrl}
-                      alt="Satellite view"
-                      className="w-full h-[200px] object-cover"
-                      onError={(e) => {
-                        e.target.style.display = "none";
-                      }}
-                    />
-                  ) : (
-                    <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(formatAddress(c.address))}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block p-5 bg-zinc-50 text-center text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
-                    >
-                      View on Google Maps
-                    </a>
-                  )}
-                </div>
-              )}
-              <div className="c360-property-grid grid grid-cols-2 gap-5">
-                {" "}
-                <div>
-                  {" "}
-                  <SectionTitle>Property Details</SectionTitle>
-                  {[
-                    ["Type", c.property?.type],
-                    ["Lawn Type", c.property?.lawnType],
-                    [
-                      "Property Sqft",
-                      c.property?.sqft
-                        ? `${parseInt(c.property.sqft).toLocaleString()} sqft`
-                        : null,
-                    ],
-                    [
-                      "Lot Sqft",
-                      c.property?.lotSqft
-                        ? `${parseInt(c.property.lotSqft).toLocaleString()} sqft`
-                        : null,
-                    ],
-                    ["Palm Count", c.property?.palmCount],
-                    ["Pool", prefs.has_pool ? "Yes" : null],
-                    ["Irrigation", prefs.has_irrigation ? "Yes" : null],
-                  ].map(
-                    ([label, val]) =>
-                      val && (
-                        <div
-                          key={label}
-                          className="flex justify-between py-1 text-12 border-b border-hairline border-zinc-200/60"
-                        >
-                          {" "}
-                          <span className="text-ink-secondary">
-                            {label}
-                          </span>{" "}
-                          <span className="text-zinc-900 u-nums">
-                            {val}
-                          </span>{" "}
-                        </div>
-                      ),
-                  )}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <SectionTitle>Access &amp; Preferences</SectionTitle>
-                  {[
-                    ["Property Gate Code", prefs.property_gate_code],
-                    ["Neighborhood Gate", prefs.neighborhood_gate_code],
-                    ["Parking Instructions", prefs.parking_instructions],
-                    ["Interior Access", prefs.interior_access_instructions],
-                    ["Pet Details", prefs.pet_details],
-                    ["Chemical Sensitivities", prefs.chemical_sensitivities],
-                    ["Preferred Time", prefs.preferred_service_time],
-                    ["Preferred Tech", prefs.preferred_technician],
-                    ["Special Instructions", prefs.special_instructions],
-                  ].map(
-                    ([label, val]) =>
-                      val && (
-                        <div
-                          key={label}
-                          className="flex justify-between py-1 text-12 border-b border-hairline border-zinc-200/60 gap-2"
-                        >
-                          {" "}
-                          <span className="text-ink-secondary flex-shrink-0">
-                            {label}
-                          </span>{" "}
-                          <span className="text-zinc-900 text-right max-w-[200px] break-words">
-                            {val}
-                          </span>{" "}
-                        </div>
-                      ),
-                  )}
-                </div>{" "}
-              </div>{" "}
-            </div>
-          )}
-
-          {/* COMPLIANCE */}
-          {(embedded ? activeTab === "property" && (hasLawnHistory || compliance.length > 0) : activeTab === "compliance") && (
-            <div>
-              {" "}
-              {(!embedded || hasLawnHistory) && <>
-              <SectionTitle>Nutrient Ledger YTD</SectionTitle>{" "}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-                {" "}
-                <Card>
-                  {" "}
-                  <CardBody className="p-4">
-                    {" "}
-                    <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
-                      Nitrogen
-                    </div>{" "}
-                    <div className="u-nums text-22 font-medium text-zinc-900">
-                      {fmtNumber(nutrientSummary.nApplied)}
-                    </div>{" "}
-                    <div className="text-11 text-ink-secondary">
-                      lb N / 1k sqft
-                    </div>{" "}
-                  </CardBody>{" "}
-                </Card>{" "}
-                <Card>
-                  {" "}
-                  <CardBody className="p-4">
-                    {" "}
-                    <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
-                      Phosphorus
-                    </div>{" "}
-                    <div className="u-nums text-22 font-medium text-zinc-900">
-                      {fmtNumber(nutrientSummary.pApplied)}
-                    </div>{" "}
-                    <div className="text-11 text-ink-secondary">
-                      lb P / 1k sqft
-                    </div>{" "}
-                  </CardBody>{" "}
-                </Card>{" "}
-                <Card>
-                  {" "}
-                  <CardBody className="p-4">
-                    {" "}
-                    <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
-                      Potassium
-                    </div>{" "}
-                    <div className="u-nums text-22 font-medium text-zinc-900">
-                      {fmtNumber(nutrientSummary.kApplied)}
-                    </div>{" "}
-                    <div className="text-11 text-ink-secondary">
-                      lb K / 1k sqft
-                    </div>{" "}
-                  </CardBody>{" "}
-                </Card>{" "}
-                <Card>
-                  {" "}
-                  <CardBody className="p-4">
-                    {" "}
-                    <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
-                      Entries
-                    </div>{" "}
-                    <div className="u-nums text-22 font-medium text-zinc-900">
-                      {nutrientSummary.entries || 0}
-                    </div>{" "}
-                    <div className="text-11 text-ink-secondary">
-                      {nutrientLedger.year || new Date().getFullYear()}
-                    </div>{" "}
-                  </CardBody>{" "}
-                </Card>{" "}
-              </div>
-              {nutrientRows.length > 0 && (
-                <Table className="mb-5">
-                  {" "}
-                  <THead>
-                    {" "}
-                    <TR>
-                      {" "}
-                      <TH>Date</TH>
-                      <TH>Product</TH>
-                      <TH>Analysis</TH>
-                      <TH>N/P/K per 1k</TH>
-                      <TH>Blackout</TH>{" "}
-                    </TR>{" "}
-                  </THead>{" "}
-                  <TBody>
-                    {nutrientRows.map((r) => (
-                      <TR key={r.id}>
-                        {" "}
-                        <TD>{fmtDate(r.application_date)}</TD>{" "}
-                        <TD className="text-zinc-900">{r.product_name}</TD>{" "}
-                        <TD className="u-nums">{r.analysis || "—"}</TD>{" "}
-                        <TD className="u-nums">
-                          {fmtNumber(r.n_applied_per_1000)} /{" "}
-                          {fmtNumber(r.p_applied_per_1000)} /{" "}
-                          {fmtNumber(r.k_applied_per_1000)}
-                        </TD>{" "}
-                        <TD>{r.blackout_status || "—"}</TD>{" "}
-                      </TR>
-                    ))}
-                  </TBody>{" "}
-                </Table>
-              )}
-              </>}
-              <SectionTitle>
-                Application History ({compliance.length})
-              </SectionTitle>
-              {compliance.length > 0 ? (
-                <Table className="mb-5">
-                  {" "}
-                  <THead>
-                    {" "}
-                    <TR>
-                      {" "}
-                      <TH>Date</TH>
-                      <TH>Product</TH>
-                      <TH>Rate</TH>
-                      <TH>Area</TH>
-                      <TH>Technician</TH>{" "}
-                    </TR>{" "}
-                  </THead>{" "}
-                  <TBody>
-                    {compliance.map((r, i) => (
-                      <TR key={i}>
-                        {" "}
-                        <TD>{fmtDate(r.applied_at)}</TD>{" "}
-                        <TD className="text-zinc-900">
-                          {r.product_name || r.product_id}
-                        </TD>{" "}
-                        <TD className="u-nums">
-                          {r.rate_per_1000_sqft
-                            ? `${r.rate_per_1000_sqft}/1k sqft`
-                            : "—"}
-                        </TD>{" "}
-                        <TD>{r.area_treated || "—"}</TD>{" "}
-                        <TD>{r.technician_name || "—"}</TD>{" "}
-                      </TR>
-                    ))}
-                  </TBody>{" "}
-                </Table>
-              ) : (
-                <div className="text-13 text-ink-secondary">
-                  No application records
-                </div>
-              )}
-              {(!embedded || hasLawnHistory) && <Card className="mt-5">
-                {" "}
-                <CardBody className="p-4">
-                  {" "}
-                  <SectionTitle>Product usage</SectionTitle>{" "}
-                  <div className="text-12 text-ink-secondary space-y-1">
-                    {" "}
-                    <div>
-                      Celsius entries in the history shown:{" "}
-                      <span className="u-nums text-zinc-900">
-                        {
-                          compliance.filter((r) =>
-                            (r.product_name || "")
-                              .toLowerCase()
-                              .includes("celsius"),
-                          ).length
-                        }
-                      </span>
-                    </div>{" "}
-                    <div>
-                      Total nitrogen applied YTD:{" "}
-                      <span className="u-nums text-zinc-900">
-                        {fmtNumber(nutrientSummary.nApplied)}
-                      </span>
-                      lb N / 1k sqft
-                    </div>{" "}
-                  </div>{" "}
-                </CardBody>{" "}
-              </Card>}
-            </div>
-          )}
-          {/* CONTRACTS */}
-          {(embedded ? activeTab === "property" : activeTab === "contracts") && (
-            <ElectronicAuthorizationContractV2
-              customer={c}
-              consents={paymentMethodConsents}
-              cards={cards}
-              contracts={contracts}
-              onRefresh={reloadCustomer}
-            />
-          )}
-
-        </div>
-        {/* ZONE 4 — TIMELINE (admin-only endpoint) */}
-        {!embedded && isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
-          {" "}
-          <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">
-            {" "}
-            <SectionTitle className="mb-0">
-              Timeline{!timelineError && ` (${filteredTimeline.length})`}
-            </SectionTitle>{" "}
-            <div className="flex gap-1 flex-wrap">
-              {[
-                { key: "all", label: "All" },
-                { key: "sms", label: "SMS" },
-                { key: "call", label: "Calls" },
-                { key: "service", label: "Services" },
-                { key: "payment", label: "Payments" },
-                { key: "notes", label: "Notes" },
-              ].map((f) => (
-                <button
-                  key={f.key}
-                  onClick={() => setTimelineFilter(f.key)}
-                  disabled={timelineError}
-                  className={cn(
-                    "h-6 px-2.5 text-10 uppercase tracking-label font-medium rounded-xs border-hairline u-focus-ring transition-colors",
-                    timelineFilter === f.key
-                      ? "bg-zinc-900 text-white border-zinc-900"
-                      : "bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-100",
-                  )}
-                >
-                  {f.label}
-                </button>
-              ))}
-            </div>{" "}
-          </div>{" "}
-          {/* On mobile the timeline grows inline (panel handles the scroll) so
-              a nested 250px scroll region doesn't trap touch; capped on desktop. */}
-          <div className="md:max-h-[250px] md:overflow-y-auto flex flex-col">
-            {filteredTimeline.slice(0, 30).map((item, i) => {
-              const TYPE_LABEL = {
-                sms: "SMS",
-                call: "CALL",
-                service: "SVC",
-                payment: "PAY",
-                review: "REV",
-                scheduled_service: "SCHED",
-                interaction: "NOTE",
-                activity: "ACT",
-              };
-              return (
-                <div
-                  key={i}
-                  className="flex gap-2.5 py-1.5 border-b border-hairline border-zinc-200/60 text-12 items-center"
-                >
-                  {" "}
-                  <Badge tone="neutral">
-                    {TYPE_LABEL[item.type] || "EVT"}
-                  </Badge>{" "}
-                  <div className="flex-1 min-w-0">
-                    {" "}
-                    <span className="font-medium text-zinc-900">
-                      {item.title}
-                    </span>
-                    {item.description && (
-                      <span className="text-ink-secondary ml-1.5">
-                        {item.description.substring(0, 80)}
-                      </span>
-                    )}
-                  </div>{" "}
-                  <span className="text-ink-secondary text-10 u-nums flex-shrink-0">
-                    {timeAgo(item.date)}
-                  </span>{" "}
-                </div>
-              );
-            })}
-            {timelineError && (
-              <div className="flex flex-col items-center gap-3 py-4">
-                <p role="alert" className="text-14 text-alert-fg">
-                  Could not load customer history.
-                </p>
-                <Button
-                  variant="secondary"
-                  aria-label="Retry customer history"
-                  onClick={retryTimeline}
-                  disabled={timelineRetrying}
-                >
-                  {timelineRetrying ? "Retrying…" : "Retry"}
-                </Button>
-              </div>
-            )}
-            {!timelineError && filteredTimeline.length === 0 && (
-              <div className="text-ink-secondary text-12 text-center py-4">
-                No timeline events
-              </div>
-            )}
-          </div>{" "}
-        </div>}
-        {!embedded && <>
-        {/* Mobile spacer for sticky action bar — tracks the same keyboard
-            inset as the bar itself so content still scrolls clear of it. */}
-        <div
-          className="c360-mobile-footer-spacer shrink-0"
-          style={{
-            height:
-              "calc(56px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))",
-          }}
-          aria-hidden="true"
-        />{" "}
-        </>}
-      </div>
-      {!embedded && <>
-      {/* Mobile sticky action bar (mirrors desktop pills) */}
-      {/* Mobile top action bar — rendered here as a sibling of the scrolling
-          .c360-panel (NOT inside it), exactly like the fixed bottom
-          CustomerActionBar below. iOS WebKit only honors position:fixed when
-          the element is NOT nested inside an overflow-scroll ancestor; #2125
-          set position:fixed but left this row inside .c360-panel, so on iOS
-          the Back / Text / Call / ⋯ row still scrolled out of reach and
-          wasn't tappable (it worked in desktop Chrome, which is why it
-          slipped through). Shown/hidden at the <=768px boundary via the
-          .c360-mobile-actionbar rule in the panel's <style> block (no
-          Tailwind md:hidden, which would blank it at exactly 768px / iPad
-          portrait). stopPropagation so taps on the bar (esp. the ⋯ menu)
-          don't bubble to the overlay's close handler. */}
-      <div
-        className="c360-mobile-actionbar fixed left-0 right-0 z-[1001] items-center justify-between gap-2 px-4 pb-2 bg-white/95 backdrop-blur border-b border-hairline border-zinc-200"
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          // Track the Safari-bookmark visual viewport (keyboard / URL bar)
-          // like the AdminLayoutV2 header; 0px until the shell sets the var.
-          top: "var(--vv-offset-top, 0px)",
-          paddingTop: "calc(0.5rem + env(safe-area-inset-top, 0px))",
-        }}
-      >
-        {" "}
-        <button
-          onClick={onClose}
-          aria-label="Back"
-          className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
-        >
-          {" "}
-          <ChevronLeft size={18} strokeWidth={1.75} />{" "}
-        </button>{" "}
-        <div className="flex items-center gap-2">
-          {c.phone && (
-            <a
-              href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
-            >
-              Text
-            </a>
-          )}
-          {c.phone && (
-            <CallBridgeLink
-              phone={c.phone}
-              customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
-              styledButton
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
-            >
-              Call
-            </CallBridgeLink>
-          )}
-          {isAdmin && (
-            <button
-              onClick={openEditModal}
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
-            >
-              Edit
-            </button>
-          )}
-          <div ref={menuRef} className="relative">
-            {" "}
-            <button
-              ref={menuButtonRef}
-              onClick={() => setMenuOpen((v) => !v)}
-              aria-label="More"
-              aria-expanded={menuOpen}
-              className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
-            >
-              {" "}
-              <MoreHorizontal size={18} strokeWidth={1.75} />{" "}
-            </button>
-            {menuOpen && (
-              <div
-                role="menu"
-                className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
-              >
-                {isAdmin && (
-                  <button
-                    role="menuitem"
-                    onClick={() => {
-                      menuButtonRef.current?.focus();
-                      openEditModal();
-                      setMenuOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                  >
-                    Edit customer
-                  </button>
-                )}
-                {isAdmin && (
-                  <button
-                    role="menuitem"
-                    onClick={() => {
-                      menuButtonRef.current?.focus();
-                      setAnnualPrepayInvoiceOpen(true);
-                      setMenuOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                  >
-                    Send prepay invoice
-                  </button>
-                )}
-                {isAdmin && (
-                  <button
-                    role="menuitem"
-                    onClick={() => {
-                      menuButtonRef.current?.focus();
-                      setAnnualPrepayOpen(true);
-                      setMenuOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                  >
-                    Record collected prepay
-                  </button>
-                )}
-                <button
-                  role="menuitem"
-                  onClick={() => {
-                    setActiveTab("comms");
-                    setMenuOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                >
-                  Add note
-                </button>{" "}
-              </div>
-            )}
-          </div>{" "}
-        </div>{" "}
-      </div>{" "}
-      <CustomerActionBar
-        customer={{
-          id: customerId,
-          phone: c.phone,
-          email: c.email,
-          firstName: c.firstName,
-          lastName: c.lastName,
-          address: c.address
-            ? [c.address.line1, c.address.line2, c.address.city, c.address.state, c.address.zip]
-                .filter(Boolean)
-                .join(", ")
-            : "",
-        }}
-        standalone
+  const sections = {
+    overview: (
+      <CustomerProfileOverview
+        embedded={embedded}
+        isAdmin={isAdmin}
+        c={c}
+        upcomingFuture={upcomingFuture}
+        services={services}
+        comms={comms}
+        commsLoading={commsLoading}
+        commsErr={commsErr}
+        data={data}
+        unreadConversations={unreadConversations}
+        prefs={prefs}
+        alerts={alerts}
+        openMessages={openMessages}
+        changeWorkspaceTab={changeWorkspaceTab}
+        viewServiceRecords={viewServiceRecords}
+        discounts={discounts}
+        referral={referral}
+        customerId={customerId}
+        accountProperties={accountProperties}
+        onSelectCustomer={onSelectCustomer}
+        addressNeighbors={addressNeighbors}
+        setData={setData}
+        setProfileActionErr={setProfileActionErr}
+        billingSummary={billingSummary}
       />
-      </>}
-      {annualPrepayOpen && (
-        <AnnualPrepayModal
-          customer={c}
-          activeTerm={displayedAnnualPrepayTerm}
-          prepaidPlans={data.prepaidPlans || []}
-          annualPrepayTerms={data.annualPrepayTerms || []}
-          estimateSuggestion={data.annualPrepayEstimateSuggestion || null}
-          onClose={() => setAnnualPrepayOpen(false)}
-          onSaved={handleAnnualPrepaySaved}
+    ),
+    billing: (
+      <CustomerProfileBilling
+        embedded={embedded}
+        balanceOwed={balanceOwed}
+        overdueBalance={overdueBalance}
+        c={c}
+        displayedAnnualPrepayTerm={displayedAnnualPrepayTerm}
+        data={data}
+        billingSummary={billingSummary}
+        isAdmin={isAdmin}
+        setAnnualPrepayOpen={setAnnualPrepayOpen}
+        setAnnualPrepayInvoiceOpen={setAnnualPrepayInvoiceOpen}
+        invoices={invoices}
+        payments={payments}
+        setRefundPayment={setRefundPayment}
+        cards={cards}
+        setCancelSignupOpen={setCancelSignupOpen}
+        setCancelPlanOpen={setCancelPlanOpen}
+      />
+    ),
+    services: (
+      <CustomerProfileServices
+        expanded={!embedded}
+        services={services}
+        initialScheduledServiceId={initialScheduledServiceId}
+        upcomingScheduled={upcomingScheduled}
+        photos={photos}
+      />
+    ),
+    property: (
+      <CustomerProfileProperty
+        embedded={embedded}
+        recipientDetails={recipientDetails}
+        isAdmin={isAdmin}
+        customerId={customerId}
+        c={c}
+        profileVersion={profileVersion}
+        reloadCustomer={reloadCustomer}
+        prefs={prefs}
+      />
+    ),
+    compliance: (
+      <CustomerProfileCompliance
+        showLawnData={!embedded || hasLawnHistory}
+        compliance={compliance}
+        nutrientSummary={nutrientSummary}
+        nutrientLedger={nutrientLedger}
+        nutrientRows={nutrientRows}
+      />
+    ),
+    contracts: (
+      <ElectronicAuthorizationContractV2
+        customer={c}
+        consents={paymentMethodConsents}
+        cards={cards}
+        contracts={contracts}
+        onRefresh={reloadCustomer}
+      />
+    ),
+    activity: (
+      <Customer360Activity
+        missingSources={timelineMissingSources}
+        timeline={timeline}
+        filter={timelineFilter}
+        onFilter={setTimelineFilter}
+        search={timelineSearch}
+        onSearch={setTimelineSearch}
+        error={timelineError}
+        retrying={timelineRetrying}
+        onRetry={retryTimeline}
+      />
+    ),
+    timeline: (
+      <CustomerProfileTimeline
+        isAdmin={isAdmin}
+        timelineError={timelineError}
+        filteredTimeline={filteredTimeline}
+        setTimelineFilter={setTimelineFilter}
+        timelineFilter={timelineFilter}
+        retryTimeline={retryTimeline}
+        timelineRetrying={timelineRetrying}
+      />
+    ),
+    conversation,
+  };
+  const Presentation = embedded
+    ? CustomerWorkspacePresentation
+    : CustomerOverlayPresentation;
+  return (
+    <Presentation
+      panelRef={panelRef}
+      activeTabButtonRef={activeTabButtonRef}
+      headerPast={headerPast}
+      headerProps={{
+        c,
+        isAdmin,
+        unreadConversations,
+        openEditModal,
+        changeWorkspaceTab,
+        openMessages,
+        setLinkRequest,
+        menuOpen,
+        setMenuOpen,
+        menuRef,
+        score,
+        onClose,
+        customerId,
+        setAnnualPrepayInvoiceOpen,
+        setActiveTab,
+      }}
+      activeTab={activeTab}
+      tabsAnchorRef={tabsAnchorRef}
+      profileContentId={profileContentId}
+      workspaceSections={workspaceSections}
+      sections={sections}
+      alerts={alerts}
+      messageOpened={messageOpened}
+      messageOpen={messageOpen}
+      setMessageOpen={setMessageOpen}
+      hasLawnHistory={hasLawnHistory}
+      hasCompliance={compliance.length > 0}
+      profileActionErr={profileActionErr}
+      actions={
+        <CustomerProfileMobileActions
+          onClose={onClose}
+          c={c}
+          isAdmin={isAdmin}
+          openEditModal={openEditModal}
+          menuRef={menuRef}
+          menuButtonRef={menuButtonRef}
+          setMenuOpen={setMenuOpen}
+          menuOpen={menuOpen}
+          setAnnualPrepayInvoiceOpen={setAnnualPrepayInvoiceOpen}
+          setAnnualPrepayOpen={setAnnualPrepayOpen}
+          setActiveTab={setActiveTab}
+          customerId={customerId}
         />
-      )}
-      {annualPrepayInvoiceOpen && (
-        <AnnualPrepayInvoiceModal
-          customer={c}
-          activeTerm={displayedAnnualPrepayTerm}
-          prepaidPlans={data.prepaidPlans || []}
-          annualPrepayTerms={data.annualPrepayTerms || []}
-          onClose={() => setAnnualPrepayInvoiceOpen(false)}
-          onSaved={handleAnnualPrepaySaved}
-        />
-      )}
-      {cancelSignupOpen && (
-        <CancelSignupModal
-          customer={c}
-          onClose={() => setCancelSignupOpen(false)}
-          onDone={reloadCustomer}
-        />
-      )}
-      {cancelPlanOpen && (
-        // This profile is a z-[1000] overlay and its own sub-modals sit at
-        // 1100/1120; ui/Dialog defaults to layer 120, which paints BENEATH
-        // the profile, so the dialog is raised to the sub-modal layer.
-        <CancelPlanDialog
-          customer={c}
-          onClose={() => setCancelPlanOpen(false)}
-          onDone={reloadCustomer}
-          layer={1120}
-        />
-      )}
-      {refundPayment && (
-        <RefundPaymentModal
-          customer={c}
-          payment={refundPayment}
-          onClose={() => setRefundPayment(null)}
-          onDone={reloadCustomer}
-        />
-      )}
-      {editOpen && (
-        <div
-          className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (!savingEdit) setEditOpen(false);
-          }}
-        >
-          {" "}
-          <div
-            ref={editModalRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Edit customer"
-            className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {" "}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
-              {" "}
-              <div className="text-15 font-medium text-zinc-900">
-                Edit customer
-              </div>{" "}
-              <button
-                onClick={() => !savingEdit && setEditOpen(false)}
-                aria-label="Close"
-                className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
-              >
-                ×
-              </button>{" "}
-            </div>{" "}
-            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {[
-                { key: "firstName", label: "First name" },
-                { key: "lastName", label: "Last name" },
-                { key: "email", label: "Email", type: "email" },
-                { key: "phone", label: "Phone", type: "tel" },
-                { key: "profileLabel", label: "Property label", full: true },
-                { key: "addressLine1", label: "Address", full: true },
-                { key: "addressLine2", label: "Address line 2", full: true },
-                { key: "city", label: "City" },
-                { key: "state", label: "State" },
-                { key: "zip", label: "ZIP" },
-                { key: "monthlyRate", label: "Monthly rate", type: "number" },
-              ].map((f) => (
-                <div key={f.key} className={f.full ? "sm:col-span-2" : ""}>
-                  {" "}
-                  <label className="u-label text-ink-secondary block mb-1">
-                    {f.label}
-                  </label>{" "}
-                  {f.key === "addressLine1" ? (
-                    <AddressAutocomplete
-                      id="customer-edit-addressLine1"
-                      aria-label="Address"
-                      enabled={import.meta.env.VITE_GATE_ADMIN_ADDRESS_AUTOCOMPLETE === "true"}
-                      appearance="admin"
-                      geocodeOnBlur={false}
-                      placeholder="Start typing an address…"
-                      value={editForm.addressLine1}
-                      onChange={(value) => setEditForm((p) => ({ ...p, addressLine1: value }))}
-                      onSelect={(parts) => {
-                        const previous = editAddressRef.current;
-                        editAddressRef.current = {
-                          line1: parts.line1 || editForm.addressLine1,
-                          city: parts.city || editForm.city,
-                          state: parts.state || editForm.state,
-                          zip: parts.zip || editForm.zip,
-                        };
-                        setEditForm((p) => ({
-                          ...p,
-                          addressLine1: parts.line1 || p.addressLine1,
-                          addressLine2: parts.line2 || (!previous || sameAutocompleteAddress(previous, parts) ? p.addressLine2 : ""),
-                          city: parts.city || p.city,
-                          state: parts.state || p.state,
-                          zip: parts.zip || p.zip,
-                        }));
-                        document.getElementById("customer-edit-addressLine2")?.focus();
-                      }}
-                      className="w-full h-10 px-2.5 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-                    />
-                  ) : <input
-                    id={`customer-edit-${f.key}`}
-                    aria-label={f.label}
-                    type={f.type || "text"}
-                    value={editForm[f.key] ?? ""}
-                    onChange={(e) =>
-                      setEditForm((p) => ({ ...p, [f.key]: e.target.value }))
-                    }
-                    className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-                  />}{" "}
-                </div>
-              ))}
-              <div>
-                {" "}
-                <label className="u-label text-ink-secondary block mb-1">
-                  Tier
-                </label>{" "}
-                <select
-                  value={editForm.tier || ""}
-                  onChange={(e) =>
-                    setEditForm((p) => ({ ...p, tier: e.target.value }))
-                  }
-                  className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-                >
-                  {" "}
-                  <option value="">No Plan</option>{" "}
-                  <option value="Platinum">Platinum</option>{" "}
-                  <option value="Gold">Gold</option>{" "}
-                  <option value="Silver">Silver</option>{" "}
-                  <option value="Bronze">Bronze</option>{" "}
-                  <option value="One-Time">One-Time</option>{" "}
-                </select>{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <label
-                  className="u-label text-ink-secondary block mb-1"
-                  htmlFor="c360-edit-contact-role"
-                >
-                  Contact role
-                </label>{" "}
-                <select
-                  id="c360-edit-contact-role"
-                  value={editForm.contactRole || ""}
-                  onChange={(e) =>
-                    setEditForm((p) => ({ ...p, contactRole: e.target.value }))
-                  }
-                  className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-                >
-                  {CONTACT_ROLE_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <label className="u-label text-ink-secondary block mb-1">
-                  Stage
-                </label>{" "}
-                <select
-                  value={editForm.pipelineStage || ""}
-                  onChange={(e) =>
-                    setEditForm((p) => ({
-                      ...p,
-                      pipelineStage: e.target.value,
-                    }))
-                  }
-                  className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-                >
-                  {Object.entries(STAGE_LABELS).map(([k, label]) => (
-                    <option key={k} value={k}>
-                      {label}
-                    </option>
-                  ))}
-                </select>{" "}
-              </div>{" "}
-            </div>
-            {editErr && (
-              <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
-                {editErr}
-              </div>
-            )}
-            <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
-              {" "}
-              <button
-                type="button"
-                onClick={async () => {
-                  if (deletingCustomer || savingEdit) return;
-                  const name =
-                    [editForm.firstName, editForm.lastName]
-                      .filter(Boolean)
-                      .join(" ")
-                      .trim() || "this customer";
-                  const ok = window.confirm(
-                    `Delete ${name}?\n\nThis removes them from the active customer list. Their history (services, invoices, payments) is preserved and can be restored.`,
-                  );
-                  if (!ok) return;
-                  setDeletingCustomer(true);
-                  setEditErr("");
-                  try {
-                    await adminFetch(`/admin/customers/${customerId}`, {
-                      method: "DELETE",
-                    });
-                    setEditOpen(false);
-                    onClose?.();
-                  } catch (e) {
-                    setEditErr(e.message || "Delete failed");
-                  }
-                  setDeletingCustomer(false);
-                }}
-                disabled={deletingCustomer || savingEdit}
-                aria-label="Delete customer"
-                title="Delete this customer (soft-delete, restorable)"
-                className="inline-flex items-center justify-center h-9 w-9 border-hairline border-alert-fg/60 rounded-sm text-alert-fg bg-white hover:bg-alert-bg disabled:opacity-50 disabled:cursor-not-allowed u-focus-ring"
-              >
-                {" "}
-                <Trash2 size={16} strokeWidth={1.75} />{" "}
-              </button>{" "}
-              <div className="flex gap-2">
-                {" "}
-                <Button
-                  variant="secondary"
-                  onClick={() => setEditOpen(false)}
-                  disabled={savingEdit || deletingCustomer}
-                >
-                  Cancel
-                </Button>{" "}
-                <Button
-                  onClick={async () => {
-                    setSavingEdit(true);
-                    setEditErr("");
-                    try {
-                      // Keep address resaves for the server's mirror repair, but
-                      // don't re-submit unchanged contacts or billing settings:
-                      // legacy shared contacts can block an unrelated city edit.
-                      const addressFields = ["addressLine1", "addressLine2", "city", "state", "zip"];
-                      const payload = Object.fromEntries(Object.entries(editForm).filter(
-                        ([key, value]) => addressFields.includes(key) || value !== initialEditForm.current[key],
-                      ));
-                      if ("monthlyRate" in payload) payload.monthlyRate = payload.monthlyRate === "" ? null : parseFloat(payload.monthlyRate);
-                      if ("tier" in payload) payload.tier = payload.tier || null;
-                      if ("contactRole" in payload) payload.contactRole = payload.contactRole || null;
-                      await adminFetch(`/admin/customers/${customerId}`, {
-                        method: "PUT",
-                        body: JSON.stringify(payload),
-                      });
-                      await reloadCustomer();
-                      setEditOpen(false);
-                    } catch (e) {
-                      setEditErr(e.body?.message || e.message || "Save failed");
-                    }
-                    setSavingEdit(false);
-                  }}
-                  disabled={savingEdit || deletingCustomer}
-                >
-                  {savingEdit ? "Saving…" : "Save"}
-                </Button>{" "}
-              </div>{" "}
-            </div>{" "}
-          </div>{" "}
-        </div>
-      )}
-    </div>
+      }
+      dialogs={
+        <>
+          {annualPrepayOpen && (
+            <AnnualPrepayModal
+              customer={c}
+              activeTerm={displayedAnnualPrepayTerm}
+              prepaidPlans={prepaidPlans}
+              annualPrepayTerms={annualPrepayTerms}
+              estimateSuggestion={annualPrepayEstimateSuggestion}
+              onClose={() => setAnnualPrepayOpen(false)}
+              onSaved={handleAnnualPrepaySaved}
+            />
+          )}
+          {annualPrepayInvoiceOpen && (
+            <AnnualPrepayInvoiceModal
+              customer={c}
+              activeTerm={displayedAnnualPrepayTerm}
+              prepaidPlans={prepaidPlans}
+              annualPrepayTerms={annualPrepayTerms}
+              onClose={() => setAnnualPrepayInvoiceOpen(false)}
+              onSaved={handleAnnualPrepaySaved}
+            />
+          )}
+          {cancelSignupOpen && (
+            <CancelSignupModal
+              customer={c}
+              onClose={() => setCancelSignupOpen(false)}
+              onDone={reloadCustomer}
+            />
+          )}
+          {cancelPlanOpen && (
+            // This profile is a z-[1000] overlay and its own sub-modals sit at
+            // 1100/1120; ui/Dialog defaults to layer 120, which paints BENEATH
+            // the profile, so the dialog is raised to the sub-modal layer.
+            <CancelPlanDialog
+              customer={c}
+              onClose={() => setCancelPlanOpen(false)}
+              onDone={reloadCustomer}
+              layer={1120}
+            />
+          )}
+          {refundPayment && (
+            <RefundPaymentModal
+              customer={c}
+              payment={refundPayment}
+              onClose={() => setRefundPayment(null)}
+              onDone={reloadCustomer}
+            />
+          )}
+          <CustomerProfileEditor
+            editOpen={editOpen}
+            savingEdit={savingEdit}
+            setEditOpen={setEditOpen}
+            editModalRef={editModalRef}
+            editForm={editForm}
+            setEditForm={setEditForm}
+            editAddressRef={editAddressRef}
+            editErr={editErr}
+            deletingCustomer={deletingCustomer}
+            setDeletingCustomer={setDeletingCustomer}
+            setEditErr={setEditErr}
+            customerId={customerId}
+            onClose={onClose}
+            setSavingEdit={setSavingEdit}
+            initialEditForm={initialEditForm}
+            reloadCustomer={reloadCustomer}
+          />
+        </>
+      }
+    />
   );
 }
