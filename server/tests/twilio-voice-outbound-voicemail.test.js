@@ -4,8 +4,8 @@
  * Pins: /outbound-connect renders byte-identical TwiML with the gate OFF (no
  * machine detection, no <Dial action>) and adds AMD + the action with the
  * gate ON; /outbound-amd ignores human/unknown verdicts, leaves the customer
- * leg UP when the text cannot go, and on a sendable machine verdict stamps
- * the call_log, hangs up the CHILD leg by REST, then texts with the linked
+ * leg UP when the text cannot go, and on a machine verdict sends the text,
+ * stamps the call_log, then hangs up the CHILD leg by REST with the linked
  * customer's first name; /outbound-dial-complete tells the admin only when
  * a voicemail was detected and otherwise hangs up silently.
  */
@@ -51,6 +51,7 @@ const twilio = require('twilio');
 const { isEnabled } = require('../config/feature-gates');
 const { sendOutboundVoicemailText } = require('../services/outbound-voicemail-sms');
 const { resolveOutboundCallReason } = require('../services/outbound-call-reason');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 
 const { AMD_MACHINE_DETECTED_KEY, outboundVoicemailTextDialOptions } = voiceRouter._test;
@@ -158,6 +159,19 @@ describe('POST /outbound-connect', () => {
     expect(res.body).toContain('record="record-from-answer-dual"');
     expect(res.body).toContain(`<Number machineDetection="Enable"`);
     expect(res.body).toContain(`>${CUSTOMER}</Number>`);
+  });
+
+  test('technician-line calls keep their existing TwiML even with the voicemail gate on', async () => {
+    const request = req();
+    request.query.callerIdNumber = TWILIO_NUMBERS.fieldTech[0].number;
+    const dark = mockRes();
+    await connect()(request, dark);
+    isEnabled.mockImplementation(() => true);
+    const enabled = mockRes();
+    await connect()(request, enabled);
+    expect(enabled.body).toBe(dark.body);
+    expect(enabled.body).not.toContain('machineDetection');
+    expect(enabled.body).not.toContain('outbound-dial-complete');
   });
 
   test('a non-1 digit still hangs up without dialing (unchanged)', async () => {

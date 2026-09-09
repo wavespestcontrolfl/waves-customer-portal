@@ -23,6 +23,8 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (key, vars) => `Hi ${vars.first_name}, sorry we missed you${vars.callback_clause}.${vars.optout_clause}`),
 }));
 jest.mock('../config/twilio-numbers', () => ({
+  isInternalNumber: (n) => jest.requireActual('../config/twilio-numbers').isInternalNumber(n),
+  isTechLine: (n) => n === '+19415550102',
   tollFree: { number: '+18005550100' },
   findByNumber: jest.fn((n) => (n === '+19412975749' || n === '+18005550100' ? { id: 'main' } : null)),
 }));
@@ -135,6 +137,19 @@ describe('precheck — decided before the customer leg is hung up', () => {
     expect(smsLogFirst).not.toHaveBeenCalled();
   });
 
+  test('configured office staff and owned lines are never recipients', async () => {
+    const saved = process.env.VIRGINIA_PHONE;
+    process.env.VIRGINIA_PHONE = '+19415550103';
+    try {
+      for (const phone of ['(941) 555-0103', MAIN_LINE]) {
+        await expect(precheck({ phone })).resolves.toEqual({ ok: false, skipped: 'admin_phone' });
+      }
+      expect(smsLogFirst).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.VIRGINIA_PHONE; else process.env.VIRGINIA_PHONE = saved;
+    }
+  });
+
   test('a technician en route / on site at this customer → no text, decided before the dedupe probe', async () => {
     visitInProgress.mockResolvedValueOnce(true);
     await expect(precheck({ phone: PHONE, customerId: 'cust-1' })).resolves.toEqual({ ok: false, skipped: 'visit_in_progress' });
@@ -176,6 +191,14 @@ describe('precheck — decided before the customer leg is hung up', () => {
 });
 
 describe('sendOutboundVoicemailText', () => {
+  test('calls from a technician line never auto-text, including an already-issued AMD callback', async () => {
+    await expect(sendOutboundVoicemailText({ phone: PHONE, callerId: '(941) 555-0102' }))
+      .resolves.toEqual({ sent: false, skipped: 'tech_line', reason: 'generic' });
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+
   test('gate off → no template render, no send', async () => {
     isEnabled.mockImplementation(() => false);
     await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({ sent: false, skipped: 'gate_off', reason: 'generic' });
@@ -284,10 +307,10 @@ describe('sendOutboundVoicemailText', () => {
     expect(sendCustomerMessage.mock.calls[0][0].metadata).not.toHaveProperty('fromNumber');
   });
 
-  test('a suppression sentinel from the pipeline is reported as not sent', async () => {
-    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+  test.each(['gate-blocked', 'template-disabled'])('a %s sentinel from the pipeline is reported as not sent', async (code) => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: code });
     await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({
-      sent: false, skipped: 'send_suppressed', code: 'gate-blocked', reason: 'generic',
+      sent: false, skipped: 'send_suppressed', code, reason: 'generic',
     });
     expect(claimDel).toHaveBeenCalledTimes(1); // nothing left → claim released
   });

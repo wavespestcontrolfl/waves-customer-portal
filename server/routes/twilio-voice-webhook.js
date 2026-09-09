@@ -3198,7 +3198,8 @@ const AMD_MACHINE_DETECTED_KEY = 'voicemail_detected_at';
 
 function outboundVoicemailTextDialOptions({ callLogId, customerNumber, callerIdNumber } = {}) {
   const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled(OUTBOUND_VOICEMAIL_SMS_GATE)) return { dial: {}, number: {} };
+  // Technician-line calls use this same bridge but exclude automated texts.
+  if (!isEnabled(OUTBOUND_VOICEMAIL_SMS_GATE) || TWILIO_NUMBERS.isTechLine(callerIdNumber)) return { dial: {}, number: {} };
   const params = new URLSearchParams();
   if (callLogId && callLogId !== 'undefined') params.set('callLogId', callLogId);
   if (customerNumber) params.set('customerNumber', customerNumber);

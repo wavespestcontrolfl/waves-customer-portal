@@ -82,14 +82,11 @@ const GATE = 'outboundVoicemailSms';
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // The press-1 bridge dials the ADMIN first; on the auto-bridge rows
-// call_log.to_phone is the admin cell. This lane must never text staff.
-function adminPhoneLast10Set() {
-  const raw = [process.env.ADAM_PHONE || '+19415993489', '9415993489'];
-  return new Set(raw.map((p) => String(p).replace(/\D/g, '').slice(-10)).filter((d) => d.length === 10));
-}
+// call_log.to_phone is the admin cell. Reuse the number registry's staff
+// and owned-line guard; retain the legacy bridge's default cell exclusion.
 function isAdminPhone(phone) {
   const d = String(phone || '').replace(/\D/g, '').slice(-10);
-  return d.length === 10 && adminPhoneLast10Set().has(d);
+  return d === '9415993489' || TWILIO_NUMBERS.isInternalNumber(phone);
 }
 
 // Twilio AnsweredBy values that mean "a machine picked up". With
@@ -138,7 +135,8 @@ function callbackClause(callerId) {
 
 /**
  * Everything that can be decided WITHOUT sending. Returns { ok: true } or
- * { ok: false, skipped } — the webhook only hangs up the customer leg on ok.
+ * { ok: false, skipped }. Passing this check still requires a real provider
+ * send before the webhook can hang up the customer leg.
  */
 async function precheck({ phone: rawPhone, customerId = null, relatedCallId = null, now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { ok: false, skipped: 'gate_off' };
@@ -245,6 +243,9 @@ function classifyOutcome(result, { phone, reason, templateKey, callLogId }) {
  * @param {string}  [p.relatedCallId] the inbound call a call-log callback is returning
  */
 async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, firstName = '', callLogId = null, callSid = null, callerId = null, reason = REASONS.GENERIC, relatedCallId = null } = {}) {
+  // Tech lines share the press-1 bridge, but never originate automated texts.
+  // Recheck here for AMD callbacks that were issued before the dial guard.
+  if (TWILIO_NUMBERS.isTechLine(normalizePhoneE164(callerId))) return { sent: false, skipped: 'tech_line', reason };
   const pre = await precheck({ phone: rawPhone, customerId, relatedCallId });
   if (!pre.ok) {
     logger.info(`[outbound-voicemail-sms] Skipped (${pre.skipped}) for ${maskPhone(rawPhone)}`);
