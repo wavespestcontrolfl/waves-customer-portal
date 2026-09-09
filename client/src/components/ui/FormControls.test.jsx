@@ -21,13 +21,13 @@ describe("shared form-control rendering contract", () => {
       "min-w-0",
       "h-11",
       "text-16",
-      "sm:h-9",
+      "md:h-9",
       "md:text-13",
     );
     expect(screen.getByLabelText("Compact input")).toHaveClass(
       "h-11",
       "text-16",
-      "sm:h-7",
+      "md:h-7",
       "md:text-12",
     );
   });
@@ -45,7 +45,7 @@ describe("shared form-control rendering contract", () => {
       "pr-8",
       "pl-3",
       "h-11",
-      "sm:h-9",
+      "md:h-9",
     );
     expect(select).not.toHaveClass("px-3");
     expect(select.style.getPropertyValue("--select-caret")).toContain("svg");

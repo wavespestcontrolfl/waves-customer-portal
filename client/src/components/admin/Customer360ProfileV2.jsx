@@ -4497,7 +4497,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4515,9 +4515,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-15 font-medium text-zinc-900">Send annual prepay invoice</div>
-            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+            <div className="text-ui-caption text-ink-secondary mt-0.5">{customerName}</div>
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !saving && onClose?.()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4527,12 +4527,12 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         </div>
         <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           {activeTermEnd && (
-            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
           {depositCredit && depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
               {depositCredit.estimateSlug ? ` (estimate ${depositCredit.estimateSlug})` : ""} — NOT
               applied here: this customer's invoices bill to a third party, and the homeowner's
@@ -4540,7 +4540,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             </div>
           )}
           {depositCredit && !depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               <label className="flex items-start gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -4565,85 +4565,85 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             onChange={handleServiceTypeChange}
           />
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Cadence</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Cadence</div>
+            <Select
               value={coverageCadence}
               onChange={(e) => handleCadenceChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Applications covered</div>
+            <Input
               type="number"
               min="1"
               max="24"
               step="1"
               value={visitCount}
               onChange={(e) => handleVisitCountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">
+            <div className="ui-label text-ink-secondary mb-1">
               {isCommercialCustomer ? "Pre-tax service amount" : "Invoice amount"}
             </div>
-            <input
+            <Input
               type="number"
               min="0"
               step="0.01"
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
             {perVisit > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Commercial: ~7% county sales tax is added — customer is invoiced
                 ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term starts</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term starts</div>
+            <Input
               type="date"
               value={termStart}
               onChange={(e) => handleStartChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term ends</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term ends</div>
+            <Input
               type="date"
               value={termEnd}
               onChange={(e) => setTermEnd(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Invoice due</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Invoice due</div>
+            <Input
               type="date"
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">First visit (optional)</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">First visit (optional)</div>
+            <Input
               type="date"
               value={firstVisitDate}
               onChange={(e) => {
@@ -4655,38 +4655,38 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               }}
               min={termStart || undefined}
               max={termEnd || undefined}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
-            <div className="text-11 text-ink-secondary mt-1">
+            <div className="text-ui-caption text-ink-secondary mt-1">
               {firstVisitDateError || "Date you already promised the customer. Blank starts coverage at the term start."}
             </div>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">First visit time</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">First visit time</div>
+            <Input
               type="time"
               step={3600}
               value={firstVisitWindowStart}
               onChange={(e) => setFirstVisitWindowStart(e.target.value)}
               disabled={!firstVisitDate}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
             />
-            <div className="text-11 text-ink-secondary mt-1">
+            <div className="text-ui-caption text-ink-secondary mt-1">
               {firstVisitTimeError || "Arrival time for visit 1, on the hour. Needs a first-visit date."}
             </div>
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Invoice note</div>
-            <textarea
+            <div className="ui-label text-ink-secondary mb-1">Invoice note</div>
+            <Textarea
               rows={3}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
         </div>
         {error && (
-          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {error}
           </div>
         )}
