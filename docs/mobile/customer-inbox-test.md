@@ -26,7 +26,7 @@ The customer row lock serializes concurrent requests. An append-only audit
 marker prevents another pair even after the original items are read or pruned.
 Retries return `alreadyCreated: true`, `createdCount: 0` and the original IDs;
 they never mark items unread again. This action has no reset/delete operation.
-It refuses inactive or churned customers. Dry-run is a current-state preview,
+It refuses inactive, churned or deleted customers. Dry-run is a current-state preview,
 not a reservation; execution checks eligibility and the one-shot marker again.
 
 After deployment and owner-authorized activation, verify a dry-run first. If

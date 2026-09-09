@@ -40,7 +40,7 @@ router.post('/customer-inbox-test', requireAdmin, async (req, res, next) => {
     const result = await db.transaction(async (trx) => {
       // Serialize this customer's pair and audit together, across all replicas.
       const customer = await trx('customers').where({ id: target, active: true })
-        .forUpdate().first('id', 'pipeline_stage');
+        .whereNull('deleted_at').forUpdate().first('id', 'pipeline_stage');
       if (!customer || customer.pipeline_stage === 'churned') return null;
       const previous = await trx('audit_log').where({
         action: INBOX_TEST_ACTION, resource_type: 'customer', resource_id: target,

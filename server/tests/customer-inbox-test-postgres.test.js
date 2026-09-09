@@ -152,7 +152,7 @@ jest.setTimeout(30000);
     expect((await post(true)).body).toMatchObject({ alreadyCreated: true, createdCount: 0 });
     expect(await rows()).toHaveLength(0); expect(await audits()).toHaveLength(1);
   });
-  test.each([{ active: false }, { pipeline_stage: 'churned' }])('refuses an ineligible configured customer: %j', async change => {
+  test.each([{ active: false }, { pipeline_stage: 'churned' }, { deleted_at: new Date() }])('refuses an ineligible configured customer: %j', async change => {
     await mockPg('customers').where({ id: customerId }).update(change);
     expect((await post(true)).status).toBe(404);
     expect(await rows()).toHaveLength(0); expect(await audits()).toHaveLength(0);
