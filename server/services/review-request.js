@@ -4130,8 +4130,13 @@ const ReviewService = {
     if (!active) return retryEnrollment();
     let requestRecorded = false;
     if (customerRequested) {
-      const captured = await db("review_sequences").where({ id: active.id, status: "active" }).update({ customer_requested: JSON.stringify(customerRequested) });
-      if (!captured) return retryEnrollment();
+      const captured = await db("review_sequences").where({ id: active.id, status: "active" })
+        .whereNull("customer_requested").update({ customer_requested: JSON.stringify(customerRequested) });
+      if (!captured) {
+        const winner = await db("review_sequences").where({ id: active.id, status: "active" }).first();
+        if (!winner?.customer_requested) return retryEnrollment();
+        active = winner; // another completion already recorded the set-once capture
+      }
       requestRecorded = true;
     }
     return { started: false, reason: "already_active", sequence: active, requestRecorded };

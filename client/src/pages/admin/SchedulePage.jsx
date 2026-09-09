@@ -467,9 +467,13 @@ function customReviewTimingHint(reviewCustomAt, preview) {
     // The window opens at 8:00; in cadence mode the worker's first tick
     // after that is 8:14 (codex #4140 r7).
     const openTick = heldToWindowOpenISO(tick || iso, preview);
-    return openTick
+    const textHint = openTick
       ? `Review text is held for the 8 AM–8 PM window — it goes out at the first ${tickNoun(preview)} after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
       : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmtReviewTime(iso)}.`;
+    if (preview?.reviewSequencesEnabled) {
+      return `${textHint} If the cadence uses email instead, it can send at the next cadence tick${tick ? `, about ${fmtReviewTime(tick)}` : ""}, without waiting for the SMS window.`;
+    }
+    return textHint;
   }
   if (tick && tick !== iso) return `Review text goes out separately at the next ${tickNoun(preview)} after ${fmtReviewTime(iso)} — about ${fmtReviewTime(tick)}.`;
   return `Review text goes out separately ${fmtReviewTime(iso)}.`;
