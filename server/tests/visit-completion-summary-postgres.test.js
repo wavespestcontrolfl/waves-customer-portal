@@ -1016,10 +1016,9 @@ postgres('visit summary recipient recovery', () => {
     expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
     const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
     const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
-    for (const message of messages) {
-      await handleEmailMessageEvent({ event: 'bounce', type: 'bounce', reason: 'mailbox unavailable',
-        timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
-    }
+    // Only this recipient bounces; the other remains accepted.
+    await handleEmailMessageEvent({ event: 'bounce', type: 'bounce', reason: 'mailbox unavailable',
+      timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, messages[0]);
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
       .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
     // The bounce-recovery rail's resend keeps the trigger identity (unit-tested
@@ -1032,6 +1031,9 @@ postgres('visit summary recipient recovery', () => {
       from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com',
       categories: JSON.stringify(['email_template', 'bounce_recovery']),
     }).returning('*');
+    await mockPg('email_bounce_recoveries').insert({ original_message_id: messages[0].id,
+      recovery_message_id: recovery.id, bounced_email: messages[0].recipient_email_snapshot,
+      corrected_email: recovery.recipient_email_snapshot, customer_id: fixture.customerId, status: 'resent' });
     await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, recovery);
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
       .toMatchObject({ status: 'sent', last_error: null });
@@ -1104,7 +1106,7 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test('a recovery delivery settles an in-flight bounce that finalized as unknown', async () => {
-    sendOne.mockImplementation(async ({ customArgs }) => {
+    sendOne.mockImplementationOnce(async ({ customArgs }) => {
       await mockPg('email_messages').where({ id: customArgs.email_message_id })
         .update({ status: 'bounced', bounced_at: new Date(), error_message: 'mailbox unavailable' });
       return { messageId: randomUUID() };
@@ -1113,7 +1115,7 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
       .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
-    const [original] = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const original = await mockPg('email_messages').where({ recipient_id: fixture.customerId, status: 'bounced' }).first();
     const [recovery] = await mockPg('email_messages').insert({
       provider: 'sendgrid', template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_type: 'customer', recipient_id: fixture.customerId, recipient_email_snapshot: 'corrected@example.invalid',
@@ -1122,6 +1124,9 @@ postgres('visit summary recipient recovery', () => {
       from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com',
       categories: JSON.stringify(['email_template', 'bounce_recovery']),
     }).returning('*');
+    await mockPg('email_bounce_recoveries').insert({ original_message_id: original.id,
+      recovery_message_id: recovery.id, bounced_email: original.recipient_email_snapshot,
+      corrected_email: recovery.recipient_email_snapshot, customer_id: fixture.customerId, status: 'resent' });
     const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
     await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, recovery);
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
