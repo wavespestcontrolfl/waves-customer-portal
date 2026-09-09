@@ -1387,6 +1387,34 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    test('scheduler refusal parking keeps the customer lock until cleanup finishes', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'park-lock', first_name: 'Synthetic', phone: '+12025550999' }],
+        review_requests: [{ id: 'park-row', customer_id: 'park-lock', status: 'pending', channel: 'sms',
+          approved_phone: '+12025550101', scheduled_for: new Date(Date.now() - 60000) }],
+      });
+      db.mockImplementation(mock);
+      let entered, finish;
+      const started = new Promise(resolve => { entered = resolve; });
+      const wait = new Promise(resolve => { finish = resolve; });
+      const realPark = ReviewService._parkRequestVerified.bind(ReviewService);
+      const park = jest.spyOn(ReviewService, '_parkRequestVerified').mockImplementation(async (...args) => {
+        entered(); await wait; return realPark(...args);
+      });
+      const tick = ReviewService.processScheduled();
+      try {
+        await started;
+        const competing = jest.fn();
+        expect(await require('../services/review-ask-dispatch').dispatchReviewAsk('park-lock', competing))
+          .toMatchObject({ code: 'REVIEW_SEND_BUSY' });
+        expect(competing).not.toHaveBeenCalled();
+      } finally { finish(); }
+      try {
+        expect(await tick).toMatchObject({ refused: 1 });
+        expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+      } finally { park.mockRestore(); }
+    });
+
     test('an unpinned send with no consented recipient is suppressed before the 3-day hold can leave it queued (codex #4156 r3 P2)', async () => {
       const mock = makeMock({
         customers: [{ id: 'nr-1', first_name: 'Uma', last_name: 'P', phone: null, nearest_location_id: 'venice' }],
