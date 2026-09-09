@@ -8,10 +8,11 @@ const knexFactory = require('knex');
 // Exercise the published table and score migrations followed by the new
 // prompt-context migration, just as an existing preview database upgrades.
 const promptContextMigration = require('../models/migrations/20260909000040_lawn_assessment_runs_prompt_context');
+const pipelineMigration = require('../models/migrations/20260908000030_lawn_assessment_runs_pipeline');
 const migrations = [
   require('../models/migrations/20260908000010_lawn_assessment_runs'),
   require('../models/migrations/20260908000020_lawn_assessment_runs_scores_adjusted'),
-  require('../models/migrations/20260908000030_lawn_assessment_runs_pipeline'),
+  pipelineMigration,
   promptContextMigration,
 ];
 
@@ -258,10 +259,13 @@ const analysis = (overrides = {}) => ({
     expect((await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).first()).pipeline_completed_at).not.toBeNull();
     // A row with no run has nothing to claim; a database without the columns delivers as before.
     expect(await visit.claimPipeline(randomUUID(), db.knex)).toBe(false);
-    await migrations[1].down(db.knex);
-    expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(true);
-    expect(await visit.completePipeline(assessment.id, db.knex)).toEqual([]); // no columns: nothing to stamp, nothing owed
-    await migrations[1].up(db.knex);
+    await pipelineMigration.down(db.knex);
+    try {
+      expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(true);
+      expect(await visit.completePipeline(assessment.id, db.knex)).toEqual([]); // no columns: nothing to stamp, nothing owed
+    } finally {
+      await pipelineMigration.up(db.knex);
+    }
   });
 
   test('priorAssessmentCount against the real table: a pending run-backed row is not a prior assessment', async () => {
