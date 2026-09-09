@@ -82,14 +82,6 @@ const sBtn = (bg, color) => ({
   fontWeight: 500,
   cursor: "pointer",
 });
-// Weekly-trend axis label: "Sep 1" instead of the raw "09-01" slice.
-function formatWeekLabel(week) {
-  if (!week) return "";
-  const d = new Date(`${String(week).slice(0, 10)}T00:00:00`);
-  return Number.isNaN(d.getTime())
-    ? String(week).substring(5)
-    : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
 const sBadge = (bg, color) => ({
   fontSize: 12, // UI audit F0540
   padding: "2px 8px",
@@ -2756,7 +2748,7 @@ function AnalyticsTab() {
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {formatWeekLabel(w.week)}
+                    {w.week?.substring(5)}
                   </div>{" "}
                 </div>
               );

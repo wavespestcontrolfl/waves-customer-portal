@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+
 const FILES = [
   'pages/admin/BankingPage.jsx',
   'pages/admin/TaxPage.jsx',
@@ -22,18 +24,34 @@ const FILES = [
   'components/schedule/TimeGridDays.jsx',
 ];
 
-const HERE = dirname(fileURLToPath(import.meta.url));
+function read(rel) {
+  return readFileSync(resolve(HERE, '..', rel), 'utf8');
+}
 
 describe('typography floor (UI audit unit 7)', () => {
   for (const rel of FILES) {
-    it(`${rel} has no inline fontSize below 11px`, () => {
-      const src = readFileSync(resolve(HERE, '..', rel), 'utf8');
+    it(`${rel} has no inline or class-based size below the floor`, () => {
       const hits = [];
-      src.split('\n').forEach((line, i) => {
-        const m = line.match(/fontSize:\s*(\d+)\b/);
-        if (m && Number(m[1]) < 11) hits.push(`${i + 1}: ${line.trim()}`);
+      read(rel).split('\n').forEach((line, i) => {
+        const inline = line.match(/fontSize:\s*(\d+)\b/);
+        if (inline && Number(inline[1]) < 11) hits.push(`${i + 1}: ${line.trim()}`);
+        // Class-based sizes below the floor (`text-8`, `text-9`). `text-10` is
+        // excluded on purpose: it is not a Tailwind token and emits no CSS
+        // (F0606), so its mapping is the separate text-10 → text-11 sweep.
+        for (const cls of line.matchAll(/\btext-(\d+)\b/g)) {
+          if (Number(cls[1]) < 10) hits.push(`${i + 1}: ${line.trim()}`);
+        }
       });
       expect(hits).toEqual([]);
     });
   }
+
+  it('TimeGridDays renders the Unassigned label at the 11px caption class (F0212)', () => {
+    const label = read('components/schedule/TimeGridDays.jsx')
+      .split('\n')
+      .find((line) => line.includes('>Unassigned</span>'));
+    expect(label).toBeDefined();
+    expect(label).toMatch(/\btext-11\b/);
+    expect(label).not.toMatch(/fontSize:\s*\d+/);
+  });
 });
