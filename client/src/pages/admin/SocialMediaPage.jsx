@@ -2717,6 +2717,10 @@ function AnalyticsTab() {
               // 80px bar + 13px value + 12px rotated label + gaps: the old
               // 100px box let the tallest columns overflow into the heading.
               height: 136,
+              // The -45deg label hangs ~10px below its line box; without this
+              // padding the scrollport above clips it (overflow-x: auto makes
+              // the y axis scrollable rather than visible).
+              paddingBottom: 16,
               minWidth: "max-content",
             }}
           >
