@@ -55,13 +55,13 @@ export function EmailSummary({ mailbox }) {
         { label: "domains blocked", value: digest.domains_blocked_today },
       ].filter((item) => item.value > 0).map((item) => <span key={item.label}><span className="u-nums text-ink-primary">{item.value}</span> {item.label}</span>)}
     </div>}
-    <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <dl className="m-0 grid grid-cols-2 gap-3 sm:grid-cols-4">
       {[
         { label: "Unread", value: stats?.unread }, { label: "Today", value: stats?.today },
         { label: "Vendor", value: stats?.vendor }, { label: "Total", value: stats?.total },
       ].map((item) => <div key={item.label} className="rounded-md border-hairline border-zinc-200 bg-white p-4">
         <dt className="text-ui-caption text-ink-secondary">{item.label}</dt>
-        <dd className="u-nums mt-1 text-18 leading-[1.35] font-medium">{statsState.error ? "—" : item.value ?? "—"}</dd>
+        <dd className="u-nums m-0 mt-1 text-18 leading-[1.35] font-medium">{statsState.error ? "—" : item.value ?? "—"}</dd>
       </div>)}
     </dl>
   </div>;
@@ -71,21 +71,20 @@ export function BlockedSenders({ mailbox }) {
   const { blocked, blockInput, setBlockInput, handleBlock, handleUnblock, blockedState, loadBlocked, pendingAction } = mailbox;
   return <section aria-label="Blocked senders" className="space-y-4">
     <div className="flex flex-wrap items-end gap-2 rounded-md border-hairline border-zinc-200 bg-white p-4">
-      <Field label="Domain or email to block" className="min-w-0 flex-1">
-        <Input disabled={Boolean(pendingAction)} value={blockInput} onChange={(event) => setBlockInput(event.target.value)}
-          onKeyDown={(event) => event.key === "Enter" && handleBlock()}
-          placeholder="example.com or name@example.com" />
-      </Field>
+      <Input disabled={Boolean(pendingAction)} value={blockInput} onChange={(event) => setBlockInput(event.target.value)}
+        onKeyDown={(event) => event.key === "Enter" && handleBlock()}
+        aria-label="Domain or email to block" className="min-w-0 flex-1"
+        placeholder="Block domain or email (e.g. spammer.com or bad@example.com)" />
       <Button variant="danger" onClick={handleBlock} loading={pendingAction === "block"} disabled={Boolean(pendingAction) || !blockInput.trim()}>Block</Button>
     </div>
     <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-      {blockedState.loading ? <p className="min-h-40 p-6 text-ink-secondary" role="status">Loading blocked senders…</p>
+      {blockedState.loading ? <p className="m-0 min-h-40 p-6 text-ink-secondary" role="status">Loading blocked senders…</p>
         : blockedState.error ? <ActionFeedback error onRetry={loadBlocked} className="min-h-40 p-6">Blocked senders are unavailable.</ActionFeedback>
-        : blocked.length === 0 ? <p className="p-8 text-center text-ink-secondary">No blocked senders</p>
-        : <ul>{blocked.map((entry) => <li key={entry.id} className="flex items-start justify-between gap-3 border-b-hairline border-zinc-200 p-4 last:border-b-0">
+        : blocked.length === 0 ? <p className="m-0 p-8 text-center text-ink-secondary">No blocked senders</p>
+        : <ul className="m-0 list-none p-0">{blocked.map((entry) => <li key={entry.id} className="flex items-start justify-between gap-3 border-b-hairline border-zinc-200 p-4 last:border-b-0">
           <div className="min-w-0 break-words">
-            <p className="font-medium">{entry.domain || entry.email_address}</p>
-            <p className="mt-1 text-ui-caption text-ink-secondary">{entry.reason}{entry.blocked_count > 0 && ` — ${entry.blocked_count} emails caught`} <span className="u-nums">{timeAgo(entry.created_at)}</span></p>
+            <p className="m-0 font-medium">{entry.domain || entry.email_address}</p>
+            <p className="m-0 mt-1 text-ui-caption text-ink-secondary">{entry.reason}{entry.blocked_count > 0 && ` — ${entry.blocked_count} emails caught`} <span className="u-nums">{timeAgo(entry.created_at)}</span></p>
           </div>
           <Button variant="secondary" onClick={() => handleUnblock(entry.id)} disabled={Boolean(pendingAction)} loading={pendingAction === `unblock:${entry.id}`} className="shrink-0">Unblock</Button>
         </li>)}</ul>}
@@ -151,8 +150,8 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
   return <section aria-label="Selected email" className="min-w-0 overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
     <div className="space-y-3 border-b-hairline border-zinc-200 p-4">
       <Button variant="ghost" onClick={onBack} className="gap-2 xl:hidden"><ArrowLeft size={16} aria-hidden />Back to inbox</Button>
-      <h2 ref={headingRef} tabIndex={-1} className="u-focus-ring break-words text-18 font-medium leading-[1.35]">{email.subject || "(no subject)"}</h2>
-      <p className="break-words text-ink-secondary">{sender}{email.from_name && ` · ${email.from_address}`}</p>
+      <h2 ref={headingRef} tabIndex={-1} className="m-0 u-focus-ring break-words text-18 font-medium leading-[1.35]">{email.subject || "(no subject)"}</h2>
+      <p className="m-0 break-words text-ink-secondary">{sender}{email.from_name && ` · ${email.from_address}`}</p>
     </div>
     <div className="space-y-4 p-4">
       <div className="flex flex-wrap gap-2">
@@ -168,7 +167,7 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
           { key: "service", value: extractedData.service_interest }, { key: "invoice", value: extractedData.invoice_amount, prefix: "$" },
         ].filter((detail) => detail.value).map((detail) => <span key={detail.key} className={cn("break-words", detail.alert && "text-alert-fg")}>{detail.prefix}{detail.value}</span>)}
       </div>}
-      {threadState.loading && <p className="min-h-32 text-ink-secondary" role="status">Loading conversation…</p>}
+      {threadState.loading && <p className="m-0 min-h-32 text-ink-secondary" role="status">Loading conversation…</p>}
       {threadState.error && <ActionFeedback error onRetry={() => loadThread(email)}>The email conversation is unavailable.</ActionFeedback>}
       <div ref={historyRef} role="region" aria-label="Email history" tabIndex={0}
         aria-busy={threadState.loading}
@@ -177,13 +176,13 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
           const node = event.currentTarget;
           followLatestRef.current = node.scrollHeight - node.clientHeight - node.scrollTop < 64;
         }}>
-      {!threadState.loading && !threadState.error && thread.length === 0 && <p className="p-4 text-ink-secondary">No messages in this conversation.</p>}
+      {!threadState.loading && !threadState.error && thread.length === 0 && <p className="m-0 p-4 text-ink-secondary">No messages in this conversation.</p>}
       {thread.map((message) => <article key={message.id} className="rounded-md border-hairline border-zinc-200 bg-white p-4">
         <div className="mb-2 flex flex-wrap justify-between gap-x-4 gap-y-1">
           <div className="min-w-0 break-words"><span className="font-medium">{message.from_name || message.from_address}</span> <span className="text-ink-secondary">&lt;{message.from_address}&gt;</span></div>
           <span className="u-nums text-ui-caption text-ink-secondary">{new Date(message.received_at).toLocaleString("en-US", { timeZone: "America/New_York" })}</span>
         </div>
-        {message.to_address && <p className="mb-3 break-words text-ui-caption text-ink-secondary">To: {message.to_address}</p>}
+        {message.to_address && <p className="m-0 mb-3 break-words text-ui-caption text-ink-secondary">To: {message.to_address}</p>}
         <EmailBody html={message.body_html} text={message.body_text} />
         {message.attachments?.length > 0 && <div className="mt-3 flex flex-wrap gap-2">
           {message.attachments.map((attachment) => <a key={attachment.id}
@@ -232,15 +231,15 @@ export function EmailInbox({ active, mailbox, editor }) {
       <section aria-label="Email inbox" className={cn("min-w-0 overflow-hidden rounded-md border-hairline border-zinc-200 bg-white", selected && "max-xl:hidden")}>
         <div className="space-y-3 border-b-hairline border-zinc-200 p-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="text-18 font-medium leading-[1.35]">Inbox</h2>
+            <h2 className="m-0 text-18 font-medium leading-[1.35]">Inbox</h2>
             <span className="u-nums text-ui-caption text-ink-secondary">{mailbox.inboxState.error || mailbox.inboxState.loading ? "—" : total} messages</span>
           </div>
           <Field label="Search emails"><Input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search emails..." /></Field>
         </div>
         <div className="max-h-[680px] overflow-y-auto overscroll-contain">
-          {mailbox.inboxState.loading ? <p className="min-h-48 p-6 text-ink-secondary" role="status">Loading inbox…</p>
+          {mailbox.inboxState.loading ? <p className="m-0 min-h-48 p-6 text-ink-secondary" role="status">Loading inbox…</p>
             : mailbox.inboxState.error ? <ActionFeedback error onRetry={mailbox.loadEmails} className="min-h-48 p-6">The email inbox is unavailable.</ActionFeedback>
-            : visibleEmails.length === 0 ? <p className="p-8 text-center text-ink-secondary">No emails found</p>
+            : visibleEmails.length === 0 ? <p className="m-0 p-8 text-center text-ink-secondary">No emails found</p>
             : visibleEmails.map((email) => <EmailMessageRow key={email.id} email={email} mailbox={mailbox} editor={editor} onOpen={openEmail} />)}
         </div>
         {total > 50 && <div className="flex flex-wrap items-center justify-between gap-2 border-t-hairline border-zinc-200 p-3">
@@ -254,8 +253,8 @@ export function EmailInbox({ active, mailbox, editor }) {
         : selected ? <EmailConversation active={active} mailbox={mailbox} editor={editor} onBack={backToInbox} />
         : <div className="hidden min-h-80 flex-col items-center justify-center rounded-md border-hairline border-zinc-200 bg-white p-8 text-center xl:flex">
           <Mail size={24} className="mb-3 text-ink-secondary" aria-hidden />
-          <h2 className="mb-2 text-18 font-medium leading-[1.35]">Choose an email</h2>
-          <p className="max-w-sm text-ink-secondary">Select a message from the inbox to read the conversation and reply.</p>
+          <h2 className="m-0 mb-2 text-18 font-medium leading-[1.35]">Choose an email</h2>
+          <p className="m-0 max-w-sm text-ink-secondary">Select a message from the inbox to read the conversation and reply.</p>
         </div>}
     </div>
   </div>;

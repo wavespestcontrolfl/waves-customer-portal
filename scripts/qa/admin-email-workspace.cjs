@@ -128,7 +128,7 @@ async function main() {
       await page.getByRole('button', { name: `Open email: ${a.subject}`, exact: true }).getByText('Jul 1', { exact: true }).waitFor();
       await page.close();
     });
-    await scenario('Keyboard inbox selection, mobile return and authenticated attachment download', async () => {
+    if (!baseline) await scenario('Keyboard inbox selection, mobile return and authenticated attachment download', async () => {
       const { page } = await openPage(390);
       await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
       const row = page.getByRole('button', { name: `Open email: ${a.subject}`, exact: true });
