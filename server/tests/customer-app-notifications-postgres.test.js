@@ -1,5 +1,6 @@
 // Opt-in against a verified private QA database. Clone the migrated table
 // shapes into a disposable schema; all recipients and providers are fictional.
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'qa-customer-app-notifications-only';
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
   db.raw = (...args) => mockPg.raw(...args);
@@ -38,7 +39,10 @@ jest.setTimeout(30000);
 
 postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   beforeAll(async () => {
-    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(new URL(connection).pathname)) throw new Error('Use a verified private QA database');
+    const target = new URL(connection);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
+    const ci = process.env.CI === 'true' && target.hostname === 'localhost' && target.pathname === '/waves_test';
+    if (!privateQa && !ci) throw new Error('Use a verified private QA database or the isolated CI database');
     admin = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = require('knex')({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
@@ -77,6 +81,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     } finally { await probe.rollback(); }
     expect(await mockPg.schema.hasColumn('service_requests', 'status_version')).toBe(hadVersion);
     await versionMigration.up(mockPg);
+    await require('../models/migrations/20260909000064_request_channel_provenance').up(mockPg);
     await mockPg('customers').insert([
       { id: owner, account_id: owner, is_primary_profile: true },
       { id: property, account_id: owner, is_primary_profile: false },
@@ -132,11 +137,70 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   });
 
   test.each([['email', 'push'], ['push', 'email']])('profile merge preserves a request Email choice: %s + %s', async (winner, loser) => {
-    await mockPg('notification_prefs').where({ customer_id: owner }).update({ request_channel: winner });
-    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel: loser });
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ request_channel: winner, request_channel_explicit: true });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel: loser, request_channel_explicit: true });
     const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
     await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
     expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({ request_channel: 'email' });
+  });
+
+  test('provenance migration preserves historical uncertainty and consent timestamps through repeatable up/down', async () => {
+    const migration = require('../models/migrations/20260909000064_request_channel_provenance');
+    const capturedAt = new Date('2025-01-02T12:00:00Z');
+    const probe = await mockPg.transaction();
+    try {
+      await migration.down(probe);
+      await probe('notification_prefs').update({ request_channel: 'email', updated_at: capturedAt });
+      await probe('notification_prefs').where({ customer_id: property }).update({ request_channel: 'push' });
+      await migration.up(probe); await migration.up(probe);
+      for (const id of [owner, property, outsider]) {
+        expect(await probe('notification_prefs').where({ customer_id: id }).first()).toMatchObject({
+          request_channel_explicit: id === property ? true : null, updated_at: capturedAt,
+        });
+      }
+      const [fresh] = await probe('notification_prefs').insert({ customer_id: randomUUID() }).returning('*');
+      expect(fresh).toMatchObject({ request_channel: 'email', request_channel_explicit: false });
+      await migration.down(probe); await migration.down(probe); await migration.up(probe);
+      expect(await probe.schema.hasColumn('notification_prefs', 'request_channel_explicit')).toBe(true);
+    } finally { await probe.rollback(); }
+    expect(await mockPg.schema.hasColumn('notification_prefs', 'request_channel_explicit')).toBe(true);
+  });
+
+  test.each([
+    ['email', false, 'push', true, 'push', true],
+    ['push', true, 'email', false, 'push', true],
+    ['email', null, 'push', true, 'email', null],
+    ['push', true, 'email', null, 'email', null],
+    ['email', false, 'email', true, 'email', true],
+    ['email', true, 'email', false, 'email', true],
+    ['email', false, 'email', null, 'email', null],
+    ['email', null, 'email', false, 'email', null],
+    ['push', false, 'push', true, 'push', true],
+    ['push', true, 'push', false, 'push', true],
+  ])('request merge keeps the selected channel and provenance: %s/%s + %s/%s', async (winner, winnerExplicit, loser, loserExplicit, channel, explicit) => {
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({
+      request_channel: winner, request_channel_explicit: winnerExplicit, sms_enabled: true,
+    });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({
+      request_channel: loser, request_channel_explicit: loserExplicit, sms_enabled: false,
+    });
+    const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
+    await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
+      request_channel: channel, request_channel_explicit: explicit, sms_enabled: false,
+    });
+    expect(await mockPg('notification_prefs').where({ customer_id: outsider }).first()).toBeUndefined();
+  });
+
+  test('a provenance-only merge retains the existing consent timestamp', async () => {
+    const capturedAt = new Date('2025-01-02T12:00:00Z');
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ updated_at: capturedAt });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ request_channel_explicit: true });
+    const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
+    await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
+      request_channel: 'email', request_channel_explicit: true, updated_at: capturedAt,
+    });
   });
 
   const prefsUrl = '/api/notifications/preferences?appPreferences=1';
@@ -154,6 +218,33 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       platform, device_token: `qa-${randomUUID()}`, subscription_data: '{}', active: true, ...extra }).returning('*');
     return row;
   }
+
+  test('request choices record provenance only on the selected profile, not a default round trip', async () => {
+    await put({ requestChannel: 'email', weatherAlerts: false });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: false });
+    await device();
+    expect((await put({ requestChannel: 'push' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'push', request_channel_explicit: true });
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: false });
+    expect((await put({ requestChannel: 'email' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'email', request_channel_explicit: true });
+    await put({ weatherAlerts: true });
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).request_channel_explicit).toBe(true);
+  });
+
+  test('legacy and gate-off saves preserve unknown request provenance with the App choice', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property })
+      .update({ request_channel: 'push', request_channel_explicit: null });
+    expect((await http('PUT', '/api/notifications/preferences', { requestChannel: 'email' })).status).toBe(200);
+    delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+    expect((await put({ requestChannel: 'email' })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ request_channel: 'push', request_channel_explicit: null });
+  });
 
   test('readiness authenticates and returns no device identifiers', async () => {
     expect((await http('GET', '/api/push/status', null, false)).status).toBe(401);
