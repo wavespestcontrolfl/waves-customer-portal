@@ -195,13 +195,27 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
   const marked = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'claim'))
     ? VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: trx }) : false));
   if (!marked) return lost;
-  const verdict = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'dispatch')) ? dispatch(trx) : lost));
-  if (verdict?.ok === true) return verdict;
-  // Nothing reached the provider. If this write fails the effect stays
+  // Nothing reached the provider: the mark returns to its pre-dispatch state
+  // so the same claim can retry. If this write fails the effect stays
   // uncertain and reaches office review, which is the safe side.
-  await db('visit_effects').where({ visit_id: visitId, effect_type: kind, claim_token: token, status: 'unknown_delivery' })
+  const unmark = () => db('visit_effects').where({ visit_id: visitId, effect_type: kind, claim_token: token, status: 'unknown_delivery' })
     .update({ status: scheduled ? 'pending' : 'claimed', claimed_at: new Date(), updated_at: db.fn.now() })
     .catch(() => {});
+  let dispatching = false;
+  let verdict;
+  try {
+    verdict = await db.transaction(async (trx) => {
+      if (!(await holdAndAuthorize(trx, 'dispatch'))) return lost;
+      dispatching = true;
+      return dispatch(trx);
+    });
+  } catch (err) {
+    // A failed re-authorization read is not a provider outcome.
+    if (!dispatching) await unmark();
+    throw err;
+  }
+  if (verdict?.ok === true) return verdict;
+  await unmark();
   return verdict || lost;
 }
 

@@ -765,6 +765,41 @@ postgres('visit summary recipient recovery', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test.each(['immediate', 'scheduled'])('a read failure between the durable mark and the %s provider request restores the claim', async (rail) => {
+    const queued = rail === 'scheduled' ? await heldSummary() : null;
+    if (rail === 'immediate') {
+      fixture.payload.items[0].body.sendCompletionSms = true;
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    }
+    // The second held transaction's first lock read fails, after the mark committed.
+    const execute = mockPg.client.constructor.prototype._query;
+    let locks = 0;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failSecondLock(connection, query) {
+      if (!interrupted && query.sql.includes('from "customers"') && query.sql.includes('for share') && query.sql.includes('"id"')) {
+        locks += 1;
+        if (locks === 2) { interrupted = true; return Promise.reject(new Error('Synthetic re-authorization outage')); }
+      }
+      return execute.call(this, connection, query);
+    });
+    let providerCalls = 0;
+    if (rail === 'scheduled') {
+      await expect(deferredHandoff(queued.metadata, async () => { providerCalls += 1; return { ok: true }; })).rejects.toThrow('Synthetic re-authorization outage');
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'pending' });
+      jest.restoreAllMocks();
+      expect(await deferredHandoff(queued.metadata, async () => { providerCalls += 1; return { ok: true }; })).toMatchObject({ ok: true });
+    } else {
+      sendCustomerMessage.mockImplementation(handoffSender(async () => { providerCalls += 1; return { sent: true }; }));
+      expect(await deliver()).toEqual({ state: 'delivery_pending' });
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'failed' });
+      jest.restoreAllMocks();
+      sendCustomerMessage.mockImplementation(handoffSender(async () => { providerCalls += 1; return { sent: true }; }));
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    }
+    expect(interrupted).toBe(true);
+    expect(providerCalls).toBe(1);
+  });
+
   test('the email retry rail holds the recipient rows through its provider request', async () => {
     const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_email_snapshot: fixture.serviceEmail };
