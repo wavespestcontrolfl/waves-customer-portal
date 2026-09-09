@@ -5507,6 +5507,7 @@ function BillingTab({ customer, refreshCustomer }) {
   const [billingEmail, setBillingEmail] = useState('');
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
   const [invoiceChannel, setInvoiceChannel] = useState('sms');
+  const [savedInvoiceChannel, setSavedInvoiceChannel] = useState('sms');
   const [appPreferencesAvailable, setAppPreferencesAvailable] = useState(false);
   const billingApp = useAppNotifications(appPreferencesAvailable, customer?.id);
   // Receipt texts have no on/off switch (owner 08-28), but a customer who
@@ -5635,6 +5636,7 @@ function BillingTab({ customer, refreshCustomer }) {
           setBillingEmail(prefsData.billingEmail || '');
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
           setInvoiceChannel(prefsData.invoiceChannel || 'sms');
+          setSavedInvoiceChannel(prefsData.invoiceChannel || 'sms');
           setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
           setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
@@ -6293,10 +6295,11 @@ function BillingTab({ customer, refreshCustomer }) {
       // SMS-suppressing 'email' choice can't linger with no deliverable
       // email leg.
       billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
-      ...(appPreferencesAvailable ? { invoiceChannel } : {}),
+      ...(appPreferencesAvailable && invoiceChannel !== savedInvoiceChannel ? { invoiceChannel } : {}),
       paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
       .then(() => {
+        setSavedInvoiceChannel(invoiceChannel);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was

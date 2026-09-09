@@ -85,6 +85,22 @@ it('saves the invoice App choice without enabling text or email and shows save f
   expect(prefs).toMatchObject({ invoiceChannel: 'push', smsEnabled: false, emailEnabled: false });
 });
 
+it('does not resubmit an unchanged App invoice choice when the server gate is rolled back', async () => {
+  prefs.invoiceChannel = 'push';
+  render(<BillingTab customer={customer} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
+  expect(select).toHaveValue('push');
+  api.updateNotificationPrefs.mockImplementation(async (changes) => {
+    if (changes.invoiceChannel === 'push') throw new Error('App preferences unavailable');
+    return { success: true };
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await screen.findByRole('button', { name: 'Saved', exact: true });
+  expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(1);
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('invoiceChannel');
+  expect(select).toHaveValue('push');
+});
+
 it('retains the saved invoice choice when the app is stale and hides it with the gate off', async () => {
   prefs.invoiceChannel = 'push';
   api.getCustomerPushStatus.mockResolvedValue({ available: true, enabled: true, registered: true, fresh: false });
