@@ -1094,3 +1094,20 @@ test('a year before a noun is a quantity, a planned withdrawal implies current s
   expect(score('E6', 'Waves handles termite infestation treatment.').expected.termite).toBe(true);
   expect(score('E6', 'Waves handles termite control services.').expected.termite).toBe(true);
 });
+
+test('a fronted clause hands back to any Waves alias, research contexts are not treatment, a withdrawal verb must govern the service predicate, and a future year may close a range (#4155 r11)', () => {
+  expect(score('E5', 'While it plans to expand, the business serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'While it plans to expand, our company serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Though formerly independent, the business is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves eliminates termites in laboratory trials.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves controls mosquitoes for a research study.').expected.mosquito).toBe(false);
+  expect(score('E6', 'In laboratory trials, Waves eliminates termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves eliminates termites using research-backed methods.').expected.termite).toBe(true);
+  expect(score('E5', 'Waves plans to stop advertising before serving Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves plans to stop marketing and offer fumigation next year.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves plans to stop its residential service to Manatee County next year.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County in 2027–2028.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County in 2027-28.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves offers fumigation during 2027/2028.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County for 2030-square-foot homes.').expected.manatee).toBe(true);
+});
