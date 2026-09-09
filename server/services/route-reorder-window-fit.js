@@ -157,6 +157,31 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, reportLat
   return { clock: startMin + workDuration(stop), prev, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
 }
 
+/** Repair the demonstrated null-position insertion defect. Keep the relative
+ * order of every already-positioned stop, including ties. Only a fully timed,
+ * ungrouped, unpinned route with a chronological backbone qualifies. A repair
+ * must turn an infeasible baseline into a feasible route; no distance saving
+ * is needed to correct that defect. The caller owns gates and fenced writes. */
+function computeChronologicalRepair(RouteOptimizer, stops) {
+  if (stops.some(stop => stop.visit_id || stop.auto_dispatch_locked || stop.auto_dispatch_excluded
+    || !Number.isFinite(effectiveWindowRange(stop)?.startMin)
+    || !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
+    || !Number(stop.lat) || !Number(stop.lng))) return null;
+  const ordered = currentOrder(stops);
+  const backbone = ordered.filter(stop => stop.route_order != null);
+  const additions = ordered.filter(stop => stop.route_order == null);
+  if (!backbone.length || !additions.length) return null;
+  if (backbone.some((stop, i) => i > 0 && effectiveWindowRange(stop).startMin < effectiveWindowRange(backbone[i - 1]).startMin)) return null;
+  if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered)) return null;
+  const candidate = [...backbone];
+  for (const stop of additions) {
+    const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > effectiveWindowRange(stop).startMin);
+    candidate.splice(index === -1 ? candidate.length : index, 0, stop);
+  }
+  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate);
+  return simulation ? { orderedStops: candidate, simulation } : null;
+}
+
 /** Simulate the complete route under the promised ARRIVAL windows. Work may
  * finish after a window closes; the next arrival still has to fit. Shared by
  * nightly reordering and staff picker/save checks. No scheduled times change.
@@ -351,6 +376,7 @@ module.exports = {
   effectiveWindowRange,
   currentOrder,
   simulateArrivalRoute,
+  computeChronologicalRepair,
   workDuration,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

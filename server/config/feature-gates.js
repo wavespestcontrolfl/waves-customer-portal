@@ -1967,6 +1967,11 @@ const gates = {
   // GATE_ROUTE_REORDER_WINDOW_FIT.
   routeReorderWindowFit: gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT'),
 
+  // Null-position repair through the existing writer. Keeps customer promises
+  // and positioned-stop order; requires drive calibration and the reorder gate.
+  // Explicit opt-in in every environment.
+  routeReorderRepair: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
+
   // Planned route measurements and candidate-specific gap checks in the
   // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
   scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),
