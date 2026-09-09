@@ -94,6 +94,31 @@ beforeEach(() => {
   require('../services/callback-cards').enabled.mockReturnValue(false);
 });
 
+describe('callback actions use the commitment PATCH endpoint', () => {
+  test.each([
+    { action: 'snooze', snooze: 'two_hours' },
+    { action: 'snooze', snooze: 'tomorrow' },
+    { action: 'fulfill' },
+  ])('forwards the complete $action payload and displayed version', async (payload) => {
+    const cards = require('../services/callback-cards');
+    cards.enabled.mockReturnValue(true);
+    cards.actOnCallback.mockResolvedValue({ id: COMMIT_ID });
+    mockDb([{ kind: 'callback', party: 'waves', call_log_id: CALL_ID }]);
+    const expected_at = new Date().toISOString();
+    await withServer(async (base) => {
+      const response = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, expected_at }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ commitment: { id: COMMIT_ID } });
+    });
+    expect(cards.actOnCallback).toHaveBeenCalledWith(db, COMMIT_ID,
+      expect.objectContaining({ ...payload, actorId: 'tech-1', expectedAt: expected_at }));
+    expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
+  });
+});
+
 describe('GET /follow-through', () => {
   test('refreshes distinct source calls and returns the completed callback off the page before its deadline', async () => {
     const cards = require('../services/callback-cards');

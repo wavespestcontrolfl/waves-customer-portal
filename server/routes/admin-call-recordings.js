@@ -408,7 +408,7 @@ router.patch('/commitments/:id', async (req, res, next) => {
     if (callbacks.enabled() && existing.kind === 'callback' && existing.party === 'waves') {
       const commitment = await callbacks.actOnCallback(db, req.params.id, {
         action: req.body?.action, actorId: req.technicianId, expectedAt: req.body?.expected_at,
-        description: req.body?.description, due_at: req.body?.due_at, note: req.body?.note,
+        description: req.body?.description, due_at: req.body?.due_at, note: req.body?.note, snooze: req.body?.snooze,
       });
       return res.json({ commitment });
     }
