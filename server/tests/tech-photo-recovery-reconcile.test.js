@@ -24,9 +24,11 @@ function mockChain(table) {
     where: jest.fn((w) => { state.where = w; return c; }),
     whereIn: jest.fn(() => c),
     orderBy: jest.fn(() => c),
+    count: jest.fn(() => { state.count = true; return c; }),
     first: jest.fn(async () => {
-      const rows = tables[table] || [];
-      return rows.find((r) => !state.where || Object.entries(state.where).every(([k, v]) => r[k] === v)) || null;
+      const rows = (tables[table] || []).filter((r) => !state.where || Object.entries(state.where).every(([k, v]) => r[k] === v));
+      if (state.count) return { n: String(rows.length) };
+      return rows[0] || null;
     }),
     update: jest.fn(async (patch) => {
       if (updateError) throw updateError;
@@ -90,6 +92,7 @@ describe('POST /:id/photos/reconcile', () => {
     tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest' }];
     tables.service_report_pdf_jobs = [];
     tables.tree_shrub_assessments = [];
+    tables.service_photos = [];
     mockEnqueue.mockResolvedValue({ ok: true, queued: true, job: { status: 'queued' } });
     mockAlert.mockResolvedValue({ created: true });
   });
@@ -116,7 +119,7 @@ describe('POST /:id/photos/reconcile', () => {
       const res = await reconcile(baseUrl);
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toMatchObject({ ok: true, serviceRecordId: 'rec-1', pdf: { invalidated: true, requeued: false }, treeShrub: null });
+      expect(body).toMatchObject({ ok: true, serviceRecordId: 'rec-1', photoSummary: { pending: false, restored: false }, pdf: { invalidated: true, requeued: false }, treeShrub: null });
       expect(updates).toEqual([{ table: 'service_records', where: { id: 'rec-1' }, patch: { pdf_storage_key: null } }]);
       expect(mockEnqueue).not.toHaveBeenCalled();
     });
@@ -171,6 +174,87 @@ describe('POST /:id/photos/reconcile', () => {
     await withServer(async (baseUrl) => {
       expect((await reconcile(baseUrl)).status).toBe(500);
       expect(mockEnqueue).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('POST /:id/photos/reconcile — parked photo summary', () => {
+  const SUMMARY = 'Two after photos show the treated bed line.';
+  const parked = () => ({ typedReportSnapshot: { photoSummary: null, photoSummaryPendingRecovery: SUMMARY, serviceLabel: 'Pest' } });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    updates.length = 0;
+    updateError = null;
+    for (const k of Object.keys(tables)) delete tables[k];
+    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1' }];
+    tables.service_report_pdf_jobs = [];
+    tables.tree_shrub_assessments = [];
+    mockEnqueue.mockResolvedValue({ ok: true, queued: true, job: { status: 'queued' } });
+  });
+
+  test('restores the summary before clearing the PDF key once every closeout photo is attached', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
+      structured_notes: { completionPhotos: { uploaded: 1, failed: 1 } } }];
+    tables.service_photos = [
+      { id: 'p1', service_record_id: 'rec-1', photo_type: 'after' },
+      { id: 'p2', service_record_id: 'rec-1', photo_type: 'after' },
+      { id: 'p3', service_record_id: 'rec-1', photo_type: 'progress' },
+    ];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(200);
+      expect((await res.json()).photoSummary).toEqual({ pending: true, restored: true });
+      expect(updates).toHaveLength(2);
+      expect(updates[0].where).toEqual({ id: 'rec-1' });
+      expect(JSON.parse(updates[0].patch.service_data).typedReportSnapshot).toEqual({ photoSummary: SUMMARY, serviceLabel: 'Pest' });
+      expect(updates[1].patch).toEqual({ pdf_storage_key: null });
+    });
+  });
+
+  test('jsonb columns delivered as strings are handled the same way', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: JSON.stringify(parked()),
+      structured_notes: JSON.stringify({ completionPhotos: { uploaded: 0, failed: 1 } }) }];
+    tables.service_photos = [{ id: 'p1', service_record_id: 'rec-1', photo_type: 'after' }];
+    await withServer(async (baseUrl) => {
+      expect((await (await reconcile(baseUrl)).json()).photoSummary).toEqual({ pending: true, restored: true });
+    });
+  });
+
+  test('409 photos_still_missing keeps the summary parked and touches nothing when photos are still short', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
+      structured_notes: { completionPhotos: { uploaded: 1, failed: 2 } } }];
+    tables.service_photos = [
+      { id: 'p1', service_record_id: 'rec-1', photo_type: 'after' },
+      { id: 'p2', service_record_id: 'rec-1', photo_type: 'after' },
+    ];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('photos_still_missing');
+      expect(updates).toHaveLength(0);
+      expect(mockEnqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a failed summary write fails the request before the PDF key is cleared or a render queued', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
+      structured_notes: { completionPhotos: { uploaded: 0, failed: 1 } } }];
+    tables.service_photos = [{ id: 'p1', service_record_id: 'rec-1', photo_type: 'after' }];
+    tables.service_report_pdf_jobs = [{ id: 'job-1', service_record_id: 'rec-1', status: 'succeeded', payload: { token: 't' } }];
+    updateError = new Error('db down');
+    await withServer(async (baseUrl) => {
+      expect((await reconcile(baseUrl)).status).toBe(500);
+      expect(updates).toHaveLength(0);
+      expect(mockEnqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a record with no parked summary (no upload failed at closeout) skips the restore', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest',
+      service_data: { typedReportSnapshot: { photoSummary: SUMMARY } }, structured_notes: {} }];
+    await withServer(async (baseUrl) => {
+      expect((await (await reconcile(baseUrl)).json()).photoSummary).toEqual({ pending: false, restored: false });
+      expect(updates).toEqual([{ table: 'service_records', where: { id: 'rec-1' }, patch: { pdf_storage_key: null } }]);
     });
   });
 });

@@ -841,6 +841,12 @@ router.post('/:id/photos', (req, res, next) => {
 // assessment cannot be re-scored in place — scoreAndStoreTreeShrubAssessment
 // is first-completion-only by design — so its partial scoring is surfaced to
 // dispatch as a one-time alert on the visit rather than silently kept.
+function parseJsonColumn(value) {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 router.post('/:id/photos/reconcile', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
@@ -853,14 +859,37 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
     const record = await db('service_records')
       .where({ scheduled_service_id: svc.id })
       .orderBy('created_at', 'desc')
-      .first('id', 'service_line');
+      .first('id', 'service_line', 'service_data', 'structured_notes');
     if (!record) return res.status(409).json({ error: 'Visit has no completion record', code: 'not_completed' });
 
-    // 1. Cached PDF: cleared directly (not via the swallow-and-warn helper) so
+    // 1. Photo summary: closeout parked the technician-approved narrative
+    //    when an upload failed (photo-summary-recovery.js). Put it back
+    //    BEFORE the report is rebuilt, and only once every closeout photo
+    //    is attached — otherwise the rebuilt report would still omit it
+    //    (or describe photos it cannot show). Fail closed on a write error.
+    const {
+      hasPendingPhotoSummary, restorePhotoSummaryAfterRecovery, completionPhotosFullyRecovered,
+    } = require('../services/service-report/photo-summary-recovery');
+    const serviceData = parseJsonColumn(record.service_data);
+    let photoSummary = { pending: false, restored: false };
+    if (hasPendingPhotoSummary(serviceData)) {
+      const afterCount = await db('service_photos')
+        .where({ service_record_id: record.id, photo_type: 'after' })
+        .count('* as n')
+        .first();
+      if (!completionPhotosFullyRecovered(parseJsonColumn(record.structured_notes), afterCount?.n)) {
+        return res.status(409).json({ error: 'Closeout photos are still missing', code: 'photos_still_missing' });
+      }
+      restorePhotoSummaryAfterRecovery(serviceData);
+      await db('service_records').where({ id: record.id }).update({ service_data: JSON.stringify(serviceData) });
+      photoSummary = { pending: true, restored: true };
+    }
+
+    // 2. Cached PDF: cleared directly (not via the swallow-and-warn helper) so
     //    a failed write is a failed reconciliation, never a silent success.
     await db('service_records').where({ id: record.id }).update({ pdf_storage_key: null });
 
-    // 2. Re-render only a report that was rendering in the first place — a
+    // 3. Re-render only a report that was rendering in the first place — a
     //    disabled / internal_only report never queued a render at closeout
     //    and must not start one now (its public route 404s for the headless
     //    renderer).
@@ -887,7 +916,7 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       pdf = { invalidated: true, requeued: true };
     }
 
-    // 3. Tree & Shrub: the closeout assessment scored only the photos that
+    // 4. Tree & Shrub: the closeout assessment scored only the photos that
     //    uploaded then. Flag it for review; never re-score behind the tech.
     let treeShrub = null;
     const { TREE_SHRUB_SERVICE_LINES } = require('../services/tree-shrub-closeout');
@@ -920,7 +949,7 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       `[tech-track] photo recovery reconciled service=${svc.id} record=${record.id} ` +
       `tech=${req.technicianId} pdfRequeued=${pdf.requeued} treeShrubFlagged=${!!treeShrub?.flaggedForReview}`
     );
-    return res.json({ ok: true, serviceRecordId: record.id, pdf, treeShrub });
+    return res.json({ ok: true, serviceRecordId: record.id, photoSummary, pdf, treeShrub });
   } catch (err) {
     logger.error(`[tech-track] photo recovery reconcile failed: ${err.message}`);
     return next(err);

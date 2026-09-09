@@ -42,6 +42,7 @@ const {
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
+const { stripPhotoSummaryForRecovery } = require('../services/service-report/photo-summary-recovery');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
 const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
@@ -6697,10 +6698,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // The photo summary was frozen into the snapshot before these
         // best-effort uploads ran — if any photo is missing, the summary
         // can describe photos the report doesn't show. Strip it rather
-        // than ship copy about absent images.
+        // than ship copy about absent images — but park the copy in the
+        // snapshot so a completed photo recovery (/photos/reconcile) can
+        // put it back on the rebuilt report (Codex #4091 P1).
         const sd = parseJsonObject(record.service_data);
-        if (sd?.typedReportSnapshot?.photoSummary) {
-          sd.typedReportSnapshot.photoSummary = null;
+        if (stripPhotoSummaryForRecovery(sd).changed) {
           await db('service_records').where({ id: record.id }).update({
             service_data: serializeJsonb(sd),
           }).then(() => {
