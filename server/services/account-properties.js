@@ -304,11 +304,29 @@ function sessionPropertyScopePayload(req) {
   return { enabled, propertyId: enabled && req.propertyId ? String(req.propertyId) : null };
 }
 
+// The selection a scoped READ was actually resolved to (uncapped codex r1m
+// P1) — for the reads that carry a resolved scope (/schedule, /schedule/next,
+// /tracking/*). Unlike the token-claim payload above, this names the fallback
+// the server chose: a claim-less multi-property session → the primary's id, a
+// lone secondary after the primary was retired → that secondary, every row
+// retired → closed. propertyId is null when no property predicate applied
+// (single home, never-had-row profile) or the scope is closed — the client
+// reads null as "the primary / the profile" and `closed` as "no house".
+function resolvedScopePayload(scope) {
+  if (!scope || !scope.enabled) return { enabled: false, propertyId: null, closed: false };
+  return {
+    enabled: true,
+    propertyId: scope.scoped && scope.property ? String(scope.property.id) : null,
+    closed: scope.closed === true,
+  };
+}
+
 module.exports = {
   accountPropertyIds,
   resolvePrimaryProfileId,
   appPropertyScopeEnabled,
   sessionPropertyScopePayload,
+  resolvedScopePayload,
   accountSavedProperties,
   resolveSessionScope,
   scopeVisitsToProperty,

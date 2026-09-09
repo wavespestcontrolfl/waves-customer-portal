@@ -2936,7 +2936,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           on the day of service, where the tech is matters more than the
           greeting. ServiceTracker renders null on every other day, so
           non-service-day layout is unchanged. */}
-      <ServiceTracker />
+      <ServiceTracker currentEntry={dashboardEntry} savedScope={dashboardSavedScope} onSavedScopeUnavailable={onSavedScopeUnavailable} />
 
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
@@ -4163,12 +4163,20 @@ function formatTime(t) {
 // tab was open: the tab re-reads the property list and withholds actions on
 // these visits until the label follows (codex #4207 r1j).
 export function scopeEchoMismatch(propertyScope, currentEntry, savedScope) {
-  if (!propertyScope || !propertyScope.enabled) return false;
+  if (!propertyScope) return false;
+  // The server is NOT scoping any more (gate off, cancelled) while this tab
+  // still dresses reads as one house: those reads are customer-wide, so they
+  // are withheld until the client adopts profile mode (uncapped codex r1m).
+  if (!propertyScope.enabled) return !!savedScope;
+  // The RESOLVED selection (what the read was scoped to, fallbacks included):
+  // null = no property predicate (single home / profile-keyed entry).
   const honored = propertyScope.propertyId ? String(propertyScope.propertyId) : null;
   // Server scoped to a house while this client is in profile mode (the gate
   // came back after a rollback): stale until the list is re-read.
   if (!savedScope) return !!honored;
   if (!currentEntry) return false;
+  // Every property retired: nothing to show under any house entry.
+  if (propertyScope.closed) return !!currentEntry.propertyId;
   if (honored) return honored !== String(currentEntry.propertyId || '');
   return currentEntry.isPrimaryProperty !== true;
 }
@@ -4332,7 +4340,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
   // a lane — absent, the CTA card below simply doesn't render.
-  const reservice = scheduleRead.data?.reservice || null;
+  // Withheld with the visits while stale (uncapped codex r1m P1): a retired
+  // secondary makes the server fall back to the primary, and its re-service
+  // link books the PRIMARY address from the secondary's screen.
+  const reservice = scopeStale ? null : (scheduleRead.data?.reservice || null);
   // Does this property have a plan at all (recurring series, upcoming rows,
   // monthly billing or a live prepay term — the schedule payload's
   // hasCancellableWork)? A property with none gets no "request a visit"
@@ -11614,7 +11625,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
   );
 }
 
-function ServiceTracker() {
+function ServiceTracker({ currentEntry = null, savedScope = false, onSavedScopeUnavailable = null }) {
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
   const [propertyPrefs, setPropertyPrefs] = useState(null);
@@ -11623,22 +11634,39 @@ function ServiceTracker() {
   // load (and itself on a slow network), and an out-of-order response would
   // overwrite fresher tracker state. Only the latest-issued request may write.
   const trackerSeqRef = useRef(0);
+  // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the tracker reads echo the
+  // selection they were scoped to. A poll that comes back scoped to another
+  // house than this tab shows (the selected house was retired mid-session;
+  // the server fell back to the primary) must not adopt that house's tracker
+  // (uncapped codex r1m P1) — drop it and re-read the property list, exactly
+  // like the schedule reads. Refs: the poll callback is stable.
+  const scopeRef = useRef({ entry: null, saved: false, refresh: null });
+  scopeRef.current = { entry: currentEntry, saved: savedScope, refresh: onSavedScopeUnavailable };
+  const adoptTracker = useCallback((d) => {
+    const { entry, saved, refresh } = scopeRef.current;
+    if (scopeEchoMismatch(d?.propertyScope, entry, saved)) {
+      setTracker(null);
+      if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
+      return;
+    }
+    setTracker(d.tracker);
+  }, []);
 
   const fetchTracker = useCallback(() => {
     const seq = ++trackerSeqRef.current;
     api.getActiveTracker()
-      .then(d => { if (seq !== trackerSeqRef.current) return; setTracker(d.tracker); setLoading(false); })
+      .then(d => { if (seq !== trackerSeqRef.current) return; adoptTracker(d); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) setLoading(false); });
-  }, []);
+  }, [adoptTracker]);
 
   useEffect(() => {
     const seq = ++trackerSeqRef.current;
     api.getTodayTracker()
-      .then(d => { if (seq !== trackerSeqRef.current) return; setTracker(d.tracker); setLoading(false); })
+      .then(d => { if (seq !== trackerSeqRef.current) return; adoptTracker(d); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) fetchTracker(); });
     api.getPropertyPreferences().then(d => setPropertyPrefs(d.preferences)).catch(() => {});
     api.getWeather().then(setWeather).catch(() => {});
-  }, [fetchTracker]);
+  }, [fetchTracker, adoptTracker]);
 
   // 'none' | step number — derived so the interval effect keys on the PHASE,
   // not the tracker object identity (which changes on every poll).

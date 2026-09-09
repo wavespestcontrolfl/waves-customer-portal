@@ -121,9 +121,11 @@ describe('saved-property scope on the customer schedule routes', () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true';
     await withServer(async (base) => {
       const list = await (await fetch(`${base}/schedule`)).json();
-      expect(list.propertyScope).toEqual({ enabled: true, propertyId: null }); // the fake auth stub sets no claim
+      // The RESOLVED selection (uncapped codex r1m): the secondary the read
+      // was scoped to, not the (absent) token claim.
+      expect(list.propertyScope).toEqual({ enabled: true, propertyId: 'prop-b', closed: false });
       const nextBody = await (await fetch(`${base}/schedule/next`)).json();
-      expect(nextBody.propertyScope).toEqual({ enabled: true, propertyId: null });
+      expect(nextBody.propertyScope).toEqual({ enabled: true, propertyId: 'prop-b', closed: false });
     });
     delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
@@ -133,7 +135,7 @@ describe('saved-property scope on the customer schedule routes', () => {
     await withServer(async (base) => {
       const res = await fetch(`${base}/schedule/next`);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ propertyScope: { enabled: false, propertyId: null }, next: null });
+      expect(await res.json()).toEqual({ propertyScope: { enabled: true, propertyId: 'prop-b', closed: false }, next: null });
       expect(propertyPredicates(visitsChainCalls())).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
     });
   });

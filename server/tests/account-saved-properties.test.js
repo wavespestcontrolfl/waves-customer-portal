@@ -19,6 +19,7 @@ const {
   assignVisitsToEntries,
   appPropertyScopeEnabled,
   sessionPropertyScopePayload,
+  resolvedScopePayload,
   isSecondarySelection,
 } = require('../services/account-properties');
 
@@ -387,5 +388,20 @@ describe('isSecondarySelection — when customer-wide self-serve surfaces must s
     expect(isSecondarySelection({ customerId: 'c1', enabled: true, scoped: false, property: { id: 'pa', is_primary: true } })).toBe(false);
     expect(isSecondarySelection({ customerId: 'c1', enabled: false, scoped: false, property: null })).toBe(false);
     expect(isSecondarySelection(null)).toBe(false);
+  });
+});
+
+describe('resolvedScopePayload — what a scoped read was actually resolved to (uncapped codex r1m)', () => {
+  test('names the fallback the server chose; null when no predicate applied; closed when every row is retired', () => {
+    const primary = { id: 'prop-a', is_primary: true };
+    const secondary = { id: 'prop-b', is_primary: false };
+    expect(resolvedScopePayload({ enabled: true, multi: true, scoped: true, closed: false, property: primary })).toEqual({ enabled: true, propertyId: 'prop-a', closed: false });
+    // A lone secondary after the primary was retired — the client must NOT read this as "the primary".
+    expect(resolvedScopePayload({ enabled: true, multi: false, scoped: true, closed: false, property: secondary })).toEqual({ enabled: true, propertyId: 'prop-b', closed: false });
+    // Single home: no predicate → null.
+    expect(resolvedScopePayload({ enabled: true, multi: false, scoped: false, closed: false, property: primary })).toEqual({ enabled: true, propertyId: null, closed: false });
+    expect(resolvedScopePayload({ enabled: true, multi: false, scoped: true, closed: true, property: null })).toEqual({ enabled: true, propertyId: null, closed: true });
+    expect(resolvedScopePayload({ enabled: false, multi: false, scoped: false, closed: false, property: null })).toEqual({ enabled: false, propertyId: null, closed: false });
+    expect(resolvedScopePayload(null)).toEqual({ enabled: false, propertyId: null, closed: false });
   });
 });

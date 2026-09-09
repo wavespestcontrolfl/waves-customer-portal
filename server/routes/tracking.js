@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
-const { applyPropertyPredicate, resolveSessionScope } = require('../services/account-properties');
+const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -462,10 +462,10 @@ router.get('/active', async (req, res, next) => {
           } catch { /* map is best-effort; the count renders without it */ }
         }
       }
-      return res.json({ tracker: formatted });
+      return res.json({ tracker: formatted, propertyScope: resolvedScopePayload(scope) });
     }
 
-    return res.json({ tracker: null });
+    return res.json({ tracker: null, propertyScope: resolvedScopePayload(scope) });
   } catch (err) { next(err); }
 });
 
@@ -537,10 +537,10 @@ router.get('/today', async (req, res, next) => {
           } catch { /* map is best-effort; the count renders without it */ }
         }
       }
-      return res.json({ tracker: formatted });
+      return res.json({ tracker: formatted, propertyScope: resolvedScopePayload(scope) });
     }
 
-    return res.json({ tracker: null });
+    return res.json({ tracker: null, propertyScope: resolvedScopePayload(scope) });
   } catch (err) { next(err); }
 });
 

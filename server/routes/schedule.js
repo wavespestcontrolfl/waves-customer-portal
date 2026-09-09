@@ -41,7 +41,7 @@ const {
   assignVisitsToEntries,
   isSecondarySelection,
   resolveSessionScope,
-  sessionPropertyScopePayload,
+  resolvedScopePayload,
 } = require('../services/account-properties');
 
 router.use(authenticate);
@@ -264,7 +264,7 @@ router.get('/', async (req, res, next) => {
       // the client compares it with what it shows and re-reads the property
       // list on a mismatch (a house retired mid-session, a gate flip) instead
       // of acting on these visits under another house's label.
-      propertyScope: sessionPropertyScopePayload(req),
+      propertyScope: resolvedScopePayload(scope),
       hasCancellableWork: cancellable,
       reservice,
       // Streamline (owner ruling 2026-08-08): when true, the Request Service
@@ -792,7 +792,7 @@ router.get('/next', async (req, res, next) => {
       .first();
 
     if (!nextService) {
-      return res.json({ propertyScope: allProperties ? undefined : sessionPropertyScopePayload(req), next: null });
+      return res.json({ propertyScope: allProperties ? undefined : resolvedScopePayload(scope), next: null });
     }
     if (allProperties) {
       // Coverage projection only — no reschedule/calendar bearer links.
@@ -817,7 +817,7 @@ router.get('/next', async (req, res, next) => {
       : nextGroupedVerdict === true ? await groupedCalendarVerdict(nextService.visit_id) : null;
 
     res.json({
-      propertyScope: sessionPropertyScopePayload(req),
+      propertyScope: resolvedScopePayload(scope),
       next: {
         id: nextService.id,
         date: nextService.scheduled_date,
