@@ -52,6 +52,25 @@ function maskPhone(phone) {
   return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
 }
 
+// Has any Waves line ever texted this number? Internal alerts are not
+// customer-facing sends and do not count. Last-10-digit match: outbound rows
+// are E.164 but older manual sends may carry local formatting.
+async function hasOutboundHistory(phone) {
+  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length !== 10) return false;
+  try {
+    const row = await db('sms_log')
+      .where({ direction: 'outbound' })
+      .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+      .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
+      .first('id');
+    return Boolean(row);
+  } catch (err) {
+    logger.warn(`[sms-compliance] outbound-history check failed (treating sender as eligible): ${err.message}`);
+    return true;
+  }
+}
+
 async function findSingleCustomerByPhone(phone) {
   const key = phoneLookupKey(phone);
   if (!key) return null;
@@ -345,8 +364,19 @@ router.post('/sms', async (req, res) => {
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
 
-    // ── STOP / UNSUBSCRIBE keyword handling ──
-    const optCommand = detectSmsOptCommand(Body);
+    // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
+    // Only a number Waves has actually messaged can be opting out of, asking
+    // about, or re-joining Waves texts: a matched customer, or any number
+    // with an outbound sms_log row. A first-contact stranger's body is NOT
+    // scanned. The opt-out detector matches phrases inside a message ("stop
+    // texting", "no more texts"), and lead-gen robotexts carry that phrasing
+    // in their own compliance footer — on 2026-07-23 a vendor pitch ending
+    // "Reply NO if you need me to stop texting" earned a "You've been
+    // unsubscribed" text back from a Waves line and a suppression row for
+    // the vendor's number (audit 2026-09-09). Fails OPEN to eligible on a
+    // query error so a real STOP is always honored.
+    const complianceEligible = Boolean(customer) || await hasOutboundHistory(From);
+    const optCommand = complianceEligible ? detectSmsOptCommand(Body) : { action: null };
 
     if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);
@@ -470,7 +500,7 @@ router.post('/sms', async (req, res) => {
     // HELP/INFO: the opt-in ask copy advertises "HELP for help" — answer it
     // (carrier compliance) instead of letting it fall into normal routing.
     const { detectHelp, HELP_RESPONSE_TEMPLATE } = require('../services/messaging/opt-out-detector');
-    if (detectHelp(Body).help) {
+    if (complianceEligible && detectHelp(Body).help) {
       await db('sms_log').insert({
         customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
@@ -1897,6 +1927,7 @@ function shouldReserveCorrectionJob(body, smsReaction) {
 
 router._internals = {
   extractContactNameFromSms,
+  hasOutboundHistory,
   intakeOutcome,
   shouldReserveCorrectionJob,
 };
