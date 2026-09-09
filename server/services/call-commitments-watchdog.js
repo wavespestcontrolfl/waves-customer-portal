@@ -71,7 +71,6 @@ function etWhen(value) {
 }
 
 function reminderVersion(row) {
-  if (row.kind !== 'callback') return row.id;
   return JSON.stringify([row.id, row.updated_at, row.due_at || row.callback_due_at || null,
     row.snoozed_until || null, row.reviewed_at || null, row.assigned_to || null]);
 }
@@ -167,7 +166,7 @@ async function runInner({ now = new Date() } = {}) {
       const notif = await NotificationService.notifyAdmin('alert', 'A promise to a caller is overdue',
         `${describe(r)}. Open the Owed tab to mark it done or dismiss it.`, {
           link: '/admin/communications#tab=owed', dedupeKey: `call-commitment-overdue:${r.id}:${today}`,
-          dedupeVersion: r.kind === 'callback' ? versions[r.id] : undefined, refreshOnDedupe: true, bell: true, trx,
+          dedupeVersion: versions[r.id], refreshOnDedupe: true, bell: true, trx,
           metadata: { triggerKey: TRIGGER_KEY, commitment_id: r.id, call_log_id: r.call_log_id, kind: r.kind, customer_id: r.customer_id },
         });
       if (!persisted(notif)) { unannounced += 1; continue; }

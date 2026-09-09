@@ -195,6 +195,20 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect((await load()).some((r) => r.id === row.call_log_id)).toBe(false);
   });
 
+  test('changed non-callback work does not inherit an old aggregate acknowledgment', async () => {
+    const changed = await seed({ kind: 'other', due_at: ago, callback_due_at: null });
+    const callbacks = [];
+    for (let i = 0; i < 5; i += 1) callbacks.push(await seed());
+    await runSweep();
+    await unread().update({ read_at: now });
+    await trx('call_commitments').where({ id: changed.id }).update({ due_at: new Date(ago.getTime() + 1000), updated_at: now });
+    await trx('call_commitments').where({ id: callbacks[0].id }).update({ status: 'fulfilled' });
+    await runSweep();
+    expect((await unread()).map((row) => row.metadata.commitment_id)).toEqual([changed.id]);
+    await runSweep();
+    expect((await unread()).map((row) => row.metadata.commitment_id)).toEqual([changed.id]);
+  });
+
   test('gate rollback keeps one shared reminder for the same callback', async () => {
     await seed(); await runSweep(); process.env.GATE_CALLBACK_CARD = 'false';
     await runSweep(); expect(await unread()).toHaveLength(1);
