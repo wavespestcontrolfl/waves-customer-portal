@@ -8,8 +8,9 @@ for new data**.
 ## Phase 1 (this PR) — additive, gated, no rewiring
 
 - **`customer_properties` table** (migration `20260629000001`): one customer →
-  many properties, each with `occupancy_type` (owner_occupied / rental_investment
-  / commercial / seasonal / vacant / unknown), `is_primary` (partial-unique: one
+  many properties, each with `occupancy_type` (owner_occupied / family_occupied
+  / rental_investment / commercial / seasonal / vacant / unknown — `family_occupied`
+  is office-set only, the call extractor's enum does not include it), `is_primary` (partial-unique: one
   per customer), address + lat/lng, and mirrored property attributes. Backfills a
   PRIMARY property per existing customer from their address (defaults
   `owner_occupied`; the schema-drift-safe backfill only mirrors columns that
