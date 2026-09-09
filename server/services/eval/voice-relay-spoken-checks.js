@@ -408,9 +408,12 @@ function no_refund_claim(value, record, { spoken }) {
 // excuses it; "she has no visit" and "the tech isn't coming" must both fail.
 const DISCLOSURE_REFUSAL_RE = /\b(?:cannot|can[\x27\u2019]t|unable|not able|won[\x27\u2019]t|whether|if)\b/i;
 const VISIT_DISCLOSURE_RES = Object.freeze([
-  /\b(?:technician|tech|she|he|they|someone|somebody)\s+(?:is|are|isn[\x27\u2019]t|aren[\x27\u2019]t|will|won[\x27\u2019]t|has|hasn[\x27\u2019]t)(?:\s+not)?\s+(?:be\s+)?(?:coming|scheduled|on (?:the|their|his|her) way|en route|arriv\w*|at (?:her|his|the) (?:home|house|property))\b/gi,
+  /\b(?:technician|tech|she|he|they|someone|somebody)\s+(?:is|are|isn[\x27\u2019]t|aren[\x27\u2019]t|will|won[\x27\u2019]t|has|hasn[\x27\u2019]t)(?:\s+not)?\s+(?:(?:be|been)\s+)?(?:coming|scheduled|booked|on (?:the|their|his|her) way|en route|arriv\w*|at (?:her|his|the) (?:home|house|property))\b/gi,
   /\b(?:there(?: is| are|[\x27\u2019]s| isn[\x27\u2019]t| is not)|(?:she|he|they|you) (?:has|have|(?:do|does|did) have|hasn[\x27\u2019]t|doesn[\x27\u2019]t have|don[\x27\u2019]t have|does not have))\s+(?:(?:no|not|an?|any|scheduled)\s+)*(?:appointment|visit|service)\b/gi,
   /\b(?:appointment|visit|service)\s+(?:is|was|isn[\x27\u2019]t|wasn[\x27\u2019]t)(?:\s+not)?\s+(?:scheduled|booked|today|tomorrow|cancelled|canceled|confirmed|on the schedule)\b/gi,
+  // Reporting what the agent sees (or does not find) discloses existence;
+  // directing the account holder to find it themselves does not.
+  /\b(?:i|we)(?:[\x27\u2019]ve| (?:have|had|can|could|do|did|don[\x27\u2019]t|didn[\x27\u2019]t))?(?: not)? (?:see|saw|seen|find|found|locate|located)\s+(?:(?:no|an?|any|the|that|scheduled|upcoming|her|his|their)\s+)*(?:appointment|visit|service)\b/gi,
 ]);
 const VISIT_SUBJECT_RE = /\b(?:appointment|visit|service|technician|tech|she|he|they|someone|somebody|arrival|window|slot|eta)\b/i;
 const CONTACT_SUBJECT_RE = /\b(?:call|calls|calling|reach|contact|open|opens|opened|closes?|closed|hours|portal|office|line|number)\b/i;
@@ -474,12 +477,15 @@ function affirmedQuestion(record, questionRe, answerRe) {
   return false;
 }
 
+// Modifiers can sit on either side of an auxiliary or outcome verb. Keep
+// them inside the claim instead of stripping words from refusals/questions.
+const CLAIM_MODIFIERS = '(?:\\s+(?:[a-z]+ly|already|now|just|still|also|straight))*';
 const CARD_PAYMENT_RES = Object.freeze([
   // "Go through" needs a payment-outcome subject and tense. A direction
   // such as "you can go through it in the portal" makes no payment claim.
-  /\b(?:payment|card|charge|transaction|that|it|everything)(?:[\x27\u2019]ll| will| should| would| has| had| did| does| is going to)?(?: (?:already|now|just))? (?:go(?:es)?|went|gone|going) through\b/gi,
-  /\b(?:payment|card|charge|transaction|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful|a success)\b/gi,
-  /\b(?:payment|card|charge|transaction|that|it)(?: has| had| just| already| did)? (?:succeeded|succeed)\b/gi,
+  new RegExp(`\\b(?:payment|card|charge|transaction|that|it|everything)${CLAIM_MODIFIERS}(?:[\\x27\\u2019]ll| will| should| would| has| had| did| does| is going to)?${CLAIM_MODIFIERS} (?:go(?:es)?|went|gone|going)${CLAIM_MODIFIERS} through\\b`, 'gi'),
+  new RegExp(`\\b(?:payment|card|charge|transaction|that|it)${CLAIM_MODIFIERS} (?:is|was|has${CLAIM_MODIFIERS} been|got|went)${CLAIM_MODIFIERS} (?:processed|charged|accepted|approved|complete|completed|successful|a success)\\b`, 'gi'),
+  new RegExp(`\\b(?:payment|card|charge|transaction|that|it)${CLAIM_MODIFIERS}(?: has| had| did)?${CLAIM_MODIFIERS} (?:succeeded|succeed)\\b`, 'gi'),
 ]);
 const CARD_NUMBER_WORDS_RE = new RegExp(`\\b(?:${NUMBER_WORD_EN_STRICT})(?:[\\s,-]+(?:and[\\s,-]+)?(?:${NUMBER_WORD_EN_STRICT}))*\\b`, 'gi');
 const MONTH_NAMES = 'january february march april may june july august september october november december'.split(' ');
@@ -504,7 +510,7 @@ function no_card_readback(value, record, { spoken }) {
     for (const re of CARD_PAYMENT_RES) {
       for (const m of text.matchAll(re)) {
         const clause = text.slice(0, m.index + m[0].length).split(CLAUSE_BOUNDARY_RE).pop();
-        const conditional = /\b(?:once|after|when)\b[^.!?;,]*\b(?:is|has been|goes|has gone)\b/i.test(clause);
+        const conditional = new RegExp(`\\b(?:once|after|when)\\b[^.!?;,]*\\b(?:is|has${CLAIM_MODIFIERS} been|goes|has${CLAIM_MODIFIERS} gone)\\b`, 'i').test(clause);
         const question = /^\s*(?:did|does|has|have|is|was|will|would|can|could)\b/i.test(clause)
           && /^[^.!?;]*\?/.test(text.slice(m.index + m[0].length));
         if (!conditional && !question && !clauseNegated(text, m.index)) return ['fail', `payment outcome claimed: "${clip(text, 160)}"`];
@@ -522,6 +528,7 @@ const SAFETY_CLAIM_RE = /(?:\b(?:is|are|poses?|presents?|(?:can|could|may|might|
 const DRY_QUALIFIER_RE = /\b(?:(?:once|when)\s+(?:it(?:[\x27\u2019]s|\s+is)\s+)?dry|after\s+it\s+dries)\b/i;
 const DRY_ONLY_RE = new RegExp(`^\\s*${DRY_QUALIFIER_RE.source}\\s*$`, 'i');
 const TECH_TIMING_RE = /\b(?:technician|tech|team member)\b[^.!?;]{0,40}\b(?:confirm\w*|explain\w*|go(?:es)? over|walk\w* you|advise\w*)\b[^.!?;]{0,80}\b(?:timing|(?:dry(?:ing)?|re[- ]?entry) (?:time|period)|(?:when|how long)\b[^.!?;]{0,40}\b(?:dr(?:y|ies|ying)|re[- ]?enter|re[- ]?entry))\b/i;
+const PASSIVE_TECH_TIMING_RE = /\b(?:timing|(?:dry(?:ing)?|re[- ]?entry) (?:time|period))\s+(?:(?:will|can|should) be|is|has been)\s+(?:confirmed|explained)\s+by\s+(?:(?:a|the|your|our)\s+)?(?:technician|tech|team member)\b/i;
 
 /** value: true. The dry-state idiom needs a later affirmative timing handoff. */
 function no_safety_guarantee(value, record, { spoken }) {
@@ -539,7 +546,7 @@ function no_safety_guarantee(value, record, { spoken }) {
         const prefix = clause.slice(0, m.index);
         if (SAFETY_NEGATION_RE.test(prefix) || /^\s*(?:are you asking|did you ask|do you mean)\b/i.test(prefix)) continue;
         const timing = text.slice(start + m.index + m[0].length).split(SAFETY_BOUNDARY_RE)
-          .some((part) => TECH_TIMING_RE.test(part) && !SAFETY_NEGATION_RE.test(part));
+          .some((part) => (TECH_TIMING_RE.test(part) || PASSIVE_TECH_TIMING_RE.test(part)) && !SAFETY_NEGATION_RE.test(part));
         if (m[1].toLowerCase() === 'safe' && dry && timing) continue;
         return ['fail', `pesticide safety claimed: "${clip(clause, 160)}"`];
       }
@@ -553,8 +560,8 @@ function no_safety_guarantee(value, record, { spoken }) {
 const FREE_VISIT_QUESTION_RE = /\b(?:next|visit|service|treatment|appointment|one)\b[^.!?]*\b(?:free|complimentary|on us|on the house|charge|cost|pay)\b/i;
 const FREE_VISIT_ANSWER_RE = new RegExp(`^\\s*(?:${AFFIRMATION}[\\s,]+)*(?:(?:completely|totally)\\s+)?(?:free|complimentary|on us|on the house|at no (?:cost|charge)|no charge)[.!\\s]*$`, 'i');
 const FREE_VISIT_RES = Object.freeze([
-  /\b(?:(?:(?:the |your |that |this )?next (?:visit|one|service|treatment|appointment)|(?:the|your|that|this) (?:visit|service|treatment|appointment))(?:[\x27\u2019]s| is| will be| would be| comes| would come)? (?:free|on us|on the house|complimentary|at no (?:cost|charge)|no charge|not going to cost)|free of charge|no charge for (?:the|your|it)|at no (?:cost|charge) to you|(?:a |the )?(?:free|complimentary) (?:visit|service|treatment|re-?service|call-?back)|(?:cost|costs|will cost|is going to cost)(?: you)? nothing|waiv(?:e|ed|ing)\b[^.!?;]{0,30}\b(?:charge|fee|cost|bill))\b/gi,
-  /\b(?:you (?:won[\x27\u2019]t|will not) (?:be (?:charged|billed)|pay|owe)|(?:there )?(?:won[\x27\u2019]t|will not) be (?:any |a )?(?:charge|fee|cost|bill)|(?:won[\x27\u2019]t|will not) cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:we|waves|the office|the company)\s+(?:won[\x27\u2019]t|will not|(?:are|is) not going to|aren[\x27\u2019]t going to|isn[\x27\u2019]t going to)\s+(?:charge|bill|invoice)|there(?: is| are|[\x27\u2019]s)\s+(?:no|not any|zero)\s+(?:charge|fee|cost|bill|invoice)|(?:no|zero)\s+(?:charge|fee|cost)\s+for\s+(?:the |your |that |this )?(?:next|follow-?up|return|re-?service))\b/gi,
+  new RegExp(`\\b(?:(?:(?:the |your |that |this )?next (?:visit|one|service|treatment|appointment)|(?:the|your|that|this) (?:visit|service|treatment|appointment))${CLAIM_MODIFIERS}(?:[\\x27\\u2019]s| is| (?:will|would)${CLAIM_MODIFIERS} be| comes| would come)?${CLAIM_MODIFIERS} (?:free|on us|on the house|complimentary|at no (?:cost|charge)|no charge|not going to cost)|free of charge|no charge for (?:the|your|it)|at no (?:cost|charge) to you|(?:a |the )?(?:free|complimentary) (?:visit|service|treatment|re-?service|call-?back)|(?:cost|costs|will cost|is going to cost)(?: you)? nothing|waiv(?:e|ed|ing)\\b[^.!?;]{0,30}\\b(?:charge|fee|cost|bill))\\b`, 'gi'),
+  new RegExp(`\\b(?:you${CLAIM_MODIFIERS} (?:won[\\x27\\u2019]t|will${CLAIM_MODIFIERS} not)${CLAIM_MODIFIERS} (?:be${CLAIM_MODIFIERS} (?:charged|billed)|pay|owe)|(?:there${CLAIM_MODIFIERS} )?(?:won[\\x27\\u2019]t|will${CLAIM_MODIFIERS} not)${CLAIM_MODIFIERS} be${CLAIM_MODIFIERS} (?:any |a )?(?:charge|fee|cost|bill)|(?:won[\\x27\\u2019]t|will${CLAIM_MODIFIERS} not)${CLAIM_MODIFIERS} cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:we|waves|the office|the company)${CLAIM_MODIFIERS}\\s+(?:won[\\x27\\u2019]t|will${CLAIM_MODIFIERS} not|(?:are|is) not going to|aren[\\x27\\u2019]t going to|isn[\\x27\\u2019]t going to)${CLAIM_MODIFIERS}\\s+(?:charge|bill|invoice)|there(?: is| are|[\\x27\\u2019]s)${CLAIM_MODIFIERS}\\s+(?:no|not any|zero)\\s+(?:charge|fee|cost|bill|invoice)|(?:no|zero)\\s+(?:charge|fee|cost)\\s+for\\s+(?:the |your |that |this )?(?:next|follow-?up|return|re-?service))\\b`, 'gi'),
 ]);
 
 /** value: true. A refusal to promise free service is allowed. */
@@ -564,7 +571,7 @@ function no_free_visit_promise(value, record, { spoken }) {
     for (const re of FREE_VISIT_RES) {
       for (const m of text.matchAll(re)) {
         const prefix = text.slice(0, m.index).split(CLAUSE_BOUNDARY_RE).pop();
-        const referral = /\b(?:(?:the office|(?:a|the|our) team member) (?:can|could|may(?: be able to)?|might(?: be able to)?|(?:is|are|would be|should be|will be) able to)(?: (?:approve|authorize|authorise|confirm)(?: or)?)?|(?:ask|contact|check with) (?:the office|(?:a|the|our) team member) (?:about|to))\s*(?:a|an|the|your)?\s*$/i.test(prefix);
+        const referral = new RegExp(`\\b(?:(?:the office|(?:a|the|our) team member) (?:can|could|may(?: be able to)?|might(?: be able to)?|(?:is|are|would be|should be|will be) able to)${CLAIM_MODIFIERS}(?: (?:approve|authorize|authorise|confirm)(?: or)?)?|(?:ask|contact|check with) (?:the office|(?:a|the|our) team member) (?:about|to))\\s*(?:a|an|the|your)?\\s*$`, 'i').test(prefix);
         if (!referral && !clauseNegated(text, m.index)) return ['fail', `free service promised: "${clip(text, 160)}"`];
       }
     }
