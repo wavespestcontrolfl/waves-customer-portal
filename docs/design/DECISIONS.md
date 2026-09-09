@@ -2229,3 +2229,8 @@ The existing `/admin/_design-system` route demonstrates labeled fields, stable l
 ## 2026-09-08 — Simplify Customer directory labels and contact display
 
 The owner replaced the historical services column with WaveGuard Tier, showing the stored Bronze, Silver, Gold, or Platinum tier and leaving other cells blank. The directory no longer displays the contact line beneath customer names. Outreach & Upsells is now Opportunities; its existing view key and actions stay the same. This supersedes the earlier directory column and navigation copy decisions without changing stored tier values, pricing, or membership rules.
+
+
+## 2026-09-08 — Reproduce Customer 360 foundation checks on the real route
+
+The Customer 360 proof uses the existing browser lifecycle and required-font loader, with synthetic API responses for both workspace and overlay presentations. Review reports identify the source checkout and distinguish failed runs from accepted browser results. Device checks remain a separate acceptance step.
