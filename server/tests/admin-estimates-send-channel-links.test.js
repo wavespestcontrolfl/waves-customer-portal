@@ -196,6 +196,25 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(require('../services/lead-estimate-link').markLinkedLeadEstimateSent).not.toHaveBeenCalled();
   });
 
+  test.each(['sent', 'viewed'])('delivery refuses a visible %s sibling whose fixed hold elapsed', async (status) => {
+    const anchor = estimateRow({ estimate_group_id: 'synthetic-fixed-group' });
+    const sibling = { id: 'synthetic-fixed-sibling', status, pricing_authority: 'SERVER',
+      estimate_data: { proposal: { enabled: true, validThrough: '2020-01-01' } } };
+    db.mockImplementation(() => {
+      const b = makeBuilder(anchor);
+      let groupProbe = false; let claimableOnly = false;
+      b.where = jest.fn(clause => { if (clause?.estimate_group_id && !clause.id) groupProbe = true; return b; });
+      b.whereNot = jest.fn(() => b);
+      b.first = jest.fn(async () => groupProbe ? null : anchor);
+      b.whereIn = jest.fn((field, statuses) => { if (field === 'status' && statuses.includes('draft')) claimableOnly = true; return b; });
+      b.select = jest.fn(async () => claimableOnly ? [] : [sibling]);
+      return b;
+    });
+    await expect(router.sendEstimateNow(anchor, 'both')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/bid validity date has passed/) });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('a REAL group handoff appends each already-published sibling\'s frozen scope at the GROUP instant, pricing snapshot untouched (codex #3811 r34 P2)', async () => {
     // The triage sweep pairs a cited revision only with sibling revisions
     // of the same handoff instant; a sibling stamped only at its own

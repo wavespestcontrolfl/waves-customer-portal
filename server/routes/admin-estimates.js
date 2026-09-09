@@ -1835,7 +1835,7 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
     // gate before this send hands the customer the group link. Same verdict
     // the schedule route applied at request time; here it runs under the
     // group lock on the rows the claims below will actually publish beside.
-    const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend });
+    const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, autoSend, sendAt: new Date() });
     if (blockingSibling) {
       const err = new Error(blockingSiblingMessage(blockingSibling, 'sending this group (the group link shows every property together)'));
       err.statusCode = blockingSibling.statusCode;
