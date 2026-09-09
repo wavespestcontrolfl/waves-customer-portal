@@ -223,8 +223,10 @@ async function saveCustomerEstimate(input, actionContext) {
     if (input.estimate_id) {
       const observed = await trx('estimates').where({ id: input.estimate_id }).first();
       if (!observed) throw failure('Estimate not found', 'target_not_found', 404);
-      await persistence.lockEstimateGroupAddressRevision(trx, observed.estimate_group_id);
-      await persistence.lockScheduledGroupGuardGroups(trx, observed, observed);
+      // A native editor may hold a group lock while waiting for acceptance
+      // to release the estimate row. Never join that wait with customer held.
+      await persistence.lockEstimateGroupAddressRevision(trx, observed.estimate_group_id, { noWait: true });
+      await persistence.lockScheduledGroupGuardGroups(trx, observed, observed, { noWait: true });
       // Customer acceptance takes estimate -> customer. Do not wait on its
       // estimate lock while holding the customer needed by conversion.
       const locked = await trx('estimates').where({ id: observed.id }).forUpdate().noWait().first().catch(err => {

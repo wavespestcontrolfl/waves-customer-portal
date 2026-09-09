@@ -469,7 +469,7 @@ suite('existing-customer estimates from another workspace', () => {
     expect((await db('estimates').where({ id: estimateId }).first()).estimate_data.engineResult.lineItems[0].frequency).toBe(12);
   }, 60000);
 
-  test('grouped address revision waits for the editor address lock before taking its send lock', async () => {
+  test('grouped address revision refuses the busy editor address lock before taking its send lock', async () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));
     const estimateId = created.body.result.estimate_id, groupId = crypto.randomUUID();
@@ -493,14 +493,67 @@ suite('existing-customer estimates from another workspace', () => {
         const acquired = await editor.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS available',
           ['estimate-group-send', groupId]);
         expect(acquired.rows[0].available).toBe(true);
+        expect((await confirming).body).toMatchObject({ success: false, result: { code: 'estimate_busy' } });
       });
     } finally {
-      if (confirming) expect((await confirming).body.success).toBe(true);
+      if (confirming) expect((await confirming).body).toMatchObject({ success: false, result: { code: 'estimate_busy' } });
     }
+    const retried = await confirm(await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 }));
+    expect(retried.body.success).toBe(true);
     const saved = await db('estimates').where({ id: estimateId }).first();
     expect(saved.estimate_group_id).toBe(groupId);
     expect(saved.estimate_data.engineResult.lineItems[0].frequency).toBe(12);
     expect(saved.address).toBe(before.address);
+  }, 60000);
+
+  test.each(['estimate-group-revise', 'estimate-group-send'])('group contention on %s releases the customer for acceptance without a deadlock', async namespace => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id, groupId = crypto.randomUUID();
+    await db('estimates').where({ id: estimateId }).update({ estimate_group_id: groupId, status: 'sent', sent_at: new Date() });
+    const before = await db('estimates').where({ id: estimateId }).first();
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    const acceptance = await db.transaction(), editor = await db.transaction();
+    let editorRow, customerRow, editorResult;
+    const persistence = require('../services/admin-estimate-persistence');
+    const original = persistence.lockEstimateGroupAddressRevision;
+    const waitForBlocker = async (waiting, blocking) => {
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const result = await db.raw('SELECT ?::int = ANY(pg_blocking_pids(?::int)) AS blocked', [blocking, waiting]);
+        if (result.rows[0].blocked) return;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      throw new Error('Expected transaction contention did not form');
+    };
+    try {
+      const acceptPid = (await acceptance.raw('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      const editorPid = (await editor.raw('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      await acceptance('estimates').where({ id: estimateId }).forUpdate().first();
+      await editor.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [namespace, groupId]);
+      editorRow = editor('estimates').where({ id: estimateId }).forUpdate().first()
+        .then(row => ({ row }), error => ({ error }));
+      await waitForBlocker(editorPid, acceptPid);
+      jest.spyOn(persistence, 'lockEstimateGroupAddressRevision').mockImplementation(async (trx, ...rest) => {
+        await trx.raw("SET LOCAL lock_timeout = '3s'");
+        const barPid = (await trx.raw('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        customerRow = acceptance('customers').where({ id: fixture.customer.id }).forUpdate().first()
+          .then(row => ({ row }), error => ({ error }));
+        await waitForBlocker(acceptPid, barPid);
+        return original(trx, ...rest);
+      });
+      const refused = await confirm(proposed);
+      expect(refused.body).toMatchObject({ success: false, outcome: 'failed', result: { code: 'estimate_busy' } });
+      const accepted = await customerRow;
+      expect(accepted.error).toBeUndefined();
+      expect(accepted.row.id).toBe(fixture.customer.id);
+      expect(await acceptance('estimates').where({ id: estimateId }).first()).toEqual(before);
+    } finally {
+      await acceptance.rollback();
+      if (editorRow) editorResult = await editorRow;
+      await editor.rollback();
+    }
+    expect(editorResult.error).toBeUndefined();
+    expect((await db('estimates').where({ id: estimateId }).first()).estimate_data).toEqual(before.estimate_data);
   }, 60000);
 
   test('a downward membership revision persists the newly priced tier instead of retaining Gold', async () => {

@@ -2360,10 +2360,15 @@ function scheduledGroupGuardGroupIds(row, writeFields) {
 }
 
 // Grouped address revisions take this before the send guard and row locks.
-async function lockEstimateGroupAddressRevision(database, groupId) {
+async function lockEstimateGroupAddressRevision(database, groupId, { noWait = false } = {}) {
   if (!groupId) return;
-  await database.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+  const lock = await database.raw(noWait
+    ? 'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired'
+    : 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     ['estimate-group-revise', String(groupId)]);
+  if (noWait && !lock.rows[0].acquired) {
+    throw Object.assign(errorWithStatus('This estimate is being updated. Ask again after that operation finishes.', 409), { code: 'estimate_busy' });
+  }
 }
 
 // LOCK ORDER (pre-push codex P1): group advisory xact lock(s) FIRST, then
@@ -2373,13 +2378,16 @@ async function lockEstimateGroupAddressRevision(database, groupId) {
 // so a revision racing a schedule of the same group waits instead of
 // deadlocking (row held + waiting for the group lock vs group lock held +
 // waiting for the row).
-async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
+async function lockScheduledGroupGuardGroups(trx, row, writeFields, { noWait = false } = {}) {
   const groupIds = revisionGroupLockIds(row, writeFields);
   for (const groupId of groupIds) {
-    await trx.raw(
-      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-      ['estimate-group-send', groupId],
-    );
+    const lock = await trx.raw(noWait
+      ? 'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS acquired'
+      : 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', groupId]);
+    if (noWait && !lock.rows[0].acquired) {
+      throw Object.assign(errorWithStatus('This estimate is being updated. Ask again after that operation finishes.', 409), { code: 'estimate_busy' });
+    }
   }
   return groupIds;
 }
