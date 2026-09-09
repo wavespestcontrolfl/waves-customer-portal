@@ -136,11 +136,36 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.10.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.10.0');
+  test('schema version is 1.11.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.11.0');
   });
 
   describe('model-output schema', () => {
+    test('a caller-proposed slot remains a request through validation, normalization and flattening', () => {
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      data.scheduling.status = 'reschedule_requested';
+      data.scheduling.confirmed_start_at = null;
+      data.scheduling.agent_committed_booking = false;
+      data.scheduling.proposed_start_at = '2026-11-09T12:00:00-05:00';
+      expect(validatePersisted(data).valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(flatView(normalized)).toMatchObject({ proposed_start_at: '2026-11-09T12:00:00-05:00',
+        preferred_date_time: null, appointment_confirmed: false, agent_committed_booking: false });
+    });
+
+    test('malformed proposed timestamps are refused while older rows without a proposal still validate', () => {
+      const data = validModelOutput();
+      data.scheduling.proposed_start_at = 'tomorrow around lunch';
+      expect(validateModelOutput(data).valid).toBe(false);
+      data.scheduling.proposed_start_at = '2026-11-09T12:00:00-05:00';
+      expect(validateModelOutput(data).valid).toBe(true);
+      const old = validPersisted();
+      old.meta.schema_version = '1.10.0';
+      expect(validatePersisted(normalizeExtractionV2(old)).valid).toBe(true);
+      expect(flatView(old).proposed_start_at).toBeNull();
+    });
+
     test('valid extraction passes', () => {
       const { valid, errors } = validateModelOutput(validModelOutput());
       expect(errors).toBeNull();

@@ -3,7 +3,7 @@ import React from "react";
 import { readFileSync } from "node:fs";
 import { parseExpression } from "@babel/parser";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { MemoryRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 import AdminTabRedirect from "./AdminTabRedirect";
 import { isPathAdminOnly } from "../../config/adminNavigation";
@@ -66,5 +66,35 @@ describe("App's existing admin aliases", () => {
     expect(screen.getByTestId("location").textContent).toBe("/before");
     fireEvent.click(screen.getByText("Forward"));
     expect(screen.getByTestId("location").textContent).toBe(`${actual.pathname}${actual.search}${actual.hash}`);
+  });
+});
+
+describe("App's /admin index and catch-all", () => {
+  it("replaces the /admin entry so Back leaves the dashboard (F0008)", () => {
+    // Every sibling redirect passes replace; the index one pushed, so
+    // /admin → /admin/dashboard → Back → /admin → /admin/dashboard looped.
+    expect(adminRoutes).toContain('<Route index element={<Navigate to="dashboard" replace />} />');
+    render(<MemoryRouter initialEntries={["/before", "/admin"]} initialIndex={1}>
+      <Routes>
+        <Route path="/admin">
+          <Route index element={<Navigate to="dashboard" replace />} />
+          <Route path="dashboard" element={<Probe />} />
+        </Route>
+        <Route path="*" element={<Probe />} />
+      </Routes>
+    </MemoryRouter>);
+    expect(screen.getByTestId("location").textContent).toBe("/admin/dashboard");
+    fireEvent.click(screen.getByText("Back"));
+    expect(screen.getByTestId("location").textContent).toBe("/before");
+  });
+
+  it("keeps unknown staff URLs inside the admin shell (F0013)", () => {
+    const declaration = adminRoutes.match(/<Route path="\*" element=\{([^\n]+?)\} \/>/);
+    expect(declaration).not.toBeNull();
+    const opening = parseExpression(declaration[1], { plugins: ["jsx"] }).openingElement;
+    expect(opening.name.name).toBe("Navigate");
+    const props = Object.fromEntries(opening.attributes.map((a) => [a.name.name, a.value ? a.value.value : true]));
+    expect(props.to).toBe("/admin/dashboard");
+    expect(props.replace).toBe(true);
   });
 });

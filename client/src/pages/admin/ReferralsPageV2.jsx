@@ -49,11 +49,12 @@ const fc = (c) => "$" + (c / 100).toFixed(2);
 const fd = (d) => "$" + parseFloat(d || 0).toFixed(2);
 
 // Badge colors
+// Zinc ramp — the label carries the milestone, not a colour.
 const MILESTONE_COLORS = {
   none: D.muted,
-  advocate: "#22d3ee",
-  ambassador: D.amber,
-  champion: "#f97316",
+  advocate: "#52525B",
+  ambassador: "#3F3F46",
+  champion: "#18181B",
 };
 const MILESTONE_LABELS = {
   none: "--",

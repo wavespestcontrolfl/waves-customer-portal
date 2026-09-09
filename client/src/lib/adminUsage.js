@@ -82,6 +82,7 @@ const SELF_REPORTING_PAGES = new Set([
   'dispatch',
   'inventory',
   'service-library',
+  'timetracking',
 ]);
 const SELF_REPORT_SETTLE_MS = 5000;
 

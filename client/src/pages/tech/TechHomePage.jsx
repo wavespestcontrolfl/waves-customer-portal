@@ -24,9 +24,9 @@
 //   pending -> en_route -> on_site -> completed
 //                                \--> skipped (with reason)
 //
-// Mobile rule (CLAUDE.md): tech portal stays Montserrat headings +
-// dark palette ('#0f1923' bg, '#1e293b' card). DO NOT apply admin
-// monochrome or customer-facing warm-tone rules to this surface.
+// The shell's tech-field-workspace flag selects the approved light field
+// surface. Existing embedded forms retain their own dark palette; the
+// flag-off route remains available during the staged integration.
 //
 // Audit focus:
 // - State transitions: confirm a tech can't accidentally skip an
@@ -40,10 +40,12 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
-import { useNavigate } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
+import TechFieldHome from './TechFieldHome';
+import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
@@ -77,27 +79,6 @@ const DARK = {
   teal: '#0ea5e9',
   text: '#e2e8f0',
   muted: '#94a3b8',
-};
-
-// Day-view stops come from GET /api/admin/schedule, whose payload is
-// camelCase and carries the arrival window as windowStart/windowEnd/
-// windowDisplay — there is no `time`/`scheduled_time` field, so the old
-// reads rendered 'Pending' (or nothing) for every booked stop. Prefer the
-// server's display string; fall back to a formatted windowStart.
-const fmtWindowClock = (v) => {
-  const m = String(v || '').match(/^(\d{1,2}):(\d{2})/);
-  if (!m) return null;
-  const h = parseInt(m[1], 10);
-  const h12 = h % 12 || 12;
-  return `${h12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
-};
-const serviceWindowLabel = (service) => {
-  if (!service) return null;
-  if (service.windowDisplay) return service.windowDisplay;
-  const start = fmtWindowClock(service.windowStart);
-  if (!start) return null;
-  const end = fmtWindowClock(service.windowEnd);
-  return end ? `${start}–${end}` : start;
 };
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -190,7 +171,7 @@ function serviceTechnicianId(service) {
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
-import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 const ON_SITE_ELIGIBLE = new Set(['en_route']);
@@ -209,9 +190,43 @@ const QUICK_ACTIONS = [
   { icon: '🗂️', label: 'Project Report', action: 'create-project' },
 ];
 
-export default function TechHomePage() {
+export default function TechHomePage({ section = 'today' }) {
   const navigate = useNavigate();
+  const { fieldWorkspace = false, documentsAvailable = false, setNavigationBusy } = useOutletContext() || {};
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
+  const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
   const [schedule, setSchedule] = useState([]);
+  // The tech's own Twilio line, if they hold one (GET /api/tech/line):
+  // the brief panel's Call/Text then go through the line. Null = personal
+  // phone links as before. Re-read with every schedule refresh (mount,
+  // dispatch broadcast, retry): a line cleared or reassigned — or the gate
+  // switched off — while the PWA stays open must bring the personal-phone
+  // links back instead of buttons that only 409 (codex #4072 r3 P2). A
+  // failed read keeps a KNOWN LINE (buttons that may 409 are the safe
+  // side) but never a cached { line: null }: a line assigned since that
+  // answer must not stay hidden behind the personal links, so the failure
+  // falls back to `{ unknown: true }` — "line couldn't be checked", NO
+  // contact links (never the personal phone on a lookup error, codex #4072
+  // r5 + r14 P2); only an authoritative { line: null } shows the personal
+  // links.
+  const [techLine, setTechLine] = useState({ unknown: true });
+  // Overlapping refreshes start overlapping lookups; only the NEWEST one
+  // may set state — an older `{ line: null }` landing last would expose
+  // the personal links after an assignment, an older assigned-line answer
+  // would restore the buttons after a revoke (codex #4072 r9 P2).
+  const lineLookupSeq = useRef(0);
+  const fetchTechLine = useCallback(async () => {
+    const seq = ++lineLookupSeq.current;
+    try {
+      const d = await techRequest('/tech/line');
+      if (seq !== lineLookupSeq.current) return;
+      setTechLine(d?.line ? d : null);
+    } catch {
+      if (seq !== lineLookupSeq.current) return;
+      setTechLine((prev) => (prev?.line ? prev : { unknown: true }));
+    }
+  }, []);
   const [loading, setLoading] = useState(true);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
@@ -248,25 +263,35 @@ export default function TechHomePage() {
   // enforce owner-only server-side regardless.
   const currentRole = getAdminUser()?.role || null;
 
+  const scheduleSeq = useRef(0);
   const fetchSchedule = useCallback(async () => {
+    const seq = ++scheduleSeq.current;
+    // Runs alongside the schedule read but never gates it: the route must
+    // render even when the line lookup hangs on a poor connection (codex
+    // #4072 r8 P2). The first render cannot show the personal-phone links
+    // while the answer is in flight — the initial `{ unknown: true }` hides
+    // every contact link until the lookup succeeds (r4 / r5 P2s).
+    fetchTechLine();
     try {
-      setScheduleError('');
       const token = getAdminAuthToken();
       const today = etDateString();
       const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json().catch(() => ({}));
+      if (seq !== scheduleSeq.current) return;
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
+      setScheduleError('');
       setSchedule(scheduleRowsFromResponse(data));
       setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
     } catch (err) {
+      if (seq !== scheduleSeq.current) return;
       console.error('Failed to fetch schedule:', err);
       setScheduleError(err.message || 'Your route could not be loaded.');
     } finally {
-      setLoading(false);
+      if (seq === scheduleSeq.current) setLoading(false);
     }
-  }, []);
+  }, [fetchTechLine]);
 
   useEffect(() => {
     fetchSchedule();
@@ -299,7 +324,7 @@ export default function TechHomePage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const msg = data.alreadyEnRoute ? 'Already en route' : 'Marked en route';
-      setEnRouteState({ pendingId: null, message: msg, isError: false });
+      setEnRouteState({ pendingId: null, serviceId, message: msg, isError: false });
       // Belt + suspenders refresh: the dispatch:job_update broadcast
       // is the primary path, but if the socket is mid-reconnect the
       // event can be missed, leaving the card stale. A retry then
@@ -310,7 +335,7 @@ export default function TechHomePage() {
       fetchSchedule();
       setTimeout(() => setEnRouteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
     } catch (err) {
-      setEnRouteState({ pendingId: null, message: err.message || 'Failed to mark en route', isError: true });
+      setEnRouteState({ pendingId: null, serviceId, message: err.message || 'Failed to mark en route', isError: true });
     }
   }, [enRouteState.pendingId, fetchSchedule]);
 
@@ -326,11 +351,11 @@ export default function TechHomePage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const msg = data.alreadyOnSite ? 'Already marked on site' : 'Marked on site';
-      setOnSiteState({ pendingId: null, message: msg, isError: false });
+      setOnSiteState({ pendingId: null, serviceId, message: msg, isError: false });
       fetchSchedule();
       setTimeout(() => setOnSiteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
     } catch (err) {
-      setOnSiteState({ pendingId: null, message: err.message || 'Failed to mark on site', isError: true });
+      setOnSiteState({ pendingId: null, serviceId, message: err.message || 'Failed to mark on site', isError: true });
     }
   }, [fetchSchedule, onSiteState.pendingId]);
 
@@ -374,7 +399,7 @@ export default function TechHomePage() {
   // Services list all need filtering before they're consumed.
   const myServices = currentTechId
     ? schedule.filter((s) => String(serviceTechnicianId(s)) === String(currentTechId))
-    : schedule;
+    : [];
   const completed = myServices.filter((s) => s.status === 'completed').length;
   const total = myServices.length;
   // "Next Stop" = first non-terminal service in the day's route.
@@ -388,6 +413,10 @@ export default function TechHomePage() {
   // siblings). Ungrouped rows are their own stop, exactly as before.
   const stops = groupServicesIntoStops(myServices);
   const nextVisitStop = nextStopOf(stops);
+  const selectedVisit = stops.find((stop) => stop.key === selectedVisitKey);
+  const fieldNextStop = stops.find((stop) => stop.services.some((service) => service.status === 'on_site'))
+    || stops.find((stop) => stop.services.some((service) => service.status === 'en_route'))
+    || nextVisitStop;
   const nextStop = nextVisitStop ? nextVisitStop.primary : undefined;
   const nextStopSummary = stopSummaryLabel(nextVisitStop);
   // Grouped stop: window = union of members; alerts = every member's, deduped.
@@ -412,23 +441,26 @@ export default function TechHomePage() {
   // Reconcile FORWARD to the most advanced live member (codex r4): a sibling
   // that an admin/GPS signal already put on site pulls the whole stop to
   // on_site; the server's on-site path accepts an en_route primary.
-  const handleSyncStop = () => {
-    if (!nextStop || !nextVisitStop) return;
-    const live = nextVisitStop.services.filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status));
+  const handleSyncStop = (stop) => {
+    if (!stop) return;
+    const live = stop.services.filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status));
     const target = live.some((s) => s.status === 'on_site') ? 'on_site'
       : live.some((s) => s.status === 'en_route') ? 'en_route' : null;
-    if (target === 'on_site') handleOnSite(nextStop.id);
-    else if (target === 'en_route') handleEnRoute(nextStop.id);
+    if (target === 'on_site') handleOnSite(stop.primary.id);
+    else if (target === 'en_route') handleEnRoute(stop.primary.id);
   };
   // Visit Brief detail loader — one estimate-source + one visit-brief
   // fetch per MEMBER service of the stop (grouped siblings keep their own
   // line-scoped history and possibly separate estimate provenance),
   // cached for the session under the stop's primary id. Partial success
-  // is fine (each section fails soft); only everything failing renders
-  // the Retry row. A 404 (ownership filter / older stop) reads as
+  // preserves each previously loaded section and exposes Retry. A 404
+  // (ownership filter / older stop) reads as
   // "nothing linked", not an error.
+  const stopDetailSeq = useRef(new Map());
   const loadStopDetail = useCallback(async (stop) => {
     const key = stop.primary.id;
+    const seq = (stopDetailSeq.current.get(key) || 0) + 1;
+    stopDetailSeq.current.set(key, seq);
     // A refresh keeps the previous data visible while it fetches — codes
     // and money must not flicker away on reopen.
     setStopDetail((d) => ({
@@ -451,12 +483,36 @@ export default function TechHomePage() {
       const [kind, id, value] = r.value;
       byService[id] = { ...byService[id], [kind]: value };
     }
-    setStopDetail((d) => ({
-      ...d,
-      [key]: { status: fulfilled === 0 ? 'error' : 'ready', byService },
-    }));
+    setStopDetail((d) => {
+      if (stopDetailSeq.current.get(key) !== seq) return d;
+      return {
+        ...d,
+        [key]: {
+          status: fulfilled === results.length ? 'ready' : 'error',
+          byService: Object.fromEntries(stop.services.map(({ id }) => [id, {
+            ...d[key]?.byService?.[id], ...byService[id],
+          }])),
+        },
+      };
+    });
+  }, []);
+  // Which stop's brief has an own-line text or bridge in flight. Tracked
+  // at the list level, not per row: the accordion shows ONE stop, so a
+  // sibling header would otherwise swap the expanded stop and unmount the
+  // busy panel — letting the action go out twice, and clearing the bridge
+  // lock timer before it could release (codex #4072 r19 P2). No header
+  // moves the accordion until the action settles.
+  const [busyStopId, setBusyStopId] = useState(null);
+  const navigationBusy = Boolean(busyStopId || enRouteState.pendingId || onSiteState.pendingId);
+  useLayoutEffect(() => {
+    setNavigationBusy?.(navigationBusy);
+    return () => setNavigationBusy?.(false);
+  }, [navigationBusy, setNavigationBusy]);
+  const onStopBusyChange = useCallback((stop, busy) => {
+    setBusyStopId((cur) => (busy ? stop.primary.id : (cur === stop.primary.id ? null : cur)));
   }, []);
   const toggleStop = useCallback((stop) => {
+    if (busyStopId) return;
     const id = stop.primary.id;
     const expanding = expandedStopId !== id;
     setExpandedStopId(expanding ? id : null);
@@ -464,7 +520,11 @@ export default function TechHomePage() {
     // settled payment, or a billing-posture change mid-day must show on
     // reopen — the previous data stays rendered while the refresh loads.
     if (expanding) loadStopDetail(stop);
-  }, [expandedStopId, loadStopDetail]);
+  }, [busyStopId, expandedStopId, loadStopDetail]);
+  useEffect(() => {
+    if (section === 'today' && selectedVisit && !scheduleError) void loadStopDetail(selectedVisit);
+  }, [section, selectedVisitKey, schedule, scheduleError, loadStopDetail]);
+
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -516,9 +576,12 @@ export default function TechHomePage() {
     }
     openProjectForService(service);
   }, [openProjectForService]);
+  const projectServices = fieldWorkspace
+    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => !TERMINAL_STATUSES_VISIT.has(service.status) && !['sent', 'closed'].includes(service.linkedProject?.status))
+    : myServices;
   const handleProjectQuickAction = useCallback(() => {
-    if (myServices.length === 1) {
-      const only = myServices[0];
+    if (projectServices.length === 1) {
+      const only = projectServices[0];
       // Same routing as the row/picker handlers — a cut-over typed job must
       // not open CreateProjectModal through the quick action either.
       if (isTypedFindingsService(only)) {
@@ -531,10 +594,33 @@ export default function TechHomePage() {
       return;
     }
     setShowProjectPicker(true);
-  }, [myServices, openProjectOrContinue]);
+  }, [projectServices, openProjectOrContinue]);
+
+  const openFieldVisit = (stop) => {
+    if (navigationBusy) return;
+    navigate(`/tech?visit=${encodeURIComponent(stop.key)}`);
+  };
+  const closeFieldVisit = () => {
+    if (navigationBusy) return;
+    setSearchParams((params) => { params.delete('visit'); return params; });
+  };
+  const openServiceReport = (service) => {
+    if (TERMINAL_STATUSES_VISIT.has(service.status)) return;
+    if (isTypedFindingsService(service)) openTypedCompletion(service);
+    else if (isPestControlService(service)) setRecapService(service);
+    else openProjectOrContinue(service);
+  };
+  const fieldTools = [
+    { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`/tech/protocols${visitSearch}`) },
+    { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`/tech/lawn-diagnostic${visitSearch}`) },
+    { label: 'Project Report', description: 'Open the existing service report workflow', icon: 'project', disabled: loading || !!scheduleError || projectServices.length === 0, onClick: handleProjectQuickAction },
+    ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate('/tech/estimate') }] : []),
+    ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`/tech/social-post${visitSearch}`) }] : []),
+  ];
+  if (!fieldWorkspace && section !== 'today') return <Navigate to="/tech" replace />;
 
   return (
-    <div style={{ maxWidth: 480, margin: '0 auto' }}>
+    <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
       <GeofenceArrivalPrompt
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
@@ -549,6 +635,41 @@ export default function TechHomePage() {
           });
         }}
       />
+      {fieldWorkspace ? (
+        <TechFieldHome
+          section={section} stops={stops} nextStop={fieldNextStop}
+          loading={loading} error={scheduleError} rainChance={rainChance}
+          onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
+          tools={fieldTools}
+          timekeeping={<>
+            <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
+            <div className="tf-existing"><TechIntelligenceBar /></div>
+            {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/documents${visitSearch}`}>Staff documents</Link></div>}
+          </>}
+          visit={selectedVisitKey && section === 'today' ? (
+            <TechFieldVisit
+              stop={selectedVisit} loading={loading} error={scheduleError}
+              onBack={closeFieldVisit} onRetry={fetchSchedule} busy={navigationBusy}
+              enRouteState={enRouteState} onSiteState={onSiteState}
+              onEnRoute={handleEnRoute} onSite={handleOnSite} onSync={handleSyncStop}
+              onMove={setRainOutService}
+            >
+              {selectedVisit && <div className="tf-existing"><VisitBriefPanel
+                stop={selectedVisit} detail={stopDetail[selectedVisit.primary.id]}
+                onRetry={() => loadStopDetail(selectedVisit)}
+                onPhotos={(service) => setPhotoTarget({ id: service.id, customerName: service.customerName || service.customer_name || 'Customer' })}
+                onProject={openServiceReport} onZone={setZoneTarget} onLead={setLeadTarget}
+                techLine={techLine} request={techRequest}
+                onBusyChange={(busy) => onStopBusyChange(selectedVisit, busy)}
+              /></div>}
+              {selectedVisit?.primary.status === 'on_site' && <>
+                {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
+                {recapCaptureEnabled && isPestControlService(selectedVisit.primary) && <TechRecapCapture service={selectedVisit.primary} request={techRequest} />}
+              </>}
+            </TechFieldVisit>
+          ) : null}
+        />
+      ) : <>
       {/* Greeting */}
       <h1 style={{
         fontSize: 22, fontWeight: 700, margin: '0 0 4px',
@@ -751,7 +872,7 @@ export default function TechHomePage() {
                 icon="🔁"
                 primary
                 disabled={Boolean(onSiteState.pendingId || enRouteState.pendingId)}
-                onClick={handleSyncStop}
+                onClick={() => handleSyncStop(nextVisitStop)}
               />
             )}
           </div>
@@ -813,6 +934,7 @@ export default function TechHomePage() {
                 expanded={expandedStopId === stop.primary.id}
                 detail={stopDetail[stop.primary.id]}
                 onToggle={() => toggleStop(stop)}
+                onBusyChange={(busy) => onStopBusyChange(stop, busy)}
                 onRetryDetail={() => loadStopDetail(stop)}
                 onProject={(s) => (
                   isTypedFindingsService(s)
@@ -825,6 +947,7 @@ export default function TechHomePage() {
                 })}
                 onZone={(s) => setZoneTarget(s)}
                 onLead={(s) => setLeadTarget(s)}
+                techLine={techLine}
               />
             ))}
           </div>
@@ -832,6 +955,7 @@ export default function TechHomePage() {
       )}
 
       <TimecardSignoffCard techName={techName} />
+      </>}
 
       {showCreateProject && (
         <CreateProjectModal
@@ -885,7 +1009,7 @@ export default function TechHomePage() {
 
       {showProjectPicker && (
         <ProjectServicePicker
-          services={myServices}
+          services={projectServices}
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
@@ -1228,7 +1352,10 @@ function TimecardSignoffCard({ techName }) {
 // name, status·window, service label + short address, exception chips
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead }) {
+function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, techLine }) {
+  // The busy guard lives in the list's toggleStop (any header, not only
+  // this row's, must leave a panel with a text or bridge in flight mounted).
+  const toggle = () => onToggle();
   const service = stop.primary;
   const status = service.status || 'pending';
   // A grouped transition that only partially fanned out leaves live
@@ -1270,9 +1397,9 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
         role="button"
         tabIndex={0}
         aria-expanded={expanded}
-        onClick={onToggle}
+        onClick={toggle}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); }
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
         }}
         style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', minHeight: 44 }}
       >
@@ -1321,6 +1448,9 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
           onProject={onProject}
           onZone={onZone}
           onLead={onLead}
+          techLine={techLine}
+          onBusyChange={onBusyChange}
+          request={techRequest}
         />
       )}
     </div>

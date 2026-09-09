@@ -5118,6 +5118,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           invoiceId: invoice.id,
           identityTrustLevel: 'phone_matches_customer',
           entryPoint: 'admin_project_report_with_invoice',
+          operatorInitiated: true,
           // original_message_type 'invoice' keeps the admin-sms-templates
           // invoice kill switch applicable to this billing text.
           metadata: { original_message_type: 'invoice', project_id: project.id, invoice_id: invoice.id },

@@ -21,6 +21,7 @@
 import api, { tokenSessionIdentity, sameRequestSession } from '../utils/api';
 import { isNativeApp, nativePlatform } from './platform';
 import { navigateToCustomerUrl } from './nativeLinks';
+import { reportError } from '../lib/reportError';
 
 export { isNativeApp };
 
@@ -100,8 +101,9 @@ async function postToken(token) {
 
 function pushPlugin() {
   if (!pushPluginPromise) {
+    // Keep the module wrapper: the Capacitor proxy has a callable `then`.
+    // Resolving a promise with that proxy stalls before any native API runs.
     pushPluginPromise = import('@capacitor/push-notifications')
-      .then(({ PushNotifications }) => PushNotifications)
       .catch((error) => {
         pushPluginPromise = null;
         throw error;
@@ -128,11 +130,17 @@ async function bindPushListeners(PushNotifications) {
       const url = action?.notification?.data?.url;
       if (url && typeof window !== 'undefined') navigateToCustomerUrl(url);
     });
+    await PushNotifications.addListener('pushNotificationReceived', () => {
+      window.dispatchEvent(new Event('waves:native-notification'));
+    });
     const { App } = await import('@capacitor/app');
     await App.addListener('appStateChange', ({ isActive }) => {
       // Permission may change in OS Settings without restarting this app.
       // Reconcile the token on every return, including outside Settings.
-      if (isActive) void initNativePush();
+      if (isActive) {
+        void initNativePush();
+        window.dispatchEvent(new Event('waves:native-notification'));
+      }
     });
   } catch (error) {
     // A partial bind must be retryable after an app/plugin recovery.
@@ -153,7 +161,7 @@ function permissionValue(permission) {
 export async function nativePushPermissionState() {
   if (!isNativeApp()) return 'unavailable';
   try {
-    const PushNotifications = await pushPlugin();
+    const { PushNotifications } = await pushPlugin();
     await bindPushListeners(PushNotifications);
     return permissionValue(await PushNotifications.checkPermissions());
   } catch {
@@ -162,38 +170,57 @@ export async function nativePushPermissionState() {
 }
 
 /**
- * Ask for native push from an explicit customer gesture (the notification
- * drawer's Enable button). A denied permission is reported to the caller so
- * it can direct the customer to device Settings instead of leaving a dead UI.
+ * Ask for native push once the authenticated customer app is unlocked, or
+ * from the notification drawer's retry button. The OS owns the permission
+ * popup and remembers an existing Allow/Don't Allow choice.
  */
 export async function requestNativePushPermission() {
   if (!isNativeApp()) return 'unavailable';
-  try {
-    const PushNotifications = await pushPlugin();
+  let settled = false;
+  let failureState = 'setup_unavailable';
+  let finish;
+  // Start the existing deadline before ANY bridge work. A plugin load,
+  // listener bind, or permission call can stall before register() is reached.
+  const confirmation = new Promise((resolve) => {
+    finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      registrationWaiters.delete(finish);
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      reportError({ name: 'TimeoutError' });
+      finish(failureState);
+    }, 15000);
+  });
+  void (async () => {
+    const { PushNotifications } = await pushPlugin();
+    if (settled) return;
+    failureState = 'permission_unavailable';
+    // requestPermissions already returns the saved OS choice when one exists.
+    // Do not put a separate permission probe in front of the system popup.
+    const state = permissionValue(await PushNotifications.requestPermissions());
+    if (settled) return;
+    if (state !== 'granted') {
+      finish(state);
+      return;
+    }
+    failureState = 'setup_unavailable';
     await bindPushListeners(PushNotifications);
-    let state = permissionValue(await PushNotifications.checkPermissions());
-    if (state === 'prompt' || state === 'prompt-with-rationale') {
-      state = permissionValue(await PushNotifications.requestPermissions());
-    }
-    if (state === 'granted') {
-      let finish;
-      const confirmation = new Promise((resolve) => {
-        finish = (result) => { clearTimeout(timeout); registrationWaiters.delete(finish); resolve(result); };
-        const timeout = setTimeout(() => finish('registration_unavailable'), 15000);
-        registrationWaiters.add(finish);
-      });
-      // The native bridge can leave register() pending even after a token
-      // event or our deadline. Completion belongs to the event/timeout,
-      // and a late bridge rejection must not fail a newer retry's waiters.
-      void Promise.resolve().then(() => PushNotifications.register())
-        .catch(() => finish('registration_unavailable'));
-      return await confirmation;
-    }
-    return state;
-  } catch (err) {
+    if (settled) return;
+    failureState = 'registration_unavailable';
+    registrationWaiters.add(finish);
+    // This task is detached: the event/deadline completes the action even if
+    // register() never resolves. A late failure belongs only to this attempt.
+    await PushNotifications.register();
+  })().catch((err) => {
+    if (settled) return;
     console.error('[nativePush] permission request failed:', err?.message || err);
-    return 'unavailable';
-  }
+    reportError(err);
+    finish(failureState);
+  });
+  return confirmation;
 }
 
 /** Confirm this device's registration, separately from its OS permission. */
@@ -215,13 +242,12 @@ export async function nativePushConnectionState() {
 export async function initNativePush() {
   if (!isNativeApp()) return;
   try {
-    const PushNotifications = await pushPlugin();
+    const { PushNotifications } = await pushPlugin();
     await bindPushListeners(PushNotifications);
 
-    // Startup may silently recover an already-granted registration, but it
-    // must never surprise a newly installed customer with an OS prompt before
-    // the app has explained the value. Prompting happens only from
-    // requestNativePushPermission(), called by the bell's Enable action.
+    // Bootstrap can run before authentication or Face ID unlock. Only recover
+    // granted registrations here; the mounted customer bell requests the OS
+    // permission popup automatically after sign-in and unlock.
     const state = permissionValue(await PushNotifications.checkPermissions());
     if (state === 'granted') {
       await PushNotifications.register();
@@ -315,7 +341,7 @@ async function retryPendingRevocation() {
   try { owed = localStorage.getItem(PENDING_REVOKE_KEY); } catch { return; }
   if (!owed) return;
   try {
-    const PushNotifications = await pushPlugin();
+    const { PushNotifications } = await pushPlugin();
     const state = permissionValue(await PushNotifications.checkPermissions());
     if (state === 'granted') {
       // Permission came back — the registration/flush path re-points the

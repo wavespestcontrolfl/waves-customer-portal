@@ -53,6 +53,7 @@ export const ADMIN_NAV_ITEMS = {
     label: "Dashboard",
     icon: LayoutDashboard,
     mobileTabIcon: Home,
+    keywords: ["home", "overview"],
     // server/routes/admin-dashboard.js is requireAdmin — the page is a wall
     // of 403s for any other role. Technicians land on /admin/schedule.
     adminOnly: true,
@@ -69,17 +70,22 @@ export const ADMIN_NAV_ITEMS = {
     label: "Pipeline",
     icon: ClipboardList,
     adminOnly: true,
+    workspacePath: "/admin/pipeline?tab=leads",
+    keywords: ["leads", "opportunities"],
+    views: [{ id: "estimates", label: "Estimates", path: "/admin/pipeline?tab=estimates" }],
   },
   schedule: {
     id: "schedule",
     path: "/admin/schedule",
     label: "Schedule",
+    keywords: ["dispatch", "calendar", "appointments", "board"],
     icon: Calendar,
   },
   staff: {
     id: "staff",
     path: "/admin/timetracking",
     label: "Staff",
+    keywords: ["time tracking", "timesheets"],
     icon: Clock,
   },
   services: {
@@ -93,6 +99,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "jobs",
     path: "/admin/projects",
     label: "Reports",
+    workspaceLabel: "Service reports",
     icon: FileText,
   },
   contracts: {
@@ -107,6 +114,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "communications",
     path: "/admin/communications",
     label: "Communications",
+    keywords: ["messages", "sms", "calls", "email", "inbox"],
     icon: MessageSquare,
     mobileTabLabel: "Messages",
   },
@@ -128,6 +136,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "ppc",
     path: "/admin/ppc",
     label: "PPC",
+    keywords: ["ads", "paid search", "advertising"],
     icon: Megaphone,
     adminOnly: true,
   },
@@ -142,6 +151,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "social",
     path: "/admin/social-media",
     label: "Social Media",
+    workspaceLabel: "Social media",
     icon: Share2,
     adminOnly: true,
   },
@@ -165,6 +175,7 @@ export const ADMIN_NAV_ITEMS = {
     label: "Assessments",
     icon: Camera,
     morePath: "/admin/lawn-assessments?tab=field",
+    workspacePath: "/admin/lawn-assessments?tab=field",
   },
   recruiting: {
     id: "recruiting",
@@ -185,6 +196,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "agentEstimate",
     path: "/admin/agent-estimate",
     label: "Agent Estimate",
+    workspaceLabel: "Agent estimate",
     icon: Sparkles,
     flag: "agent_estimate",
     adminOnly: true,
@@ -205,6 +217,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "priceMatch",
     path: "/admin/price-match",
     label: "Price Match",
+    workspaceLabel: "Price match",
     icon: Tags,
     adminOnly: true,
   },
@@ -232,6 +245,8 @@ export const ADMIN_NAV_ITEMS = {
     id: "recovery",
     path: "/admin/billing-recovery",
     label: "Recovery",
+    workspaceLabel: "Needs attention",
+    keywords: ["billing recovery", "missing invoices", "overdue"],
     icon: Banknote,
     adminOnly: true,
   },
@@ -239,6 +254,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "payers",
     path: "/admin/payers",
     label: "Payers",
+    workspaceLabel: "Billing accounts",
     icon: Building2,
     // server/routes/admin-payers.js is requireAdmin on every endpoint.
     adminOnly: true,
@@ -254,6 +270,8 @@ export const ADMIN_NAV_ITEMS = {
     id: "taxes",
     path: "/admin/tax",
     label: "Taxes",
+    workspaceLabel: "Books & taxes",
+    keywords: ["bookkeeping", "accounting"],
     icon: Receipt,
     adminOnly: true,
   },
@@ -268,6 +286,7 @@ export const ADMIN_NAV_ITEMS = {
     id: "toolHealth",
     path: "/admin/tool-health",
     label: "Tool Health",
+    workspaceLabel: "System health",
     icon: Activity,
     adminOnly: true,
   },
@@ -369,6 +388,78 @@ export const ADMIN_MOBILE_MORE_SECTIONS = materializeSections(
 export const ADMIN_MOBILE_TABS = MOBILE_TAB_IDS.map((itemId) =>
   materializeItem(itemId, "mobileTab"),
 );
+
+// The grouped shell reuses the canonical destinations and their individual
+// access rules. A parent never lends its permissions to a child.
+export const ADMIN_WORKSPACE_DESTINATIONS = Object.values(ADMIN_NAV_ITEMS)
+  .filter(({ id }) => id !== "more")
+  .flatMap((item) => [
+    { ...item, label: item.workspaceLabel || item.label, path: item.workspacePath || item.path },
+    ...(item.views || []).map((view) => ({ ...item, keywords: [], ...view })),
+  ]);
+
+const WORKSPACE_GROUPS = [
+  { id: "dashboard", label: "Dashboard", target: "dashboard", itemIds: ["dashboard"], section: "Daily work" },
+  { id: "schedule", label: "Schedule", target: "schedule", itemIds: ["schedule"], section: "Daily work" },
+  { id: "customers", label: "Customers", target: "customers", itemIds: ["customers", "contracts"], section: "Daily work" },
+  { id: "sales", label: "Sales", target: "pipeline", itemIds: ["pipeline", "estimates", "priceMatch", "agentEstimate"], section: "Daily work" },
+  { id: "communications", label: "Communications", target: "communications", itemIds: ["communications"], section: "Daily work" },
+  { id: "billing", label: "Billing", target: "invoices", itemIds: ["invoices", "recovery", "payers"], section: "Daily work" },
+  { id: "operations", label: "Operations", icon: Wrench, itemIds: ["jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"], section: "Manage" },
+  { id: "marketing", label: "Marketing", icon: Megaphone, itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"], section: "Manage" },
+  { id: "team", label: "Team", icon: Users, itemIds: ["staff", "recruiting"], section: "Manage" },
+  { id: "accounting", label: "Accounting", icon: Landmark, itemIds: ["banking", "taxes"], section: "Manage" },
+  { id: "agents", label: "Agent Ops", target: "agents", itemIds: ["agents"], section: "Manage" },
+  { id: "settings", label: "Settings", target: "settings", itemIds: ["settings", "toolHealth"], section: "Preferences" },
+];
+
+export const ADMIN_WORKSPACE_GROUP_IDS = WORKSPACE_GROUPS.map(({ id }) => id);
+
+export function getAdminWorkspaceGroups(role, flags = {}) {
+  if (!role) return [];
+  const visible = ADMIN_WORKSPACE_DESTINATIONS.filter((item) =>
+    (!item.adminOnly || role === "admin") && (!item.flag || flags[item.flag] === true),
+  );
+  return WORKSPACE_GROUPS.map((group) => {
+    const items = group.itemIds.map((id) => visible.find((item) => item.id === id)).filter(Boolean);
+    const target = items.find(({ id }) => id === group.target);
+    return { ...group, items, target, icon: group.icon || target?.icon };
+  }).filter(({ items }) => items.length);
+}
+
+// Page names only: this index never queries customer records, calls the
+// assistant, or records the operator's search text.
+export function searchAdminWorkspacePages(groups, query) {
+  const normalize = (value) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const normalized = normalize(query);
+  const words = normalized.split(/\s+/).filter(Boolean);
+  return groups.flatMap((group) => group.items.map((item) => ({ ...item, groupLabel: group.label })))
+    .filter((item) => {
+      const text = normalize([item.label, ADMIN_NAV_ITEMS[item.id]?.label || '', item.groupLabel, item.path, ...(item.keywords || [])].join(' '));
+      return words.every((word) => text.includes(word));
+    }).sort((a, b) => Number(normalize(b.label).startsWith(normalized)) - Number(normalize(a.label).startsWith(normalized)));
+}
+
+// Pipeline consumes its query when selecting a tab. Prefer the page's rendered
+// view after that happens; a new URL is authoritative until the page reports.
+export function getAdminWorkspaceSelection(location, renderedView) {
+  const { pathname, search = "" } = location;
+  if (pathname === "/admin/pipeline") {
+    const tab = renderedView?.pathname === pathname
+      ? renderedView.tab : new URLSearchParams(search).get("tab") || "leads";
+    const itemId = tab === "leads" ? "pipeline" : tab === "estimates" ? "estimates" : null;
+    return { groupId: "sales", itemId };
+  }
+  if (pathname === "/admin/estimates" || pathname.startsWith("/admin/estimates/")) return { groupId: "sales", itemId: "estimates" };
+  if (pathname === "/admin/more") return { groupId: "settings", itemId: "settings" };
+  const match = ADMIN_WORKSPACE_DESTINATIONS.find((item) => isAdminNavItemActive(item, pathname, search));
+  const group = WORKSPACE_GROUPS.find(({ itemIds }) => itemIds.includes(match?.id));
+  if (group) return { groupId: group.id, itemId: match.id };
+  if (MOBILE_SETTINGS_SECTIONS.some(({ to }) => pathname === pathnameFor(to))) {
+    return { groupId: "settings", itemId: "settings" };
+  }
+  return { groupId: null, itemId: null };
+}
 
 function pathnameFor(path) {
   return String(path || "").split("?")[0];

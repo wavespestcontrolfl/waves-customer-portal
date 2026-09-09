@@ -71,6 +71,7 @@ function wireDb() {
   });
   // Suppression + cache write run in a transaction under the shared
   // per-phone advisory lock (codex #3495 r16); the mock trx is db itself.
+  db.isTransaction = true;
   db.raw = jest.fn(async () => ({}));
   db.transaction = jest.fn(async (fn) => fn(db));
 }

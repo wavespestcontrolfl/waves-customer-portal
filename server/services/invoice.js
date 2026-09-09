@@ -2654,6 +2654,7 @@ const InvoiceService = {
         // caller can requeue the exact pay-link text on the scheduled rail.
         if (sendResult.deferred) err.deferred = true;
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
+        if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
         err.smsBody = body;
         err.toPhone = customer.phone;
         throw err;
@@ -2870,6 +2871,7 @@ const InvoiceService = {
         // instead of treating the hold as a spent delivery attempt.
         if (err.deferred) sms.deferred = true;
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
+        if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
@@ -2883,7 +2885,7 @@ const InvoiceService = {
     // 8:00 AM under the same payment_link policy. Scheduled callers
     // (allowClaimed) skip this — their whole send defers below instead.
     if (!allowClaimed
-      && sms.code === "QUIET_HOURS_HOLD"
+      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && sms.deferred
       && sms.nextAllowedAt
       && sms.heldBody
@@ -2955,13 +2957,13 @@ const InvoiceService = {
     // night sends, admin resends) are NOT deferred: their documented
     // gate-ON behavior is email-immediate with the SMS leg held.
     const scheduledSmsHeld = allowClaimed
-      && sms.code === "QUIET_HOURS_HOLD"
+      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && Boolean(sms.nextAllowedAt);
     if (scheduledSmsHeld || sms.holdUnowned) {
       email.error = sms.holdUnowned
         ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
         : "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
-      email.code = "QUIET_HOURS_HOLD";
+      email.code = sms.code;
     } else {
       try {
         const r = await sendInvoiceEmail(invoiceId, {
@@ -3377,7 +3379,7 @@ const InvoiceService = {
       // to the window open and leave the attempt counter alone — five
       // overnight cron passes must not permanently fail the send.
       const smsHeld =
-        result.sms?.code === "QUIET_HOURS_HOLD" && result.sms?.nextAllowedAt;
+        ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
       if (smsHeld) {
         deferred += 1;
         await db("invoices")
@@ -3390,11 +3392,19 @@ const InvoiceService = {
           });
       } else {
         failed += 1;
+        // A temporary native failure consumes an attempt under this
+        // queue's existing five-attempt cap, but cannot replay before
+        // the provider delay. Window/eligibility holds above spend none.
+        const nativeRetryMs = result.sms?.code === "APP_PROVIDER_RETRY"
+          ? Math.max(60000, Number(result.sms.retryAfterMs) || 60000)
+            * (2 ** Number(inv.scheduled_send_attempts || 0)) * (1 + Math.random() * 0.2)
+          : null;
         await db("invoices")
           .where({ id: inv.id })
           .update({
             status: "scheduled",
             scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+            ...(nativeRetryMs ? { scheduled_send_at: new Date(Date.now() + nativeRetryMs) } : {}),
             scheduled_send_error: error,
             updated_at: new Date(),
           });
@@ -5062,6 +5072,63 @@ const InvoiceService = {
       logger.warn(`[invoice] unvoid committed but setup-fee alert reconcile failed for invoice ${invoice.id}: ${err.message}`);
     }
     return invoice;
+  },
+
+  /**
+   * Close an invoice whose existing discounts/deposit/account-credit allocation
+   * leave exactly nothing due. Uses the non-cash prepaid state and keeps its
+   * existing allocations for the canonical void/reversal paths. No new credit,
+   * payment row, provider call or receipt is created by this transition.
+   */
+  async settleZeroBalance(id, database = db) {
+    const run = async (trx) => {
+      const invoice = await trx("invoices").where({ id }).forUpdate().first();
+      if (!invoice) return { settled: false, reason: "not_found", invoice: null };
+      const skip = (reason) => ({ settled: false, reason, invoice });
+      if (!require("./invoice-helpers").isInvoiceCollectibleStatus(invoice.status)) return skip("already_settled");
+      const totalCents = Math.round(Number(invoice.total) * 100);
+      const creditCents = Math.round(Number(invoice.credit_applied || 0) * 100);
+      const validAmounts = [totalCents, creditCents].every((cents) => Number.isSafeInteger(cents) && cents >= 0);
+      if (invoice.total == null || !validAmounts || creditCents > totalCents) return skip("invalid_balance");
+      if (totalCents !== creditCents) return skip("balance_due");
+      await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
+      if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
+        invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
+        return skip("existing_payment_work");
+      }
+      const payment = await trx("payments").whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id]).first("id");
+      const plan = await trx("payment_plans").where({ invoice_id: id, status: "active" }).first("id");
+      if (payment || plan) return skip("existing_payment_work");
+      const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate()
+        .first("id", "status", "touch_claimed_at");
+      if (sequence?.status === "stopped") return skip("collection_stopped");
+      // fireStep claims under this same invoice lock, then renders/sends
+      // outside its transaction. Let that existing ten-minute lease finish.
+      if (new Date(sequence?.touch_claimed_at).getTime() > Date.now() - 10 * 60 * 1000) {
+        return { ...skip("followup_in_flight"), retryable: true };
+      }
+      await trx("customers").where({ id: invoice.customer_id }).forUpdate().first("id");
+      if (await require("./invoice-helpers").visitRefusesSettlement(trx, invoice.scheduled_service_id)) {
+        return skip("visit_never_ran");
+      }
+      const [settled] = await trx("invoices").where({ id }).update({
+        status: "prepaid", prepaid_prev_status: invoice.status,
+        prepaid_at: trx.fn.now(), prepaid_by: "system:zero_balance",
+        paid_at: trx.fn.now(), updated_at: trx.fn.now(),
+      }).returning("*");
+      if (sequence) await trx("invoice_followup_sequences").where({ id: sequence.id }).update({
+        status: "completed", next_touch_at: null, touch_claimed_at: null, updated_at: trx.fn.now(),
+      });
+      await require("./audit-log").recordAuditEvent({
+        actor_type: "system", action: "invoice.zero_balance_settled",
+        resource_type: "invoice", resource_id: id,
+        metadata: { previous_status: invoice.status, total_cents: totalCents, credit_applied_cents: creditCents },
+        critical: true, trx,
+      });
+      return { settled: true, reason: null, invoice: settled };
+    };
+    return database.isTransaction ? run(database) : database.transaction(run);
   },
 
   /**

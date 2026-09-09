@@ -24,12 +24,13 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { loadOccupancy, conflictsForTarget } = require('../services/rain-out');
+const { validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
 const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
+const { bookingPropertyStamp } = require('../services/customer-properties');
 
 const MAX_FIND_TIME_DAYS = 90;
 
@@ -55,7 +56,24 @@ function isYmd(value) {
   return Number.isFinite(parsed.getTime()) && etDateString(parsed) === value;
 }
 
-async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng }) {
+// The edit form's Service address picker: a property the operator has
+// selected but not yet saved. Its stamp (what update-details will write)
+// replaces the visit's stored stamp for this search, in the shape the
+// arrival context and geocoder read (Codex #4120 r7 P2).
+async function pendingPropertyStamp({ customerId, propertyId }) {
+  const stamp = await bookingPropertyStamp({ customerId, propertyId });
+  return {
+    property_id: stamp.property_id,
+    address_line1: stamp.service_address_line1,
+    city: stamp.service_address_city,
+    state: stamp.service_address_state,
+    zip: stamp.service_address_zip,
+    lat: finiteNumber(stamp.lat),
+    lng: finiteNumber(stamp.lng),
+  };
+}
+
+async function resolveFindTimeTarget({ serviceId, propertyId, customerId, address, lat, lng }) {
   let targetLat = finiteNumber(lat);
   let targetLng = finiteNumber(lng);
   let source = targetLat != null && targetLng != null ? 'request_coordinates' : null;
@@ -63,6 +81,7 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
   let targetAddress = address || null;
   let resolvedCustomerId = customerId || null;
   let profileLabel = null;
+  let pendingStamp = null;
 
   // Existing-visit surfaces rank at the VISIT's stamped address — a call
   // booking for a secondary/rental property must not score detours at the
@@ -82,11 +101,15 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
     if (!visit) throw httpError(404, 'Visit not found');
     resolvedCustomerId = resolvedCustomerId || visit.visit_customer_id || null;
     profileLabel = visit.visit_profile_label || null;
-    const location = await resolveServiceLocation(visit, targetAddress);
+    // A pending Service address selection outranks the stored stamp: the
+    // save applies it, so the hint must price the destination the save
+    // will leave, not the one it replaces.
+    pendingStamp = propertyId ? await pendingPropertyStamp({ customerId: visit.visit_customer_id, propertyId }) : null;
+    const location = await resolveServiceLocation(pendingStamp || visit, pendingStamp ? undefined : targetAddress);
     targetAddress = location.address || null;
     targetLat = finiteNumber(location.lat);
     targetLng = finiteNumber(location.lng);
-    source = location.source;
+    source = pendingStamp && location.source === 'visit_stamp' ? 'pending_property' : location.source;
   }
 
   // An EXPLICIT request address (the create modal's service-address picker
@@ -149,12 +172,15 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
   }
 
   return {
-    lat: targetLat,
-    lng: targetLng,
-    address: targetAddress,
-    source,
-    customerId: customer?.id || resolvedCustomerId,
-    profileLabel: customer?.profile_label || profileLabel,
+    target: {
+      lat: targetLat,
+      lng: targetLng,
+      address: targetAddress,
+      source,
+      customerId: customer?.id || resolvedCustomerId,
+      profileLabel: customer?.profile_label || profileLabel,
+    },
+    pendingStamp,
   };
 }
 
@@ -165,6 +191,7 @@ router.post('/', async (req, res) => {
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
+      pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -193,6 +220,16 @@ router.post('/', async (req, res) => {
         throw httpError(400, 'slotStepMinutes must be an integer between 1 and 120');
       }
     }
+    // Picker-hint params (the hour in the picker, its window end, the
+    // picker's same-day floor) — shapes and meaning in find-time-hints.js.
+    const hintParamError = validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin });
+    if (hintParamError) throw httpError(400, hintParamError);
+    // A pending Service address only means something for an existing
+    // visit (the edit form); the stamp helper 422s on an id that is not
+    // one of the customer's active saved addresses.
+    if (propertyId !== undefined && (!hint || !serviceId || typeof propertyId !== 'string' || !propertyId.trim())) {
+      throw httpError(400, 'propertyId requires hint mode and a serviceId');
+    }
 
     const today = etDateString();
     const from = dateFrom || today;
@@ -207,9 +244,28 @@ router.post('/', async (req, res) => {
     const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
     // Arrival checks load the saved appointment too. Request coordinates or
     // an address echo must not make its hint promise a different destination.
-    const target = await resolveFindTimeTarget(useArrivalWindows
-      ? { serviceId }
-      : { serviceId, customerId, address, lat, lng });
+    const { target, pendingStamp } = await resolveFindTimeTarget(useArrivalWindows
+      ? { serviceId, propertyId }
+      : { serviceId, propertyId, customerId, address, lat, lng });
+    // The pending edit as the save probe would hand it to the arrival
+    // checker (`changes: updates`): when the operator re-picked the Service
+    // address, that property's stamp — so the route simulation runs on the
+    // visit being saved. The picked verdict adds its window (scorePickedHour);
+    // the ranking's candidates carry their own. Gap mode has no route
+    // context to feed.
+    //
+    // The duration rides along ONLY for an explicit duration edit
+    // (`durationEdit`, the edit form — update-details writes the form's
+    // duration). A move (manual reschedule, drag-drop confirm) sends its
+    // stored window span and the reschedule save keeps the stored estimate,
+    // so overriding it here would simulate a 60-minute job for a 120-minute
+    // visit and promise an hour the save's route check refuses (pre-push
+    // hook P1). The checker already takes the larger of the stored work
+    // duration and `durationMinutes`, so a lengthened window still counts.
+    const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
+    const hintChanges = useArrivalWindows
+      ? { ...(durationEdit === true ? { estimated_duration_minutes: spanMin } : {}), ...(pendingStamp || {}) }
+      : undefined;
 
     const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);
     const result = await findAvailableSlots({
@@ -219,14 +275,19 @@ router.post('/', async (req, res) => {
       dateFrom: from,
       dateTo: clampedTo,
       technicianId: technicianId || undefined,
-      // Hint mode over-fetches so the occupancy guard below can drop hours
-      // without leaving the chips row short.
-      topN: hint ? Math.min(requestedTopN * 3, 30) : requestedTopN,
+      // Hint mode takes the engine's ENTIRE candidate list and slices to
+      // the requested count below: the occupancy guard can veto whole gaps
+      // (a 3× over-fetch on a topN:1 range search starved the hint when its
+      // three gaps were all occupied and a fourth was free — pre-push P1),
+      // and a picked hour can sit in the worst gap of the day — or, on a
+      // busy multi-tech range, past any fixed cap (Codex #4120 r1). topN
+      // only changes the engine's final slice, never its work.
+      topN: hint ? Number.POSITIVE_INFINITY : requestedTopN,
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
-      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId } } : {}),
+      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges } } : {}),
       slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
@@ -236,69 +297,26 @@ router.post('/', async (req, res) => {
       includeWeekends: true,
     });
 
-    if (hint && Array.isArray(result?.slots) && result.slots.length) {
-      // The engine walks per-technician routes, so a scheduled row with NO
-      // assigned tech occupies no route and is invisible to it — an hour it
-      // recommends can sit on an unassigned visit the commit will still
-      // reject. Mirror the dispatch slot-check occupancy guard (tech-blind,
-      // same overlap predicate, excludeServiceIds honored) and veto those
-      // hours. The engine emits only the EARLIEST start per route gap, so a
-      // vetoed candidate must not discard its whole gap — walk the gap
-      // through latest_start_min at the request's step and keep the first
-      // clear start (detour is position-independent within a gap). Fail-open
-      // like checkSlots: a snapshot failure keeps the engine's answer —
-      // this whole path is advisory.
-      try {
-        const occupancyByDate = new Map();
-        await Promise.all([...new Set(result.slots.map((s) => s.date))].map(async (d) => {
-          occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
-        }));
-        const excluded = (excludeServiceIds || []).map(String);
-        const toMin = (hhmm) => {
-          const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
-          return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
-        };
-        const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
-        const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
-        const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
-        result.slots = result.slots.flatMap((s) => {
-          // The full arrival simulation already checked every actual work
-          // span against unassigned/other-tech work and live holds. Comparing
-          // its promise to nominal work blocks here would recreate the bug.
-          if (s.route_mode === 'arrival_windows') return [s];
-          const baseMin = toMin(s.start_time);
-          if (baseMin == null) return [];
-          const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
-          for (let m = baseMin; m <= latest; m += step) {
-            const window = { start: toHHMM(m), end: toHHMM(m + spanMin) };
-            const clear = conflictsForTarget(
-              occupancyByDate.get(s.date), null, s.date, window,
-              { excludeServiceIds: excluded },
-            ).length === 0;
-            if (clear) {
-              return [m === baseMin ? s : { ...s, start_time: window.start, end_time: window.end }];
-            }
-          }
-          return [];
-        });
-      } catch (guardErr) {
-        logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
-      }
-      // Unscoped searches rank technician/time PAIRS, so the top of the
-      // list can be one hour three times over — dedupe by day+start (list
-      // is already rank-sorted, first wins) BEFORE slicing, or the chips
-      // row collapses below the requested count.
-      const seenStarts = new Set();
-      result.slots = result.slots.filter((s) => {
-        const key = `${s.date}|${s.start_time}`;
-        if (seenStarts.has(key)) return false;
-        seenStarts.add(key);
-        return true;
-      }).slice(0, requestedTopN);
-    }
+    // The picker hints' policy (occupancy guard, same-day floor, dedupe +
+    // slice, the picked-hour verdict) lives in scheduling/find-time-hints.js;
+    // the ungated Find-a-Time search only gets unknown detours marked.
+    const excluded = (excludeServiceIds || []).map(String);
+    const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
+    const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
+    const slots = hint
+      ? await guardHintSlots(rawSlots, { today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN })
+      : rawSlots;
+    const picked = hint && pickedStart
+      ? await scorePickedHour({
+        rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
+        serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
+      })
+      : undefined;
 
     res.json({
       ...result,
+      slots,
+      ...(picked ? { picked } : {}),
       target,
       range: { dateFrom: from, dateTo: clampedTo },
     });

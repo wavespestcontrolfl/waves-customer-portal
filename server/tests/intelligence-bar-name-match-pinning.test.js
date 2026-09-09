@@ -134,6 +134,20 @@ describe('resolveCustomer (comms)', () => {
     expect(res.preview_changed).toBeUndefined();
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415551111', customerId: null }));
   });
+
+  test('provider acceptance survives a later audit failure and keeps its provider receipt', async () => {
+    db.mockReturnValue(chain({ first: CUST_A }));
+    const err = Object.assign(new Error('audit unavailable'), {
+      providerOutcome: { sent: true, providerMessageId: 'SM_synthetic_receipt' },
+    });
+    sendCustomerMessage.mockRejectedValueOnce(err);
+    const result = await executeCommsTool('send_sms', {
+      customer_id: CUST_A.id, phone: CUST_A.phone, message: 'Synthetic message',
+    });
+    expect(result).toMatchObject({ success: true, state: 'provider_accepted', providerMessageId: 'SM_synthetic_receipt' });
+    expect(result.warning).toContain('Do not send it again');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('update_lead_status (leads)', () => {
@@ -220,6 +234,16 @@ describe('bulk_update_leads (leads)', () => {
     expect(res.matched_ids).toEqual(['lead-1', 'lead-2']);
   });
 
+  test('the confirmation preview filters reads to its server-approved cohort', async () => {
+    const leads = chain({ select: [LEAD_A] });
+    db.mockReturnValue(leads);
+    const res = await previewBulkLeadUpdate({ current_status: 'contacted', new_status: 'lost',
+      _approved_lead_ids: ['lead-1'] });
+    expect(leads.whereIn).toHaveBeenCalledWith('id', ['lead-1']);
+    expect(res.matched_ids).toEqual(['lead-1']);
+    expect(leads.update).not.toHaveBeenCalled();
+  });
+
   test('execution is ONE guarded UPDATE: pinned ids AND the criteria ride in the same WHERE, RETURNING reports the real set', async () => {
     // Only two of the three pinned leads still match the criteria at
     // confirm time — the guarded UPDATE returns exactly those.
@@ -231,7 +255,7 @@ describe('bulk_update_leads (leads)', () => {
       current_status: 'contacted',
       new_status: 'lost',
       dry_run: false,
-      lead_ids: ['lead-1', 'lead-2', 'lead-gone'],
+      _approved_lead_ids: ['lead-1', 'lead-2', 'lead-gone'],
     });
 
     expect(res.success).toBe(true);
@@ -253,7 +277,7 @@ describe('bulk_update_leads (leads)', () => {
     bridgeLeadsFunnelStage.mockResolvedValueOnce({ reason: 'error' });
 
     const res = await executeLeadsTool('bulk_update_leads', {
-      current_status: 'estimate_sent', new_status: 'won', dry_run: false, lead_ids: ['lead-1', 'lead-2', 'lead-3'],
+      current_status: 'estimate_sent', new_status: 'won', dry_run: false, _approved_lead_ids: ['lead-1', 'lead-2', 'lead-3'],
     });
     expect(res.success).toBe(true);
     expect(bridgeLeadsFunnelStage).toHaveBeenCalledTimes(1);
@@ -272,7 +296,7 @@ describe('bulk_update_leads (leads)', () => {
     db.mockImplementation((table) => (table === 'leads' ? leads : activities));
 
     const res = await executeLeadsTool('bulk_update_leads', {
-      current_status: 'estimate_sent', new_status: 'won', dry_run: false, lead_ids: ['lead-1'],
+      current_status: 'estimate_sent', new_status: 'won', dry_run: false, _approved_lead_ids: ['lead-1'],
     });
     expect(res.success).toBe(true);
     expect(res.updated).toBe(1);
@@ -287,7 +311,7 @@ describe('bulk_update_leads (leads)', () => {
     db.mockImplementation((table) => (table === 'leads' ? leads : activities));
 
     const res = await executeLeadsTool('bulk_update_leads', {
-      current_status: 'contacted', new_status: 'lost', dry_run: false, lead_ids: ['lead-1'],
+      current_status: 'contacted', new_status: 'lost', dry_run: false, _approved_lead_ids: ['lead-1'],
     });
     expect(res.dry_run).toBeUndefined();
     expect(res.updated).toBe(1);

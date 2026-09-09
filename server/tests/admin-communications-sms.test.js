@@ -81,6 +81,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   parkThreadSuggestions: jest.fn(async () => []),
   reopenScheduledSuggestions: jest.fn(async () => 0),
   ignoreParkedSuggestions: jest.fn(async () => 0),
+  sweepStaleSuggestionsAfterReply: jest.fn(async () => undefined),
   lockSuggestThread: jest.fn(async () => {}),
 }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous

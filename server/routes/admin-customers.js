@@ -9,6 +9,7 @@ const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
+const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
 const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
@@ -1158,6 +1159,11 @@ function mapCustomerListRow(c) {
     healthScore: c.health_score != null ? parseInt(c.health_score) : null,
     healthGrade: c.health_grade || null,
     cardsOnFile: parseInt(c.cards_on_file || 0),
+    // Active saved properties. Callers that don't select property_count
+    // (quick-add echoes, detail mappers) read 0 — never a guess of 1: a row
+    // may legitimately have no customer_properties row yet (pre-06-29
+    // customers whose sole-property anchor has not been written).
+    propertyCount: parseInt(c.property_count || 0),
   };
 }
 
@@ -2344,6 +2350,13 @@ router.get('/', async (req, res, next) => {
       db.raw('? as health_score', [latestHealthValueRaw(healthColumns, 'score')]),
       db.raw('? as health_grade', [latestHealthValueRaw(healthColumns, 'grade')]),
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
+      // ACTIVE saved properties (customer_properties) — the same rows the New
+      // Appointment service-address picker offers. The search dropdowns
+      // render a "N properties" chip from it so the office sees a
+      // multi-property customer BEFORE picking them, instead of discovering
+      // the second house only after the primary was booked (owner report
+      // 2026-09-08). Retired rows (active=false) are not counted.
+      db.raw("(SELECT COUNT(*) FROM customer_properties WHERE customer_properties.customer_id = customers.id AND customer_properties.active = TRUE) as property_count"),
       // Net of all paid payments minus refunds — the same definition the
       // customer-detail endpoint computes. customers.lifetime_revenue has NO
       // production writer (only demo seeds ever set it), so reading the
@@ -3236,14 +3249,15 @@ router.get('/:id', async (req, res, next) => {
         .orderBy('created_at', 'desc')
         .limit(25)
         .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger: ${e.message}`); return []; }),
-      db('property_nutrient_ledger')
-        .where({ customer_id: c.id, application_year: currentYear })
-        .first(
-          db.raw('COALESCE(SUM(n_applied_per_1000), 0)::float as "nApplied"'),
-          db.raw('COALESCE(SUM(p_applied_per_1000), 0)::float as "pApplied"'),
-          db.raw('COALESCE(SUM(k_applied_per_1000), 0)::float as "kApplied"'),
-          db.raw('COUNT(*)::int as entries')
-        )
+      // Summed through the shared ledger summary (nutrient-ledger.js), which
+      // weights a partial-area row by its coverage of the saved lawn — the
+      // same figure the planner's annual budget and closeout advisory use.
+      Promise.all([
+        db('property_nutrient_ledger')
+          .where({ customer_id: c.id, application_year: currentYear })
+          .select('n_applied_per_1000', 'p_applied_per_1000', 'k_applied_per_1000', 'lawn_sqft'),
+        db('customer_turf_profiles').where({ customer_id: c.id, active: true }).first('lawn_sqft'),
+      ]).then(([rows, turf]) => summarizeLedgerRows(rows, currentYear, { lawnSqft: turf?.lawn_sqft }))
         .catch(e => { logger.warn(`[customers:${c.id}] property_nutrient_ledger_summary: ${e.message}`); return null; }),
       accountPropertySummary(c.account_id, c.id).catch(e => { logger.warn(`[customers:${c.id}] account_properties: ${e.message}`); return []; }),
       annualPrepayTermsPromise,
