@@ -1438,7 +1438,15 @@ function initScheduledJobs() {
     if (!require('./callback-cards').enabled()) return;
     try {
       const { runExclusive } = require('../utils/cron-lock');
-      await runExclusive('callback-cards', () => require('./callback-cards').notifyDueCallbacks(require('../models/db')));
+      const result = await runExclusive('callback-cards', () => require('./callback-cards').notifyDueCallbacks(require('../models/db')));
+      if (result?.skipped === true && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Callback tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('callback-cards').catch(() => {});
+        await recordJobEnd('callback-cards', startedAt, error).catch(() => {});
+        throw error;
+      }
     } catch (err) {
       logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
     }

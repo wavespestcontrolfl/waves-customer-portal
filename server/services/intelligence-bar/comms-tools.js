@@ -486,7 +486,7 @@ async function getSmsStats(days) {
 // here is exactly what the office sees there.
 async function getOpenCommitments(input) {
   const { listOpenCommitments, selectOverdue, implicitDueAt, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../call-commitments');
-  const { isEnabled, gateEnvValue } = require('../../config/feature-gates');
+  const { isEnabled } = require('../../config/feature-gates');
   const party = input.party === 'customer' ? 'customer' : input.party === 'all' ? null : 'waves';
   let customerId = input.customer_id || null;
   let customerLabel = null;
@@ -510,7 +510,7 @@ async function getOpenCommitments(input) {
     // Each row also carries its own effective_due_at below.
     implicit_due_rules: {
       send_estimate: `${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours after the call`,
-      callback: gateEnvValue('GATE_CALLBACK_CARD')
+      callback: require('../callback-cards').enabled()
         ? 'four staffed hours after the call, using office hours and blackout dates'
         : "the end of the call's day (Eastern)",
       other_prompts: `${OVERDUE_IMPLICIT_DAYS} days after the call`,
