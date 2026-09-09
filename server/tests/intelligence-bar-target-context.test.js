@@ -451,7 +451,7 @@ test.each(['customer', 'raw_sms', 'vendor_email', 'unlinked_lead', 'unlinked_est
       rows.emails = [{ id: recordId, customer_id: A, from_address: 'fixture@example.invalid' }];
     }
     if (kind === 'unlinked_lead' || kind === 'bulk_leads') {
-      toolName = 'update_lead'; params = { lead_id: recordId, updates: { status: 'new' } };
+      toolName = 'update_lead_status'; params = { lead_id: recordId, updates: { status: 'new' } };
       rows.leads = [{ id: recordId, first_name: 'Synthetic', last_name: 'Person', customer_id: null }];
     }
     if (kind === 'unlinked_estimate') {
@@ -634,8 +634,12 @@ test('scoped customer-row readers fail closed for an explicitly named customer w
     expect(await Context.prepareReadInput(params, { ...unresolved, namesRequested: false }, { toolName, schema })).toEqual({ input: params });
     expect(await Context.prepareReadInput(params, { ...context(), namesRequested: true }, { toolName, schema })).toEqual({ input: params });
   }
-  // Readers outside the scoped list keep their own target checks.
-  expect(await Context.prepareReadInput({ date: '2026-09-09' }, unresolved, { toolName: 'get_zone_capacity', schema })).toEqual({ input: { date: '2026-09-09' } });
+  // A reader that touches no customer rows (scope none) keeps its own target checks.
+  expect(await Context.prepareReadInput({ date: '2026-09-09' }, unresolved, { toolName: 'find_schedule_gaps', schema })).toEqual({ input: { date: '2026-09-09' } });
+  // A reader the catalog does not know fails closed everywhere, resolved or not.
+  expect(await Context.prepareReadInput({ date: '2026-09-09' }, unresolved, { toolName: 'get_zone_capacity', schema })).toMatchObject({ code: 'scope_unclassified' });
+  expect(await Context.prepareReadInput({ date: '2026-09-09' }, context(), { toolName: 'get_zone_capacity', schema })).toMatchObject({ code: 'scope_unclassified' });
+  expect(await Context.prepareReadInput({ date: '2026-09-09' }, { targets: [], page: { ids: {} } }, { toolName: 'get_zone_capacity', schema })).toMatchObject({ code: 'scope_unclassified' });
   // Readers with an optional customer selector are broad only when the model supplies no selector or record id.
   const optional = { properties: { customer_id: { type: 'string' }, call_id: { type: 'string' }, days_back: { type: 'number' } } };
   for (const [toolName, params] of [['get_call_log', { days_back: 1 }], ['search_messages', { search: 'estimate' }], ['get_open_commitments', {}]]) {
@@ -763,4 +767,55 @@ test('the operator-wide conversation search is refused inside a customer-scoped 
   expect(await Context.prepareReadInput(params, context(), { toolName: 'search_ib_history', schema })).toMatchObject({ code: 'customer_scope_required' });
   expect(await Context.prepareReadInput(params, { targets: [], namesRequested: true, page: { ids: {} } }, { toolName: 'search_ib_history', schema })).toMatchObject({ code: 'customer_scope_required' });
   expect(await Context.prepareReadInput(params, { targets: [], page: { ids: {} } }, { toolName: 'search_ib_history', schema })).toEqual({ input: params });
+});
+
+// ─── Scope catalog enforcement matrix (scope-policy.js) ─────────────────
+// One representative per declared class, exercised for a resolved task
+// customer, an explicitly named customer who did not resolve, and a request
+// that names nobody. The class comes from action-policy.json, not from a
+// list in task-context.js, so a reclassification changes behavior here.
+test('each read scope class enforces its rule for resolved, unresolved and unnamed customers', async () => {
+  const { scopeOf } = require('../services/intelligence-bar/scope-policy');
+  const schema = { properties: { limit: { type: 'number' } } };
+  const resolved = context();
+  const unresolved = { targets: [], namesRequested: true, candidates: [], page: { ids: {} } };
+  const unnamed = { targets: [], page: { ids: {} } };
+  const code = async (toolName, ctx, params = {}) => (await Context.prepareReadInput(params, ctx, { toolName, schema })).code ?? 'ok';
+  const matrix = [
+    // [tool, scope, resolved, unresolved, unnamed]
+    ['get_kpi_snapshot', 'none', 'ok', 'ok', 'ok'],
+    ['get_outstanding_balances', 'broad', 'customer_scope_required', 'customer_scope_required', 'ok'],
+    ['search_ib_history', 'actor_wide', 'customer_scope_required', 'customer_scope_required', 'ok'],
+    ['query_customers', 'scoped', 'ok', 'customer_scope_required', 'ok'],
+    ['get_service_history', 'record', 'ok', 'customer_scope_required', 'ok'],
+    ['get_partner_call_history', 'phone_keyed', 'target_clarification_required', 'customer_scope_required', 'ok'],
+    ['check_email_suppression', 'email_keyed', 'target_clarification_required', 'customer_scope_required', 'ok'],
+  ];
+  for (const [toolName, scope, whenResolved, whenUnresolved, whenUnnamed] of matrix) {
+    expect({ toolName, scope: scopeOf(toolName) }).toEqual({ toolName, scope });
+    expect({ toolName, resolved: await code(toolName, resolved) }).toEqual({ toolName, resolved: whenResolved });
+    expect({ toolName, unresolved: await code(toolName, unresolved) }).toEqual({ toolName, unresolved: whenUnresolved });
+    expect({ toolName, unnamed: await code(toolName, unnamed) }).toEqual({ toolName, unnamed: whenUnnamed });
+  }
+  // A record reader that carries its own selector is admitted for an unresolved name and checked against the task's authority.
+  expect(await code('get_service_history', unresolved, { customer_id: A })).toBe('target_clarification_required');
+  expect(await code('get_service_history', resolved, { customer_id: A })).toBe('ok');
+});
+
+test('write scope classes are enforced for resolved and unresolved customers and an unclassified writer never proposes', async () => {
+  const { scopeOf } = require('../services/intelligence-bar/scope-policy');
+  const unresolved = { targets: [], namesRequested: true };
+  expect(scopeOf('optimize_all_routes')).toBe('route_wide');
+  expect((await Context.validateRecordTarget({ date: '2026-09-09' }, context(), { toolName: 'optimize_all_routes' })).code).toBe('customer_scope_required');
+  expect((await Context.validateRecordTarget({ date: '2026-09-09' }, unresolved, { toolName: 'optimize_all_routes' })).code).toBe('customer_scope_required');
+  expect(await Context.validateRecordTarget({ date: '2026-09-09' }, { targets: [] }, { toolName: 'optimize_all_routes' })).toBeNull();
+  expect(scopeOf('update_customer')).toBe('record');
+  expect(await Context.validateRecordTarget({ customer_id: A, updates: {} }, context(), { toolName: 'update_customer' })).toBeNull();
+  expect((await Context.validateRecordTarget({ customer_id: A, updates: {} }, unresolved, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
+  expect(scopeOf('adjust_stock')).toBe('none');
+  expect(await Context.validateRecordTarget({ quantity: 1 }, context(), { toolName: 'adjust_stock' })).toBeNull();
+  for (const ctx of [context(), unresolved, { targets: [] }]) {
+    expect(await Context.validateRecordTarget({ customer_id: A }, ctx, { toolName: 'update_lead' })).toMatchObject({ code: 'scope_unclassified' });
+    expect(await Context.validateRecordTarget({ customer_id: A }, ctx, { toolName: 'update_lead', forApproval: true })).toMatchObject({ code: 'scope_unclassified' });
+  }
 });

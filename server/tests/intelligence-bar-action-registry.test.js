@@ -189,3 +189,89 @@ test('generic lookup verbs cannot make an unsupported capability appear discover
   expect(registry.discover({ query: 'get inventory stock' }, { role: 'admin', context: 'customers' })
     .definitions.length).toBeGreaterThan(0);
 });
+
+// ─── Data-scope catalog (scope-policy.js) ───────────────────────────────
+// Membership lives in action-policy.json. These lists are the frozen policy
+// snapshot: a tool cannot silently leave a class or join the registry without
+// one. Change a list here first, then the policy file.
+const SCOPE_SNAPSHOT = {
+  broad: [
+    'cancel_and_reschedule_far_out', 'export_payouts', 'find_duplicates', 'find_overdue_customers', 'find_similar_estimates',
+    'get_ar_aging', 'get_blocked_senders', 'get_churn_analysis', 'get_csr_overview', 'get_day_summary', 'get_email_suppressions',
+    'get_inbox_summary', 'get_my_route', 'get_outreach_candidates', 'get_outstanding_balances', 'get_payer_ar_aging',
+    'get_payout_details', 'get_recent_completions', 'get_revenue_breakdown', 'get_stock_movements', 'get_stripe_payment_intents',
+    'get_today_briefing', 'get_top_revenue_customers', 'get_twilio_failed_messages', 'get_unanswered_threads',
+    'get_unresponded_reviews', 'get_zone_density', 'list_call_partners', 'list_open_closeouts', 'search_reviews',
+  ],
+  scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
+  actor_wide: ['search_ib_history'],
+  phone_keyed: ['get_partner_call_history'],
+  email_keyed: ['check_email_suppression'],
+  route_wide: ['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments'],
+  record: [
+    // reads: a customer or record selector confines the rows to one customer
+    'check_customer_status', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'get_call_log',
+    'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_open_commitments', 'get_service_history',
+    'get_stop_details', 'query_revenue', 'search_messages',
+    // writes: specific customer records proven by validateRecordTarget
+    'assign_technician', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan', 'create_agent_estimate_draft',
+    'create_appointment', 'create_customer', 'create_pending_estimate', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
+    'send_email_reply', 'send_sms', 'set_estimate_presentation', 'submit_review_reply', 'switch_appointment_property',
+    'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer', 'update_lead_status',
+    'update_property_access',
+  ],
+};
+
+test('every tool declares a data scope that is valid for its kind', () => {
+  const scopePolicy = require('../services/intelligence-bar/scope-policy');
+  const policy = require('../services/intelligence-bar/action-policy.json');
+  for (const [name, entry] of Object.entries(policy)) {
+    expect({ name, valid: scopePolicy.validScope(entry) }).toEqual({ name, valid: true });
+    expect({ name, scope: scopePolicy.scopeOf(name) }).toEqual({ name, scope: entry.scope });
+    expect(registry.actions.get(name).scope).toBe(entry.scope);
+  }
+  expect(scopePolicy.scopeOf('arbitrary_action')).toBeNull();
+});
+
+test('the non-trivial scope classes match the frozen snapshot and no tool sits in two of them', () => {
+  const { toolsWithScope, READ_SCOPES, WRITE_SCOPES } = require('../services/intelligence-bar/scope-policy');
+  for (const [scope, names] of Object.entries(SCOPE_SNAPSHOT)) expect(toolsWithScope(scope)).toEqual([...names].sort());
+  const classified = Object.values(SCOPE_SNAPSHOT).flat();
+  expect(new Set(classified).size).toBe(classified.length);
+  const policy = require('../services/intelligence-bar/action-policy.json');
+  for (const name of Object.keys(policy)) {
+    if (!classified.includes(name)) expect({ name, scope: policy[name].scope }).toEqual({ name, scope: 'none' });
+  }
+  expect(READ_SCOPES).toEqual(['none', 'record', 'scoped', 'broad', 'actor_wide', 'phone_keyed', 'email_keyed']);
+  expect(WRITE_SCOPES).toEqual(['none', 'record', 'route_wide']);
+});
+
+test('a reader whose schema takes a customer selector is never scope none', () => {
+  for (const action of registry.actions.values()) {
+    if (action.kind !== 'read') continue;
+    const selector = ['customer_id', 'customer_name'].some(key => action.schema.properties?.[key]);
+    if (selector) expect({ id: action.id, scope: action.scope }).toMatchObject({ id: action.id, scope: expect.stringMatching(/^(record|scoped)$/) });
+  }
+});
+
+test('a tool with a missing or invalid scope never joins the registry', () => {
+  const policy = require('../services/intelligence-bar/action-policy.json');
+  const { scope: _dropped, ...unscoped } = policy.query_products;
+  const cases = [
+    ['missing', unscoped],
+    ['unknown class', { ...policy.query_products, scope: 'everything' }],
+    ['write class on a read', { ...policy.query_products, scope: 'route_wide' }],
+    ['read class on a write', { ...policy.adjust_stock, scope: 'broad' }],
+  ];
+  for (const [label, entry] of cases) {
+    const name = entry.kind === 'read' ? 'query_products' : 'adjust_stock';
+    jest.isolateModules(() => {
+      jest.doMock('../services/intelligence-bar/action-policy.json', () => ({ ...policy, [name]: entry }));
+      const isolated = require('../services/intelligence-bar/action-registry');
+      expect({ label, errors: isolated.policyErrors }).toEqual({ label, errors: [name] });
+      expect(isolated.actions.has(name)).toBe(false);
+      expect(isolated.validateInput(name, {}, { role: 'admin', context: 'procurement' })).toMatchObject({ code: 'capability_unimplemented' });
+      jest.dontMock('../services/intelligence-bar/action-policy.json');
+    });
+  }
+});

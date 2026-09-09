@@ -500,20 +500,25 @@ function bulkLeadSelection(toolName, records, params) {
   });
 }
 
-// Writers that act on every stop for a date or technician and carry no record
-// identifiers. A customer-scoped task cannot mint an approval for them: the
-// stored action would have no references for the confirm-time recheck. An
-// explicitly named customer who did not resolve keeps the task customer-scoped
-// (as for the broad readers), so a misspelling never widens a request to a
-// whole date or technician.
-const ROUTE_WIDE_WRITERS = new Set(['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments']);
+// Per-tool data scope comes from action-policy.json (see scope-policy.js).
+// A tool whose scope is missing or invalid is refused here as well as by the
+// registry, so no caller can reach an unclassified reader or writer.
+const { scopeOf, UNCLASSIFIED } = require('./scope-policy');
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   // A refused cohort or unresolved name stops here too; explicit record IDs
   // inside "both appointment A and appointment B" do not reopen it.
   if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
   const policy = require('./action-policy.json')[toolName];
-  if ((context.targets?.length || context.namesRequested) && ROUTE_WIDE_WRITERS.has(toolName)) {
+  const scope = toolName === undefined ? null : scopeOf(toolName);
+  if (toolName !== undefined && !scope) return UNCLASSIFIED;
+  // Route-wide writers act on every stop for a date or technician and carry no
+  // record identifiers. A customer-scoped task cannot mint an approval for
+  // them: the stored action would have no references for the confirm-time
+  // recheck. An explicitly named customer who did not resolve keeps the task
+  // customer-scoped (as for the broad readers), so a misspelling never widens
+  // a request to a whole date or technician.
+  if ((context.targets?.length || context.namesRequested) && scope === 'route_wide') {
     return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
   }
   if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
@@ -572,82 +577,65 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
 // Resolve name/phone selectors to one of the task's known customers, then pass
 // the immutable ID to existing readers. Broad searches without a selector stay
 // broad. No fuzzy result or model-selected alternate contact becomes authority.
-// Readers that list customer rows (names, phones, addresses, balances,
-// message bodies) without a customer selector and without consuming the
-// task's read scope. Inside a customer-scoped task they would hand every
-// matching customer to the model, so they are refused there; the scoped
-// readers (query_customers, query_leads, get_schedule_view, search_emails …)
-// remain available for the task customer.
-const BROAD_CUSTOMER_ROW_READERS = new Set([
-  'get_csr_overview', 'get_unanswered_threads', 'list_call_partners',
-  'find_duplicates', 'find_overdue_customers', 'get_recent_completions',
-  'get_day_summary', 'get_zone_density', 'cancel_and_reschedule_far_out',
-  'get_outreach_candidates', 'get_unresponded_reviews', 'search_reviews',
-  'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
-  'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
-  'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging', 'get_blocked_senders',
-  'get_my_route', 'get_payout_details', 'export_payouts',
-  // The open-closeout sweep walks every completed visit of the day and
-  // returns other customers' ids and closeout facts; it takes no selector.
-  'list_open_closeouts',
-]);
-
-// Readers that confine themselves to the task's read scope (readCustomerIds).
-// That scope is empty when an explicitly named customer did not resolve, so
-// they would read every customer's rows; they fail closed until it resolves.
-// Readers with an optional customer selector fail closed the same way when
-// the model supplies no selector at all (see hasOwnSelector).
-const SCOPED_CUSTOMER_ROW_READERS = new Set(['query_customers', 'query_leads', 'get_stale_leads', 'get_schedule_view',
-  'search_emails', 'get_email_thread', 'draft_email_reply', 'match_existing_customer']);
+// Read scope classes (declared per tool in action-policy.json, see
+// scope-policy.js):
+// - broad: readers that list customer rows (names, phones, addresses,
+//   balances, message bodies) without a customer selector and without
+//   consuming the task's read scope. Inside a customer-scoped task they would
+//   hand every matching customer to the model, so they are refused there.
+// - scoped: readers that confine themselves to the task's read scope
+//   (readCustomerIds). That scope is empty when an explicitly named customer
+//   did not resolve, so they would read every customer's rows; they fail
+//   closed until it resolves.
+// - record: readers with a customer or record selector. They fail closed the
+//   same way when the model supplies no selector at all (see hasOwnSelector).
+// - actor_wide: the operator's own past conversations quote every customer
+//   verbatim, and a stored thread carries no customer association to filter
+//   on, so the search is refused inside a customer-scoped task, not narrowed.
+// - phone_keyed / email_keyed: the supplied contact must belong to a task customer.
 // A customer selector or a record identifier: either one is checked against
 // the task's authority further down, so only a selector-free call is broad.
 const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone)
   || Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
-
-// The operator's own past conversations quote every customer verbatim, and a
-// stored thread carries no customer association to filter on, so the search
-// is refused inside a customer-scoped task rather than narrowed.
-const ACTOR_WIDE_READERS = new Set(['search_ib_history']);
-
-const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
-const EMAIL_KEYED_READERS = new Set(['check_email_suppression']);
 
 async function prepareReadInput(params, context, { toolName, schema }) {
   // A refused cohort never widens into an unscoped read; an unresolved
   // explicit name is handled by the scope guards below, which still admit a
   // reader that carries its own selector or record identifier.
   if (context.ambiguous) return { error: 'Name one customer for this record lookup', code: 'target_clarification_required' };
+  const scope = scopeOf(toolName);
+  if (!scope) return UNCLASSIFIED;
   const input = { ...params };
   // A request about one customer — a resolved target, an unresolved name, or
   // a phone/email literal that identifies the customer — never widens into
   // a reader that lists every customer.
   const customerSpecific = Boolean(context.targets?.length || context.namesRequested || context.contactRequested);
-  if (customerSpecific && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
+  if (customerSpecific && scope === 'broad') {
     return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
   }
-  if (customerSpecific && ACTOR_WIDE_READERS.has(toolName)) {
+  if (customerSpecific && scope === 'actor_wide') {
     return { error: 'Past-conversation search returns verbatim exchanges about any customer and cannot be limited to the task customer, so it is unavailable inside a task for a specific customer.', code: 'customer_scope_required' };
   }
   if (context.namesRequested && !context.targets?.length
-    && (SCOPED_CUSTOMER_ROW_READERS.has(toolName) || (schema.properties?.customer_id && !hasOwnSelector(params)))) {
+    && (scope === 'scoped' || ((scope === 'record' || schema.properties?.customer_id) && !hasOwnSelector(params)))) {
     return { error: 'The named customer did not match anyone on file, so this lookup has no customer scope. Correct the name before reading that customer\'s records.', code: 'customer_scope_required' };
   }
   // Keyed readers bind their phone or email to a task customer. A request
   // about a customer who did not resolve has nobody to bind the key to, so a
   // model-supplied key cannot read another party's history or suppression.
-  if (customerSpecific && !context.targets?.length && (PHONE_KEYED_READERS.has(toolName) || EMAIL_KEYED_READERS.has(toolName))) {
+  if (customerSpecific && !context.targets?.length && (scope === 'phone_keyed' || scope === 'email_keyed')) {
     return { error: 'The named customer did not match anyone on file, so this lookup has no customer to verify its phone or email against. Correct the name before reading by contact.', code: 'customer_scope_required' };
   }
   // Phone-keyed readers without a customer selector: the phone must belong to
   // a task customer, so a model-supplied number cannot read another party.
-  if (context.targets?.length && PHONE_KEYED_READERS.has(toolName)) {
+  if (context.targets?.length && scope === 'phone_keyed') {
     const digits = String(params.phone || '').replace(/\D/g, '').slice(-10);
     const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('phone');
     if (!digits || !owners.some(owner => String(owner.phone || '').replace(/\D/g, '').slice(-10) === digits)) {
       return { error: 'Use the task customer\'s own phone number for this call history', code: 'target_clarification_required' };
     }
   }
-  if (context.targets?.length && EMAIL_KEYED_READERS.has(toolName)) {
+  if (context.targets?.length && scope === 'email_keyed') {
     const email = String(params.email || '').trim().toLowerCase();
     const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('email');
     if (!email || !owners.some(owner => String(owner.email || '').trim().toLowerCase() === email)) {
@@ -704,4 +692,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { UUID_RE, BROAD_CUSTOMER_ROW_READERS, pageIds, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { UUID_RE, pageIds, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
