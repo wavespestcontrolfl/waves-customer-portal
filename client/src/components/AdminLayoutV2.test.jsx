@@ -88,7 +88,7 @@ describe("AdminLayoutV2", () => {
     expect(ForbiddenChild).not.toHaveBeenCalled();
   });
 
-  it.each(["payers", "billing-recovery", "invoices"].flatMap((path) => ["csr", "technician"].map((role) => ({ path, role }))))(
+  it.each(["payers", "billing-recovery", "invoices", "banking", "tax"].flatMap((path) => ["csr", "technician"].map((role) => ({ path, role }))))(
     "blocks $role at the migrated $path route before mounting its content",
     async ({ path, role }) => {
       adminFetch.mockResolvedValue({ id: 2, name: "Fixture staff", role });
