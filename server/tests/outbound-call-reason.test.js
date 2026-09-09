@@ -14,13 +14,16 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/sms-intent', () => ({ isSmsReaction: jest.fn((b) => /^(👍|❤️|Liked|Loved) ?/.test(String(b))) }));
 
 const db = require('../models/db');
 const {
   REASONS,
   LOOKBACK_MS,
-  QUOTE_BRIDGE_LOOKBACK_MS,
+  VISIT_IN_PROGRESS_WINDOW_MS,
   resolveOutboundCallReason,
+  visitInProgress,
+  isSubstantiveText,
   _private,
 } = require('../services/outbound-call-reason');
 
@@ -48,6 +51,8 @@ function installDb(byTable = {}) {
       return state.byTable[table] || [];
     };
     b.whereIn = jest.fn((...a) => { q.wheres.push(['IN', ...a]); return b; });
+    b.whereNull = jest.fn((...a) => { q.wheres.push(['NULL', ...a]); return b; });
+    b.orWhereBetween = jest.fn((...a) => { q.wheres.push(['OR BETWEEN', ...a]); return b; });
     b.select = jest.fn(async () => rowsFor());
     b.first = jest.fn(async () => rowsFor()[0]);
     return b;
@@ -95,12 +100,12 @@ describe('resolveOutboundCallReason', () => {
     // The lookback probe returns the same spam row → filtered → no call; no text → generic.
     const r = await resolveOutboundCallReason({ call: call({ metadata: { relatedCallId: 'in-9' } }), phone: PHONE });
     expect(r.reason).toBe(REASONS.GENERIC);
-    expect(state.queries.map((q) => q.table)).toEqual(['call_log', 'call_log', 'sms_log', 'call_log']);
+    expect(state.queries.map((q) => q.table)).toEqual(['call_log', 'call_log', 'sms_log', 'leads', 'call_log']);
   });
 
   test('the literal "undefined" relatedCallId is not looked up', async () => {
     await resolveOutboundCallReason({ call: call({ metadata: { relatedCallId: 'undefined' } }), phone: PHONE });
-    expect(state.queries.map((q) => q.table)).toEqual(['call_log', 'sms_log', 'call_log']);
+    expect(state.queries.map((q) => q.table)).toEqual(['call_log', 'sms_log', 'leads', 'call_log']);
   });
 
   test('inbound call inside 48h, no text → returning_call', async () => {
@@ -110,7 +115,7 @@ describe('resolveOutboundCallReason', () => {
   });
 
   test('inbound text inside 48h, no call → saw_text', async () => {
-    installDb({ sms_log: [{ id: 'sms-1', created_at: hoursAgo(1) }] });
+    installDb({ sms_log: [{ id: 'sms-1', created_at: hoursAgo(1), message_body: 'Can you come look at the ants?' }] });
     const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
     expect(r).toEqual({ reason: REASONS.SAW_TEXT, evidence: { inbound_sms_id: 'sms-1', at: hoursAgo(1) } });
   });
@@ -118,7 +123,7 @@ describe('resolveOutboundCallReason', () => {
   test('both inside 48h → the MORE RECENT wins (text newer)', async () => {
     installDb({
       call_log: [{ id: 'in-1', created_at: hoursAgo(5), ai_extraction_enriched: { call_nature: 'new_lead' } }],
-      sms_log: [{ id: 'sms-1', created_at: hoursAgo(1) }],
+      sms_log: [{ id: 'sms-1', created_at: hoursAgo(1), message_body: 'Can you come look at the ants?' }],
     });
     const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
     expect(r.reason).toBe(REASONS.SAW_TEXT);
@@ -127,7 +132,7 @@ describe('resolveOutboundCallReason', () => {
   test('both inside 48h → the MORE RECENT wins (call newer, tie goes to the call)', async () => {
     installDb({
       call_log: [{ id: 'in-1', created_at: hoursAgo(1), ai_extraction_enriched: { call_nature: 'new_lead' } }],
-      sms_log: [{ id: 'sms-1', created_at: hoursAgo(1) }],
+      sms_log: [{ id: 'sms-1', created_at: hoursAgo(1), message_body: 'Can you come look at the ants?' }],
     });
     const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
     expect(r.reason).toBe(REASONS.RETURNING_CALL);
@@ -171,10 +176,11 @@ describe('resolveOutboundCallReason', () => {
     const r = await resolveOutboundCallReason({ call: call({ customer_id: null }), phone: '' });
     expect(r.reason).toBe(REASONS.GENERIC);
     for (const q of state.queries) expect(q.raws).toEqual([['false']]);
+    expect(state.queries).toHaveLength(4);
   });
 
   test('phone-only contact (no customer) uses a plain where on the last-10', async () => {
-    installDb({ sms_log: [{ id: 'sms-1', created_at: hoursAgo(1) }] });
+    installDb({ sms_log: [{ id: 'sms-1', created_at: hoursAgo(1), message_body: 'Can you come look at the ants?' }] });
     const r = await resolveOutboundCallReason({ call: call({ customer_id: null }), phone: PHONE });
     expect(r.reason).toBe(REASONS.SAW_TEXT);
     expect(state.queries[1].wheres.some((w) => w[0] === 'OR')).toBe(false);
@@ -187,10 +193,9 @@ describe('resolveOutboundCallReason', () => {
     const q = state.queries.find((x) => x.wheres.some((w) => w[0] === 'direction' && w[1] === 'outbound'));
     expect(q.wheres).toEqual(expect.arrayContaining([
       ['IN', 'source', ['lead-webhook-auto-bridge']],
-      ['created_at', '>=', new Date(T0.getTime() - QUOTE_BRIDGE_LOOKBACK_MS)],
+      ['created_at', '>=', new Date(T0.getTime() - LOOKBACK_MS)],
     ]));
     expect(q.wheres.find((w) => w[0] === 'OR')[1].__raw).toContain("metadata->>'leadPhone'");
-    expect(QUOTE_BRIDGE_LOOKBACK_MS).toBe(48 * 3600000);
   });
 
   test('a quote bridge loses to a MORE RECENT inbound call or text', async () => {
@@ -202,9 +207,63 @@ describe('resolveOutboundCallReason', () => {
     expect(r.reason).toBe(REASONS.RETURNING_CALL);
   });
 
+  test('a web quote-form lead inside 48h → quote_request even when the after-hours bridge never fired', async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(19) }] });
+    const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
+    expect(r).toEqual({ reason: REASONS.QUOTE_REQUEST, evidence: { quote_lead_id: 'lead-1', at: hoursAgo(19) } });
+    const q = state.queries.find((x) => x.table === 'leads');
+    expect(q.wheres).toEqual(expect.arrayContaining([
+      ['NULL', 'deleted_at'],
+      ['IN', 'first_contact_channel', ['form', 'website_quote']],
+      ['created_at', '>=', new Date(T0.getTime() - LOOKBACK_MS)],
+    ]));
+    expect(q.wheres.find((w) => w[0] === 'OR')[1].__raw).toContain('phone');
+  });
+
+  test('one-word acknowledgements, reactions, empty MMS and reschedule replies do NOT count as "your text"', async () => {
+    installDb({
+      sms_log: [
+        { id: 'ack', created_at: hoursAgo(1), message_body: 'Ok' },
+        { id: 'menu', created_at: hoursAgo(2), message_body: '1', message_type: 'reschedule_reply' },
+        { id: 'thanks', created_at: hoursAgo(3), message_body: 'Great! Thank you' },
+        { id: 'react', created_at: hoursAgo(4), message_body: 'Liked "Adam is on the way"' },
+        { id: 'empty', created_at: hoursAgo(5), message_body: '' },
+        { id: 'real', created_at: hoursAgo(6), message_body: 'I thought you were coming Monday' },
+      ],
+    });
+    const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
+    expect(r).toEqual({ reason: REASONS.SAW_TEXT, evidence: { inbound_sms_id: 'real', at: hoursAgo(6) } });
+  });
+
+  test('isSubstantiveText', () => {
+    for (const b of ['Ok', 'okay!', 'k', 'yes', 'Thanks', 'Great! Thank you', 'sounds good', '1', '', '   ', '👍', '5125']) {
+      expect(isSubstantiveText({ message_body: b })).toBe(false);
+    }
+    expect(isSubstantiveText({ message_body: 'Can I call you later?' })).toBe(true);
+    expect(isSubstantiveText({ message_body: 'Can I call you later?', message_type: 'reschedule_reply' })).toBe(false);
+    expect(isSubstantiveText({ message_body: 'looking for a wdo on 12211 Violet Jasper Dr' })).toBe(true);
+  });
+
   test('nothing in the lookback → generic', async () => {
     const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
     expect(r).toEqual({ reason: REASONS.GENERIC, evidence: {} });
+  });
+
+  test('visitInProgress: live en_route/on_site status OR an en_route/arrived stamp inside the last 3h', async () => {
+    installDb({ scheduled_services: [{ id: 'v1' }] });
+    await expect(visitInProgress({ customerId: 'cust-1', before: T0 })).resolves.toBe(true);
+    const q = state.queries[0];
+    expect(q.table).toBe('scheduled_services');
+    expect(q.wheres).toEqual(expect.arrayContaining([
+      ['customer_id', 'cust-1'],
+      ['IN', 'status', ['en_route', 'on_site']],
+      ['OR BETWEEN', 'en_route_at', [new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS), T0]],
+      ['OR BETWEEN', 'arrived_at', [new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS), T0]],
+    ]));
+    expect(VISIT_IN_PROGRESS_WINDOW_MS).toBe(3 * 3600000);
+    installDb({});
+    await expect(visitInProgress({ customerId: 'cust-1', before: T0 })).resolves.toBe(false);
+    await expect(visitInProgress({ customerId: null, before: T0 })).resolves.toBe(false);
   });
 
   test('a probe failure falls back to generic instead of throwing', async () => {

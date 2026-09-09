@@ -7,15 +7,26 @@
  *
  *   quote_request   the web quote-form auto-bridge (call_log.source) — they
  *                   just submitted a quote request; or a manual follow-up
- *                   call to someone we quote-bridged inside the last 48h
- *                   (the replay showed the office redialing a form lead a
- *                   day or two later).
+ *                   call to someone who submitted a web quote form inside
+ *                   the last 48h (a leads row from the form / website_quote
+ *                   channel, or our own bridge call — the bridge does not
+ *                   fire after hours, so the lead row is the primary signal).
+ *
+ *   Suppression (not a reason): visitInProgress() — the technician is en
+ *   route to or on site at this customer right now. Those calls are about
+ *   finding the address or getting access; the customer just received the
+ *   en-route / arrived texts, and a "returning your call" or "quote request"
+ *   text would be wrong. The send layer skips the text entirely.
  *   returning_call  a callback of a specific inbound call
  *                   (call_log.metadata.relatedCallId, set by the call-log
  *                   Call button), or the most recent inbound call from them
  *                   inside the lookback (spam / robocall / wrong-number /
  *                   vendor natures excluded).
- *   saw_text        an inbound text from them inside the lookback.
+ *   saw_text        an inbound text from them inside the lookback — a real
+ *                   message, not a one-word acknowledgement ("Ok", "1",
+ *                   "Great! Thank you", a bare emoji, an empty MMS) or a
+ *                   reschedule-option reply; the audit over real calls
+ *                   showed those producing "Saw your text" for nothing.
  *   generic         nothing we can honestly name — "Sorry we missed you."
  *
  * When several of {inbound call, inbound text, quote bridge} fall inside
@@ -27,6 +38,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { isSmsReaction } = require('./sms-intent');
 
 const REASONS = Object.freeze({
   QUOTE_REQUEST: 'quote_request',
@@ -36,10 +48,15 @@ const REASONS = Object.freeze({
 });
 
 const QUOTE_REQUEST_SOURCES = new Set(['lead-webhook-auto-bridge']);
+// leads.first_contact_channel values written by the web quote funnels.
+const QUOTE_FORM_CHANNELS = new Set(['form', 'website_quote']);
+// Reply types that are answers to OUR texts, never a message to call back about.
+const IGNORED_TEXT_TYPES = new Set(['reschedule_reply']);
+const VISIT_IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
+const VISIT_IN_PROGRESS_WINDOW_MS = 3 * 60 * 60 * 1000;
 // Same set context-aggregator uses to keep junk calls out of customer context.
 const NON_CONTACT_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
 const LOOKBACK_MS = 48 * 60 * 60 * 1000;
-const QUOTE_BRIDGE_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 
 function last10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -97,8 +114,20 @@ async function latestInboundCall({ customerId, phoneLast10, before, since }) {
   return rows.find((r) => !NON_CONTACT_NATURES.has(callNature(r))) || null;
 }
 
+// A text worth saying "saw your text" about: has words, is not a bare
+// acknowledgement / emoji reaction, and is not a reply to a reschedule menu.
+function isSubstantiveText(row) {
+  if (IGNORED_TEXT_TYPES.has(String(row?.message_type || ''))) return false;
+  const body = String(row?.message_body || '').trim();
+  if (!body || !/[a-z]/i.test(body)) return false;
+  if (isSmsReaction(body)) return false;
+  // Short courtesy closers with no content ("ok", "thanks", "great thank you").
+  if (/^(ok(ay)?|k|yes|no|yep|nope|sure|great|thanks?|thank you|ty|got it|sounds good|perfect|will do|1|2)[\s!.]*(thanks?|thank you)?[\s!.]*$/i.test(body)) return false;
+  return true;
+}
+
 async function latestInboundText({ customerId, phoneLast10, before, since }) {
-  return fromContact(
+  const rows = await fromContact(
     db('sms_log')
       .where('direction', 'inbound')
       .where('created_at', '<', before)
@@ -106,14 +135,49 @@ async function latestInboundText({ customerId, phoneLast10, before, since }) {
     { customerId, phoneLast10, phoneColumn: 'from_phone' },
   )
     .orderBy('created_at', 'desc')
+    .limit(5)
+    .select('id', 'created_at', 'message_body', 'message_type');
+  return rows.find(isSubstantiveText) || null;
+}
+
+// A web quote-form lead from them inside the lookback (the form's own row —
+// fires even when the after-hours bridge did not).
+async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
+  return fromContact(
+    db('leads')
+      .whereNull('deleted_at')
+      .whereIn('first_contact_channel', [...QUOTE_FORM_CHANNELS])
+      .where('created_at', '<', before)
+      .where('created_at', '>=', since),
+    { customerId, phoneLast10, phoneColumn: 'phone' },
+  )
+    .orderBy('created_at', 'desc')
     .first('id', 'created_at');
+}
+
+/**
+ * Is a technician en route to / on site at this customer right now (or was,
+ * inside the last 3h before `before`)? Live rows carry the status; the
+ * en_route_at / arrived_at stamps make the check replayable on history.
+ */
+async function visitInProgress({ customerId, before = new Date() } = {}) {
+  if (!customerId) return false;
+  const since = new Date(new Date(before).getTime() - VISIT_IN_PROGRESS_WINDOW_MS);
+  const row = await db('scheduled_services')
+    .where('customer_id', customerId)
+    .where(function active() {
+      this.whereIn('status', VISIT_IN_PROGRESS_STATUSES)
+        .orWhereBetween('en_route_at', [since, before])
+        .orWhereBetween('arrived_at', [since, before]);
+    })
+    .first('id');
+  return !!row;
 }
 
 // Our own quote-form auto-bridge to this person inside the last 48h: the
 // follow-up call is still about their quote request. The bridge row's
 // to_phone is the admin cell; the prospect's number is metadata.leadPhone.
-async function latestQuoteBridge({ customerId, phoneLast10, before }) {
-  const since = new Date(before.getTime() - QUOTE_BRIDGE_LOOKBACK_MS);
+async function latestQuoteBridge({ customerId, phoneLast10, before, since }) {
   return db('call_log')
     .where('direction', 'outbound')
     .whereIn('source', [...QUOTE_REQUEST_SOURCES])
@@ -155,18 +219,20 @@ async function resolveOutboundCallReason({ call = {}, phone } = {}) {
       return { reason: REASONS.RETURNING_CALL, evidence: { related_call_id: related.id, at: related.created_at } };
     }
 
-    const [inboundCall, inboundText, quoteBridge] = await Promise.all([
+    const [inboundCall, inboundText, quoteLead, quoteBridge] = await Promise.all([
       latestInboundCall({ customerId, phoneLast10, before, since }),
       latestInboundText({ customerId, phoneLast10, before, since }),
-      latestQuoteBridge({ customerId, phoneLast10, before }),
+      latestQuoteFormLead({ customerId, phoneLast10, before, since }),
+      latestQuoteBridge({ customerId, phoneLast10, before, since }),
     ]);
     const candidates = [
       inboundCall && { reason: REASONS.RETURNING_CALL, at: inboundCall.created_at, evidence: { inbound_call_id: inboundCall.id, at: inboundCall.created_at } },
       inboundText && { reason: REASONS.SAW_TEXT, at: inboundText.created_at, evidence: { inbound_sms_id: inboundText.id, at: inboundText.created_at } },
+      quoteLead && { reason: REASONS.QUOTE_REQUEST, at: quoteLead.created_at, evidence: { quote_lead_id: quoteLead.id, at: quoteLead.created_at } },
       quoteBridge && { reason: REASONS.QUOTE_REQUEST, at: quoteBridge.created_at, evidence: { quote_bridge_call_id: quoteBridge.id, at: quoteBridge.created_at } },
     ].filter(Boolean);
     if (candidates.length) {
-      // Most recent wins; on a tie the order above (call, text, bridge) holds.
+      // Most recent wins; on a tie the order above (call, text, lead, bridge) holds.
       const best = candidates.reduce((a, b) => (new Date(b.at) > new Date(a.at) ? b : a));
       return { reason: best.reason, evidence: best.evidence };
     }
@@ -182,9 +248,12 @@ async function resolveOutboundCallReason({ call = {}, phone } = {}) {
 module.exports = {
   REASONS,
   LOOKBACK_MS,
-  QUOTE_BRIDGE_LOOKBACK_MS,
   QUOTE_REQUEST_SOURCES,
+  QUOTE_FORM_CHANNELS,
   NON_CONTACT_NATURES,
+  VISIT_IN_PROGRESS_WINDOW_MS,
   resolveOutboundCallReason,
+  visitInProgress,
+  isSubstantiveText,
   _private: { last10, callNature, parseMetadata },
 };

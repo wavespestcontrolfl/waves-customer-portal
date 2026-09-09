@@ -3263,9 +3263,18 @@ router.post('/outbound-amd', async (req, res) => {
 
     if (!isVoicemailAnsweredBy(AnsweredBy)) return res.sendStatus(200);
 
+    let row = null;
+    let customer = null;
+    if (callLogId && callLogId !== 'undefined') {
+      row = await db('call_log').where({ id: callLogId }).first('id', 'customer_id', 'source', 'metadata', 'created_at').catch(() => null);
+      if (row?.customer_id) {
+        customer = await db('customers').where({ id: row.customer_id }).first('id', 'first_name').catch(() => null);
+      }
+    }
+
     // Decide BEFORE hanging up: if the text cannot go, leave the admin on
     // the voicemail greeting to decide for themselves.
-    const pre = await voicemailTextPrecheck({ phone: customerNumber });
+    const pre = await voicemailTextPrecheck({ phone: customerNumber, customerId: row?.customer_id || null });
     if (!pre.ok) {
       logger.info(`[outbound-amd] Voicemail detected but text skipped (${pre.skipped}) — customer leg left up (call_log ${callLogId || 'n/a'})`);
       await patchCallLogMetadata(callLogId, { voicemail_text: { outcome: 'skipped', reason: pre.skipped } });
@@ -3287,14 +3296,6 @@ router.post('/outbound-amd', async (req, res) => {
       }
     }
 
-    let row = null;
-    let customer = null;
-    if (callLogId && callLogId !== 'undefined') {
-      row = await db('call_log').where({ id: callLogId }).first('id', 'customer_id', 'source', 'metadata', 'created_at').catch(() => null);
-      if (row?.customer_id) {
-        customer = await db('customers').where({ id: row.customer_id }).first('id', 'first_name').catch(() => null);
-      }
-    }
     // The customer number always comes from the TwiML query (the originator
     // set it) — never from call_log.to_phone, which on the auto-bridge rows
     // is the admin cell.

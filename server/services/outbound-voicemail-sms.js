@@ -19,19 +19,22 @@
  *   2. Quiet hours — 8am–8pm ET only. Outside the window the customer leg
  *      is NOT hung up either: the admin hears the voicemail greeting and
  *      decides, exactly as before.
- *   3. One text per phone per 24h — an admin who redials the same number
+ *   3. Not while a technician is en route to / on site at the customer
+ *      (the audit showed those calls are about access, right after the
+ *      en-route + arrived texts).
+ *   4. One text per phone per 24h — an admin who redials the same number
  *      an hour later must not double-text (sms_log probe on message_type).
- *   4. The sendCustomerMessage policy pipeline: suppression (STOP),
+ *   5. The sendCustomerMessage policy pipeline: suppression (STOP),
  *      consent (transactional — we called about their own service), emoji
  *      fail-closed, line-type, audit log.
- *   5. Reason → template (services/outbound-call-reason.js decides WHY we
+ *   6. Reason → template (services/outbound-call-reason.js decides WHY we
  *      called: quote request / returning your call / saw your text /
  *      generic). Each template is admin-editable and is_active-toggleable;
  *      a disabled reason template falls back to the generic one, and a
  *      disabled generic template is the lane's kill switch.
- *   6. Never to a staff phone (the bridge's admin leg).
+ *   7. Never to a staff phone (the bridge's admin leg).
  *
- * precheck() runs 1–3 and is called BEFORE the webhook hangs up the customer
+ * precheck() runs 1–4 and is called BEFORE the webhook hangs up the customer
  * leg: if the text cannot go, nothing changes for the admin on the call.
  */
 
@@ -44,7 +47,7 @@ const { isWithinSendWindowET } = require('./messaging/send-window');
 const { isRealProviderSend } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
-const { REASONS } = require('./outbound-call-reason');
+const { REASONS, visitInProgress } = require('./outbound-call-reason');
 
 // One message_type for the whole lane (dedupe + sms_log history), one
 // template per reason the resolver can honestly name. A deactivated reason
@@ -120,12 +123,22 @@ function callbackClause(callerId) {
  * Everything that can be decided WITHOUT sending. Returns { ok: true } or
  * { ok: false, skipped } — the webhook only hangs up the customer leg on ok.
  */
-async function precheck({ phone: rawPhone, now = new Date() } = {}) {
+async function precheck({ phone: rawPhone, customerId = null, now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { ok: false, skipped: 'gate_off' };
   const phone = normalizePhoneE164(rawPhone);
   if (!phone) return { ok: false, skipped: 'missing_input' };
   if (isAdminPhone(phone)) return { ok: false, skipped: 'admin_phone' };
   if (!isWithinSendWindowET(now)) return { ok: false, skipped: 'quiet_hours' };
+
+  // The technician is at (or heading to) this customer's door: the call is
+  // about access/address, the en-route + arrived texts just went out, and
+  // any "why we called" text would be wrong. Fail closed on a probe error.
+  try {
+    if (await visitInProgress({ customerId, before: now })) return { ok: false, skipped: 'visit_in_progress' };
+  } catch (e) {
+    logger.warn(`[outbound-voicemail-sms] visit-in-progress probe failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
+    return { ok: false, skipped: 'visit_probe_failed' };
+  }
 
   // Fail closed on a probe failure: a double text is worse than a missed one.
   try {
@@ -168,7 +181,7 @@ async function renderForReason(reason, vars, context) {
  * @param {string}  [p.reason]     a REASONS value from outbound-call-reason.js (default generic)
  */
 async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, firstName = '', callLogId = null, callSid = null, callerId = null, reason = REASONS.GENERIC } = {}) {
-  const pre = await precheck({ phone: rawPhone });
+  const pre = await precheck({ phone: rawPhone, customerId });
   if (!pre.ok) {
     logger.info(`[outbound-voicemail-sms] Skipped (${pre.skipped}) for ${maskPhone(rawPhone)}`);
     return { sent: false, skipped: pre.skipped };

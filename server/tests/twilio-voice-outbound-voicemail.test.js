@@ -201,7 +201,7 @@ describe('POST /outbound-amd', () => {
     const res = mockRes();
     await amd()(req('machine_start'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
-    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER });
+    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: null });
     expect(twilio.__calls).not.toHaveBeenCalled();
     expect(sendOutboundVoicemailText).not.toHaveBeenCalled();
     const patches = metadataPatches();
@@ -218,6 +218,8 @@ describe('POST /outbound-amd', () => {
     const res = mockRes();
     await amd()(req('machine_start'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
+    // The precheck sees the linked customer (visit-in-progress suppression).
+    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: 'cust-9' });
 
     const patches = metadataPatches();
     // Order matters: the detected stamp lands BEFORE the hangup so the dial

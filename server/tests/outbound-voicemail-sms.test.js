@@ -27,12 +27,14 @@ jest.mock('../config/twilio-numbers', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/outbound-call-reason', () => ({
   REASONS: { QUOTE_REQUEST: 'quote_request', RETURNING_CALL: 'returning_call', SAW_TEXT: 'saw_text', GENERIC: 'generic' },
+  visitInProgress: jest.fn(async () => false),
 }));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
+const { visitInProgress } = require('../services/outbound-call-reason');
 const {
   MESSAGE_TYPE,
   GENERIC_TEMPLATE_KEY,
@@ -72,6 +74,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   jest.useFakeTimers({ now: IN_WINDOW, doNotFake: ['nextTick', 'setImmediate'] });
   isEnabled.mockImplementation(() => true);
+  visitInProgress.mockImplementation(async () => false);
   installDb();
 });
 
@@ -121,6 +124,18 @@ describe('precheck — decided before the customer leg is hung up', () => {
   test('outside 8am–8pm ET skips before the dedupe probe', async () => {
     await expect(precheck({ phone: PHONE, now: OUT_OF_WINDOW })).resolves.toEqual({ ok: false, skipped: 'quiet_hours' });
     expect(smsLogFirst).not.toHaveBeenCalled();
+  });
+
+  test('a technician en route / on site at this customer → no text, decided before the dedupe probe', async () => {
+    visitInProgress.mockResolvedValueOnce(true);
+    await expect(precheck({ phone: PHONE, customerId: 'cust-1' })).resolves.toEqual({ ok: false, skipped: 'visit_in_progress' });
+    expect(visitInProgress).toHaveBeenCalledWith({ customerId: 'cust-1', before: IN_WINDOW });
+    expect(smsLogFirst).not.toHaveBeenCalled();
+  });
+
+  test('a visit-probe failure fails CLOSED', async () => {
+    visitInProgress.mockRejectedValueOnce(Object.assign(new Error('down'), { code: 'ETIMEDOUT' }));
+    await expect(precheck({ phone: PHONE, customerId: 'cust-1' })).resolves.toEqual({ ok: false, skipped: 'visit_probe_failed' });
   });
 
   test('a prior missed-you text to the same phone inside 24h skips', async () => {
