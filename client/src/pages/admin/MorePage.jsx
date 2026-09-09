@@ -14,7 +14,7 @@ import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS } from "../../config/admi
 import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
 import { UiSurface } from "../../components/ui";
-import { WorkspaceGroup } from "../../components/admin/AdminWorkspaceNavigation";
+import { PinnedWorkspaceLinks, WorkspaceGroup } from "../../components/admin/AdminWorkspaceNavigation";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
 
 // The Settings leaves this page lists inline: every entry of the former
@@ -73,6 +73,7 @@ export default function MorePage() {
           the full-bleed lists beneath it. */}
       <AdminCommandHeader title="Settings" icon={Settings} sticky={false} variant={navigation ? 'workspace' : undefined} />
       {navigation ? <UiSurface className="space-y-1 border-y border-zinc-200 py-3" density="comfortable">
+        <PinnedWorkspaceLinks source="more" />
         <h2 className="m-0 px-4 py-2 text-14 font-medium text-zinc-500">Workspaces</h2>
         {mobileWorkspaces.map((group) => <WorkspaceGroup key={group.id} group={group} source="more" />)}
       </UiSurface> : ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => {

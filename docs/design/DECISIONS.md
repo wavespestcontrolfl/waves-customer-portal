@@ -2234,6 +2234,10 @@ The existing `/admin/_design-system` route demonstrates labeled fields, stable l
 
 The owner-approved navigation scope retains every destination while grouping the sidebar into six daily links, four expandable management areas, direct Agent Ops and footer Settings. Leaf roles and feature gates remain authoritative. The default-off `admin-navigation` per-user flag enables the shared desktop/mobile workspace metadata, account-specific expansion and rendered-tab selection. Existing routes, mobile tabs, settings leaves, page data and usage beacons remain intact. New chrome uses the incoming shared UI foundation and its 14px text and responsive control density. See `docs/admin-sidebar-navigation.md` for behavior, rollout and integration dependencies.
 
+## 2026-09-09 — Local page search and personal navigation pins
+
+The second phase of the approved sidebar scope adds page search to the existing global palette and up to three browser-local pins per verified account. The same `admin-navigation` flag governs both phases. Search indexes only permitted page metadata, including familiar old names and workspace labels; queries never reach the assistant or server. Pins store known destination IDs and respect current roles and feature access. Ask Waves retains the existing assistant and unsent question, and the flag-off keyboard shortcut still opens it directly. Shared dialog focus handling and admin visual-viewport sizing keep the page finder usable above the mobile drawer and keyboard. See `docs/admin-sidebar-navigation.md` for behavior and verification.
+
 ## 2026-09-08 — Reproduce Customer 360 foundation checks on the real route
 
 The Customer 360 proof uses the existing browser lifecycle and required-font loader, with synthetic API responses for both workspace and overlay presentations. Review reports identify the source checkout and distinguish failed runs from accepted browser results. Device checks remain a separate acceptance step.
