@@ -5,6 +5,9 @@ describe('shared SMS vendor-pitch detector', () => {
     null,
     '',
     '   ',
+    'I have two leads for you: my neighbors both need pest control. Can you quote them?',
+    'I have more lawn leads for you from my neighbors. Can you quote them?',
+    'I can send extra pest leads from my neighborhood. Can you contact them?',
     'Do you offer exclusive rates for new customers?',
     'Can I get unlimited estimates for my rental properties?',
     'Do qualified customers get a discount on pest control?',
@@ -31,6 +34,9 @@ describe('shared SMS vendor-pitch detector', () => {
 
   test.each([
     'Our network offers exclusive lawn leads.',
+    'We can provide more lawn leads.',
+    'We have extra qualified pest leads.',
+    'More pest leads for you. Reply STOP to opt out.',
     'We provide unlimited leads for contractors.',
     'We provide unlimited estimates for contractors.',
     'Our network offers exclusive lawn jobs for local contractors.',

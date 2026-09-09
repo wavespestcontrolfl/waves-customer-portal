@@ -6,7 +6,11 @@
  */
 
 const SOLICITATION_MARKERS = [
-  { key: 'leads_pitch', strong: true, re: /\b(?:exclusive|qualified|unlimited|more|extra)\s+(?:\w+\s+){0,3}leads?\b|\bleads?\s+for\s+(?:you|your)\b/i },
+  { key: 'leads_pitch', strong: true, re: /\b(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}leads?\b/i },
+  // Referring neighbors is ordinary intake; more leads or "leads for you"
+  // needs independent vendor evidence, such as a supplier offer or footer.
+  { key: 'lead_referral', strong: false, re: /\b(?:more|extra)\s+(?:\w+\s+){0,3}leads?\b|\bleads?\s+for\s+(?:you|your)\b/i },
+  { key: 'lead_supplier', strong: false, outreach: true, re: /\b(?:we|i|our\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer)s?\s+(?:more|extra)\s+(?:\w+\s+){0,3}leads?\b/i },
   { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
   // A prospect can offer enough service work to fill our schedule.
   // This needs an independent outreach clue, like other capacity wording.
