@@ -197,9 +197,17 @@ async function sendCustomerMessage(input) {
   // Request lifecycle email companions have no text leg. Keep their App
   // intent even when the saved choice or gate changes before dispatch.
   if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
-  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms'
-    || input.audience !== 'lead' || input.purpose !== 'conversational' || input.entryPoint !== 'lead_response_auto_reply')) {
-    return { sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies' };
+  // The locked handoff holds a caller's authority rows through the actual
+  // provider request. Immediate lead replies and the visit-summary bearer
+  // link (its immediate send and its scheduled replay) are the callers whose
+  // recipient may change between validation and the handoff.
+  const smsHandoffAllowed = (input.audience === 'lead' && input.purpose === 'conversational'
+      && input.entryPoint === 'lead_response_auto_reply')
+    || (input.audience === 'customer' && input.purpose === 'service_completion'
+      && input.metadata?.original_message_type === 'visit_summary'
+      && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint));
+  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
+    return { sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.

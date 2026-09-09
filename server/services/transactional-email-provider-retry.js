@@ -201,49 +201,63 @@ async function retryOne(message) {
   }
 
   // A visit summary is a bearer link: its recipient, the customer's
-  // preferences and the link itself are re-authorized right before the
-  // handoff, not only the template and the suppression ledger.
-  if (message.template_key === 'service.visit_summary') {
-    let fence;
-    try {
-      fence = await require('./visit-completion-summary').summaryRetryAuthorized(message);
-    } catch (err) {
-      // Fail closed, the same way an unreadable suppression ledger does.
-      await markRetryFailure(message, new Error(`Visit summary recheck failed: ${err.message}`));
-      return { sent: false, error: err };
-    }
-    if (!fence.ok) {
-      const reason = `Suppressed before retry: ${fence.reason}`;
-      await db('email_messages')
-        .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-        .update({ status: 'blocked', error_message: reason, provider_retry_next_at: null,
-          provider_retry_exhausted_at: new Date(), updated_at: new Date() });
-      return { sent: false, stopped: true, reason };
-    }
-  }
+  // preferences and the link itself are re-authorized while their rows are
+  // held through the provider request, not only the template and the
+  // suppression ledger before it.
+  const withProviderHandoff = message.template_key === 'service.visit_summary'
+    ? (dispatch) => require('./visit-completion-summary').retrySummaryThroughHandoff(message, dispatch)
+    : null;
 
   const group = String(message.suppression_group_key_snapshot || '').trim().toLowerCase();
   const asmGroupId = group === 'transactional_required' ? 0 : sendgrid.serviceGroupId();
   try {
-    // Blocks are a provider-specific suppression distinct from hard bounces.
-    // If it remains, SendGrid will drop the retry before attempting delivery.
-    await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
-    const result = await sendgrid.sendOne({
-      to: message.recipient_email_snapshot,
-      fromEmail: message.from_email_snapshot,
-      fromName: message.from_name_snapshot,
-      replyTo: message.reply_to_snapshot,
-      subject: message.subject_snapshot,
-      html: message.html_snapshot,
-      text: message.text_snapshot,
-      categories: asArray(message.categories),
-      asmGroupId,
-      customArgs: {
-        email_message_id: message.id,
-        send_attempt_token: message.send_attempt_token,
-      },
-      suppressErrorLog: true,
-    });
+    let result;
+    const dispatchToProvider = async () => {
+      // Blocks are a provider-specific suppression distinct from hard bounces.
+      // If it remains, SendGrid will drop the retry before attempting delivery.
+      await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
+      result = await sendgrid.sendOne({
+        to: message.recipient_email_snapshot,
+        fromEmail: message.from_email_snapshot,
+        fromName: message.from_name_snapshot,
+        replyTo: message.reply_to_snapshot,
+        subject: message.subject_snapshot,
+        html: message.html_snapshot,
+        text: message.text_snapshot,
+        categories: asArray(message.categories),
+        asmGroupId,
+        customArgs: {
+          email_message_id: message.id,
+          send_attempt_token: message.send_attempt_token,
+        },
+        suppressErrorLog: true,
+      });
+    };
+    if (withProviderHandoff) {
+      let dispatchStarted = false;
+      let fence;
+      try {
+        fence = await withProviderHandoff(async () => { dispatchStarted = true; await dispatchToProvider(); });
+      } catch (err) {
+        if (dispatchStarted && !result) throw err;
+        if (!dispatchStarted) {
+          // Fail closed, the same way an unreadable suppression ledger does.
+          await markRetryFailure(message, new Error(`Visit summary recheck failed: ${err.message}`));
+          return { sent: false, error: err };
+        }
+        logger.warn(`[email-provider-retry] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
+      }
+      if (!result) {
+        const reason = `Suppressed before retry: ${fence?.reason || 'visit_summary_unavailable'}`;
+        await db('email_messages')
+          .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+          .update({ status: 'blocked', error_message: reason, provider_retry_next_at: null,
+            provider_retry_exhausted_at: new Date(), updated_at: new Date() });
+        return { sent: false, stopped: true, reason };
+      }
+    } else {
+      await dispatchToProvider();
+    }
     const [updated] = await db('email_messages')
       .where({ id: message.id, send_attempt_token: message.send_attempt_token })
       .update({
