@@ -324,6 +324,10 @@ function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) 
   const c = visionContext || {};
   const hash = crypto.createHash('sha256');
   hash.update(PROMPT_VERSION).update('\n').update(PROMPT_DIGEST).update('\n');
+  // The rendered user text too: its safety instructions and context
+  // formatting change what the model sees without a version bump, and the
+  // context values alone would not tell (Codex #4149 r13).
+  hash.update(crypto.createHash('sha256').update(buildUserText(photos.length, c)).digest('hex')).update('\n');
   hash.update(JSON.stringify({
     season: c.season ?? null, month: c.month ?? null, region: c.region ?? null, grassType: c.grassType ?? null,
     turfHeightIn: c.turfHeightIn ?? null, irrigation: c.irrigation ?? null,
@@ -544,6 +548,10 @@ async function analyzeVisit({ photos = [], photoZones = [], visionContext = {}, 
   const base = {
     promptVersion: PROMPT_VERSION,
     contextHash: contextHash({ photos, photoZones, visionContext }),
+    // The prompt snapshot the run row keeps (never the technician's notes —
+    // only that the call had them), so a replay can prove its context.
+    visionContext: contextSnapshot(visionContext),
+    technicianNotesPresent: !!(visionContext && visionContext.technicianNotes),
     latencyMs: Date.now() - started,
     failures: Array.isArray(outcome.failures) ? outcome.failures : [],
   };
@@ -561,6 +569,13 @@ async function analyzeVisit({ photos = [], photoZones = [], visionContext = {}, 
     usage: outcome.usage || null, raw: outcome.json,
     ...withoutTechnicianEchoes(normalizeAssessment(outcome.json, photos.length, photoZones), visionContext.technicianNotes),
   };
+}
+
+function contextSnapshot(context) {
+  const c = context || {};
+  const snapshot = {};
+  for (const key of ['season', 'month', 'region', 'grassType', 'turfHeightIn', 'irrigation', 'priorSummary']) if (c[key] != null) snapshot[key] = c[key];
+  return snapshot;
 }
 
 // The deterministic boundary between the technician's notes and customer
@@ -608,17 +623,26 @@ function echoesTechnicianNotes(text, notes) {
   const raw = String(notes).split(/\s+/);
   for (let i = 0; i < raw.length; i += 1) {
     const token = raw[i].replace(/^[^\p{L}]+|[^\p{L}']+$/gu, '');
-    if (!/^\p{Lu}/u.test(token) || token.length < 3) continue;
+    if (token.length < 3) continue;
     const lower = token.toLowerCase();
     const base = lower.replace(/'s$/, '');
     if (ECHO_ALLOWLIST.has(lower) || ECHO_ALLOWLIST.has(base)) continue;
-    // A sentence-initial capital on an ordinary word is capitalisation, not
-    // a name; on anything else it is a name ("Kowalski reports …"). The word
-    // after an honorific ("Mrs. Kowalski") is always a name.
-    const sentenceInitial = i === 0 || (/[.!?:;]$/.test(raw[i - 1]) && !/^(?:mr|mrs|ms|miss|mx|dr)\.?$/i.test(raw[i - 1]));
     const next = (raw[i + 1] || '').replace(/[^\p{L}']+$/gu, '');
     const nameSyntax = /'s$/i.test(token) || NAME_SYNTAX_RE.test(next);
-    if (sentenceInitial && !nameSyntax && (ECHO_COMMON_WORDS.has(lower) || ECHO_COMMON_WORDS.has(base) || SUMMARY_CAUSE_RE.test(token))) continue;
+    const ordinary = ECHO_COMMON_WORDS.has(lower) || ECHO_COMMON_WORDS.has(base) || SUMMARY_CAUSE_RE.test(token);
+    if (!/^\p{Lu}/u.test(token)) {
+      // A lowercase token is a name only by its syntax ("kowalski reports
+      // damage" — a short note typed without capitals, Codex #4149 r13), and
+      // never when it is an ordinary word ("customer reports damage").
+      if (!nameSyntax || ordinary) continue;
+    } else {
+      // A sentence-initial capital on an ordinary word is capitalisation, not
+      // a name — unless name syntax follows ("Brown reports …"); on anything
+      // else it is a name ("Kowalski reports …"). The word after an honorific
+      // ("Mrs. Kowalski") is always a name.
+      const sentenceInitial = i === 0 || (/[.!?:;]$/.test(raw[i - 1]) && !/^(?:mr|mrs|ms|miss|mx|dr)\.?$/i.test(raw[i - 1]));
+      if (sentenceInitial && !nameSyntax && ordinary) continue;
+    }
     if (words.includes(lower) || words.includes(`${lower}'s`) || words.includes(lower.replace(/'s$/, ''))) return true;
   }
   return false;
@@ -695,16 +719,35 @@ function customerObservations(text, findings = []) {
 // label alone would authorise "nutsedge" at low confidence — the prompt's
 // rule is no species below moderate, and that is applied here (Codex #4149
 // r10).
+// Terms are compared at their OWN specificity, never through the collapsed
+// label: "nutsedge" and "clover" both collapse to "weed pressure", "iron
+// deficiency" to "color and nutrient stress", so a moderate generic finding
+// would otherwise authorise any species or deficiency the prose names (Codex
+// #4149 r13). A prose term is published only when a moderate+ finding's own
+// NAME or label carries that same governed term.
 const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
-function namesUnpublishedCause(text, findings) {
-  const published = new Set((findings || [])
-    .filter((finding) => finding && finding.label && (CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0) >= CONFIDENCE_RANK.moderate)
-    .map((finding) => finding.label));
+const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
+const causeTerm = (term) => {
+  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s-]+/g, ' ');
+  if (CAUSE_TERM_SYNONYMS[base]) return CAUSE_TERM_SYNONYMS[base];
+  return /(?:ss|us|is)$/.test(base) ? base : base.replace(/(?<=[a-z])s$/, '');
+};
+function governedTerms(text) {
+  const terms = new Set();
   const re = new RegExp(SUMMARY_CAUSE_RE.source, 'gi');
   let match;
-  while ((match = re.exec(text)) !== null) {
-    if (!published.has(safeConditionLabel(match[1], 'high'))) return true;
+  while ((match = re.exec(String(text || ''))) !== null) terms.add(causeTerm(match[1]));
+  return terms;
+}
+function namesUnpublishedCause(text, findings) {
+  const published = new Set();
+  for (const finding of findings || []) {
+    if (!finding || !finding.label || (CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0) < CONFIDENCE_RANK.moderate) continue;
+    // A negated technician detail names the cause it ruled OUT — it publishes nothing.
+    if (finding.negated || finding.label === NO_STRESS_LABEL) continue;
+    for (const term of governedTerms(`${finding.name || ''} ${finding.label}`)) published.add(term);
   }
+  for (const term of governedTerms(text)) if (!published.has(term)) return true;
   return false;
 }
 
@@ -846,6 +889,8 @@ function runRowFor({ assessment, analysis, adjustedScores = null, photoRecords =
     severities: whenComplete(analysis.severities),
     scores_raw: whenComplete(analysis.scores),
     scores_adjusted: whenComplete(presented),
+    vision_context: JSON.stringify(analysis.visionContext || {}),
+    technician_notes_present: !!analysis.technicianNotesPresent,
     observations: analysis.observations || null,
     raw_response: analysis.raw == null ? null : JSON.stringify(analysis.raw),
     tokens_in: usage.input_tokens,
@@ -1168,9 +1213,28 @@ function detailClauses(text) {
 }
 // Cause clauses with their negation resolved: a negation in the clause
 // itself, or a negation-only clause right after it ("Checked for chinch
-// bugs; none found") — that clause answers the one before.
+// bugs; none found") — that clause answers the one before. A clause that
+// names MORE THAN ONE cause is split on and / or into one part per cause
+// ("Drought ruled out and chinch bugs confirmed by float test"), and a part
+// with neither a negation nor a positive marker takes the polarity of the
+// nearest part that has one — the following part first ("chinch and grubs
+// ruled out"), then the preceding ("no signs of chinch or grubs") — so a
+// negation binds to the mentions it governs, not the whole clause (Codex
+// #4149 r13).
+const POSITIVE_MARKER_RE = /\b(?:confirmed|confirms?|active|present|found|seen|observed|visible|spreading|heavy|evident|positive|detected|noted)\b/i;
+function causePartsOf(clause) {
+  const mentions = (String(clause).match(new RegExp(SUMMARY_CAUSE_RE.source, 'gi')) || []).length;
+  const parts = mentions > 1 ? clause.split(/\b(?:and|or)\b/i).map((part) => part.trim()).filter(Boolean) : [clause];
+  const entries = parts.map((part) => ({ clause: part, cause: SUMMARY_CAUSE_RE.test(part), negation: NEGATED_DETAIL_RE.test(part), positive: POSITIVE_MARKER_RE.test(part) }));
+  entries.forEach((entry, index) => {
+    if (!entry.cause || entry.negation || entry.positive) return;
+    const marked = entries.slice(index + 1).find((other) => other.negation || other.positive) || [...entries.slice(0, index)].reverse().find((other) => other.negation || other.positive);
+    if (marked) entry.negation = marked.negation && !marked.positive;
+  });
+  return entries;
+}
 function causeClausesOf(text) {
-  const clauses = detailClauses(text).map((clause) => ({ clause, cause: SUMMARY_CAUSE_RE.test(clause), negation: NEGATED_DETAIL_RE.test(clause) }));
+  const clauses = detailClauses(text).flatMap((clause) => causePartsOf(clause));
   clauses.forEach((entry, index) => {
     if (entry.negation && !entry.cause && index > 0 && clauses[index - 1].cause) clauses[index - 1].negation = true;
   });
@@ -1437,15 +1501,15 @@ function confirmScores(assessment, run, adjustedScores, { scoreValue, calculateO
 // unavailable run, or an answer that could determine nothing, has no score
 // to compare — calibration then records nothing, rather than a row of NULL
 // AI values whose avg_delta of 0 would read as perfect agreement.
+// The immutable snapshot is REQUIRED: a complete run without scores_adjusted
+// is a writer bug, not a comparable baseline — deriving from scores_raw
+// would calibrate against unadjusted values and mislead the technician deltas
+// (Codex #4149 r13). Such a run is not comparable (empty → calibration off).
 function runAiScores(run) {
   if (run?.status !== 'complete') return {};
   const presented = parseJsonObject(run.scores_adjusted);
-  if (presented) return Object.fromEntries(SCORE_KEYS.map((key) => [key, known(presented[key]) ? presented[key] : null]));
-  const scores = parseJsonObject(run.scores_raw);
-  const severities = parseJsonObject(run.severities);
-  if (!scores) return {};
-  const legacy = deriveLegacyScores({ status: 'complete', scores, severities: severities || {}, observations: '' });
-  return Object.fromEntries(SCORE_KEYS.map((key) => [key, legacy[key]]));
+  if (!presented) return {};
+  return Object.fromEntries(SCORE_KEYS.map((key) => [key, known(presented[key]) ? presented[key] : null]));
 }
 
 // ── Response shapes ───────────────────────────────────────────────────
@@ -1498,6 +1562,8 @@ module.exports = {
   customerObservations,
   unpublishableCustomerCopy,
   namesUnpublishedCause,
+  governedTerms,
+  contextSnapshot,
   echoesTechnicianNotes,
   withoutTechnicianEchoes,
   runAiScores,

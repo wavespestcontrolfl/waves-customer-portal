@@ -10,7 +10,6 @@ const knexFactory = require('knex');
 // applied only the first and CI's real-PostgreSQL run failed on the insert).
 const migrations = [
   require('../models/migrations/20260908000010_lawn_assessment_runs'),
-  require('../models/migrations/20260908000020_lawn_assessment_runs_scores_adjusted'),
   require('../models/migrations/20260908000030_lawn_assessment_runs_pipeline'),
 ];
 
@@ -57,7 +56,7 @@ const analysis = (overrides = {}) => ({
     expect(await db.knex.schema.hasTable('lawn_assessment_runs')).toBe(true);
     for (const step of migrations) await expect(step.up(db.knex)).resolves.toBeUndefined(); // hasTable / hasColumn guards
     const columns = await db.knex('lawn_assessment_runs').columnInfo();
-    for (const column of ['assessment_id', 'status', 'provider', 'fallback_used', 'failures', 'unavailable_reason', 'prompt_version', 'context_hash', 'photo_ids', 'findings', 'severities', 'scores_raw', 'scores_adjusted', 'raw_response', 'tokens_reasoning', 'latency_ms', 'reviewed_findings', 'added_details', 'reconciliation', 'reviewed_at', 'reviewed_by_technician_id']) {
+    for (const column of ['assessment_id', 'status', 'provider', 'fallback_used', 'failures', 'unavailable_reason', 'prompt_version', 'context_hash', 'photo_ids', 'findings', 'severities', 'scores_raw', 'scores_adjusted', 'vision_context', 'technician_notes_present', 'raw_response', 'tokens_reasoning', 'latency_ms', 'reviewed_findings', 'added_details', 'reconciliation', 'reviewed_at', 'reviewed_by_technician_id']) {
       expect(columns[column]).toBeDefined();
     }
     expect(columns.assessment_id.nullable).toBe(false);
@@ -226,10 +225,10 @@ const analysis = (overrides = {}) => ({
     expect((await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).first()).pipeline_completed_at).not.toBeNull();
     // A row with no run has nothing to claim; a database without the columns delivers as before.
     expect(await visit.claimPipeline(randomUUID(), db.knex)).toBe(false);
-    await migrations[2].down(db.knex);
+    await migrations[1].down(db.knex);
     expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(true);
     expect(await visit.completePipeline(assessment.id, db.knex)).toEqual([]); // no columns: nothing to stamp, nothing owed
-    await migrations[2].up(db.knex);
+    await migrations[1].up(db.knex);
   });
 
   test('priorAssessmentCount against the real table: a pending run-backed row is not a prior assessment', async () => {
