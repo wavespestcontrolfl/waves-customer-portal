@@ -257,6 +257,7 @@ router.post('/sms', async (req, res, next) => {
   let claimedReviewRequestId = null;
   let claimedReviewClaimToken = null;
   let reviewEmailOutcome = null;
+  let reviewSettlementAttempted = false;
   // Quick Links "Both": once the text has really sent, the same ask goes out
   // by email too (ReviewService.sendInlineEmailCopy). Hoisted: the catch
   // below emails after an accepted-but-thrown send.
@@ -400,6 +401,15 @@ router.post('/sms', async (req, res, next) => {
       const normalizedCustomerPhone = normalizePhone(customer.phone);
       if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
+      }
+      trustedCustomerId = customer.id;
+    }
+
+    const reviewLooking = !!reviewRequestId || require('../services/review-ask-history').looksLikeReviewAsk(cleanBody);
+    if (reviewLooking && !reviewRequestId && !trustedCustomerId) {
+      const customer = await findSingleCustomerForPhone(to);
+      if (!customer || normalizePhone(customer.phone) !== normalizePhone(to)) {
+        return res.status(409).json({ error: 'Select the customer receiving this review request before sending.' });
       }
       trustedCustomerId = customer.id;
     }
@@ -643,6 +653,9 @@ router.post('/sms', async (req, res, next) => {
         if (!rr || rr.triggered_by !== 'auto_inline') {
           return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
         }
+        if (trustedCustomerId && rr.customer_id !== trustedCustomerId) {
+          return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
+        }
         const { existingShortUrlFor } = require('../services/short-url');
         const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
         // Canonical match: scheme dropped and the HOST compared case-
@@ -672,6 +685,7 @@ router.post('/sms', async (req, res, next) => {
         if (!owner || normalizePhoneLast10(owner.phone) !== normalizePhoneLast10(to)) {
           return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
         }
+        trustedCustomerId = rr.customer_id;
         // Live consent + the ask gates + the claim, serialized under the same
         // per-customer review lock the mint runs under: a draft can sit open
         // for hours, so the MINT-time gate is stale — a cadence or one-off
@@ -752,7 +766,7 @@ router.post('/sms', async (req, res, next) => {
     // blocked — and the claim released — where the funnel accepts it (GH
     // Codex #3844 r5 P1). The composer inserts the BASE template copy.
     const cardVisitIds = cardClaim ? cardClaim.cards.map((c) => c.scheduledServiceId) : [];
-    const dispatch = () => sendCustomerMessage({
+    const sendMessage = () => sendCustomerMessage({
       to,
       body: cleanBody,
       channel: 'sms',
@@ -792,6 +806,52 @@ router.post('/sms', async (req, res, next) => {
         humanAuthored: !bodyIsUnchangedAgentDraft,
       },
     });
+    const dispatch = async () => {
+      const sendAndSettle = async () => {
+        let result;
+        try {
+          // Recheck the held inline claim at the actual provider boundary.
+          if (claimedReviewRequestId && !(await require('../services/review-request')
+            .inlineClaimStillHeld(claimedReviewRequestId, claimedReviewClaimToken))) {
+            return { sent: false, blocked: true, code: 'REVIEW_CLAIM_LOST', httpStatus: 409,
+              reason: 'This review link was claimed by another send. Remove it and re-insert if still needed.' };
+          }
+          result = await sendMessage();
+        } catch (err) {
+          if (claimedReviewRequestId) {
+            reviewSettlementAttempted = true;
+            try {
+              await settleInlineReviewAfterThrow({ err, requestId: claimedReviewRequestId,
+                claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true });
+            } catch (claimErr) {
+              logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
+            }
+          }
+          throw err;
+        }
+        if (claimedReviewRequestId && !result.blocked && result.sent !== false) {
+          reviewSettlementAttempted = true;
+          try {
+            reviewEmailOutcome = await settleInlineReviewAfterSend({
+              result, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
+            });
+          } catch (markErr) {
+            logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
+            // Both: the text left but its delivery stamp (or the email copy)
+            // threw — say the email leg did not go out rather than reporting a
+            // bare "Message sent." (GH Codex #3856 r3 P2).
+            if (reviewRequestEmail === true && !reviewEmailOutcome) {
+              reviewEmailOutcome = { sent: false, reason: 'email_not_attempted' };
+            }
+          }
+        }
+        return result;
+      };
+      return reviewLooking
+        ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
+          { excludeRequestId: claimedReviewRequestId })
+        : sendAndSettle();
+    };
     const result = prepLinkSends
       ? await dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null, () => require('../services/composer-customer-links')
         .recheckPrepLinks(cleanBody, normalizePhoneLast10(to), {
@@ -821,7 +881,7 @@ router.post('/sms', async (req, res, next) => {
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send was blocked or failed — suggestion reopened.',
       });
-      return res.status(422).json({
+      return res.status(result.httpStatus || 422).json({
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
       });
@@ -911,21 +971,7 @@ router.post('/sms', async (req, res, next) => {
     // The text left — the project delivery claim has covered its window; the
     // row's delivery state is restored (the text is a re-share, not a delivery).
     await releaseProjectClaim();
-    if (claimedReviewRequestId) {
-      try {
-        reviewEmailOutcome = await settleInlineReviewAfterSend({
-          result, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
-        });
-      } catch (markErr) {
-        logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
-        // Both: the text left but its delivery stamp (or the email copy)
-        // threw — say the email leg did not go out rather than reporting a
-        // bare "Message sent." (GH Codex #3856 r3 P2).
-        if (reviewRequestEmail === true && !reviewEmailOutcome) {
-          reviewEmailOutcome = { sent: false, reason: 'email_not_attempted' };
-        }
-      }
-    }
+
 
     // A reply from the Comms composer is a first response to any open lead
     // with this phone — stamp the Speed-to-Lead clock (SLA truth only; lead
@@ -996,7 +1042,7 @@ router.post('/sms', async (req, res, next) => {
     // AFTER acceptance (err.providerOutcome.sent === true, the scheduler's
     // same convention) means the ask DID text: stamp it delivered instead so
     // it can never go out twice.
-    if (claimedReviewRequestId) {
+    if (claimedReviewRequestId && !reviewSettlementAttempted) {
       try {
         await settleInlineReviewAfterThrow({
           err, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,

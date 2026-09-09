@@ -106,6 +106,11 @@ jest.mock('../services/review-request', () => ({
 // The send seam re-validates consent + gates + claim under the per-customer
 // review lock; with the bare db mock the real lock would fail closed
 // (skipped: no_connection), so run the body inline here.
+jest.mock('../services/review-ask-history', () => ({
+  ...jest.requireActual('../services/review-ask-history'),
+  lastDeliveredAskAt: jest.fn(async () => null),
+  lastManualAskAt: jest.fn(async () => null),
+}));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_key, fn) => fn()),
   wasLockSkipped: (r) => !!(r && r.skipped === true),
@@ -1778,5 +1783,119 @@ describe('admin communications SMS route', () => {
     expect(csvEscape('\r=cmd')).toBe('"\'\r=cmd"');
     expect(csvEscape('   @cmd')).toBe("'   @cmd");
     expect(csvEscape('plain')).toBe('plain');
+  });
+});
+
+describe('Communications review ask serialization', () => {
+  const history = require('../services/review-ask-history');
+  const locks = require('../utils/cron-lock');
+  const reviews = require('../services/review-request');
+  const held = new Set();
+  let bearerSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    held.clear();
+    history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
+    history.lastManualAskAt.mockReset().mockResolvedValue(null);
+    locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {
+      if (held.has(key)) return { skipped: true, reason: 'lease_held' };
+      held.add(key);
+      try { return await callback(); } finally { held.delete(key); }
+    });
+    for (const method of ['inlineClaimStillHeld', 'claimInlineForSend']) reviews[method].mockReset().mockResolvedValue(true);
+    reviews.reviewSmsAllowedNow.mockReset().mockResolvedValue({ allowed: true });
+    reviews.checkUnscheduledAskGates.mockReset().mockResolvedValue({ allowed: true });
+    reviews.markInlineDelivered.mockReset().mockResolvedValue(undefined);
+    reviews.sendInlineEmailCopy.mockReset().mockResolvedValue({ sent: true });
+    reviews.releaseInlineClaim.mockReset().mockResolvedValue(undefined);
+    sendCustomerMessage.mockReset().mockResolvedValue({ sent: true, providerMessageId: 'SM-test' });
+    bearerSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck').mockResolvedValue({ ok: true });
+    db.mockImplementation(table => {
+      const builder = makeUniversalBuilder();
+      if (table === 'customers') builder.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      if (table === 'review_requests') builder.first.mockResolvedValue({ id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123' });
+      return builder;
+    });
+  });
+  afterEach(() => { bearerSpy?.mockRestore(); locks.runExclusive.mockImplementation(async (_key, callback) => callback()); });
+  const send = (baseUrl, overrides = {}) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: '+15551234567', customerId: 'cust-A', messageType: 'manual', body: 'Please review us: https://g.page/r/example/review', ...overrides }),
+  });
+  const inline = { reviewRequestId: 'rr-1', body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123' };
+
+  test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch', async () => {
+    let entered, release;
+    const providerEntered = new Promise(resolve => { entered = resolve; });
+    const providerRelease = new Promise(resolve => { release = resolve; });
+    sendCustomerMessage.mockImplementationOnce(async () => {
+      expect(held.has('review-send:cust-A')).toBe(true);
+      entered();
+      await providerRelease;
+      history.lastManualAskAt.mockResolvedValue(new Date());
+      return { sent: true, providerMessageId: 'SM-test' };
+    });
+    await withServer(async baseUrl => {
+      const first = send(baseUrl);
+      try {
+        await providerEntered;
+        const cadenceProvider = jest.fn();
+        expect(await locks.runExclusive('review-send:cust-A', cadenceProvider)).toMatchObject({ skipped: true });
+        expect(cadenceProvider).not.toHaveBeenCalled();
+        const second = await send(baseUrl);
+        expect(second.status).toBe(409);
+        expect((await second.json()).code).toBe('REVIEW_SEND_BUSY');
+      } finally { release(); }
+      expect((await first).status).toBe(200);
+      const afterDelivery = await send(baseUrl);
+      expect(afterDelivery.status).toBe(409);
+      expect((await afterDelivery.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+  test('a preceding cadence delivery blocks the bare staff ask', async () => {
+    history.lastDeliveredAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl);
+      expect(response.status).toBe(409);
+      expect((await response.json()).code).toBe('REVIEW_ASK_SPACING');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+  test('history failure releases the inline claim without sending', async () => {
+    history.lastManualAskAt.mockRejectedValue(new Error('history unavailable'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(503);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(reviews.releaseInlineClaim).toHaveBeenCalledWith('rr-1', true);
+    });
+  });
+  test('inline stamping and the owed email stay inside the lock', async () => {
+    reviews.markInlineDelivered.mockImplementation(async () => { expect(held.has('review-send:cust-A')).toBe(true); });
+    reviews.sendInlineEmailCopy.mockImplementation(async () => { expect(held.has('review-send:cust-A')).toBe(true); return { sent: true }; });
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, { ...inline, reviewRequestEmail: true });
+      expect(response.status).toBe(200);
+      expect((await response.json()).reviewEmail).toEqual({ sent: true });
+      expect(reviews.markInlineDelivered).toHaveBeenCalledTimes(1);
+      expect(reviews.sendInlineEmailCopy).toHaveBeenCalledTimes(1);
+    });
+  });
+  test('an accepted provider throw stamps delivery before unlocking', async () => {
+    sendCustomerMessage.mockRejectedValue(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true } }));
+    reviews.markInlineDelivered.mockImplementation(async () => { expect(held.has('review-send:cust-A')).toBe(true); });
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(500);
+      expect(reviews.markInlineDelivered).toHaveBeenCalledTimes(1);
+      expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
+    });
+  });
+  test('ordinary invoice-review text retains its send behavior', async () => {
+    history.lastManualAskAt.mockRejectedValue(new Error('must not read history'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, { body: 'Please review your invoice when you have time.' })).status).toBe(200);
+      expect(history.lastManualAskAt).not.toHaveBeenCalled();
+      expect(locks.runExclusive).not.toHaveBeenCalled();
+    });
   });
 });
