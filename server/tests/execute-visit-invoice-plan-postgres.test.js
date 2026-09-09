@@ -15,7 +15,7 @@ jest.setTimeout(30000);
   let fixture; let db;
   beforeEach(async () => { fixture = await createRepairDatabase(); db = fixture.db; });
   afterEach(async () => { await fixture.destroy(); });
-  const review = async (ids) => (await evaluate(db, ids.invoiceId, new Set())).pairing;
+  const review = async (ids) => (await evaluate(db, ids.invoiceId)).pairing;
   const invoice = (ids) => db('invoices').where({ id: ids.invoiceId }).first();
   async function waitForBlocker(pid) {
     const until = Date.now() + 5000;
@@ -25,6 +25,16 @@ jest.setTimeout(30000);
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error('Expected executor to reach the held database lock');
+  }
+  async function holdInvoiceUpdates() {
+    // Pause the final UPDATE after eligibility reads, using a test-only trigger.
+    await db.raw(`CREATE FUNCTION pause_invoice_update() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN PERFORM pg_advisory_xact_lock(4121, 1); RETURN NEW; END $$;
+      CREATE TRIGGER pause_invoice_update BEFORE UPDATE ON invoices FOR EACH ROW EXECUTE FUNCTION pause_invoice_update();`);
+    const barrier = await db.transaction();
+    const { rows: [{ pid }] } = await barrier.raw('SELECT pg_backend_pid() AS pid');
+    await barrier.raw('SELECT pg_advisory_xact_lock(4121, 1)');
+    return { barrier, pid };
   }
 
   test('applies reviewed links and clears the stale technician name without changing money fields', async () => {
@@ -41,7 +51,7 @@ jest.setTimeout(30000);
     await executePlan(db, [await review(ids)]);
     expect(await invoice(ids)).toMatchObject({ technician_id: ids.techId, tech_name: 'Fixture Technician' });
   });
-  test.each(['visitCallback', 'recordCallback', 'composite', 'amount', 'techName', 'newRecord', 'disposition'])('refuses post-review drift: %s', async (change) => {
+  test.each(['visitCallback', 'recordCallback', 'composite', 'amount', 'techName', 'newRecord', 'disposition', 'prepay', 'legacyInvoice'])('refuses post-review drift: %s', async (change) => {
     const ids = await seedPair(db); const reviewed = await review(ids);
     if (change === 'visitCallback') await db('scheduled_services').where({ id: ids.visitId }).update({ is_callback: true });
     if (change === 'recordCallback') await db('service_records').where({ id: ids.recordId }).update({ is_callback: true });
@@ -50,6 +60,13 @@ jest.setTimeout(30000);
     if (change === 'techName') await db('invoices').where({ id: ids.invoiceId }).update({ tech_name: 'Changed Technician' });
     if (change === 'newRecord') await db('service_records').insert({ id: randomUUID(), scheduled_service_id: ids.visitId });
     if (change === 'disposition') await db('visit_billing_dispositions').insert({ id: randomUUID(), scheduled_service_id: ids.visitId });
+    if (change === 'prepay') await db('annual_prepay_terms').insert({ id: randomUUID(), prepay_invoice_id: ids.invoiceId });
+    if (change === 'legacyInvoice') {
+      const recordId = randomUUID();
+      await db('service_records').insert({ id: recordId, customer_id: ids.customerId });
+      await db('invoices').insert({ id: randomUUID(), customer_id: ids.customerId, status: 'paid',
+        service_date: '2020-01-01', service_record_id: recordId });
+    }
     await expect(executePlan(db, [reviewed])).rejects.toThrow('reviewed pairing changed');
     expect((await invoice(ids)).scheduled_service_id).toBeNull();
   });
@@ -79,21 +96,31 @@ jest.setTimeout(30000);
     await rejected;
     expect((await invoice(ids)).scheduled_service_id).toBeNull();
   });
-  test('aborts if an invoice was inserted between the invoice and customer locks', async () => {
+  test('refuses a busy customer so a customer-first merge can finish its invoice sweep', async () => {
+    const ids = await seedPair(db); const reviewed = await review(ids); const winnerId = randomUUID();
+    await db('customers').insert({ id: winnerId });
+    const merge = await db.transaction();
+    try {
+      // customer-dedupe.executeMerge locks both customers before its FK sweep.
+      await merge('customers').whereIn('id', [winnerId, ids.customerId]).forUpdate();
+      await expect(executePlan(db, [reviewed])).rejects.toMatchObject({ code: '55P03' });
+      await merge.raw("SET LOCAL lock_timeout = '100ms'");
+      expect(await merge('invoices').where({ customer_id: ids.customerId }).update({ customer_id: winnerId })).toBe(1);
+      await merge.commit();
+    } finally { if (!merge.isCompleted()) await merge.rollback(); }
+    expect(await invoice(ids)).toMatchObject({ customer_id: winnerId, scheduled_service_id: null });
+  });
+  test('refuses a customer FK lock without blocking a concurrent invoice insert', async () => {
     const ids = await seedPair(db); const reviewed = await review(ids);
     const insert = await db.transaction();
-    const { rows: [{ pid }] } = await insert.raw('SELECT pg_backend_pid() AS pid');
-    await insert('customers').where({ id: ids.customerId }).forKeyShare().first();
-    const executing = executePlan(db, [reviewed]);
-    const rejected = expect(executing).rejects.toThrow('Customer invoice set changed');
     try {
-      await waitForBlocker(pid);
+      await insert('customers').where({ id: ids.customerId }).forKeyShare().first();
+      await expect(executePlan(db, [reviewed])).rejects.toMatchObject({ code: '55P03' });
       await insert('invoices').insert({ id: randomUUID(), customer_id: ids.customerId, status: 'void', service_date: '2020-01-01' });
     } finally { await insert.commit(); }
-    await rejected;
     expect((await invoice(ids)).scheduled_service_id).toBeNull();
   });
-  test.each(['recordEdit', 'newRecord', 'newInvoice', 'siblingInvoice', 'siblingVisit', 'payerEdit', 'attemptEdit', 'newVisit', 'newAddon'])('holds %s against changes after revalidation until commit', async (change) => {
+  test.each(['recordEdit', 'newRecord', 'newInvoice', 'siblingInvoice', 'siblingVisit', 'payerEdit', 'attemptEdit', 'newVisit', 'newAddon', 'newPrepay'])('holds %s against changes after revalidation until commit', async (change) => {
     const ids = await seedPair(db);
     const siblingInvoiceId = randomUUID(); const siblingVisitId = randomUUID(); const attemptId = randomUUID();
     await db('payers').insert({ id: 1 });
@@ -104,14 +131,7 @@ jest.setTimeout(30000);
     await db('service_records').insert({ id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.visitId });
     await db('service_completion_attempts').insert({ id: attemptId, service_id: ids.visitId, service_record_id: ids.recordId, status: 'succeeded' });
     const reviewed = await review(ids);
-    // This test-only trigger pauses the final UPDATE after all eligibility
-    // reads. It gives a deterministic window to probe each held row/FK lock.
-    await db.raw(`CREATE FUNCTION pause_invoice_update() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN PERFORM pg_advisory_xact_lock(4121, 1); RETURN NEW; END $$;
-      CREATE TRIGGER pause_invoice_update BEFORE UPDATE ON invoices FOR EACH ROW EXECUTE FUNCTION pause_invoice_update();`);
-    const barrier = await db.transaction();
-    const { rows: [{ pid }] } = await barrier.raw('SELECT pg_backend_pid() AS pid');
-    await barrier.raw('SELECT pg_advisory_xact_lock(4121, 1)');
+    const { barrier, pid } = await holdInvoiceUpdates();
     const executing = executePlan(db, [reviewed]);
     const completed = expect(executing).resolves.toBe(1);
     try {
@@ -129,8 +149,21 @@ jest.setTimeout(30000);
         if (change === 'newVisit') query = edit('scheduled_services').insert({ id: randomUUID(), customer_id: ids.customerId, scheduled_date: '2020-01-01', status: 'confirmed' });
         if (change === 'newAddon') query = edit('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: ids.visitId });
         if (change === 'payerEdit') query = edit('payers').where({ id: 1 }).update({ tax_exempt: true });
+        if (change === 'newPrepay') query = edit('annual_prepay_terms').insert({ id: randomUUID(), prepay_invoice_id: ids.invoiceId });
         await expect(query).rejects.toMatchObject({ code: '55P03' });
       } finally { await edit.rollback(); }
+    } finally { await barrier.commit(); }
+    await completed;
+    expect((await invoice(ids)).scheduled_service_id).toBe(ids.visitId);
+  });
+  test('catalog insertions cannot change an in-flight exact-label repair', async () => {
+    const ids = await seedPair(db); const reviewed = await review(ids);
+    const { barrier, pid } = await holdInvoiceUpdates();
+    const completed = expect(executePlan(db, [reviewed])).resolves.toBe(1);
+    try {
+      await waitForBlocker(pid);
+      await db('services').insert({ id: randomUUID(), name: 'Pest Control + Mosquito Control' });
+      expect(await review(ids)).toEqual(reviewed);
     } finally { await barrier.commit(); }
     await completed;
     expect((await invoice(ids)).scheduled_service_id).toBe(ids.visitId);

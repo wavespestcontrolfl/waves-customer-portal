@@ -7,7 +7,7 @@
 // node ops/agents/execute-visit-invoice-plan.js --plan=/tmp/link-plan.json
 // node ops/agents/execute-visit-invoice-plan.js --execute --plan=/tmp/link-plan.json
 const { isDeepStrictEqual } = require('util');
-const { evaluate, catalog, readPlan, formatPairing } = require('./link-unlinked-visit-invoices');
+const { evaluate, readPlan, formatPairing } = require('./link-unlinked-visit-invoices');
 const { acquireScheduledInvoiceMintLock, acquireScheduledMintLockChain } = require('../../server/services/scheduled-invoice-mint');
 
 async function executePlan(database, reviewed) {
@@ -27,7 +27,10 @@ async function executePlan(database, reviewed) {
     // and other-date siblings: refund failure and redating can make them live
     // candidates again without touching the reviewed invoice.
     const invoices = await trx('invoices').whereIn('customer_id', customerIds).orderBy('id').forUpdate().select('id', 'payer_id');
-    const customers = await trx('customers').whereIn('id', customerIds).orderBy('id').forUpdate().select('id', 'payer_id');
+    // Customer merges lock customers before repointing invoices. Never wait
+    // here with invoice locks held: NOWAIT makes the repair abort instead of
+    // deadlocking that live merge (or an invoice insert holding FK key-share).
+    const customers = await trx('customers').whereIn('id', customerIds).orderBy('id').forUpdate().noWait().select('id', 'payer_id');
     // Customer FOR UPDATE blocks new invoice/visit FKs. A row inserted between
     // the invoice lock statement and that customer lock is not held: detect
     // the changed set and abort instead of silently trusting its future state.
@@ -48,11 +51,8 @@ async function executePlan(database, reviewed) {
     await trx('service_completion_attempts').whereIn('service_id', visitIds).orderBy('id').forUpdate().select('id');
     const payerIds = [...new Set([...customers, ...visits, ...invoices].map((r) => r.payer_id).filter((id) => id != null))].sort((a, b) => a - b);
     await trx('payers').whereIn('id', payerIds).orderBy('id').forUpdate().select('id');
-    // Pin existing catalog rows used by the application evidence classifier.
-    await trx('services').orderBy('id').forShare().select('id');
-    const catalogNames = await catalog(trx);
     for (const p of reviewed) {
-      const again = await evaluate(trx, p.invoiceId, catalogNames);
+      const again = await evaluate(trx, p.invoiceId);
       if (!isDeepStrictEqual(again.pairing, p)) {
         throw new Error(`Invoice ${p.invoiceId}: reviewed pairing changed (${again.skip || 'reviewed fields differ'}) — batch aborted`);
       }
