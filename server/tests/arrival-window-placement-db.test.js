@@ -164,6 +164,36 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'technician_unavailable' });
     });
   });
+  test('capacity offers and save probes isolate technicians while retaining unassigned blockers', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      for (const table of ['tech_schedule_blocks', 'technician_capabilities']) {
+        await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
+      }
+      const otherTech = '10000000-0000-4000-8000-000000000002';
+      await mockConn('technicians').insert({ id: otherTech, name: 'Other fixture technician', active: true,
+        employment_status: 'active', field_dispatchable: true });
+      await mockConn('scheduled_services').where({ id: SOUTH }).delete();
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ technician_id: otherTech,
+        window_start: '09:00', window_end: '10:00' });
+      const request = { ...OPTIONS, earliestStartMin: 960 };
+      expect((await findAvailableSlots(request)).slots).toEqual(expect.arrayContaining([
+        expect.objectContaining({ start_time: '16:00', technician: expect.objectContaining({ id: TECH }) }),
+      ]));
+      expect((await findAvailableSlots({ ...request, arrivalWindow: undefined })).slots)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ start_time: '16:00' })]));
+      expect(await probe({ windowStart: '16:00', windowEnd: '17:00' })).toEqual([]);
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ technician_id: null,
+        window_start: '16:00', window_end: '18:00', estimated_duration_minutes: 120 });
+      expect((await findAvailableSlots(request)).slots).toEqual([]);
+      expect((await probe({ windowStart: '16:00', windowEnd: '17:00' }))[0])
+        .toMatchObject({ conflict_reason: 'arrival_window' });
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  }, 30000);
 
   test('ranks the nearby morning placement first, and picker/live-check/save agree without rewriting other promises', async () => {
     const offers = await findAvailableSlots(OPTIONS);
