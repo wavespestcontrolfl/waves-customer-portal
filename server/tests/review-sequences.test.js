@@ -1013,6 +1013,50 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(again.sent).toBe(1);
     });
 
+    test('an immediate start skipped by the customer lock is durably picked up by the next cadence tick', async () => {
+      const mock = makeMock({ customers: [{ id: 'immediate-lock', first_name: 'Ana', nearest_location_id: 'sarasota' }] });
+      db.mockImplementation(mock);
+      global.__reviewLockHeld = new Set(['review-send:immediate-lock']);
+      try {
+        const result = await ReviewService.startReviewSequence({ customerId: 'immediate-lock', serviceType: 'pest control', techName: 'Bea' });
+        expect(result).toMatchObject({ started: true, firstTouch: { deferred: true, reason: 'customer_lock_held' } });
+        expect(result.sequence.next_run_at).toBeInstanceOf(Date);
+        expect(result.sequence.next_run_at.getTime()).toBeLessThanOrEqual(Date.now());
+        expect(parse(result.sequence.decision)).toMatchObject({ reason: 'customer_lock_held', ownerAction: 'none' });
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      } finally {
+        global.__reviewLockHeld = null;
+      }
+      const nextTick = await ReviewService.processReviewSequences();
+      expect(nextTick.sent).toBe(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed immediate-start retry write never reports a queued cadence', async () => {
+      const mock = makeMock({ customers: [{ id: 'immediate-lock-write', nearest_location_id: 'sarasota' }] }, { throwUpdateFor: ['review_sequences'] });
+      db.mockImplementation(mock);
+      global.__reviewLockHeld = new Set(['review-send:immediate-lock-write']);
+      try {
+        const result = await ReviewService.startReviewSequence({ customerId: 'immediate-lock-write', serviceType: 'pest control', techName: 'Bea' });
+        expect(result).toMatchObject({ started: false, reason: 'send_failed' });
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      } finally {
+        global.__reviewLockHeld = null;
+      }
+    });
+
+    test('a held customer lock does not reschedule an existing in-flight claim', async () => {
+      const mock = makeMock({ review_sequences: [{ id: 'live-claim', customer_id: 'live-claim-customer', status: 'active', next_run_at: null }] });
+      db.mockImplementation(mock);
+      global.__reviewLockHeld = new Set(['review-send:live-claim-customer']);
+      try {
+        expect(await ReviewService._runSequenceStep('live-claim')).toMatchObject({ deferred: true, reason: 'customer_lock_held' });
+        expect(mock.__state.rows.review_sequences[0].next_run_at).toBeNull();
+      } finally {
+        global.__reviewLockHeld = null;
+      }
+    });
+
     test('a failed staff-sent-ask lookup defers an ask step instead of sending inside 72h (codex #4141 r4 P1)', async () => {
       const mock = makeMock(fixture('seq-sl', { lastAskAgoMs: 100 * 3600000 }), { throwSelectWhen: (q) => q.table === 'sms_log' });
       db.mockImplementation(mock);

@@ -4502,6 +4502,16 @@ const ReviewService = {
     let firstTouch;
     try {
       firstTouch = await this._runSequenceStep(sequence.id);
+      if (firstTouch?.reason === "customer_lock_held") {
+        // Only this newly inserted immediate start lacks a retry timestamp.
+        // Do not requeue arbitrary NULL schedules in the lock wrapper: those
+        // can be live claims belonging to another worker.
+        const nextEvalAt = new Date();
+        await db("review_sequences")
+          .where({ id: sequence.id, status: "active" })
+          .whereNull("next_run_at")
+          .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "customer_lock_held", nextEvalAt }), updated_at: nextEvalAt });
+      }
     } catch (err) {
       // The Day-0 touch threw during setup (insert / short-link / send). The
       // step's own catch restored next_run_at for a CRON retry, but for a

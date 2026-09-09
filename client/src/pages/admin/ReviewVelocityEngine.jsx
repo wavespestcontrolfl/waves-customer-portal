@@ -320,6 +320,7 @@ const DECISION_LABELS = {
   spacing_lookup_unavailable: "Re-checking the last ask (3-day rule)",
   send_window: "Held for the 8 AM–8 PM send window",
   provider_retry: "Provider retry",
+  customer_lock_held: "Waiting for another review send to finish",
   send_error_retry: "Send error — retrying",
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
   cap_stats_unavailable: "Re-checking the ask cap",
