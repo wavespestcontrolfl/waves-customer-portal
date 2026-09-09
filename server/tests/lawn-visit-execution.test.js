@@ -21,7 +21,7 @@ const ok = (json = validAnswer(), extra = {}) => ({
 
 beforeEach(() => dispatchWithFallback.mockReset());
 
-test.each([[], null, [photo('')], [photo('YQ==', 'garage')], Array.from({ length: 7 }, () => photos[0])])(
+test.each([[], null, [photo('')], [photo('YQ==', 'garage')], Array.from({ length: 7 }, () => photos[0])].map((invalid) => [invalid]))(
   'rejects invalid visit photos before any paid dispatch (%j)', async (invalid) => {
     await expect(analyzeVisit({ photos: invalid })).rejects.toMatchObject({ code: 'INVALID_VISIT_PHOTOS', statusCode: 400 });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
