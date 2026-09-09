@@ -267,6 +267,22 @@ describe('cross-tab saved-property switch', () => {
     api.getAuthProperties.mockResolvedValue(SAVED);
   });
 
+  it('/auth/me reporting propertyScope.enabled=false with a failed list reload drops the saved-property labels instead of dressing customer-wide reads as one house', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-b' } });
+    api.getAuthProperties.mockResolvedValue({ ...SAVED, selected: { key: 'cust-1:prop-b', customerId: 'cust-1', propertyId: 'prop-b' } });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
+    // Gate turned off: the server no longer scopes; the list re-read fails.
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: false, propertyId: null } });
+    api.getAuthProperties.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => { await authApi.refreshCustomer(); });
+    expect(screen.getByTestId('selected').textContent).toBe('');
+    expect(screen.getByTestId('scope').textContent).toBe('profile');
+    expect(screen.getByTestId('labels').textContent).toBe('');
+    api.getAuthProperties.mockResolvedValue(SAVED);
+  });
+
   it('a routine same-family rotation without a property change keeps the epoch', async () => {
     const tokA1 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 1 });
     const tokA2 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 2 });

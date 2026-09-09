@@ -81,11 +81,11 @@ test('a push that names the saved property switches by the (profile, property) p
   await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith({ customerId: 'property-1', propertyId: 'prop-b' }));
 });
 
-test('a profile-only push for the current profile keeps today\'s rule: no switch', async () => {
+test('a profile-only push for the current profile while its PRIMARY is selected: no switch', async () => {
   window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1');
   state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
-    selectedProperty: { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
-    properties: [{ id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' }, { id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' }],
+    selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+    properties: [{ id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true }, { id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false }],
     propertiesError: null, switchProperty: vi.fn(async () => true) };
   render(<App />);
   await new Promise((r) => setTimeout(r, 50));
@@ -101,4 +101,16 @@ test('a push naming a saved property that is no longer listed shows the unavaila
   render(<App />);
   await waitFor(() => expect(document.body.textContent).toMatch(/no longer available/));
   expect(state.auth.switchProperty).not.toHaveBeenCalled();
+});
+
+test('a profile-only push for the current profile while a NON-primary house is selected falls back to that profile\'s primary', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
+    properties: [
+      { id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true },
+      { id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false },
+    ], propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith({ customerId: 'property-1', propertyId: 'prop-a' }));
 });

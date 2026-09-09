@@ -445,13 +445,24 @@ function ProtectedRoute({ children }) {
   // today's rule: switch only when the PROFILE differs.
   const targetPropertyId = new URLSearchParams(location.search).get('notificationPropertyId');
   const profileDiffers = !!targetProperty && String(customer?.id) !== targetProperty;
-  const savedDiffers = !!targetProperty && !!targetPropertyId && !profileDiffers
-    && String(selectedProperty?.propertyId || '') !== targetPropertyId;
+  // A saved property named by the link wins. A profile-only link (every push
+  // minted before the composers carry the property) means that profile's
+  // PRIMARY — the house unstamped visits belong to — so a non-primary
+  // selection on the same profile still switches back rather than keeping
+  // an arbitrary house whose scoped reads would hide the notified visit.
+  const currentProfileEntries = properties.filter((property) => String(property.customerId || property.id) === String(customer?.id));
+  const primaryEntry = currentProfileEntries.find((property) => property.isPrimaryProperty) || null;
+  const resolvedTargetPropertyId = targetPropertyId
+    || (!profileDiffers && primaryEntry && selectedProperty?.propertyId && String(selectedProperty.propertyId) !== String(primaryEntry.propertyId)
+      ? String(primaryEntry.propertyId)
+      : null);
+  const savedDiffers = !!targetProperty && !!resolvedTargetPropertyId && !profileDiffers
+    && String(selectedProperty?.propertyId || '') !== resolvedTargetPropertyId;
   const targetPending = isAuthenticated && (profileDiffers || savedDiffers);
   const switchingTarget = useRef(null);
   const [targetError, setTargetError] = useState(null);
   useEffect(() => {
-    const destination = `${targetProperty}:${targetPropertyId || ''}`;
+    const destination = `${targetProperty}:${resolvedTargetPropertyId || ''}`;
     if (!targetPending || loading || switchingTarget.current === destination) return;
     if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
     // Saved-property entries carry composite ids (GATE_APP_PROPERTY_SCOPE);
@@ -461,10 +472,10 @@ function ProtectedRoute({ children }) {
       return;
     }
     // A named saved property must be one of that profile's listed entries.
-    const savedEntry = targetPropertyId
-      ? properties.find((property) => String(property.customerId || property.id) === targetProperty && String(property.propertyId) === targetPropertyId)
+    const savedEntry = resolvedTargetPropertyId
+      ? properties.find((property) => String(property.customerId || property.id) === targetProperty && String(property.propertyId) === resolvedTargetPropertyId)
       : null;
-    if (targetPropertyId && !savedEntry) {
+    if (resolvedTargetPropertyId && !savedEntry) {
       setTargetError('This notification belongs to a property that is no longer available on your account.');
       return;
     }
@@ -474,7 +485,7 @@ function ProtectedRoute({ children }) {
     void switchProperty(savedEntry ? { customerId: savedEntry.customerId, propertyId: savedEntry.propertyId } : targetProperty).then((switched) => {
       if (!switched) setTargetError('This property could not be opened. Try again.');
     }).catch(() => setTargetError('This property could not be opened. Try again.'));
-  }, [targetPending, targetProperty, targetPropertyId, loading, properties, propertiesError, switchProperty]);
+  }, [targetPending, targetProperty, resolvedTargetPropertyId, loading, properties, propertiesError, switchProperty]);
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
   useGlassSurface(loading || targetPending);

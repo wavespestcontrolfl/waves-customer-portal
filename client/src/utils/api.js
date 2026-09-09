@@ -432,12 +432,14 @@ export class ApiClient {
   }
 
   // ---- Schedule ----
-  getSchedule(days = 90) {
-    return this.request(`/schedule?days=${days}`);
+  // allProperties: the customer's WHOLE schedule regardless of the selected
+  // saved property — plan-coverage evidence only (WaveGuard is per customer).
+  getSchedule(days = 90, { allProperties = false } = {}) {
+    return this.request(`/schedule?days=${days}${allProperties ? '&allProperties=1' : ''}`);
   }
 
-  getNextService() {
-    return this.request('/schedule/next');
+  getNextService({ allProperties = false } = {}) {
+    return this.request(allProperties ? '/schedule/next?allProperties=1' : '/schedule/next');
   }
 
   // Every property on the account with its next visit (multi-property Visits tab).

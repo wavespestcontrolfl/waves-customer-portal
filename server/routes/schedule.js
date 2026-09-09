@@ -46,6 +46,12 @@ router.use(authenticate);
 
 const listQuerySchema = Joi.object({
   days: Joi.number().integer().min(1).max(365).default(90),
+  // allProperties=1 (GATE_APP_PROPERTY_SCOPE): read the CUSTOMER's whole
+  // schedule regardless of the session's selected property. WaveGuard
+  // coverage is per customer (owner ruling 2026-06-29), so the My Plan tab's
+  // coverage evidence must see the services at every house; the visits
+  // surfaces never pass it.
+  allProperties: Joi.boolean().truthy('1').falsy('0').default(false),
 });
 
 function calendarUrlFor(row, now = new Date()) {
@@ -102,15 +108,16 @@ router.get('/', async (req, res, next) => {
   try {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { days } = value;
+    const { days, allProperties } = value;
     // ET calendar day, matching the etDateString() lower bound below — a UTC
     // cutoff rolls the window an ET-evening early (scheduled_date is a DATE).
     const cutoffDate = etDateString(addETDays(new Date(), days));
 
     // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the session's selected
     // property, or the primary. No predicate at all for gate-off and
-    // single-home customers (services/account-properties.js).
-    const scope = await resolveSessionScope(req);
+    // single-home customers (services/account-properties.js) — nor for a
+    // plan-coverage read (allProperties), which must see every house.
+    const scope = allProperties ? null : await resolveSessionScope(req);
     const upcomingQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(upcomingQuery, scope);
@@ -702,7 +709,9 @@ router.get('/properties-next', async (req, res, next) => {
 
 router.get('/next', async (req, res, next) => {
   try {
-    const scope = await resolveSessionScope(req);
+    // Same allProperties escape hatch as GET / (plan-coverage evidence).
+    const allProperties = ['1', 'true'].includes(String(req.query?.allProperties || '').toLowerCase());
+    const scope = allProperties ? null : await resolveSessionScope(req);
     const nextQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(nextQuery, scope);

@@ -151,4 +151,17 @@ describe('saved-property scope on the customer schedule routes', () => {
       expect(updateChain.calls[1][0]).toBe('update');
     });
   });
+
+  test('GET /?allProperties=1 and GET /next?allProperties=1: plan-coverage reads stay customer-wide under a multi-property scope', async () => {
+    global.__SCOPE__ = MULTI_SECONDARY;
+    await withServer(async (base) => {
+      await fetch(`${base}/schedule?days=365&allProperties=1`);
+      expect(propertyPredicates(visitsChainCalls())).toEqual([]);
+    });
+    jest.clearAllMocks();
+    await withServer(async (base) => {
+      await fetch(`${base}/schedule/next?allProperties=1`);
+      expect(propertyPredicates(visitsChainCalls())).toEqual([]);
+    });
+  });
 });

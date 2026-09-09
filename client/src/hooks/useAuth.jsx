@@ -211,7 +211,15 @@ export function AuthProvider({ children }) {
         // claim, which the server ignores for a retired property or while
         // the gate is off. The entry details arrive with the next refresh.
         const claimed = data?.propertyScope?.propertyId ? String(data.propertyScope.propertyId) : null;
-        if (claimed && data?.id) {
+        if (data?.propertyScope && data.propertyScope.enabled === false) {
+          // The server is NOT scoping this session (gate off, cancelled): the
+          // saved-property labels must go with it, even though the list could
+          // not be re-read — composite entries would otherwise dress
+          // customer-wide reads as one house. The next successful list read
+          // (profile shape) restores the switcher.
+          resetPropertyScope();
+          if (propertiesRef.current.some((p) => p.key)) setProperties([]);
+        } else if (claimed && data?.id) {
           setSelectedProperty((prev) => (prev && String(prev.propertyId) === claimed && String(prev.customerId) === String(data.id)
             ? prev
             : { key: `${data.id}:${claimed}`, customerId: data.id, propertyId: claimed }));

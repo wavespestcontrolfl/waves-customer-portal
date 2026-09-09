@@ -10377,8 +10377,10 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   const loadPlan = useCallback(() => {
     setPlanStatus('loading');
     Promise.all([
-      api.getNextService(),
-      api.getSchedule(365),
+      // Coverage evidence is per CUSTOMER (WaveGuard covers every house):
+      // never narrowed to the selected saved property.
+      api.getNextService({ allProperties: true }),
+      api.getSchedule(365, { allProperties: true }),
       // Completed-service history is optional context. Keep the current plan
       // usable when that focused endpoint is temporarily unavailable.
       api.getServices({ limit: 50 }).catch((err) => {

@@ -32,6 +32,14 @@ describe('api saved-property calls', () => {
     ]);
   });
 
+  it('getSchedule / getNextService add allProperties=1 only for plan-coverage reads', async () => {
+    await api.getSchedule(90);
+    await api.getSchedule(365, { allProperties: true });
+    await api.getNextService();
+    await api.getNextService({ allProperties: true });
+    expect(calls.map((c) => c.url.replace(/^.*\/api/, ''))).toEqual(['/schedule?days=90', '/schedule?days=365&allProperties=1', '/schedule/next', '/schedule/next?allProperties=1']);
+  });
+
   it('getSavedPropertiesNext reads the per-entry route', async () => {
     await api.getSavedPropertiesNext();
     expect(calls[0].url).toMatch(/\/schedule\/properties-next$/);
