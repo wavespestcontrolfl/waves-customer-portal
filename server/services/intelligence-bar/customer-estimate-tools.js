@@ -222,7 +222,12 @@ async function saveCustomerEstimate(input, actionContext) {
       if (!observed) throw failure('Estimate not found', 'target_not_found', 404);
       await persistence.lockEstimateGroupAddressRevision(trx, observed.estimate_group_id);
       await persistence.lockScheduledGroupGuardGroups(trx, observed, observed);
-      const locked = await trx('estimates').where({ id: observed.id }).forUpdate().first();
+      // Customer acceptance takes estimate -> customer. Do not wait on its
+      // estimate lock while holding the customer needed by conversion.
+      const locked = await trx('estimates').where({ id: observed.id }).forUpdate().noWait().first().catch(err => {
+        if (err.code === '55P03') throw failure('This estimate is being updated. Ask again after that operation finishes.', 'estimate_busy');
+        throw err;
+      });
       // A draft deleted between the observed read and the row lock is a
       // deterministic refusal, never a TypeError that strands the action.
       if (!locked) throw failure('The estimate was deleted after the preview. Nothing was saved.', 'target_not_found', 404);

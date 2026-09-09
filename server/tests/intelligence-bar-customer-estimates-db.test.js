@@ -386,6 +386,30 @@ suite('existing-customer estimates from another workspace', () => {
     }
   }, 60000);
 
+  test('a revision refuses acceptance row-lock contention with a known failure and releases its customer lock', async () => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
+    const before = await db('estimates').where({ id: estimateId }).first();
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    const acceptance = await db.transaction();
+    try {
+      // Independent connection reproduces accept's estimate -> customer order.
+      await acceptance('estimates').where({ id: estimateId }).forUpdate().first();
+      const refused = await confirm(proposed);
+      expect(refused.body).toMatchObject({ success: false, outcome: 'failed', result: { code: 'estimate_busy' } });
+      const receipt = await require('../services/intelligence-bar/pending-actions').getActionReceipt(proposed.body.pendingActions[0].id, actor);
+      expect(receipt).toMatchObject({ outcome: 'failed', result: { code: 'estimate_busy' } });
+      await acceptance.raw("SET LOCAL lock_timeout = '2s'");
+      await acceptance('customers').where({ id: fixture.customer.id }).forUpdate().first();
+      expect(await acceptance('estimates').where({ id: estimateId }).first()).toEqual(before);
+    } finally { await acceptance.rollback(); }
+    const retried = await confirm(await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 }));
+    expect(retried.body).toMatchObject({ success: true, result: { estimate_id: estimateId } });
+    expect((await db('estimates').where({ id: estimateId }).first()).estimate_data.engineResult.lineItems[0].frequency).toBe(12);
+  }, 60000);
+
   test('grouped address revision waits for the editor address lock before taking its send lock', async () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));

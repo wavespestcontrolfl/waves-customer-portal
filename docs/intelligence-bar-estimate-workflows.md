@@ -35,6 +35,9 @@ lead, appointment, customer message or scheduled send is created.
   prices and estimate version. The commit locks customer/property rows first,
   then estimate group address/send guards, then the estimate row. This keeps
   customer profile edits and estimate revisions in the same lock order.
+  The estimate row lock refuses contention without waiting because customer
+  acceptance takes the estimate before the customer. A busy revision rolls
+  back and records a known failure; a fresh request can retry after it clears.
   Administrator permission and fresh facts are rechecked inside the transaction.
 - The estimate, audit and pending-action receipt commit together. A missing
   receipt rolls back the mutation; an interruption after commit recovers the
@@ -55,15 +58,19 @@ keeps the loaded editor usable and offers Retry without consuming the mutation.
 Review corrections preserve canonical unknown/mixed grass instead of falling
 back to a stale property type, apply the estimator's shared field-review and
 low-confidence predicates, and conditionally persist interrupted outcomes
-without overwriting an atomic completed receipt. The current real PostgreSQL
-route suite passes all 25 scenarios, including alternate-cadence approval
+without overwriting an atomic completed receipt. The real PostgreSQL route
+suite passed all 25 scenarios in its full run, including alternate-cadence approval
 drift, discounted same-link revision parity with public pricing, and preview
 cache isolation. The authorization suite passes 42 tests, including disclosure
 and approval hashing of all offered cadences. Both editor lifecycle suites
 pass 21 tests, including failed-refresh retry and preservation of edits made
 after the failure. All eight scoped estimate tool schema, database, smoke and
 shape validators pass; side-effecting save smoke/shape checks are deliberately
-skipped by the validator. Model output is scripted in this suite; pricing,
+skipped by the validator. After the acceptance-contention correction, all four
+focused lock/deletion cases pass, including known-failure receipt persistence,
+an unchanged estimate, release of the customer lock and a successful fresh
+request after contention clears (26 distinct DB scenarios across the runs).
+Model output is scripted in this suite; pricing,
 domain persistence, authentication and PostgreSQL are real.
 
 The latest browser checks at 1440×1050 and 390×844 use the actual approval card
@@ -77,7 +84,7 @@ All fixtures are synthetic in the dedicated development Postgres database.
 The model is scripted and provider adapters are isolated. This is real
 HTTP/auth/domain/persistence evidence, not live-model or provider-send evidence.
 
-- The 25 estimate DB scenarios cover create from Inventory with A targeted
+- The 26 estimate DB scenarios cover create from Inventory with A targeted
   while B is viewed, no new lead, primary/secondary measurement authority,
   tampered parents, same-property estimate substitution, stale approval, cadence, percentage/fixed discount handling,
   membership changes in both directions, zero-area refusal, grouped revision
