@@ -4,6 +4,7 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey, loadCustomerGrassContext } = require('../lawn-grass-context');
 const { loadCurrentServiceSpendContext } = require('../estimate-membership-context');
 const { agentEngineResultDigest } = require('../agent-estimate-preview');
+const { previewFingerprint } = require('./authorization-contract');
 const { storedManualDiscountForReplay } = require('../estimate-manual-discount-replay');
 const { perApplicationChargeAmount } = require('../billing-cadence');
 const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
@@ -80,7 +81,7 @@ async function loadContext(input, database = db, lock = false) {
   return { customer: contact, property,
     properties: rows.map(row => ({ id: row.id, label: row.label, address: address(row), is_primary: row.is_primary })),
     current_services: spend.currentServices, current_tier: spend.currentTierLabel,
-    _version: agentEngineResultDigest({ contact, property, currentServices: JSON.parse(JSON.stringify(spend)) }) };
+    _version: previewFingerprint({ contact, property, currentServices: JSON.parse(JSON.stringify(spend)) }) };
 }
 
 async function readCustomerEstimateContext(input) {
@@ -156,6 +157,8 @@ async function estimatePreview(input, database = db, context = null) {
       || storedManualDiscountForReplay(savedData, { requireReplayable: true });
     if (manualDiscount) body.estimateData.engineInputs.manualDiscount = manualDiscount;
     if (savedData.operatorPriceAdjustment) body.estimateData.operatorPriceAdjustment = savedData.operatorPriceAdjustment;
+    // The public pricing builder replays this naming audit after recompute.
+    if (Array.isArray(savedData.presentationOverrides)) body.estimateData.presentationOverrides = savedData.presentationOverrides;
   }
   const params = { database, body, dryRun: true, requireLivePricing: true };
   const prepared = input.estimate_id

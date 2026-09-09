@@ -185,6 +185,65 @@ suite('existing-customer estimates from another workspace', () => {
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(1);
   }, 60000);
 
+  test('a cadence revision preserves the naming audit and customer-facing service name on the same live link', async () => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
+    const before = await db('estimates').where({ id: estimateId }).first();
+    const renamed = await require('../services/intelligence-bar/estimate-tools').executeEstimateTool('set_estimate_presentation', {
+      estimate_identifier: estimateId, service: before.estimate_data.engineResult.lineItems[0].service,
+      display_name: 'Custom Lawn Program', reason: 'Synthetic presentation regression',
+    }, { confirmed: true, isAdmin: true, technicianId: actor });
+    expect(renamed.success).toBe(true);
+    const relabeled = await db('estimates').where({ id: estimateId }).first();
+    const publicPricing = require('../routes/estimate-public').buildPricingBundle;
+    expect((await publicPricing(relabeled)).services).toContainEqual(expect.objectContaining({ label: 'Custom Lawn Program' }));
+    const revised = await confirm(await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 }));
+    expect(revised.body).toMatchObject({ success: true, result: { estimate_id: estimateId } });
+    const saved = await db('estimates').where({ id: estimateId }).first();
+    expect(saved.token).toBe(before.token);
+    expect(saved.estimate_data.presentationOverrides).toEqual(relabeled.estimate_data.presentationOverrides);
+    expect(saved.estimate_data.engineResult.lineItems[0].frequency).toBe(12);
+    expect((await publicPricing(saved)).services).toContainEqual(expect.objectContaining({ label: 'Custom Lawn Program' }));
+  }, 60000);
+
+  test('unordered service rows preserve the context version and confirmation while real spend changes still invalidate it', async () => {
+    const fixture = await customerFixture();
+    const visitIds = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+    await db('scheduled_services').insert([
+      { id: visitIds[0], service_type: 'General Pest Control', service_address_line1: fixture.property.address_line1, estimated_price: 89 },
+      { id: visitIds[2], service_type: 'General Pest Control', service_address_line1: '200 Example Grove', estimated_price: 99 },
+      { id: visitIds[1], service_type: 'Mosquito Control', service_address_line1: fixture.property.address_line1, estimated_price: 75 },
+    ].map(row => ({ customer_id: fixture.customer.id, status: 'confirmed', is_recurring: true, recurring_pattern: 'quarterly',
+      scheduled_date: require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000)), ...row })));
+    const { executeCustomerEstimateTool } = require('../services/intelligence-bar/customer-estimate-tools');
+    const input = { customer_id: fixture.customer.id, property_id: fixture.property.id };
+    const rowOrder = new Map([visitIds[0], visitIds[2], visitIds[1]].map((id, index) => [id, index]));
+    let reversed = false, reordered = 0;
+    const reorderUnorderedRows = (rows, query) => {
+      if (Array.isArray(rows) && rows.length > 1 && rows.every(row => rowOrder.has(row.id))
+          && /from "scheduled_services"/.test(query.sql) && !/order by/i.test(query.sql)) {
+        rows.sort((a, b) => (rowOrder.get(a.id) - rowOrder.get(b.id)) * (reversed ? -1 : 1));
+        if (reversed) reordered += 1;
+      }
+    };
+    db.on('query-response', reorderUnorderedRows);
+    try {
+      const before = await executeCustomerEstimateTool('get_customer_estimate_context', input);
+      expect(before.current_services.length).toBeGreaterThan(1);
+      const proposed = await propose(fixture);
+      reversed = true;
+      const after = await executeCustomerEstimateTool('get_customer_estimate_context', input);
+      expect(reordered).toBeGreaterThan(0);
+      expect(after.current_services.map(service => service.key)).not.toEqual(before.current_services.map(service => service.key));
+      expect(after._version).toBe(before._version);
+      expect((await confirm(proposed)).body.success).toBe(true);
+      await db('scheduled_services').where({ id: visitIds[0] }).update({ estimated_price: 119 });
+      expect((await executeCustomerEstimateTool('get_customer_estimate_context', input))._version).not.toBe(before._version);
+    } finally { db.removeListener('query-response', reorderUnorderedRows); }
+  }, 60000);
+
   test('revision keeps an existing editor percentage discount while changing cadence', async () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));

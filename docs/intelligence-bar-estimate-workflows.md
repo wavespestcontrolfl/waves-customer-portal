@@ -139,3 +139,23 @@ controls apply. No production migration, merge, gate flip, customer message,
 purchase or payment was performed. Shared target/retry findings in the parent
 stack and the remaining capability matrix still require implementation before
 the mission is complete.
+
+## Local follow-up after the final published review
+
+Published head `33588a1c1c` has green CI and two P2 findings, with no new P0/P1.
+Both are corrected locally for integration after the property review split:
+
+- Saved `presentationOverrides` survive the cadence revision. The existing
+  public pricing builder reapplies their custom names after recomputation and
+  retains the naming audit on the same customer link.
+- The service-context version uses the existing approval fingerprint, which
+  canonicalizes nested unordered collections while keeping prices and record
+  identities bound. SQL row order alone cannot invalidate the confirmation.
+
+The public-name, percentage-discount and property-drift DB scenarios pass. The
+row-order regression also passes with two explicitly controlled SQL result
+orders: context versions match and confirmation succeeds, while a real spend
+change changes the version. Combined with the earlier runs, all 28 distinct
+estimate DB scenarios have passed. The authorization/write-gate suites pass
+87 tests. These corrections remain local while the owner considers the
+property split; the published head and its existing review are unchanged.
