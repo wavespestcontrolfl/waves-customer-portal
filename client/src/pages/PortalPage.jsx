@@ -4275,12 +4275,15 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
   );
 }
 
-function ScheduleTab({ customer, properties = [], activePropertyId: activePropertyIdProp, onRequestVisit, onSelectProperty, switchingPropertyId }) {
+function ScheduleTab({ customer, properties = [], activePropertyId: activePropertyIdProp, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   // The entry this session is scoped to (saved-property key, else the profile
   // id). Falls back to the profile for callers that do not pass one.
   const activePropertyId = activePropertyIdProp || customer?.id;
   const currentEntry = properties.find((p) => p.id === activePropertyId) || null;
-  const currentLabel = currentEntry?.profileLabel || customer?.profileLabel || 'this property';
+  // A selection whose entry is not (yet) loaded is named neutrally — never
+  // the primary's label over another house's visits.
+  const scopedWithoutEntry = !currentEntry && !!activePropertyIdProp && activePropertyIdProp !== customer?.id;
+  const currentLabel = currentEntry?.profileLabel || (scopedWithoutEntry ? 'the selected property' : customer?.profileLabel) || 'this property';
   // Saved-property entries carry `key` (GET /auth/properties?scope=saved).
   const savedScope = properties.some((p) => p.key);
   const portalGlass = usePortalGlass();
@@ -4320,7 +4323,18 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Saved-property scope reads the per-entry twin (/schedule/properties-next,
   // rows keyed like the entries); the profile scope keeps /account-next.
   const accountNextRead = usePortalRead(`account-next:${customer?.id}:${activePropertyId}:${multiProperty}:${savedScope}`, () => multiProperty
-    ? (savedScope ? api.getSavedPropertiesNext() : api.getAccountUpcoming()).then(res => Array.isArray(res?.properties) ? res.properties : [])
+    ? (savedScope
+      // A 404 here means GATE_APP_PROPERTY_SCOPE went dark while this tab was
+      // open (codex #4207 r1 P1): the server has already dropped its property
+      // predicate, so this tab must fall back to the profile model too —
+      // re-read the property list (which now answers the profile shape) and
+      // serve the profile summary meanwhile.
+      ? api.getSavedPropertiesNext().catch((err) => {
+        if (err?.status !== 404) throw err;
+        if (onSavedScopeUnavailable) onSavedScopeUnavailable();
+        return api.getAccountUpcoming();
+      })
+      : api.getAccountUpcoming()).then(res => Array.isArray(res?.properties) ? res.properties : [])
     : Promise.resolve(null));
   // A summary awaiting revalidation must not look like a current appointment.
   const accountNextFailed = Boolean(accountNextRead.error);
@@ -15087,7 +15101,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
-function VisitsTab({ customer, properties = [], activePropertyId, subTab, onSubTabChange, onRequestVisit, onSelectProperty, switchingPropertyId }) {
+function VisitsTab({ customer, properties = [], activePropertyId, subTab, onSubTabChange, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   const compact = useIsMobile(760);
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
   const card = {
@@ -15154,7 +15168,7 @@ function VisitsTab({ customer, properties = [], activePropertyId, subTab, onSubT
           </div>
         </div>
       </section>
-      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} switchingPropertyId={switchingPropertyId} /> : <ServicesTab />}
+      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : <ServicesTab />}
     </div>
   );
 }
@@ -15682,7 +15696,11 @@ export default function PortalPage() {
       setRequestRefreshKey(key => key + 1);
     }
   };
-  const activePropertyAddress = formatPropertyAddress(activeProperty || customer);
+  // The header address is the selected entry's. A selection whose entry is
+  // not loaded shows no address rather than the primary's (codex #4207 r1).
+  const activePropertyAddress = activeProperty
+    ? formatPropertyAddress(activeProperty)
+    : (selectedProperty && activePropertyId !== customer.id ? '' : formatPropertyAddress(customer));
   const accountMenuItems = (cancelledAccount ? (items) => items.filter(i => CANCELLED_TABS.includes(i.tab)) : (items) => items)([
     { icon: 'home', label: 'Home', sub: 'Portal overview', tab: 'dashboard', action: () => switchTab('dashboard') },
     { icon: 'plan', label: 'My Plan', sub: 'Services and bundle savings', tab: 'plan', action: () => switchTab('plan') },
@@ -16225,7 +16243,7 @@ export default function PortalPage() {
           onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
-        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} subTab={visitsSubTab} onSubTabChange={(sub) => {
+        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the
           // same sub-tab; replace (not push) so pill toggles don't stack

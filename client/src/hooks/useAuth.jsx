@@ -196,6 +196,16 @@ export function AuthProvider({ children }) {
         // (setLoading(false) below) while the previous customer's state is
         // still rendered under the new token.
         if (sessionEpochRef.current !== epoch) return;
+        // A saved-property token scopes every read to its claim even when the
+        // list cannot be read (codex #4207 r1 P1): derive the selection from
+        // the token so the page never presents that house's visits under the
+        // primary's identity. The entry details arrive with the next refresh.
+        const claimed = tokenPropertyId(api.token);
+        if (claimed && data?.id) {
+          setSelectedProperty((prev) => (prev && String(prev.propertyId) === claimed && String(prev.customerId) === String(data.id)
+            ? prev
+            : { key: `${data.id}:${claimed}`, customerId: data.id, propertyId: claimed }));
+        }
         // The active customer is still valid. Preserve any property list we
         // already have instead of collapsing a multi-property account to a
         // single property, and surface a retry in the account menu.

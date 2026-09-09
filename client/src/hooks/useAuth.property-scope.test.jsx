@@ -202,6 +202,17 @@ describe('cross-tab saved-property switch', () => {
     api.getAuthProperties.mockResolvedValue(SAVED);
   });
 
+  it('a fresh tab whose saved-property list read fails still derives its selection from the token claim', async () => {
+    const tokB = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'prop-b' });
+    stubLocalStorage({ waves_token: tokB, waves_refresh_token: 'ref-b' });
+    api.getMe.mockResolvedValue({ id: 'cust-1' });
+    api.getAuthProperties.mockRejectedValue(new Error('offline'));
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-1');
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
+    api.getAuthProperties.mockResolvedValue(SAVED);
+  });
+
   it('a routine same-family rotation without a property change keeps the epoch', async () => {
     const tokA1 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 1 });
     const tokA2 = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1', nonce: 2 });

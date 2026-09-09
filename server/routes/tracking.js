@@ -296,6 +296,29 @@ async function findCanonicalScheduledService(customerId, opts = {}) {
   return buildCanonicalScheduledServiceQuery(db, customerId, canonicalQueryOptions(opts)).first();
 }
 
+// The house being viewed drives the pin, the ETA and the rain chip: when the
+// saved-property scope resolves to a NON-primary property, its coordinates
+// and address replace the customer row's primary mirror (codex #4207 r1 P1).
+// A secondary without a geocode yields NO pin rather than the primary's — the
+// same "never the wrong house" posture as the stamped-address branch below.
+// The visit's own stamped geocode still wins where that branch runs.
+function scopedLocationCustomer(customer, scope) {
+  const property = scope && scope.enabled && scope.multi && scope.property && scope.property.is_primary !== true
+    ? scope.property
+    : null;
+  if (!property) return customer;
+  return {
+    ...customer,
+    latitude: property.latitude ?? null,
+    longitude: property.longitude ?? null,
+    address_line1: property.address_line1 ?? customer?.address_line1 ?? null,
+    address_line2: property.address_line2 ?? null,
+    city: property.city ?? customer?.city ?? null,
+    state: property.state ?? customer?.state ?? null,
+    zip: property.zip ?? customer?.zip ?? null,
+  };
+}
+
 async function enrichScheduledWithTechStatus(tracker, service, customer) {
   if (!tracker || tracker.currentStep !== 3) return tracker;
   try {
@@ -369,13 +392,14 @@ router.get('/maps-key', (req, res) => {
 router.get('/active', async (req, res, next) => {
   try {
     const scope = await resolveSessionScope(req);
+    const locationCustomer = scopedLocationCustomer(req.customer, scope);
     const canonical = await findCanonicalScheduledService(req.customerId, { activeOnly: true, scope });
     if (canonical) {
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
-      const formatted = formatScheduledTracker(canonical, tech, req.customer);
+      const formatted = formatScheduledTracker(canonical, tech, locationCustomer);
       await attachTechPhoto(formatted, tech);
-      await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
-      await attachRainChance(formatted, canonical, req.customer);
+      await enrichScheduledWithTechStatus(formatted, canonical, locationCustomer);
+      await attachRainChance(formatted, canonical, locationCustomer);
       // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
       // fail-soft null. routeProgress feeds the route-dots strip.
       const stops = await computeStopsAhead(db, canonical.id);
@@ -399,9 +423,9 @@ router.get('/active', async (req, res, next) => {
             service_address_line1: canonical.service_address_line1,
             service_address_zip: canonical.service_address_zip,
             service_address_city: canonical.service_address_city,
-            customer_address_line1: req.customer?.address_line1,
-            customer_zip: req.customer?.zip,
-            customer_city: req.customer?.city,
+            customer_address_line1: locationCustomer?.address_line1,
+            customer_zip: locationCustomer?.zip,
+            customer_city: locationCustomer?.city,
           });
           if (diverges) formatted.customerLocation = null;
         }
@@ -443,13 +467,14 @@ router.get('/active', async (req, res, next) => {
 router.get('/today', async (req, res, next) => {
   try {
     const scope = await resolveSessionScope(req);
+    const locationCustomer = scopedLocationCustomer(req.customer, scope);
     const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true, scope });
     if (canonical) {
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
-      const formatted = formatScheduledTracker(canonical, tech, req.customer);
+      const formatted = formatScheduledTracker(canonical, tech, locationCustomer);
       await attachTechPhoto(formatted, tech);
-      await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
-      await attachRainChance(formatted, canonical, req.customer);
+      await enrichScheduledWithTechStatus(formatted, canonical, locationCustomer);
+      await attachRainChance(formatted, canonical, locationCustomer);
       // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
       // fail-soft null. routeProgress feeds the route-dots strip.
       const stops = await computeStopsAhead(db, canonical.id);
@@ -473,9 +498,9 @@ router.get('/today', async (req, res, next) => {
             service_address_line1: canonical.service_address_line1,
             service_address_zip: canonical.service_address_zip,
             service_address_city: canonical.service_address_city,
-            customer_address_line1: req.customer?.address_line1,
-            customer_zip: req.customer?.zip,
-            customer_city: req.customer?.city,
+            customer_address_line1: locationCustomer?.address_line1,
+            customer_zip: locationCustomer?.zip,
+            customer_city: locationCustomer?.city,
           });
           if (diverges) formatted.customerLocation = null;
         }
@@ -550,6 +575,7 @@ router.post('/demo/advance', async (req, res, next) => {
 router._test = {
   buildCanonicalScheduledServiceQuery,
   canonicalQueryOptions,
+  scopedLocationCustomer,
   isFreshTechStatusTimestamp,
   formatScheduledTracker,
 };

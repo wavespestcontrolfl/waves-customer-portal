@@ -121,4 +121,16 @@ describe('canonical customer tracker query', () => {
     expect(trackingRouter._test.isFreshTechStatusTimestamp(null)).toBe(false);
     expect(trackingRouter._test.isFreshTechStatusTimestamp('not-a-date')).toBe(false);
   });
+
+  test('scopedLocationCustomer: a non-primary selection supplies its own coordinates/address (no geocode → no pin); primary/single/off keep the customer row', () => {
+    const scoped = trackingRouter._test.scopedLocationCustomer;
+    const customer = { id: 'c1', latitude: 27.1, longitude: -82.1, address_line1: '1200 Palm Row Ct', city: 'Parrish', state: 'FL', zip: '34219' };
+    const secondary = { id: 'pb', is_primary: false, latitude: 27.5, longitude: -82.5, address_line1: '418 Oak Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
+    expect(scoped(customer, { enabled: true, multi: true, property: secondary })).toMatchObject({ id: 'c1', latitude: 27.5, longitude: -82.5, address_line1: '418 Oak Ave', city: 'Bradenton', zip: '34205' });
+    expect(scoped(customer, { enabled: true, multi: true, property: { ...secondary, latitude: null, longitude: null } })).toMatchObject({ latitude: null, longitude: null, address_line1: '418 Oak Ave' });
+    expect(scoped(customer, { enabled: true, multi: true, property: { ...secondary, is_primary: true } })).toBe(customer);
+    expect(scoped(customer, { enabled: true, multi: false, property: secondary })).toBe(customer);
+    expect(scoped(customer, { enabled: false, multi: false, property: null })).toBe(customer);
+    expect(scoped(customer, null)).toBe(customer);
+  });
 });
