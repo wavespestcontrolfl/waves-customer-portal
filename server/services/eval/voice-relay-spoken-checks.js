@@ -505,7 +505,7 @@ function hasPhoneFragment(text) {
   return labeled || ending;
 }
 // "and twelve" continues an hour range; "and her visit" begins a new fact.
-const VISIT_CLAUSE_BOUNDARY_RE = new RegExp(`[.!?;,]|(?<!\\d):|:(?!\\d)|\\b(?:but|however|though|although|yet|so|then|because|since|while|and(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b))\\b`, 'i');
+const VISIT_CLAUSE_BOUNDARY_RE = new RegExp(`[.!?;,]|(?<!\\d):|:(?!\\d)|\\b(?:but|however|though|although|yet|so|then|because|since|while|whilst|whereas|as(?=\\s+(?:her|his|their|your|[a-z]+[\\x27\\u2019]s)\\s+(?:appointment|visit|service)s?\\b)|and(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b))\\b`, 'i');
 
 const VISIT_COORDINATION_RE = new RegExp(`\\b(?:and(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b)|or)(?!\\s+(?:whether|if|not|when)\\b)\\b`, 'gi');
 
