@@ -707,6 +707,13 @@ async function listForCall(conn, callLogId) {
   return rows.map(normalizeRow);
 }
 
+function effectiveDueAt(row, cardsEnabled) {
+  const isCard = row.kind === 'callback' && row.party === 'waves' && cardsEnabled;
+  const base = row.due_at || (isCard ? row.callback_due_at : null) || null;
+  if (!base || !isCard || !row.snoozed_until) return base;
+  return new Date(row.snoozed_until).getTime() > new Date(base).getTime() ? row.snoozed_until : base;
+}
+
 function normalizeRow(row) {
   const parse = (v) => {
     if (v == null) return null;
@@ -716,8 +723,10 @@ function normalizeRow(row) {
   const cardsEnabled = require('./callback-cards').enabled();
   return {
     ...row,
-    // Display the staffed deadline without turning it into an editable stated promise.
-    effective_due_at: row.due_at || (row.kind === 'callback' && row.party === 'waves' && cardsEnabled ? row.callback_due_at : null) || null,
+    // Display the deadline the queue judges — the staffed one, pushed out
+    // to the end of an active snooze — without turning it into an editable
+    // stated promise (due_at and callback_due_at keep the original times).
+    effective_due_at: effectiveDueAt(row, cardsEnabled),
     // A snooze is card policy: with the gate off the server ignores it, so
     // no reader sees a snooze the queue no longer honours.
     ...(row.snoozed_until !== undefined ? { snoozed_until: cardsEnabled ? row.snoozed_until : null } : {}),
@@ -1513,7 +1522,11 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
   return builder;
 }
 
-async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
+// `prepare`: the staff queue and the reminder scan initialize undated
+// callback cards (deadline, default owner, audit row) as they read; every
+// other caller — the Intelligence Bar's read-only tool, the integrations
+// worker — gets a pure read and sees whatever those paths persisted.
+async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date() } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -1527,7 +1540,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
   // the watchdog scan) and would skip rows or repeat them. Later pages read
   // the snapshot the first page established; the next first-page read
   // prepares whatever arrived meanwhile.
-  if (!(Number(offset) > 0)) await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
+  if (prepare && !(Number(offset) > 0)) await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')

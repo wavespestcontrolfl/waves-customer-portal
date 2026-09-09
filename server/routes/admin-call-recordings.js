@@ -288,7 +288,7 @@ router.get('/commitments/open', async (req, res, next) => {
     // 200-row page passing as the whole worklist (Codex #3725 r17 P2).
     const pageLimit = Math.max(1, Math.min(200, Number(limit) || 100));
     const pageOffset = Number(offset) || 0;
-    const opts = { party: party || null, kind: kind || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0' };
+    const opts = { party: party || null, kind: kind || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0', prepare: true };
     const { isEnabled } = require('../config/feature-gates');
     const enabled = isEnabled('callCommitments');
     let rows = await listOpenCommitments(db, opts);
