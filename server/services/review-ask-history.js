@@ -45,10 +45,21 @@ async function lastManualAskAt(customerId, { since } = {}) {
     // Include correspondence just before the boundary so its timestamp
     // cannot instead be assigned to a manual ask just after the boundary.
     .where('created_at', '>=', new Date(sinceAt.getTime() - 90000))
-    .whereNotIn('status', ['scheduled', 'sending', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
+    .where(q => q.whereNotIn('status', ['scheduled', 'sending', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
+      // A finalize-only replay has already delivered; changing its queue
+      // status must not hide that ask while bookkeeping catches up.
+      .orWhereRaw("metadata->>'finalize_only' = 'true'"))
     .orderBy('created_at', 'desc')
-    .select('message_body', 'created_at');
-  const candidates = outbound.filter(row => looksLikeReviewAsk(row.message_body));
+    .select('message_body', 'created_at', 'metadata');
+  const candidates = outbound.filter(row => {
+    if (looksLikeReviewAsk(row.message_body)) return true;
+    // Bundled completion asks can carry only a short link. Their persisted
+    // review linkage remains evidence before the review row is finalized.
+    try {
+      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+      return !!(meta?.bundled_review_request_id || meta?.review_ask_delivered_at);
+    } catch { return false; }
+  });
   if (!candidates.length) return null;
   const sends = await db('review_requests')
     .where({ customer_id: customerId })

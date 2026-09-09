@@ -108,6 +108,7 @@ function makeMock(initial = {}, opts = {}) {
         this.equals.push([a, op]); return this;
       },
       orWhere() { return this; },
+      orWhereRaw() { return this; },
       orWhereNull() { return this; },
       whereRaw(sql) { this.raws.push(sql); return this; },
       whereNot(c, v) { this.notEquals.push([c, v]); return this; },

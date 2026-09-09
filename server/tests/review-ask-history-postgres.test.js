@@ -65,6 +65,14 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.deliveredAskRows(customerId, { since: deliveredAt })).toEqual([]);
   });
 
+  test.each(['bundled', 'declared'])('a delivered %s ask remains visible during finalize-only recovery', async kind => {
+    await trx('sms_log').insert({ customer_id: customerId, direction: 'outbound',
+      from_phone: '+12025550101', to_phone: '+12025550102', status: 'scheduled',
+      created_at: at, message_body: 'Thank you: https://portal.test/l/abc123',
+      metadata: { ...(kind === 'bundled' ? { bundled_review_request_id: randomUUID() } : { review_ask_delivered_at: at.toISOString() }), finalize_only: true } });
+    expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(at);
+  });
+
   test('latest delivered manual ask excludes failed sends and acknowledgments', async () => {
     await request({ sms_sent_at: at });
     const manualAt = new Date(at.getTime() + 240000);
