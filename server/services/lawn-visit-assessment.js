@@ -577,6 +577,21 @@ const ECHO_ALLOWLIST = new Set([
   'florida', 'southwest', 'lawn', 'turf', 'grass', 'front', 'back', 'side', 'yard', 'photo', 'photos',
 ].filter(Boolean));
 const ECHO_RUN_WORDS = 5;
+// Words a sentence may open with in ordinary lawn notes ("Checked the back
+// yard", "Chinch damage by the drive"): a sentence-initial capital on one of
+// these is capitalisation, not a name; any OTHER sentence-initial capital
+// the answer reproduces is treated as a name ("Kowalski reports thinning by
+// the gate" — Codex #4149 r11: the first token was exempted outright).
+const ECHO_COMMON_WORDS = new Set(('the a an and or but so if then this that these those there here it its is are was were be been has have had do does did '
+  + 'not no yes we our i my you your they their he she his her him them who what when where which how also still just very some any all most more less much many '
+  + 'new old big small good bad fine ok okay please note notes noted check checked checking saw seen see found find looks looked looking appears appeared seems seemed '
+  + 'customer client owner homeowner tech technician crew visit visited service treated treatment applied application spray sprayed '
+  + 'lawn turf grass yard front back side left right north south east west corner edge edges strip bed beds driveway walk walkway sidewalk street curb fence gate pool patio house home garage mailbox '
+  + 'area areas spot spots patch patches zone zones section sections whole entire mostly some heavy light moderate mild severe minor major '
+  + 'thin thinning bare sparse brown browning yellow yellowing green dry wet soggy dead dying damage damaged stress stressed weak healthy dense '
+  + 'water watering irrigation sprinkler sprinklers rain mow mowed mowing cut scalped shade shaded sun sunny dog dogs pet pets kids traffic '
+  + 'chinch bugs bug insect insects pest pests fungus fungal disease weeds weed sedge nutsedge crabgrass clover spurge dollarweed drought thatch grubs grub worms worm armyworms caterpillars '
+  + 'photo photos photos taken took recheck follow up next last today yesterday week month').split(/\s+/));
 const echoWords = (text) => String(text || '').toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean);
 function echoesTechnicianNotes(text, notes) {
   if (!text || !notes) return false;
@@ -590,11 +605,14 @@ function echoesTechnicianNotes(text, notes) {
   for (let i = 0; i < raw.length; i += 1) {
     const token = raw[i].replace(/^[^\p{L}]+|[^\p{L}']+$/gu, '');
     if (!/^\p{Lu}/u.test(token) || token.length < 3) continue;
-    // A sentence-initial capital is not a name — but the word after an
-    // honorific ("Mrs. Kowalski") is.
-    if (i === 0 || (/[.!?:;]$/.test(raw[i - 1]) && !/^(?:mr|mrs|ms|miss|mx|dr)\.?$/i.test(raw[i - 1]))) continue;
     const lower = token.toLowerCase();
-    if (ECHO_ALLOWLIST.has(lower) || ECHO_ALLOWLIST.has(lower.replace(/'s$/, ''))) continue;
+    const base = lower.replace(/'s$/, '');
+    if (ECHO_ALLOWLIST.has(lower) || ECHO_ALLOWLIST.has(base)) continue;
+    // A sentence-initial capital on an ordinary word is capitalisation, not
+    // a name; on anything else it is a name ("Kowalski reports …"). The word
+    // after an honorific ("Mrs. Kowalski") is always a name.
+    const sentenceInitial = i === 0 || (/[.!?:;]$/.test(raw[i - 1]) && !/^(?:mr|mrs|ms|miss|mx|dr)\.?$/i.test(raw[i - 1]));
+    if (sentenceInitial && (ECHO_COMMON_WORDS.has(lower) || ECHO_COMMON_WORDS.has(base) || SUMMARY_CAUSE_RE.test(token))) continue;
     if (words.includes(lower) || words.includes(`${lower}'s`) || words.includes(lower.replace(/'s$/, ''))) return true;
   }
   return false;
@@ -1024,8 +1042,17 @@ function technicianFindingIds(details, stored, highWater = 0) {
 
 // A technician-added detail becomes a finding of its own: moderate at most
 // (the diagnostic tool's evidence rule — no cause above moderate without a
-// structured field check), evidence = the note itself.
+// structured field check), evidence = the note itself. A NEGATED detail
+// ("Checked for chinch bugs; none found") is the technician ruling a cause
+// OUT: it keeps its text in the review but carries the clean-lawn label, so
+// it never reconciles as the positive condition or raises a "chinch bug
+// activity: monitor response" watch item (Codex #4149 r11). The label
+// mapper handles a LEADING negation only.
+const NEGATED_DETAIL_RE = /\b(?:none|nothing|no\s+(?:signs?|evidence|indication|trace|activity|damage)|not\s+(?:found|seen|present|observed|detected|evident|visible)|absent|negative|ruled\s+out|did\s*n[o']t\s+(?:find|see|observe|detect|notice)|couldn['’]?t\s+(?:find|see|confirm)|clear\s+of|free\s+of|no\s+longer)\b/i;
 function technicianFinding(detail, findingId) {
+  const negatedCause = NEGATED_DETAIL_RE.test(detail.text) && SUMMARY_CAUSE_RE.test(detail.text);
+  const label = negatedCause ? NO_STRESS_LABEL : safeConditionLabel(detail.text, 'moderate');
+  const negated = negatedCause || label === NO_STRESS_LABEL; // a leading "No …" the mapper already reads as clean
   return {
     finding_id: findingId,
     name: detail.text,
@@ -1043,7 +1070,8 @@ function technicianFinding(detail, findingId) {
     zone: detail.zone || 'unknown',
     can_determine: true,
     cannot_determine_reason: '',
-    label: safeConditionLabel(detail.text, 'moderate'),
+    label,
+    negated,
     source: 'technician',
     keep: true,
     tech_note: null,

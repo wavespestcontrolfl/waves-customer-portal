@@ -436,6 +436,11 @@ describe('technician notes never reach customer copy', () => {
     expect(visit.echoesTechnicianNotes("Mrs. Kowalski's dog has worn a path by the gate.", notes)).toBe(true);
     expect(visit.echoesTechnicianNotes('Worn strip where the dog digs by the side gate.', notes)).toBe(true);
     expect(visit.echoesTechnicianNotes('Thin St. Augustine turf at the side gate looks dry.', notes)).toBe(false); // grass and place words are not the notes
+    // A name that OPENS the notes is still a name; an ordinary word opening a sentence is just capitalisation.
+    expect(visit.echoesTechnicianNotes('Kowalski reports thinning by the gate.', 'Kowalski reports thinning by the gate')).toBe(true);
+    expect(visit.echoesTechnicianNotes("Thinning near the gate, as Kowalski's note says.", 'Kowalski says the dog digs there')).toBe(true);
+    expect(visit.echoesTechnicianNotes('Chinch damage along the drive; the back yard was checked.', 'Chinch damage by the drive. Checked the back yard. Dog digs.')).toBe(false);
+    expect(visit.echoesTechnicianNotes('Thin turf near the mailbox.', 'Mailbox side is thin. Nothing else.')).toBe(false);
     expect(visit.echoesTechnicianNotes('Turf is thin near the side gate.', '')).toBe(false);
     expect(visit.echoesTechnicianNotes('', notes)).toBe(false);
     const analysis = visit.normalizeAssessment(answer({ observations: "Mrs. Kowalski's dog has worn a path by the gate.", findings: [finding({ confirmation_step: 'Ask Mrs. Kowalski when the dog is out' }), finding({ name: 'Dollar spot', confirmation_step: 'Check the shaded strip at dawn' })] }), 2);
@@ -488,6 +493,11 @@ describe('customer copy compliance screen', () => {
     expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ label: 'weed pressure', confidence: 'low' }])).toBe(visit.NO_OBSERVATIONS);
     expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ label: 'weed pressure', confidence: 'moderate' }])).toMatch(/^Nutsedge/);
     expect(visit.customerObservations('Weed pressure along the walk.', [{ label: 'weed pressure', confidence: 'low' }])).toMatch(/^Weed pressure/);
+    // Every weed species the label mapper recognises is governed the same way.
+    for (const species of ['Clover', 'Spurge', 'Sedge', 'Crabgrass', 'Dollarweed']) {
+      expect(visit.customerObservations(`${species} is spreading along the walk.`, [{ label: 'weed pressure', confidence: 'low' }])).toBe(visit.NO_OBSERVATIONS);
+      expect(visit.customerObservations(`${species} is spreading along the walk.`, [{ label: 'weed pressure', confidence: 'moderate' }])).toMatch(new RegExp(`^${species}`));
+    }
     // Symptom-only prose passes regardless of confidence.
     expect(visit.customerObservations('Thin turf along the driveway edge; the shaded side holds moisture.', [low])).toMatch(/^Thin turf/);
     expect(visit.namesUnpublishedCause('Drought stress near the curb', [{ label: 'drought stress', confidence: 'high' }])).toBe(false);
@@ -755,6 +765,19 @@ describe('technician review on confirm', () => {
     expect(visit.reviewedObservations({ assessment: { observations: visit.NO_OBSERVATIONS }, run: after({ reviewedFindings: [] }) })).toBe(prose);
     // Technician-authored observations are left alone.
     expect(visit.reviewedObservations({ assessment: { observations: 'Tech note: the dog run is the cause.' }, run: after({ reviewedFindings: [{ finding_id: 'F1', keep: false }] }) })).toBeNull();
+  });
+
+  test('a negated technician detail rules a cause out: it stays in the review with the clean-lawn label and never reconciles as the positive condition', () => {
+    const { review } = visit.validateReview({ addedDetails: [{ text: 'Checked for chinch bugs; none found', zone: 'front' }, { text: 'Float test negative for chinch at the drive' }, { text: 'Chinch confirmed by float test' }, { text: 'No dollar spot seen' }] }, run);
+    const built = visit.buildReview(run, review);
+    expect(built.added_details.map((d) => [d.finding_id, d.label, d.negated])).toEqual([['T1', 'no major visible stress', true], ['T2', 'no major visible stress', true], ['T3', 'chinch bug activity', false], ['T4', 'no major visible stress', true]]);
+    expect(built.added_details[0].name).toBe('Checked for chinch bugs; none found'); // the technician's record is kept verbatim
+    const rec = built.reconciliation;
+    expect(rec.flags.filter((f) => f.type === 'untreated_condition').map((f) => f.finding_id)).toEqual(['F1', 'F2', 'T3']);
+    expect(rec.watch_items.some((item) => /^chinch bug activity: monitor/.test(item) && item !== 'chinch bug activity: monitor response')).toBe(false);
+    expect(rec.watch_items.filter((item) => /^chinch bug activity/.test(item))).toHaveLength(1); // T3 only
+    // A negated detail publishes no cause for the observation re-gate either.
+    expect(visit.customerObservations('Chinch bug activity along the drive.', [built.added_details[0]])).toBe(visit.NO_OBSERVATIONS);
   });
 
   test('with no products every kept finding reads untreated — the honest state until the completion records what was applied', () => {
