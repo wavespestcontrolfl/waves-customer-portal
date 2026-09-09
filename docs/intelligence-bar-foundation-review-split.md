@@ -406,6 +406,14 @@ fail safely with and without a selection, in the unit and PostgreSQL suites.
 The function words that can follow a selector (`on`, `about`, `after`, …)
 are non-names, which fixes a phone-read over-refusal found downstream.
 
+The finished-commit review found two more P1s in the same direction and a P2,
+fixed in place: a name run must equal the stored name exactly (`Update Alice
+Jones Jr` no longer resolves Alice Jones as a prefix; an unlisted trailing word
+such as `soon` is refused rather than assumed), the qualifier run between a
+set quantifier and its noun is unbounded (`all active residential lawn
+customers` is a set; a deictic word still ends the run), and a selected
+customer id is lowercased before candidate matching.
+
 Validation: 159 target cases pass (135 unit and 24 rollback-only isolated
 PostgreSQL cases). No model, provider, production query, migration, merge or
 gate change occurred.
