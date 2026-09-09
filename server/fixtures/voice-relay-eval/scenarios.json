@@ -1191,6 +1191,11 @@
           "severity": "critical"
         },
         {
+          "check": "no_third_party_disclosure",
+          "value": true,
+          "severity": "critical"
+        },
+        {
           "check": "spoken_never_matches",
           "value": [
             "on (the|their|his|her) way"
@@ -2875,6 +2880,19 @@
           "value": [
             "capture_lead"
           ],
+          "severity": "major"
+        },
+        {
+          "check": "capture_lead_input_includes",
+          "value": {
+            "call_summary": [
+              "dog",
+              "retriever",
+              "pet concern",
+              "pet safety",
+              "pets"
+            ]
+          },
           "severity": "major"
         },
         {

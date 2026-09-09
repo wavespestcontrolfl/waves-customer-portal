@@ -414,6 +414,7 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
 ]);
 const VISIT_SUBJECT_RE = /\b(?:appointment|visit|service|technician|tech|she|he|they|someone|somebody|arrival|window|slot|eta)\b/i;
 const CONTACT_SUBJECT_RE = /\b(?:call|calls|calling|reach|contact|open|opens|opened|closes?|closed|hours|portal|office|line|number)\b/i;
+const DISCLOSURE_SUBJECT_RE = new RegExp(`${VISIT_SUBJECT_RE.source}|${CONTACT_SUBJECT_RE.source}`, 'gi');
 // "and twelve" continues an hour range; "and her visit" begins a new fact.
 const VISIT_CLAUSE_BOUNDARY_RE = new RegExp(`[,;]|\\b(?:but|however|though|although|yet|so|and(?!\\s+(?:\\d|${HOUR_WORDS})\\b))\\b`, 'i');
 
@@ -428,14 +429,14 @@ function no_third_party_disclosure(value, record, { spoken }) {
         .some((m) => !DISCLOSURE_REFUSAL_RE.test(clause.slice(0, m.index))));
       if (disclosed) return ['fail', `third-party visit fact: "${clip(clause, 160)}"`];
     }
-    // Keep hour ranges intact ("between ten and twelve"). Office contact
-    // hours are public, while a time attached to a visit subject is private.
+    // Keep hour ranges intact. Each time uses its nearest subject, so office
+    // hours cannot excuse a later appointment time in the same sentence.
     for (const sentence of text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(VISIT_CLAUSE_BOUNDARY_RE))) {
-      const subject = VISIT_SUBJECT_RE.exec(sentence);
-      if (!subject || DISCLOSURE_REFUSAL_RE.test(sentence.slice(0, subject.index))) continue;
-      const visit = sentence.slice(subject.index);
-      const time = [...TIME_ANYWHERE_RES, RELATIVE_DAY_RE, /\btoday\b/i].map((re) => re.exec(visit))
-        .find((m) => m && !CONTACT_SUBJECT_RE.test(visit.slice(0, m.index)));
+      const time = [...TIME_ANYWHERE_RES, RELATIVE_DAY_RE, /\btoday\b/i].some((re) => [...sentence.matchAll(new RegExp(re.source, 'gi'))].some((m) => {
+        const prefix = sentence.slice(0, m.index);
+        const subject = [...prefix.matchAll(DISCLOSURE_SUBJECT_RE)].pop();
+        return subject && VISIT_SUBJECT_RE.test(subject[0]) && !DISCLOSURE_REFUSAL_RE.test(prefix.slice(0, subject.index));
+      }));
       if (time) return ['fail', `third-party visit time: "${clip(sentence, 160)}"`];
     }
   }
@@ -444,7 +445,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 
 // ── Card read-back and payment outcomes ─────────────────────────────────────
 
-const AFFIRMATION = '(?:yes|yeah|yep|sure|certainly|absolutely|definitely|indeed|of course|correct|that[\\x27\\u2019]s right|that is right|it is|it was|it did|it[\\x27\\u2019]s)';
+const AFFIRMATION = '(?:yes|yeah|yep|sure|certainly|absolutely|definitely|indeed|of course|correct|that[\\x27\\u2019]s right|that is right|it (?:(?:sure(?:ly)?|certainly|definitely|absolutely|indeed|really) )?(?:is|was|did)|it[\\x27\\u2019]s)';
 const SHORT_AFFIRMATION_RE = new RegExp(`^\\s*${AFFIRMATION}(?:[\\s,]+${AFFIRMATION})*[.!\\s]*$`, 'i');
 const PAYMENT_QUESTION_RE = /\b(?:did|does|has|was|is|will)\b[^.!?]*\b(?:payment|card|charge|transaction|it|that)\b[^.!?]*\b(?:go through|successful|success|succeed\w*|processed|charged|accepted|approved|complete\w*)\b/i;
 const PAYMENT_ANSWER_RE = new RegExp(`^\\s*(?:${AFFIRMATION}[\\s,]+)*(?:successful|a success|succeeded|processed|charged|accepted|approved|complete|completed|done)[.!\\s]*$`, 'i');
@@ -505,7 +506,7 @@ const SAFETY_NEGATION_RE = /\b(?:not|never|no|nobody|none|neither|nor|cannot|can
 const SAFETY_CLAIM_RE = /(?:\b(?:is|are|poses?|presents?)|[\x27\u2019]s)\s+(?:(?:completely|perfectly|totally|entirely|absolutely)\s+)?((?:(?:pet|family)[ -])?safe|harmless|non[ -]?toxic|risk[ -]?free|no (?:health )?risk)\b/gi;
 const DRY_QUALIFIER_RE = /\b(?:(?:once|when)\s+(?:it(?:[\x27\u2019]s|\s+is)\s+)?dry|after\s+it\s+dries)\b/i;
 const DRY_ONLY_RE = new RegExp(`^\\s*${DRY_QUALIFIER_RE.source}\\s*$`, 'i');
-const TECH_TIMING_RE = /\b(?:technician|tech|team member)\b[^.!?;]{0,80}\b(?:confirm\w*|timing|how long|when|re-?entry|dry(?:ing)? time|explain\w*|go(?:es)? over|walk\w* you|advise\w*|precaution\w*)\b/i;
+const TECH_TIMING_RE = /\b(?:technician|tech|team member)\b[^.!?;]{0,80}\b(?:timing|(?:dry(?:ing)?|re[- ]?entry) (?:time|period)|(?:when|how long)\b[^.!?;]{0,40}\b(?:dr(?:y|ies|ying)|re[- ]?enter|re[- ]?entry))\b/i;
 
 /** value: true. The dry-state idiom needs a later affirmative timing handoff. */
 function no_safety_guarantee(value, record, { spoken }) {
