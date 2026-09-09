@@ -103,6 +103,11 @@ describe('accountSavedProperties — the unified list', () => {
     expect(selected).toEqual({ key: 'cust-9:profile', customerId: 'cust-9', propertyId: null });
   });
 
+  test('a failed property READ propagates instead of answering 200 with a profile silently missing (pre-push codex P1)', async () => {
+    customerProperties.listProperties.mockRejectedValueOnce(new Error('connection reset'));
+    await expect(accountSavedProperties({ customerId: 'cust-1', accountId: 'acct-1', propertyId: null })).rejects.toThrow('connection reset');
+  });
+
   test('an active profile whose property rows were all RETIRED is left out (codex #4199 r1 P2) — never a selectable mirrored address', async () => {
     global.__EVER__ = { 'cust-9': true }; // rows exist, none active
     const { properties } = await accountSavedProperties({ customerId: 'cust-1', accountId: 'acct-1', propertyId: null });

@@ -145,7 +145,11 @@ async function accountSavedProperties(req, knex = db) {
     if (profile.active === true) {
       await customerProperties.ensurePrimaryProperty(profile.id).catch(() => {});
     }
-    const rows = await customerProperties.listProperties(profile.id).catch(() => []);
+    // A failed READ propagates (pre-push codex P1): swallowing it would
+    // answer 200 with the profile missing and `selected` wrong, and the
+    // client could never tell it needs to retry. Only the lazy WRITE above is
+    // best-effort — the list is still correct for the rows that exist.
+    const rows = await customerProperties.listProperties(profile.id);
     if (!rows.length) {
       // No ACTIVE rows. A profile that has NEVER had a property row (no
       // address to build one from) still lists once, keyed to the profile.
