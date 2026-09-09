@@ -889,9 +889,19 @@ test('address-keyed readers take only a task customer\'s own active saved addres
   expect(await read('40 Tower Ct Apt 12, Sarasota FL', context(B))).toEqual({ input: { address: '40 Tower Ct, Apt 12, Sarasota, FL 34236' } });
   expect((await read('40 Tower Ct, Sarasota FL', context(B))).code).toBe('target_clarification_required');
   expect((await read('40 Tower Ct Apt 13, Sarasota FL', context(B))).code).toBe('target_clarification_required');
-  // A different city or ZIP on the same street line is a different parcel.
+  // A different city, state or ZIP on the same street line is a different parcel.
   expect((await read('1234 Main St, Tampa FL', context())).code).toBe('target_clarification_required');
   expect((await read('1234 Main St, Bradenton FL 34205', context())).code).toBe('target_clarification_required');
+  expect((await read('99 Beach Rd Apt 4, Venice CA', context())).code).toBe('target_clarification_required');
+  expect((await read('1234 Main St, Bradenton GA 34203', context())).code).toBe('target_clarification_required');
+  // A supplied component the saved row cannot verify (a ZIP against a city-only row) is refused; the row still binds
+  // for the components it has, and a comma-free post-directional is not read as a city.
+  rows.customer_properties.push({ id: '30000000-0000-4000-8000-000000000007', customer_id: A, address_line1: '8 Cove Way', city: 'Venice', state: 'FL', active: true },
+    { id: '30000000-0000-4000-8000-000000000008', customer_id: A, address_line1: '100 53rd Ave E', city: 'Bradenton', state: 'FL', zip: '34203', active: true });
+  expect(await read('8 Cove Way, Venice FL', context())).toEqual({ input: { address: '8 Cove Way, Venice, FL' } });
+  expect((await read('8 Cove Way 34285', context())).code).toBe('target_clarification_required');
+  expect((await read('8 Cove Way, Venice FL 34285', context())).code).toBe('target_clarification_required');
+  expect(await read('100 53rd Ave E', context())).toEqual({ input: { address: '100 53rd Ave E, Bradenton, FL 34203' } });
   // The unit must match exactly: the building or another unit is not this property.
   expect((await read('99 Beach Rd, Venice FL', context())).code).toBe('target_clarification_required');
   expect((await read('99 Beach Rd Apt 5, Venice FL', context())).code).toBe('target_clarification_required');

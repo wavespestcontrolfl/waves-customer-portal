@@ -515,14 +515,30 @@ const { validScope, UNCLASSIFIED } = require('./scope-policy');
 // "123 Main St, Bradenton" and a bare street line cannot resolve a
 // different parcel on a repeated street name. A saved row with neither city
 // nor ZIP cannot verify any locality (the comparer treats a missing side as
-// compatible), so it never binds; rows carrying both are tried first.
+// compatible), so it never binds; rows carrying both are tried first. Every
+// locality component the supplied text carries (city, state, ZIP) must be
+// present on the saved row and equal to it: the comparer ignores state and
+// a missing side, so "99 Beach Rd, Venice CA" or a ZIP the saved row lacks
+// would otherwise bind and be rewritten to the saved parcel.
 // Returns the saved row's full address and its stored coordinates (null when
 // the row has none).
 async function bindSavedAddress(supplied, targets) {
   const { sameStreetAddress } = require('../estimator-engine/address-compare');
-  const { formatAddress } = require('../../utils/address-normalizer');
+  const { formatAddress, parseRawAddress, normalizeState } = require('../../utils/address-normalizer');
   const text = String(supplied || '').trim();
   if (!text) return null;
+  const parsed = parseRawAddress(text);
+  const cityKey = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const zip5 = value => String(value || '').replace(/\D/g, '').slice(0, 5);
+  // A comma-free numbered route or post-directional leaves a bare number or
+  // direction in the parsed city; neither is a locality.
+  const BARE_DIRECTIONAL = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw', 'north', 'south', 'east', 'west']);
+  const suppliedCity = /[a-z]{2,}/i.test(parsed.city || '') && !BARE_DIRECTIONAL.has(String(parsed.city).toLowerCase()) ? cityKey(parsed.city) : '';
+  const suppliedState = normalizeState(parsed.state || '') || '';
+  const suppliedZip = zip5(parsed.zip);
+  const localityVerified = row => (!suppliedCity || cityKey(row.city) === suppliedCity)
+    && (!suppliedState || (normalizeState(row.state || '') || '') === suppliedState)
+    && (!suppliedZip || zip5(row.zip) === suppliedZip);
   const ids = targets.map(target => target.customer_id);
   const fields = ['address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude'];
   const [customers, properties] = await Promise.all([
@@ -535,10 +551,12 @@ async function bindSavedAddress(supplied, targets) {
     .filter(row => present(row.address_line1) && (present(row.city) || present(row.zip)))
     .sort((a, b) => Number(present(b.city) && present(b.zip)) - Number(present(a.city) && present(a.zip)))
     .map(row => ({
+      row,
       address: formatAddress({ line1: row.address_line1, line2: row.address_line2, city: row.city, state: row.state, zip: row.zip }),
       lat: coordinate(row.latitude), lng: coordinate(row.longitude),
     }));
-  return saved.find(({ address }) => sameStreetAddress(text, address, { requireExactUnit: true })) || null;
+  const match = saved.find(({ row, address }) => localityVerified(row) && sameStreetAddress(text, address, { requireExactUnit: true }));
+  return match ? { address: match.address, lat: match.lat, lng: match.lng } : null;
 }
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
