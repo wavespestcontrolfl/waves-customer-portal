@@ -13911,7 +13911,7 @@ function useSheetViewport(open, dialogRef) {
   return viewport;
 }
 
-function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp }) {
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, onSavedScopeUnavailable = null }) {
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
   const viewport = useSheetViewport(open, dialogRef);
@@ -13988,6 +13988,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // GitHub r3 P1), not the profile mirror, which is always the primary.
   const propertyAddress = propertyAddressProp !== undefined ? propertyAddressProp : formatPropertyAddress(customer);
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(' ');
+  // Shown in the address slot while the selection is being refreshed.
+  const propertyAddressShown = scopeStale ? 'Refreshing your property selection…' : propertyAddress;
 
   // Callback recognition: pest/lawn issue within 30 days of last service
   const activeTierName = resolveActiveTierName(customer);
@@ -14006,7 +14008,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // the eligible pest/lawn ticket form is REPLACED by the picker CTA (the
   // picker's own details box reaches dispatch notes; photos are accepted as
   // lost on this lane — the ticket form survives only for ineligible plans).
-  const overlayHandoff = !!scheduleData?.overlayHandoff;
+  // The schedule read echoes the selection it was scoped to; a mismatch with
+  // the house this overlay names (the selected secondary was retired while
+  // the page stayed open — the server fell back to the primary) withholds
+  // every action here — the picker handoff, the per-visit reschedule links
+  // AND the ticket itself, which the server would file under the fallback
+  // house — until the selection is refreshed (uncapped codex r1n P1).
+  const scopeStale = scopeEchoMismatch(scheduleData?.propertyScope, currentEntry, savedScope);
+  useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
+  const overlayHandoff = !scopeStale && !!scheduleData?.overlayHandoff;
   const handoffLane = category === 'pest_issue' ? 'pest' : category === 'lawn_concern' ? 'lawn' : null;
   const pickerHandoffUrl = overlayHandoff && handoffLane && scheduleData?.reservice?.url
     && (scheduleData.reservice.lanes || []).includes(handoffLane)
@@ -14029,7 +14039,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   const lastServiceDateStr = lastService ? fmtDate(lastService.date, { month: 'short', day: 'numeric' }) : '';
   const descriptionLimit = 500;
   const photoLimit = 3;
-  const canSubmit = !!category && !!description.trim() && !submitting;
+  const canSubmit = !!category && !!description.trim() && !submitting && !scopeStale;
   const photosRemaining = Math.max(0, photoLimit - photos.length);
 
   const muted = PORTAL_SHELL.muted;
@@ -14347,9 +14357,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                         <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>
                           {customerName || 'Waves customer'}
                         </div>
-                        {propertyAddress && (
+                        {propertyAddressShown && (
                           <div style={{ fontSize: 14, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {propertyAddress}
+                            {propertyAddressShown}
                           </div>
                         )}
                       </div>
@@ -16405,6 +16415,9 @@ export default function PortalPage() {
         onSubmitted={() => setRequestRefreshKey(k => k + 1)}
         customer={customer}
         propertyAddress={activePropertyAddress}
+        currentEntry={activeProperty}
+        savedScope={portalProperties.some((p) => p.key)}
+        onSavedScopeUnavailable={refreshProperties}
       />
     </div>
     </PortalReadProvider>

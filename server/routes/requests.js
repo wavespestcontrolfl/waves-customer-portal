@@ -213,23 +213,33 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // Same fail-open posture as the eligibility check below.
     let secondarySelection = false;
     let requestProperty = null;
+    // The server-validated saved property this ticket is about (codex #4207
+    // r1j): persisted on the row, part of the dedupe key, and shown to staff
+    // — a secondary-house ticket must name its house.
+    const ticketProperty = (p) => ({
+      id: String(p.id),
+      isPrimary: p.is_primary === true,
+      label: p.label || null,
+      address: [p.address_line1, p.address_line2].filter(Boolean).join(' ')
+        + (p.city ? `, ${p.city}` : '') + (p.state || p.zip ? `, ${[p.state, p.zip].filter(Boolean).join(' ')}` : ''),
+    });
     try {
       const scope = await resolveSessionScope(req);
       secondarySelection = isSecondarySelection(scope);
-      // The server-validated saved property this ticket is about (codex
-      // #4207 r1j): persisted on the row, part of the dedupe key, and shown
-      // to staff — a secondary-house ticket must name its house.
-      if (scope && scope.enabled && scope.scoped && scope.property) {
-        const p = scope.property;
-        requestProperty = {
-          id: String(p.id),
-          isPrimary: p.is_primary === true,
-          label: p.label || null,
-          address: [p.address_line1, p.address_line2].filter(Boolean).join(' ')
-            + (p.city ? `, ${p.city}` : '') + (p.state || p.zip ? `, ${[p.state, p.zip].filter(Boolean).join(' ')}` : ''),
-        };
+      if (scope && scope.enabled && scope.scoped && scope.property) requestProperty = ticketProperty(scope.property);
+    } catch (scopeErr) {
+      logger.warn(`Property scope check failed for ${req.customer.id}: ${scopeErr.message}`);
+      // The resolver failed, but the auth middleware already validated the
+      // token's claim against an ACTIVE row of this customer (req.property).
+      // Keep that binding (uncapped codex r1n P1): treating the request as
+      // unscoped would steer a covered secondary-house issue into the
+      // primary-only picker guard and file every other ticket without its
+      // house. A claim-less session has no binding to keep — today's path.
+      if (req.property && String(req.property.customer_id || req.customer.id) === String(req.customer.id)) {
+        requestProperty = ticketProperty(req.property);
+        secondarySelection = req.property.is_primary !== true;
       }
-    } catch (scopeErr) { logger.warn(`Property scope check failed for ${req.customer.id}: ${scopeErr.message}`); }
+    }
     // Lightweight server-side dedupe — reject identical create within 60s
     const dupeWindow = new Date(Date.now() - 60 * 1000);
     const dupeQuery = db('service_requests')

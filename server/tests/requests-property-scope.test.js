@@ -23,8 +23,16 @@ jest.mock('../services/account-properties', () => {
   return { ...actual, resolveSessionScope: jest.fn(async () => global.__SCOPE__) };
 });
 jest.mock('../middleware/auth', () => ({
-  authenticate: (req, _res, next) => { req.customer = { id: 'cust-1', first_name: 'Jordan', last_name: 'Rivera', active: true }; req.customerId = 'cust-1'; next(); },
-  authenticateAllowInactive: (req, _res, next) => { req.customer = { id: 'cust-1', first_name: 'Jordan', last_name: 'Rivera', active: true }; req.customerId = 'cust-1'; next(); },
+  authenticate: (req, _res, next) => {
+    req.customer = { id: 'cust-1', first_name: 'Jordan', last_name: 'Rivera', active: true }; req.customerId = 'cust-1';
+    if (global.__REQ_PROPERTY__) { req.property = global.__REQ_PROPERTY__; req.propertyId = global.__REQ_PROPERTY__.id; }
+    next();
+  },
+  authenticateAllowInactive: (req, _res, next) => {
+    req.customer = { id: 'cust-1', first_name: 'Jordan', last_name: 'Rivera', active: true }; req.customerId = 'cust-1';
+    if (global.__REQ_PROPERTY__) { req.property = global.__REQ_PROPERTY__; req.propertyId = global.__REQ_PROPERTY__.id; }
+    next();
+  },
 }));
 
 const express = require('express');
@@ -88,6 +96,28 @@ test('a covered pest issue under a SECONDARY selection files as a ticket that na
   const alertBody = notifyAdmin.mock.calls[0][2];
   expect(alertBody).toMatch(/Property: 418 Oak Ave, Bradenton, FL 34205 \(not the primary address\)/);
   expect(notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ propertyId: 'prop-b', propertyAddress: '418 Oak Ave, Bradenton, FL 34205' });
+});
+
+test('a resolver failure keeps the middleware-validated SECONDARY binding: no picker steer, the ticket still names its house (uncapped codex r1n P1)', async () => {
+  const { resolveSessionScope } = require('../services/account-properties');
+  resolveSessionScope.mockRejectedValueOnce(new Error('connection reset'));
+  global.__REQ_PROPERTY__ = { ...SECONDARY.property, customer_id: 'cust-1' };
+  try {
+    const res = await post({ category: 'pest_issue', subject: 'Ants in the kitchen', description: 'Trail along the counter' });
+    expect(res.status).toBe(201);
+    expect(res.body.code).not.toBe('use_reservice_picker');
+    const insert = log.find((e) => e[0] === 'insert');
+    expect(JSON.parse(insert[1].metadata)).toMatchObject({ propertyId: 'prop-b', property: { id: 'prop-b', isPrimary: false } });
+    expect(log.find((e) => e[0] === 'whereRaw')[2]).toEqual(['prop-b']);
+  } finally { global.__REQ_PROPERTY__ = null; }
+});
+
+test('a resolver failure on a claim-less session keeps today\'s path (no binding to keep)', async () => {
+  const { resolveSessionScope } = require('../services/account-properties');
+  resolveSessionScope.mockRejectedValueOnce(new Error('connection reset'));
+  const res = await post({ category: 'pest_issue', subject: 'Ants in the kitchen' });
+  expect(res.status).toBe(409);
+  expect(res.body.code).toBe('use_reservice_picker');
 });
 
 test('the same covered issue under the PRIMARY selection is still steered to the re-service picker', async () => {
