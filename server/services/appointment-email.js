@@ -210,6 +210,7 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
 }
 
 async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null }) {
+  if (Number.isFinite(renderedSlotMs) && moveHoldServiceId) metadata = { ...metadata, rendered_slot_ms: renderedSlotMs };
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 

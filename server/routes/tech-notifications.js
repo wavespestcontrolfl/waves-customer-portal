@@ -19,6 +19,9 @@ router.get('/', async (req, res, next) => {
     let q = db('tech_notifications')
       .where({ technician_id: req.technicianId })
       .whereNull('dismissed_at')
+      // These live on the shared follow-through cards and disappear when
+      // tracking catches up. Keep them out of the floating geofence feed.
+      .whereNot('type', 'follow_through_tracking')
       // Storm-watch nudges are only actionable for a couple of hours
       // (sweep lookahead + service window). Without an age cutoff, unread
       // alerts from earlier days pile up into a wall of cards that buries

@@ -279,8 +279,12 @@ router.get('/follow-through', async (req, res, next) => {
     const callbacksEnabled = cards.enabled();
     if (callbacksEnabled) await cards.prepareCallbackCards(db);
     const callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
+    const detector = require('../services/no-show-detector');
+    const noShowsEnabled = detector.enabled();
+    const noShows = await detector.listNoShows(db, { limit: 101, offset, actorId: req.technicianId, admin: req.techRole === 'admin' });
     res.json({ actor_id: req.technicianId, callbacks_enabled: callbacksEnabled,
-      callbacks: callbacks.slice(0, 100), has_more: callbacks.length > 100, next_offset: offset + 100 });
+      callbacks: callbacks.slice(0, 100), no_shows_enabled: noShowsEnabled, no_shows: noShows.slice(0, 100),
+      has_more: callbacks.length > 100 || noShows.length > 100, next_offset: offset + 100 });
   } catch (err) { next(err); }
 });
 

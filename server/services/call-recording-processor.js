@@ -16150,6 +16150,13 @@ const CallRecordingProcessor = {
 
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
+      if (appointmentResult?.scheduledServiceId && isEnabled('noShowDetector')) {
+        try {
+          await require('./no-show-detector').recordAgreedWindow(db, { callId: call.id, visitId: appointmentResult.scheduledServiceId });
+        } catch (err) {
+          logger.warn(`[call-proc] promised window capture failed for ${call.id}: ${err.code || err.name || 'error'}`);
+        }
+      }
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization
