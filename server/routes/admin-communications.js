@@ -814,7 +814,7 @@ router.post('/sms', async (req, res, next) => {
           if (!bareReviewReservationId) return;
           // A real provider log replaces the pre-send evidence. Otherwise
           // keep the reservation: even a failed UPDATE must retain the hold.
-          if (outcome?.sent === true) {
+          if (require('../services/sms-auto-send').isRealProviderSend(outcome)) {
             try {
               const logged = outcome.providerMessageId && await db('sms_log')
                 .where({ twilio_sid: outcome.providerMessageId, direction: 'outbound' }).first('id');
@@ -825,7 +825,7 @@ router.post('/sms', async (req, res, next) => {
             } catch (stampErr) {
               logger.warn(`[communications] accepted review keeps its reservation (${bareReviewReservationId}): ${stampErr.message}`);
             }
-          } else if (outcome?.blocked || (outcome?.sent === false && !outcome.retryable && !outcome.deferred)) {
+          } else if (outcome?.sent === true || outcome?.blocked || (outcome?.sent === false && !outcome.retryable && !outcome.deferred)) {
             await db('sms_log').where({ id: bareReviewReservationId }).del();
           }
         };
