@@ -172,6 +172,11 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       return { sent: false, blocked: true, provider: 'push', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
     }
     if (result.appRetryable) {
+      if (Number.isFinite(result.retryAfterMs)) {
+        const retryAfterMs = Math.max(60000, result.retryAfterMs);
+        return { sent: false, provider: 'push', code: 'APP_PROVIDER_RETRY', error: result.error,
+          retryable: true, deferred: true, retryAfterMs, nextAllowedAt: new Date(Date.now() + retryAfterMs).toISOString() };
+      }
       return { sent: false, blocked: true, provider: 'push', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
     }
     if (result.preSendBlocked || (result.guardBlocked && result.code)) {

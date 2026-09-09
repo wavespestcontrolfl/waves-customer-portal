@@ -433,7 +433,7 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
  * corrupt the primary's identity and make the later secondary insert dedup against
  * the now-mutated primary. The unit-bearing call is handled by recordCallProperty.
  */
-async function completePrimaryFromCall(customerId, call = {}, { claimFence = null } = {}) {
+async function completePrimaryFromCall(customerId, call = {}, { claimFence = null, conn = null } = {}) {
   if (!customerId || !String(call.address_line1 || '').trim()) return undefined;
   // Optional processing-claim fence (#3418 r18): same shape as
   // recordCallProperty's — FOR UPDATE on the call_log row inside one
@@ -456,7 +456,9 @@ async function completePrimaryFromCall(customerId, call = {}, { claimFence = nul
       return completePrimaryCore(customerId, call, trx);
     });
   }
-  return completePrimaryCore(customerId, call, db);
+  // Office review already owns the customer lock; its completion and property
+  // insert must commit together on that same transaction connection.
+  return completePrimaryCore(customerId, call, conn || db);
 }
 
 async function completePrimaryCore(customerId, call, conn) {
