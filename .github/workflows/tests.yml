@@ -201,10 +201,13 @@ jobs:
           node-version-file: '.nvmrc'
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit
       - run: npm run test:qa-workflow
       - name: Portal, payment, report and completion previews
         run: npm run qa:previews
+      - name: Email workspace synthetic scenarios
+        if: ${{ !cancelled() }}
+        run: node scripts/qa/admin-email-workspace.cjs
       - name: Estimate interaction and PDF previews
         if: ${{ !cancelled() }}
         env:
@@ -216,7 +219,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: browser-qa-${{ github.sha }}
-          path: .tmp/qa/
+          path: |
+            .tmp/qa/
+            .tmp/email-workspace/
           retention-days: 7
 
   application-qa:
