@@ -1109,6 +1109,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
 
 module.exports = {
   REASON_CODE,
+  TERMINAL_VISIT_STATUSES,
   classifiedPropertiesFromExtraction,
   buildPropertyRoleProposals,
   stagePropertyRoleReview,
