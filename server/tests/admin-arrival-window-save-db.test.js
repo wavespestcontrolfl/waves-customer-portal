@@ -109,7 +109,9 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
     geocodeAddress.mockReset().mockResolvedValue(null);
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     mockConn = await database.transaction();
-    for (const table of ['scheduled_services', 'customers', 'technicians', 'customer_properties', 'service_visits']) {
+    // Isolate closure settings too: a relative weekly fixture can fall on a
+    // weekend, and this test expects its new date to remain exactly one week out.
+    for (const table of ['scheduled_services', 'customers', 'technicians', 'customer_properties', 'service_visits', 'system_settings', 'schedule_blackout_dates']) {
       await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
     }
     await mockConn('technicians').insert([TECH, OLD_TECH].map(id => ({
