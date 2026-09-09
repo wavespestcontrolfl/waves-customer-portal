@@ -674,11 +674,9 @@ router.post('/assess', async (req, res, next) => {
     } else {
       // A pending run-backed row (the gate was on, the technician has not
       // completed it) is not a prior assessment: a legacy row that replaces
-      // it after the kill switch still becomes the customer's baseline.
-      const existingCount = await visitAssessment.withoutPendingRuns(db('lawn_assessments').where({ customer_id: customerId }))
-        .count('id as cnt')
-        .first();
-      isBaseline = parseInt(existingCount.cnt) === 0;
+      // it after the kill switch still becomes the customer's baseline. A
+      // database without the run table yet counts every row.
+      isBaseline = (await visitAssessment.priorAssessmentCount(customerId, db)) === 0;
     }
     const canStampProperty = await db.schema.hasColumn('lawn_assessments', 'property_id');
 
@@ -1115,8 +1113,12 @@ router.post('/confirm', async (req, res, next) => {
     // installConfirmedBaseline stamps confirmed_by_tech and installs the row
     // as the property baseline, which only a confirmed row may become. A
     // pre-gate row has no run and confirms exactly as before.
+    // A run-backed row confirms once: the row is claimed under its lock, and
+    // a retry or a second tab arriving after the completing confirm gets the
+    // confirmed row back with nothing rewritten and no second pipeline.
     const installBaseline = propertyHistoryEnabled && confirmed;
     const writeConfirm = async (trx) => {
+      if (reviewedRun && !(await visitAssessment.claimConfirm(assessmentId, trx))) return { alreadyConfirmed: true };
       Object.assign(updateData, await visitAssessment.legacyBaselineFields({ assessment, run: visitRun, confirmed, propertyHistoryEnabled }, trx));
       const row = installBaseline
         ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: trx })
@@ -1126,7 +1128,11 @@ router.post('/confirm', async (req, res, next) => {
         : null;
       return { updated: row, reviewedVisitRun: run };
     };
-    const { updated, reviewedVisitRun } = reviewedRun ? await db.transaction(writeConfirm) : await writeConfirm(db);
+    const { updated, reviewedVisitRun, alreadyConfirmed } = reviewedRun ? await db.transaction(writeConfirm) : await writeConfirm(db);
+    if (alreadyConfirmed) {
+      const current = await db('lawn_assessments').where({ id: assessmentId }).first();
+      return res.json({ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment.responseForRun(visitRun) });
+    }
     if (protocolFieldChecksProvided) {
       await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
       Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });

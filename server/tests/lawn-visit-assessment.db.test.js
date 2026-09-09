@@ -151,6 +151,40 @@ const analysis = (overrides = {}) => ({
     expect(baselines.map((row) => row.id)).toEqual([assessment.id]);
   });
 
+  test('claimConfirm is one-shot: two concurrent confirms of one row serialize on its lock and only the first may confirm', async () => {
+    const { assessment } = await seed();
+    const seen = [];
+    const confirm = (tag, hold) => db.knex.transaction(async (trx) => {
+      const claimed = await visit.claimConfirm(assessment.id, trx);
+      seen.push(`${tag}:${claimed}`);
+      await hold;
+      if (claimed) await trx('lawn_assessments').where({ id: assessment.id }).update({ confirmed_by_tech: true });
+      return claimed;
+    });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const first = confirm('first', held);
+    while (!seen.length) await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = confirm('second', Promise.resolve());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(seen).toEqual(['first:true']); // the second is waiting on the row lock
+    release();
+    expect(await Promise.all([first, second])).toEqual([true, false]);
+    expect(seen).toEqual(['first:true', 'second:false']);
+    // A retry after the completing confirm sees the confirmed row: no claim, nothing to rewrite.
+    expect(await db.knex.transaction((trx) => visit.claimConfirm(assessment.id, trx))).toBe(false);
+    expect(await db.knex.transaction((trx) => visit.claimConfirm(randomUUID(), trx))).toBe(false);
+  });
+
+  test('priorAssessmentCount against the real table: a pending run-backed row is not a prior assessment', async () => {
+    const { customerId, assessment } = await seed(); // seed() inserts one unconfirmed row with no run
+    expect(await visit.priorAssessmentCount(customerId, db.knex)).toBe(1);
+    await visit.recordRun({ assessment, analysis: analysis(), photoRecords: [] }, db.knex); // now pending + run-backed
+    expect(await visit.priorAssessmentCount(customerId, db.knex)).toBe(0);
+    await db.knex('lawn_assessments').where({ id: assessment.id }).update({ confirmed_by_tech: true });
+    expect(await visit.priorAssessmentCount(customerId, db.knex)).toBe(1);
+  });
+
   test('deleting the assessment cascades to its run', async () => {
     const { assessment } = await seed();
     await visit.recordRun({ assessment, analysis: analysis(), photoRecords: [] }, db.knex);

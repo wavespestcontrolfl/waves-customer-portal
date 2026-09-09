@@ -141,7 +141,9 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/visitAssessment\.recordRun\(\{ assessment: rows\[0\], analysis: visitAnalysis, adjustedScores \}, trx\)/);
       expect(assess).toMatch(/is_baseline: propertyHistoryEnabled \|\| visitAssessmentEnabled \? false : isBaseline,/);
       // The legacy baseline count ignores a pending run-backed row, so a legacy replacement after the kill switch still becomes the baseline.
-      expect(assess).toMatch(/const existingCount = await visitAssessment\.withoutPendingRuns\(db\('lawn_assessments'\)\.where\(\{ customer_id: customerId \}\)\)/);
+      // …through the module's count, which falls back to the plain count on a database without the run table (the dark gate stays a usable kill switch mid-rollout).
+      expect(assess).toMatch(/isBaseline = \(await visitAssessment\.priorAssessmentCount\(customerId, db\)\) === 0;/);
+      expect(assess).not.toMatch(/withoutPendingRuns\(/);
     });
 
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
@@ -160,12 +162,14 @@ describe('lawn assessment route contracts', () => {
       // customer's baseline lock — legacyBaselineFields takes it), then the review when one was sent, so
       // a lost review can never ride a successful confirm and two first confirms cannot both become the
       // baseline. A run-backed row always writes in a transaction; a pre-gate row writes as before.
-      const write = confirm.slice(confirm.indexOf('const writeConfirm = async (trx) => {'), confirm.indexOf('const { updated, reviewedVisitRun } ='));
-      expect(write).toMatch(/^const writeConfirm = async \(trx\) => \{\s*Object\.assign\(updateData, await visitAssessment\.legacyBaselineFields\(\{ assessment, run: visitRun, confirmed, propertyHistoryEnabled \}, trx\)\);/);
+      const write = confirm.slice(confirm.indexOf('const writeConfirm = async (trx) => {'), confirm.indexOf('const { updated, reviewedVisitRun, alreadyConfirmed } ='));
+      // A run-backed row is claimed under its row lock first: a confirm arriving after the completing one rewrites nothing and runs no pipeline.
+      expect(write).toMatch(/^const writeConfirm = async \(trx\) => \{\s*if \(reviewedRun && !\(await visitAssessment\.claimConfirm\(assessmentId, trx\)\)\) return \{ alreadyConfirmed: true \};\s*Object\.assign\(updateData, await visitAssessment\.legacyBaselineFields\(\{ assessment, run: visitRun, confirmed, propertyHistoryEnabled \}, trx\)\);/);
       expect(write).toMatch(/installBaseline\s*\? await lawnAssessment\.installConfirmedBaseline\(\{ assessmentId, updateData \}, \{ knex: trx \}\)\s*: \(await trx\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.update\(updateData\)\.returning\('\*'\)\)\[0\];/);
       expect(write).toMatch(/const run = reviewedRun && visitReview\.provided\s*\? await visitAssessment\.reviewRun\(\{ run: visitRun, review: visitReview, technicianId: req\.technicianId \}, trx\)\s*: null;/);
       expect(write.indexOf('legacyBaselineFields(')).toBeLessThan(write.indexOf('installConfirmedBaseline('));
-      expect(confirm).toMatch(/const \{ updated, reviewedVisitRun \} = reviewedRun \? await db\.transaction\(writeConfirm\) : await writeConfirm\(db\);/);
+      expect(confirm).toMatch(/const \{ updated, reviewedVisitRun, alreadyConfirmed \} = reviewedRun \? await db\.transaction\(writeConfirm\) : await writeConfirm\(db\);\s*if \(alreadyConfirmed\) \{[\s\S]{0,300}return res\.json\(\{ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment\.responseForRun\(visitRun\) \}\);/);
+      expect(confirm.indexOf('if (alreadyConfirmed) {')).toBeLessThan(confirm.indexOf('persistProtocolFieldChecks('));
       expect(confirm).not.toMatch(/reviewRun\([\s\S]{0,120}, db\)/);
       expect(confirm).not.toMatch(/legacyBaselineFields\([\s\S]{0,120}, db\)/);
       // Calibration compares the run's scores with the RESOLVED confirmation — every score the row confirmed

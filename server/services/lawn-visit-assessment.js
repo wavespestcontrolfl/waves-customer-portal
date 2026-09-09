@@ -351,11 +351,14 @@ function normalizeSignal(raw, levels) {
   };
 }
 
+// A score is known only when the answer says so in the schema's own terms:
+// `determinable` literally true and `value` a finite number. Anything else —
+// a null value the schema forbids, a "false" string, a numeric string — is
+// not determinable (Codex #4149 r6: Number(null) read as a real 0).
 function scoreOrNull(raw, min, max) {
-  if (!raw || typeof raw !== 'object' || raw.determinable === false) return null;
-  const n = Number(raw.value);
-  if (!Number.isFinite(n)) return null;
-  return Math.max(min, Math.min(max, Math.round(n)));
+  if (!raw || typeof raw !== 'object' || raw.determinable !== true) return null;
+  if (typeof raw.value !== 'number' || !Number.isFinite(raw.value)) return null;
+  return Math.max(min, Math.min(max, Math.round(raw.value)));
 }
 
 // A photo the answer did not rate stays 'unrated' — it never inherits a
@@ -427,6 +430,8 @@ function ratesEveryPhoto(list, photoCount) {
 
 function normalizeAssessment(json, photoCount, photoZones = []) {
   const rawFindings = Array.isArray(json.findings) ? json.findings : [];
+  const photoQuality = normalizePhotoQuality(json.photo_quality, photoCount);
+  const usable = new Set(photoQuality.filter((row) => CUSTOMER_VISIBLE_QUALITY.has(row.quality)).map((row) => row.photo));
   const findings = normalizeFindings(rawFindings).map((finding, index) => {
     const raw = rawFindings[index] || {};
     const photoRefs = uniqueInts(raw.photo_refs, photoCount);
@@ -436,7 +441,13 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
     // out-of-range numbers): evidence nobody can trace is not evidence. The
     // clean-lawn finding is exempt — it has nothing to point at.
     const untraceable = !photoRefs.length && safeConditionLabel(finding.name, finding.confidence) !== NO_STRESS_LABEL;
-    const canDetermine = raw.can_determine !== false && !untraceable;
+    // A finding whose every cited photo the same answer rated poor (blurred,
+    // too far, not a lawn) rests on evidence the answer itself disowned: in a
+    // mixed-quality visit one adequate photo lifts the retake hold, so the
+    // gate is applied per finding — undeterminable, no cause published
+    // (Codex #4149 r6).
+    const unsupported = photoRefs.length > 0 && !photoRefs.some((ref) => usable.has(ref));
+    const canDetermine = raw.can_determine !== false && !untraceable && !unsupported;
     const confidence = canDetermine ? finding.confidence : 'unknown';
     return {
       ...finding,
@@ -448,7 +459,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
       photo_refs: photoRefs,
       zone: zoneFromRefs(photoRefs, photoZones),
       can_determine: canDetermine,
-      cannot_determine_reason: canDetermine ? '' : (clip(raw.cannot_determine_reason, 300) || (untraceable ? 'no photo of this visit cited' : '')),
+      cannot_determine_reason: canDetermine ? '' : (clip(raw.cannot_determine_reason, 300) || (untraceable ? 'no photo of this visit cited' : '') || (unsupported ? 'every cited photo rated poor' : '')),
       // The allowlisted customer label — the naming gate applied here, once,
       // so no consumer ever maps the raw name itself.
       label: safeConditionLabel(finding.name, confidence),
@@ -469,7 +480,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
     findings,
     severities,
     scores,
-    photoQuality: normalizePhotoQuality(json.photo_quality, photoCount),
+    photoQuality,
     grassType: grass && grass !== 'unknown' ? grass : null,
     observations: clip(json.observations, 1200),
   };
@@ -771,6 +782,32 @@ async function loadRun(assessmentId, knex) {
   }
 }
 
+// The customer's prior assessments for the legacy baseline decision
+// (property history off): every row but a pending run-backed one. A database
+// without the run table yet (migration lag, the gate dark) has no pending
+// run-backed row to exclude — the plain count, so the legacy /assess path
+// never depends on the run table (Codex #4150 r8).
+async function priorAssessmentCount(customerId, knex) {
+  const count = async (query) => parseInt((await query.count('id as cnt').first()).cnt, 10);
+  try {
+    return await count(withoutPendingRuns(knex('lawn_assessments').where({ customer_id: customerId })));
+  } catch (err) {
+    if (err && err.code === '42P01') return count(knex('lawn_assessments').where({ customer_id: customerId }));
+    throw err;
+  }
+}
+
+// A run-backed row's confirmation is a one-shot transition: the row is
+// locked for the confirm's transaction and claimed only while it is still
+// unconfirmed, so a retried or concurrent confirm of a completed row neither
+// rewrites it nor runs the customer pipeline (duplicate notification, report
+// and calibration rows) a second time (Codex #4150 r8). True when this
+// transaction may confirm the row; false when it already is confirmed.
+async function claimConfirm(assessmentId, trx) {
+  const row = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first('confirmed_by_tech');
+  return !!row && !row.confirmed_by_tech;
+}
+
 const parseJsonArray = (value) => {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string') return [];
@@ -864,19 +901,39 @@ function mergedReviewInputs(run, review = {}) {
   const sent = review.sent || {};
   const stored = {
     reviewedFindings: parseJsonArray(run?.reviewed_findings).map((row) => ({ finding_id: String(row.finding_id), keep: row.keep !== false, name: row.label || null, tech_note: row.tech_note || null })),
-    addedDetails: parseJsonArray(run?.added_details).map((row) => ({ text: row.name, zone: row.zone ?? null })),
+    addedDetails: parseJsonArray(run?.added_details).map((row) => ({ text: row.name, zone: row.zone ?? null, finding_id: row.finding_id })),
     appliedProducts: parseJsonObject(run?.reconciliation)?.products || [],
   };
   const pick = (field) => (sent[field] || review[field]?.length ? review[field] || [] : stored[field]);
   return { reviewedFindings: pick('reviewedFindings'), addedDetails: pick('addedDetails'), appliedProducts: pick('appliedProducts') };
 }
 
+// Technician-added findings keep their ids across follow-up reviews: a detail
+// the stored review already carries (same text) keeps the id the products
+// were mapped to; a new one takes the next number above every id ever
+// assigned, so a reorder or a replacement can never move `T1` onto another
+// condition while a retained product still addresses it (Codex #4149 r6).
+// A retained reference to a detail that no longer exists drops out in
+// buildTreatmentRationale.
+function technicianFindingIds(details, stored) {
+  const normalized = (text) => String(text || '').trim().toLowerCase();
+  const byText = new Map(stored.filter((row) => /^T\d+$/.test(row.finding_id || '')).map((row) => [normalized(row.name), row.finding_id]));
+  let next = Math.max(0, ...[...byText.values()].map((id) => Number(id.slice(1))));
+  const taken = new Set();
+  return details.map((detail) => {
+    const kept = byText.get(normalized(detail.text));
+    if (kept && !taken.has(kept)) { taken.add(kept); return kept; }
+    next += 1;
+    return `T${next}`;
+  });
+}
+
 // A technician-added detail becomes a finding of its own: moderate at most
 // (the diagnostic tool's evidence rule — no cause above moderate without a
 // structured field check), evidence = the note itself.
-function technicianFinding(detail, index) {
+function technicianFinding(detail, findingId) {
   return {
-    finding_id: `T${index + 1}`,
+    finding_id: findingId,
     name: detail.text,
     confidence: 'moderate',
     severity: 'moderate',
@@ -912,11 +969,18 @@ function buildReview(run, rawReview = {}) {
     const entry = byId.get(String(finding.finding_id));
     // A technician rename is already a canonical allowlisted label
     // (validateReview) — it IS the label; re-mapping it through the pattern
-    // list would turn "general lawn stress" into "color stress".
+    // list would turn "general lawn stress" into "color stress". The
+    // confidence behind it is the technician's, not the model's: moderate,
+    // the same ceiling a technician-added finding gets (no cause above
+    // moderate without a structured field check) — a rename never publishes
+    // a cause on a low / unknown-confidence read, and never inherits the
+    // model's high confidence for a cause the model did not name (Codex
+    // #4149 r6).
     const name = entry?.name || finding.name;
     return {
       ...finding,
       name,
+      confidence: entry?.name ? 'moderate' : finding.confidence,
       // An unrenamed finding keeps the label the run stored at assessment
       // time (provenance) — never re-mapped by whatever the pattern list says
       // at confirmation; a stored run without one (never the case for a run
@@ -927,7 +991,8 @@ function buildReview(run, rawReview = {}) {
       source: finding.source || 'model',
     };
   });
-  const added = review.addedDetails.map(technicianFinding);
+  const ids = technicianFindingIds(review.addedDetails, parseJsonArray(run?.added_details));
+  const added = review.addedDetails.map((detail, index) => technicianFinding(detail, ids[index]));
   // The reconciliation builders interpolate finding NAMES into customer-facing
   // copy (customer_explanation, watch items, flag wording), so they only ever
   // see the allowlisted label — never the model's or the technician's raw
@@ -1138,6 +1203,8 @@ module.exports = {
   mergedReviewInputs,
   legacyBaselineFields,
   withoutPendingRuns,
+  priorAssessmentCount,
+  claimConfirm,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
   SYSTEM_PROMPT,
