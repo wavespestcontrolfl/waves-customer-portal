@@ -127,6 +127,27 @@ describe("Admin billing failure and draft boundaries", () => {
     expect(screen.queryByLabelText("Amount")).not.toBeInTheDocument();
   });
 
+  it("keeps statement-authorized reminder controls available when the status read fails", async () => {
+    const fetch = vi.fn(async (url, options) => {
+      if (options?.method === "POST") return response({ error: "Reminder temporarily unavailable" }, 503);
+      if (url.endsWith("/statements")) return response({ statements: [statement] });
+      if (url.endsWith("/ar")) return response(ar);
+      if (url.endsWith("/followups")) return response({ error: "Reminder status unavailable" }, 503);
+      return response({ lines: [] });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<UiSurface><PayerDetailSheet payer={payer} onClose={vi.fn()} onChanged={vi.fn()} /></UiSurface>);
+    fireEvent.click(await screen.findByRole("button", { name: /S-71/ }));
+    await screen.findByText("Reminder status unavailable");
+    expect(screen.getByRole("button", { name: "Pause", exact: true })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Send reminder now" }));
+    await screen.findByText("Reminder temporarily unavailable");
+    expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST")).toEqual([
+      ["/api/admin/payers/42/statements/71/followups/send-now", expect.objectContaining({ method: "POST", body: "{}" })],
+    ]);
+  });
+
   it("reports failed payer AR as unavailable, while a successful zero-count response is empty", async () => {
     const fetch = vi.fn().mockResolvedValueOnce(response({ error: "AR unavailable" }, 503)).mockResolvedValue(response({ statement_count: 0, payers: [] }));
     vi.stubGlobal("fetch", fetch);

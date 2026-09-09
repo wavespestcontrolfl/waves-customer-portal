@@ -83,3 +83,12 @@ editor, statement/payment, and aging screenshots were inspected. Lint has zero
 errors and two existing page complexity warnings (44 and 26). Evidence is local
 under `.tmp/admin-billing-foundation/`; this is synthetic frontend verification,
 not production, provider, database, or physical-device acceptance.
+
+## Integration review corrections
+
+Restored the existing payer empty-state content and search behavior, plus existing
+read-error/loading copy. The shared ActionFeedback retry label comes from the
+existing UI foundation. Reminder-status read failures now show retry feedback
+alongside the statement-authorized controls. A synthetic regression confirms a
+sent statement can still submit its unchanged reminder endpoint/payload after
+the read fails; it failed before the correction and passes afterward.

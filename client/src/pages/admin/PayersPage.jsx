@@ -94,7 +94,7 @@ export default function PayersPage() {
       if (includeInactive) params.set("includeInactive", "true");
       const r = await adminFetch(`/admin/payers?${params.toString()}`);
       const data = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(data?.error || "Could not load payers.");
+      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
       if (version !== loadVersion.current) return;
       setPayers(Array.isArray(data?.payers) ? data.payers : []);
     } catch (err) {
@@ -247,8 +247,7 @@ export default function PayersPage() {
               ) : payers.length === 0 ? (
                 <TR>
                   <TD colSpan={6} className="text-center text-ink-secondary py-6">
-                    {search.trim() ? "No payers match this search. Clear the search to see all payers." : "No payers yet. Create one to bill a third party."}
-                    {search.trim() && <Button variant="secondary" className="mt-3" onClick={() => setSearch("")}>Clear search</Button>}
+                    No payers yet. Create one to bill a third party.
                   </TD>
                 </TR>
               ) : (

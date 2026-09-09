@@ -44,10 +44,11 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
       try {
         const r = await adminFetch("/admin/payers/ar-aging");
         const d = await r.json().catch(() => null);
-        if (!r.ok || !Array.isArray(d?.payers)) throw new Error(d?.error || "Could not load payer AR aging.");
+        if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+        if (!Array.isArray(d?.payers)) throw new Error("Could not load payer aging.");
         if (alive) setAr(d || null);
       } catch (err) {
-        if (alive) setError(err.message || "Could not load payer AR aging.");
+        if (alive) setError(err.message || "Could not load payer aging.");
       } finally {
         if (alive) setLoading(false);
       }
