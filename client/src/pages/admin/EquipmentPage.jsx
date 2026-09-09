@@ -10,22 +10,7 @@ import EquipmentCalibrationPanel from "./EquipmentCalibrationPanel";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly while keeping semantic green/amber/red distinct.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8"
-};
+
 const MONO = "'JetBrains Mono', monospace";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -40,8 +25,8 @@ function adminFetch(path, options = {}) {
   });
 }
 const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
+  background: "#FFFFFF",
+  border: `1px solid ${"#E4E4E7"}`,
   borderRadius: 12,
   padding: 20,
   marginBottom: 12,
@@ -240,8 +225,8 @@ export default function EquipmentPage() {
         });
       }
     } : null} variant="workspace" />
-      {activeGroup.tabs.length > 1 && <Tabs value={tab} onValueChange={selectLeaf} className="mb-4">
-          <TabList aria-label={`${activeGroup.label} views`}>
+      {activeGroup.tabs.length > 1 && <Tabs value={tab} onValueChange={selectLeaf} className="mb-4" variant="section">
+          <TabList aria-label={`${activeGroup.label} views`} scrollable>
             {activeGroup.tabs.map(key => {
           const leaf = EQUIPMENT_LEAF_BY_KEY[key];
           const LeafIcon = leaf.Icon;
@@ -621,7 +606,7 @@ function TankMixTab({
     }
   };
   if (loading && mixes.length === 0) return <div style={{
-    color: D.muted,
+    color: "#71717A",
     padding: 40,
     textAlign: "center"
   }}>
@@ -630,13 +615,13 @@ function TankMixTab({
   return <div>
       {loadError && <div role="alert" style={{
       ...sCard,
-      color: D.red,
+      color: "#991B1B",
       fontSize: 14
     }}>
           Could not load tank mixes.
           {mixes.length > 0 && " Showing previously loaded mixes; costs may be out of date."}
           <button onClick={loadMixes} aria-label="Retry tank mixes" style={{
-        ...sBtn(D.teal, "#fff"),
+        ...sBtn("#18181B", "#fff"),
         marginLeft: 12,
         fontSize: 14
       }}>
@@ -644,13 +629,13 @@ function TankMixTab({
           </button>
         </div>}
       {loading && <div role="status" style={{
-      color: D.muted
+      color: "#71717A"
     }}>Refreshing tank mixes...</div>}
       {mixes.length === 0 ? !loadError && <div style={{
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: D.muted
+      color: "#71717A"
     }}>
           No tank mixes configured yet. Add your standard mixes to track costs
           per application.
@@ -672,13 +657,13 @@ function TankMixTab({
                   <div style={{
               fontSize: 15,
               fontWeight: 500,
-              color: D.heading
+              color: "#09090B"
             }}>
                     {m.name}
                   </div>{" "}
                   <div style={{
               fontSize: 12,
-              color: D.muted
+              color: "#71717A"
             }}>
                     {m.service_type} · {m.tank_size_gal}gal tank · covers{" "}
                     {(m.coverage_sqft || 0).toLocaleString()} sqft
@@ -698,27 +683,27 @@ function TankMixTab({
                 fontFamily: MONO,
                 fontSize: 18,
                 fontWeight: 700,
-                color: m.cost_incomplete ? D.amber : D.green
+                color: m.cost_incomplete ? "#A16207" : "#15803D"
               }}>
                       {fmt(m.cost_per_tank)}/tank
                     </div>{" "}
                     <div style={{
                 fontFamily: MONO,
                 fontSize: 12,
-                color: D.muted
+                color: "#71717A"
               }}>
                       {fmt(m.cost_per_1000sf)}/1000sf
                     </div>{" "}
                     {m.cost_incomplete && <div style={{
                 fontSize: 11,
-                color: D.amber
+                color: "#A16207"
               }}>
                         incomplete — unpriced component excluded
                       </div>}{" "}
                   </div>{" "}
                   <button onClick={() => recalculate(m.id)} style={{
-              ...sBtn("transparent", D.muted),
-              border: `1px solid ${D.border}`,
+              ...sBtn("transparent", "#71717A"),
+              border: `1px solid ${"#E4E4E7"}`,
               padding: "4px 8px",
               fontSize: 10
             }}>
@@ -741,12 +726,12 @@ function TankMixTab({
                     <tr>
                       {["Product", "Rate/1000sf", "Oz/Tank", "Cost"].map(h => <th key={h} style={{
                   fontSize: 10,
-                  color: D.muted,
+                  color: "#71717A",
                   textTransform: "uppercase",
                   letterSpacing: 1,
                   textAlign: "left",
                   padding: "4px 8px",
-                  borderBottom: `1px solid ${D.border}22`
+                  borderBottom: `1px solid ${"#E4E4E7"}22`
                 }}>
                             {h}
                           </th>)}
@@ -758,7 +743,7 @@ function TankMixTab({
                         <td style={{
                   padding: "6px 8px",
                   fontSize: 12,
-                  color: D.heading
+                  color: "#09090B"
                 }}>
                           {p.product_name}
                         </td>{" "}
@@ -780,7 +765,7 @@ function TankMixTab({
                   padding: "6px 8px",
                   fontSize: 12,
                   fontFamily: MONO,
-                  color: D.green
+                  color: "#15803D"
                 }}>
                           {fmt(p.cost)}
                         </td>{" "}
@@ -809,7 +794,7 @@ function JobCostTab() {
     });
   }, []);
   if (loading) return <div style={{
-    color: D.muted,
+    color: "#71717A",
     padding: 40,
     textAlign: "center"
   }}>
@@ -825,19 +810,19 @@ function JobCostTab() {
           {[{
         label: "Avg Margin",
         value: summary.avgMargin != null ? `${summary.avgMargin.toFixed(1)}%` : "—",
-        color: summary.avgMargin == null || summary.avgMargin >= 50 ? D.green : D.amber
+        color: summary.avgMargin == null || summary.avgMargin >= 50 ? "#15803D" : "#A16207"
       }, {
         label: "Avg Revenue/Job",
         value: fmt(summary.avgRevenue),
-        color: D.green
+        color: "#15803D"
       }, {
         label: "Avg Cost/Job",
         value: fmt(summary.avgCost),
-        color: D.amber
+        color: "#A16207"
       }, {
         label: "Total Jobs Costed",
         value: summary.totalJobs || 0,
-        color: D.heading
+        color: "#09090B"
       }].map(s => <div key={s.label} style={{
         ...sCard,
         flex: isMobile ? "1 1 calc(50% - 6px)" : "1 1 140px",
@@ -856,7 +841,7 @@ function JobCostTab() {
               </div>{" "}
               <div style={{
           fontSize: 9,
-          color: D.muted,
+          color: "#71717A",
           textTransform: "uppercase",
           letterSpacing: 1,
           marginTop: 2
@@ -872,7 +857,7 @@ function JobCostTab() {
           <div style={{
         fontSize: 15,
         fontWeight: 500,
-        color: D.heading,
+        color: "#09090B",
         marginBottom: 12
       }}>
             Margins by Service Type
@@ -881,12 +866,12 @@ function JobCostTab() {
         display: "flex",
         justifyContent: "space-between",
         padding: "8px 0",
-        borderBottom: `1px solid ${D.border}22`,
+        borderBottom: `1px solid ${"#E4E4E7"}22`,
         fontSize: 12
       }}>
               {" "}
               <span style={{
-          color: D.heading,
+          color: "#09090B",
           fontWeight: 500
         }}>
                 {svc}
@@ -897,22 +882,22 @@ function JobCostTab() {
         }}>
                 {" "}
                 <span style={{
-            color: D.muted
+            color: "#71717A"
           }}>{stats.count} jobs</span>{" "}
                 <span style={{
-            color: D.green,
+            color: "#15803D",
             fontFamily: MONO
           }}>
                   Rev: {fmt(stats.avgRevenue)}
                 </span>{" "}
                 <span style={{
-            color: D.amber,
+            color: "#A16207",
             fontFamily: MONO
           }}>
                   Cost: {fmt(stats.avgCost)}
                 </span>{" "}
                 <span style={{
-            color: stats.avgMargin >= 50 ? D.green : D.amber,
+            color: stats.avgMargin >= 50 ? "#15803D" : "#A16207",
             fontFamily: MONO,
             fontWeight: 700
           }}>
@@ -926,7 +911,7 @@ function JobCostTab() {
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: D.muted
+      color: "#71717A"
     }}>
           No job costs recorded yet
         </div>}
@@ -950,7 +935,7 @@ function MaintenanceTab({
     }).catch(() => setLoading(false));
   }, []);
   if (loading) return <div style={{
-    color: D.muted,
+    color: "#71717A",
     padding: 40,
     textAlign: "center"
   }}>
@@ -961,7 +946,7 @@ function MaintenanceTab({
       <div style={{
       fontSize: 15,
       fontWeight: 500,
-      color: D.heading,
+      color: "#09090B",
       marginBottom: 12
     }}>
         Upcoming Maintenance
@@ -970,14 +955,14 @@ function MaintenanceTab({
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: D.muted
+      color: "#71717A"
     }}>
           No equipment needs service soon
         </div> : equipment.map(e => {
       const hoursLeft = e.next_service_hours - (e.current_hours || 0);
       return <div key={e.id} style={{
         ...sCard,
-        borderLeft: `3px solid ${hoursLeft <= 10 ? D.red : D.amber}`
+        borderLeft: `3px solid ${hoursLeft <= 10 ? "#991B1B" : "#A16207"}`
       }}>
               {" "}
               <div style={{
@@ -991,13 +976,13 @@ function MaintenanceTab({
                   <div style={{
               fontSize: 14,
               fontWeight: 500,
-              color: D.heading
+              color: "#09090B"
             }}>
                     {e.name}
                   </div>{" "}
                   <div style={{
               fontSize: 12,
-              color: D.muted
+              color: "#71717A"
             }}>
                     {e.next_service_type} — in {Math.round(hoursLeft)} hours
                   </div>{" "}
@@ -1015,7 +1000,7 @@ function MaintenanceTab({
             } catch (err) {
               showToast(`Failed: ${err.message}`);
             }
-          }} style={sBtn(D.green, D.white)}>
+          }} style={sBtn("#15803D", "#FFFFFF")}>
                   Mark Complete
                 </button>{" "}
               </div>{" "}
