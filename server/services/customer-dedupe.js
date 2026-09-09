@@ -445,7 +445,9 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 // repointing would import components the winner's scalar knows nothing
 // about (and same-family rows would abort the merge on the unique
 // constraint). The loser's rows are explicitly deleted instead.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates']);
+// Field credit allocations retain the account that supplied the accepted
+// value. Their append-only guard must not abort an unrelated account merge.
+const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations']);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert
