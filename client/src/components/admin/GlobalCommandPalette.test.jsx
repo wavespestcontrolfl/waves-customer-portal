@@ -1,14 +1,130 @@
 // @vitest-environment jsdom
 import React, { createRef } from 'react';
+import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import GlobalCommandPalette from './GlobalCommandPalette';
 import useIsMobile from '../../hooks/useIsMobile';
+import { AdminNavigationProvider } from '../../hooks/useAdminNavigation';
+import { markUsageSource } from '../../lib/adminUsage';
+
+vi.mock('../../lib/adminUsage', () => ({ markUsageSource: vi.fn(), trackAdminPageView: vi.fn() }));
 
 vi.mock('../../hooks/useIsMobile', () => ({ default: vi.fn(() => false) }));
 vi.mock('../tech/DictationButton', () => ({ default: () => null }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+describe('local page search', () => {
+  beforeEach(() => {
+    const store = new Map([['waves_admin_token', 'fixture-token']]);
+    vi.stubGlobal('localStorage', { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, value), removeItem: (key) => store.delete(key) });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) })));
+    useIsMobile.mockReturnValue(false);
+  });
+  function fixture({ id = 'fixture-admin', role = 'admin', enabled = true } = {}) {
+    const ref = createRef();
+    const onNavigate = vi.fn();
+    const view = render(<MemoryRouter initialEntries={['/admin/customers']}>
+      <AdminNavigationProvider key={id} user={{ id, role }} enabled={enabled}>
+        <button onClick={() => ref.current.openNavigation()}>Open pages</button>
+        <GlobalCommandPalette ref={ref} user={{ id, role }} onNavigate={onNavigate} />
+      </AdminNavigationProvider>
+    </MemoryRouter>);
+    return { ...view, ref, onNavigate };
+  }
+
+  test('Cmd/Ctrl K searches aliases without assistant requests and Enter follows a real link', () => {
+    const { onNavigate } = fixture();
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+    const input = screen.getByRole('searchbox', { name: 'Search pages' });
+    expect(input).toHaveFocus();
+    fireEvent.change(input, { target: { value: 'payers' } });
+    expect(screen.getByRole('link', { name: /Billing accounts/ })).toHaveAttribute('href', '/admin/payers');
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onNavigate).toHaveBeenCalledOnce();
+    expect(markUsageSource).toHaveBeenCalledWith('palette');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test('arrows move between links, Escape restores focus, and a no-match query stays local', () => {
+    fixture();
+    const opener = screen.getByRole('button', { name: 'Open pages' });
+    opener.focus();
+    fireEvent.click(opener);
+    const input = screen.getByRole('searchbox');
+    fireEvent.change(input, { target: { value: 'Accounting' } });
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(screen.getByRole('link', { name: /Banking/ })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement, { key: 'ArrowDown' });
+    expect(screen.getByRole('link', { name: /Books & taxes/ })).toHaveFocus();
+    fireEvent.change(input, { target: { value: 'no such page' } });
+    expect(screen.getByText(/No pages match/)).toBeVisible();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(opener).toHaveFocus();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test('pins up to three pages, frees slots on unpin, and isolates accounts on reload', () => {
+    const view = fixture();
+    act(() => view.ref.current.openNavigation());
+    for (const label of ['Invoices', 'Pipeline', 'Books & taxes']) {
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: label } });
+      fireEvent.click(screen.getByRole('button', { name: `Pin ${label}`, exact: true }));
+    }
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Inventory' } });
+    expect(screen.getByRole('button', { name: 'Pin Inventory', exact: true })).toBeDisabled();
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Invoices' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Unpin Invoices', exact: true }));
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Inventory' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Pin Inventory', exact: true }));
+    const saved = JSON.parse(localStorage.getItem('waves_admin_navigation:fixture-admin'));
+    expect(saved.pins).toEqual(['pipeline', 'taxes', 'inventory']);
+    expect(fetch).not.toHaveBeenCalled();
+    view.unmount();
+    const reload = fixture();
+    act(() => reload.ref.current.openNavigation());
+    expect(screen.getAllByRole('button', { name: /^Unpin / })).toHaveLength(3);
+    reload.unmount();
+    const other = fixture({ id: 'fixture-tech', role: 'technician' });
+    act(() => other.ref.current.openNavigation());
+    expect(screen.queryByRole('button', { name: /^Unpin / })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Contracts|System health|Estimates/ })).not.toBeInTheDocument();
+  });
+
+  test('drops invalid pins, hides revoked pages and keeps same-page navigation dismissible', () => {
+    localStorage.setItem('waves_admin_navigation:fixture-admin', JSON.stringify({ pins: ['https://example.invalid', 'invoices', 'inventory', 'inventory'] }));
+    const view = fixture({ role: 'technician' });
+    act(() => view.ref.current.openNavigation());
+    expect(screen.getAllByRole('button', { name: /^Unpin / })).toHaveLength(1);
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Customers' } });
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Enter' });
+    expect(view.onNavigate).toHaveBeenCalledOnce();
+    expect(markUsageSource).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  test('Ask Waves reopens the existing assistant without losing its unsent question', async () => {
+    const view = fixture();
+    await act(async () => view.ref.current.open());
+    fireEvent.change(screen.getByPlaceholderText(/Ask anything/), { target: { value: 'Unsent question' } });
+    const callsBefore = fetch.mock.calls.length;
+    act(() => view.ref.current.openNavigation());
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Recovery' } });
+    expect(fetch).toHaveBeenCalledTimes(callsBefore);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Ask Waves' })));
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('Unsent question');
+  });
+
+  test('the default-off flag preserves the assistant keyboard shortcut', async () => {
+    fixture({ enabled: false });
+    await act(async () => fireEvent.keyDown(window, { key: 'k', metaKey: true }));
+    expect(screen.getByPlaceholderText(/Ask anything/)).toBeVisible();
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+  });
+});
 
 test.each([["admin", "email"], ["technician", "comms"]].flatMap(([role, context]) =>
   ["/admin/communications", "/admin/communications/"].map((pathname) => [role, context, pathname]),
