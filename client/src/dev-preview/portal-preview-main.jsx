@@ -343,7 +343,7 @@ Object.assign(api, {
   getSavedPropertiesNext: async () => ({
     properties: SAVED_ENTRIES.map((e, i) => ({
       key: e.key, customerId: e.customerId, propertyId: e.propertyId,
-      next: CANCELLED || i === 2 ? null : { id: `svc-demo-${i}`, date: addDays(7 + i * 9).slice(0, 10), windowStart: i === 0 ? '09:00:00' : '13:00:00', windowEnd: i === 0 ? '11:00:00' : '15:00:00', serviceType: i === 0 ? 'Quarterly Pest Control' : 'Mosquito Treatment', status: 'confirmed', customerConfirmed: i === 0 },
+      next: CANCELLED || i === 2 ? null : { id: `svc-demo-${i}`, date: day(7 + i * 9), windowStart: i === 0 ? '09:00:00' : '13:00:00', windowEnd: i === 0 ? '11:00:00' : '15:00:00', serviceType: i === 0 ? 'Quarterly Pest Control' : 'Mosquito Treatment', status: 'confirmed', customerConfirmed: i === 0 },
     })),
   }),
 

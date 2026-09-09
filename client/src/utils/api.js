@@ -41,6 +41,16 @@ export function sameRequestSession(left, right) {
     && (left.propertyId ?? null) === (right.propertyId ?? null));
 }
 
+// The native unread badge is keyed by the CUSTOMER (server counts by
+// req.customerId), so a same-profile saved-property switch must not zero it
+// (codex #4207 GitHub r1 P2): the request-supersession identity above is
+// property-strict on purpose; this one is not.
+export function sameBadgeAccount(left, right) {
+  return Boolean(left && right
+    && left.customerId === right.customerId
+    && (left.sessionId === null || left.sessionId === right.sessionId));
+}
+
 function isTrustedCustomerRequestUrl(url) {
   try {
     const pageHref = typeof window !== 'undefined' && window.location?.href
@@ -72,7 +82,7 @@ export class ApiClient {
   }
 
   setTokens(token, refreshToken) {
-    if (!sameRequestSession(tokenSessionIdentity(this.token), tokenSessionIdentity(token))) void clearNativeBadge();
+    if (!sameBadgeAccount(tokenSessionIdentity(this.token), tokenSessionIdentity(token))) void clearNativeBadge();
     this.tokenGeneration += 1;
     this.token = token;
     this.refreshToken = refreshToken;
@@ -98,7 +108,7 @@ export class ApiClient {
   }
 
   adoptTokens(token, refreshToken) {
-    if (this.token && !sameRequestSession(tokenSessionIdentity(this.token), tokenSessionIdentity(token))) void clearNativeBadge();
+    if (this.token && !sameBadgeAccount(tokenSessionIdentity(this.token), tokenSessionIdentity(token))) void clearNativeBadge();
     this.tokenGeneration += 1;
     this.token = token || null;
     this.refreshToken = refreshToken || null;

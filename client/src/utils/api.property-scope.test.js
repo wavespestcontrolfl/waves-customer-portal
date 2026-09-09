@@ -3,6 +3,9 @@
 // and the per-entry next-visit read hits its route.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const clearNativeBadge = vi.fn(async () => {});
+vi.mock('../native/nativeBadge', () => ({ clearNativeBadge: (...args) => clearNativeBadge(...args) }));
+
 describe('api saved-property calls', () => {
   let api; let calls;
   beforeEach(async () => {
@@ -61,5 +64,23 @@ describe('request identity carries the saved-property claim', () => {
     expect(sameRequestSession(none, a)).toBe(false); // none → some is a scope change
     expect(sameRequestSession(a, tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f', propertyId: 'pa', nonce: 2 })))).toBe(true);
     expect(sameRequestSession(none, tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f', nonce: 2 })))).toBe(true);
+  });
+
+  it('a same-profile saved-property switch keeps the native unread badge; a different customer clears it', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+    const { default: client, sameBadgeAccount, tokenSessionIdentity } = await import('./api.js');
+    clearNativeBadge.mockClear();
+    client.setTokens(tok({ customerId: 'c1', sessionId: 'f', propertyId: 'pa' }), 'r1');
+    const before = clearNativeBadge.mock.calls.length;
+    // Unread counts are per customer, not per house: the switch must not zero a valid badge.
+    client.setTokens(tok({ customerId: 'c1', sessionId: 'f', propertyId: 'pb' }), 'r2');
+    client.adoptTokens(tok({ customerId: 'c1', sessionId: 'f' }), 'r3');
+    expect(clearNativeBadge.mock.calls.length).toBe(before);
+    // Another customer's token (a new login in this tab) still clears it.
+    client.setTokens(tok({ customerId: 'c2', sessionId: 'g' }), 'r4');
+    expect(clearNativeBadge.mock.calls.length).toBe(before + 1);
+    const a = tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f', propertyId: 'pa' }));
+    expect(sameBadgeAccount(a, tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'f', propertyId: 'pb' })))).toBe(true);
+    expect(sameBadgeAccount(a, tokenSessionIdentity(tok({ customerId: 'c1', sessionId: 'h' })))).toBe(false);
   });
 });

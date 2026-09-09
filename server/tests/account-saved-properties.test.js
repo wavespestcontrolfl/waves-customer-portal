@@ -225,6 +225,45 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
     expect(never).toEqual({ customerId: 'cust-1', enabled: true, multi: false, scoped: false, closed: false, property: null });
   });
 
+  test('the resolver is a plain READ once a property row exists — the lazy primary writer (customers FOR UPDATE) runs only for a profile that never had a row', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    customerProperties.ensurePrimaryProperty.mockClear();
+    db.mockImplementation((table) => {
+      if (table === 'customer_properties') return chain(PROPS['cust-1']);
+      throw new Error(`unexpected table ${table}`);
+    });
+    await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
+    await resolveSessionScope({ customerId: 'cust-1', propertyId: 'prop-b' });
+    // The tracker polls this every 15s: no transaction, no customer-row lock.
+    expect(customerProperties.ensurePrimaryProperty).not.toHaveBeenCalled();
+
+    // Every row retired (closed): still a read.
+    let ever = true;
+    db.mockImplementation((table) => {
+      if (table !== 'customer_properties') throw new Error(`unexpected table ${table}`);
+      const c = chain([]);
+      c.first = jest.fn(async () => (ever ? { id: 'old-row' } : undefined));
+      return c;
+    });
+    await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
+    expect(customerProperties.ensurePrimaryProperty).not.toHaveBeenCalled();
+
+    // Never had a row: the one-time lazy primary, then a re-read.
+    ever = false;
+    let reads = 0;
+    db.mockImplementation((table) => {
+      if (table !== 'customer_properties') throw new Error(`unexpected table ${table}`);
+      reads += 1;
+      const c = chain(reads >= 3 ? [PROPS['cust-1'][0]] : []);
+      c.first = jest.fn(async () => undefined);
+      return c;
+    });
+    const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
+    expect(customerProperties.ensurePrimaryProperty).toHaveBeenCalledTimes(1);
+    expect(customerProperties.ensurePrimaryProperty).toHaveBeenCalledWith('cust-1');
+    expect(scope).toMatchObject({ enabled: true, multi: false, scoped: false, closed: false, property: { id: 'prop-a' } });
+  });
+
   test('gate on, three properties: the claim wins; the primary also owns unstamped visits; a secondary does not', async () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true';
     db.mockImplementation((table) => {

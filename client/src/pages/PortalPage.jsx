@@ -13883,7 +13883,7 @@ function useSheetViewport(open, dialogRef) {
   return viewport;
 }
 
-function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp }) {
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
   const viewport = useSheetViewport(open, dialogRef);
@@ -13955,7 +13955,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const problemCategoryValues = ['pest_issue', 'lawn_concern', 'schedule_change'];
   const isProblemCategory = problemCategoryValues.includes(category);
   const selectedCategory = requestCategories.find(c => c.value === category);
-  const propertyAddress = formatPropertyAddress(customer);
+  // The house this ticket is about: the SELECTED saved property's address
+  // (the server files the ticket under the same selection — codex #4207
+  // GitHub r3 P1), not the profile mirror, which is always the primary.
+  const propertyAddress = propertyAddressProp !== undefined ? propertyAddressProp : formatPropertyAddress(customer);
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(' ');
 
   // Callback recognition: pest/lawn issue within 30 days of last service
@@ -16373,6 +16376,7 @@ export default function PortalPage() {
         onClose={() => setShowReportIssue(false)}
         onSubmitted={() => setRequestRefreshKey(k => k + 1)}
         customer={customer}
+        propertyAddress={activePropertyAddress}
       />
     </div>
     </PortalReadProvider>

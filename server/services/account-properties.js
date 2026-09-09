@@ -199,15 +199,26 @@ async function resolveSessionScope(req, knex = db) {
   // Gate off — or a C4 cancelled read-only session (req.customerInactive):
   // no property scoping at all, today's customer-wide reads.
   if (!appPropertyScopeEnabled() || req.customerInactive === true) return unscoped;
-  const customerProperties = require('./customer-properties');
-  await customerProperties.ensurePrimaryProperty(customerId).catch(() => {});
-  const rows = await knex('customer_properties')
+  const readActiveRows = () => knex('customer_properties')
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
     .select('id', 'is_primary', 'label', 'relationship', 'occupancy_type', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+  // READ first. This resolver runs on every scoped read — including the
+  // tracker's 15-second poll — and ensurePrimaryProperty opens a transaction
+  // that takes FOR UPDATE on the customers row before it checks anything
+  // (codex #4207 GitHub r1 P2): steady-state polling must not queue billing
+  // and scheduling writes behind a lock it never needed. The lazy primary is
+  // attempted only for a profile with NO row at all (never had one); once it
+  // exists, or once every row is retired, this is a plain read.
+  let rows = await readActiveRows();
   if (!rows.length) {
-    const everHadRow = await knex('customer_properties').where({ customer_id: customerId }).first('id');
-    return { customerId, enabled: true, multi: false, scoped: !!everHadRow, closed: !!everHadRow, property: null };
+    const everHadRow = !!(await knex('customer_properties').where({ customer_id: customerId }).first('id'));
+    if (!everHadRow) {
+      const customerProperties = require('./customer-properties');
+      await customerProperties.ensurePrimaryProperty(customerId).catch(() => {});
+      rows = await readActiveRows();
+    }
+    if (!rows.length) return { customerId, enabled: true, multi: false, scoped: everHadRow, closed: everHadRow, property: null };
   }
   const property = (req.propertyId && rows.find((r) => String(r.id) === String(req.propertyId)))
     || rows.find((r) => r.is_primary === true)
