@@ -185,8 +185,21 @@ async function adoptScheduledInvoiceUnderMintLock(trx, scheduledServiceId) {
 // DEPOSIT_CREDIT_CHANGED thrown inside the transaction before anything is
 // created; the caller re-previews and tries again. Null = no expectation
 // (every other caller).
+// expectedBalanceDue: the BALANCE the caller previewed (GitHub P1 #4131 r2).
+// The deposit check above cannot see a total that differs from the
+// caller's preview — InvoiceService.create computes the authoritative
+// after-tax total (county rate, verified exemption, third-party payer) and
+// caps the applied credit against it, while the Invoices page previews a
+// flat 7% — so a matching deposit can still deliver a different balance
+// than the operator approved. The created row's `total` IS that balance
+// (create nets the applied credit into it); it is compared to the cent
+// INSIDE the transaction, and a mismatch throws 409 BALANCE_CHANGED
+// carrying the authoritative figures, rolling the create back — the caller
+// shows them and re-submits with the confirmed balance. Null = no
+// expectation.
 async function mintScheduledServiceInvoiceWithDeposit({
   svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false, expectedDepositCredit = null,
+  expectedBalanceDue = null,
 }) {
   const InvoiceService = require('../services/invoice');
   const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
@@ -257,6 +270,19 @@ async function mintScheduledServiceInvoiceWithDeposit({
             : {}),
         });
         const effective = Number(created?.applied_deposit_credit) || 0;
+        if (expectedBalanceDue != null) {
+          const balanceDue = Number(created?.total) || 0;
+          if (Math.round(balanceDue * 100) !== Math.round(Number(expectedBalanceDue) * 100)) {
+            const e = new Error(`The balance this invoice would bill ($${balanceDue.toFixed(2)}) differs from the one previewed ($${Number(expectedBalanceDue).toFixed(2)}) — the customer's tax or exemption on file changes the total. Nothing was created; the summary now shows the balance that would be sent — review it and click Create again to send it.`);
+            e.status = 409;
+            e.code = 'BALANCE_CHANGED';
+            e.expectedBalanceDue = Number(expectedBalanceDue);
+            e.balanceDue = balanceDue;
+            e.invoiceTotal = Math.round((balanceDue + effective) * 100) / 100;
+            e.appliedDepositCredit = effective;
+            throw e;
+          }
+        }
         if (effective > 0) {
           const allocated = await consumeDepositCredit({
             estimateId: sourceEstimateId,

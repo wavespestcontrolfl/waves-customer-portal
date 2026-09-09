@@ -222,6 +222,36 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
   });
 
+  test('the previewed balance rides to the helper; a balance the server would bill differently is refused (409 BALANCE_CHANGED) with the real figures — nothing created', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT, expectedDepositCredit: 49, expectedBalanceDue: 76.19 });
+      expect(res.status).toBe(201);
+      expect(mintScheduledServiceInvoiceWithDeposit.mock.calls[0][0]).toMatchObject({ expectedDepositCredit: 49, expectedBalanceDue: 76.19 });
+    });
+    mintScheduledServiceInvoiceWithDeposit.mockRejectedValueOnce(Object.assign(
+      new Error('The balance this invoice would bill ($68.00) differs from the one previewed ($76.19) — nothing was created.'),
+      { status: 409, code: 'BALANCE_CHANGED', expectedBalanceDue: 76.19, balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49 },
+    ));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT, expectedDepositCredit: 49, expectedBalanceDue: 76.19 });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: expect.stringContaining('nothing was created'),
+        code: 'BALANCE_CHANGED',
+        expectedBalanceDue: 76.19,
+        balanceDue: 68,
+        invoiceTotal: 117,
+        appliedDepositCredit: 49,
+      });
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+    });
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { scheduledServiceId: VISIT, expectedBalanceDue: 'lots' })).status).toBe(400);
+      expect((await post(baseUrl, { scheduledServiceId: VISIT, expectedBalanceDue: -0.01 })).status).toBe(400);
+      expect(mintScheduledServiceInvoiceWithDeposit).toHaveBeenCalledTimes(2);
+    });
+  });
+
   test('a legacy NULL-status visit is open — linkable, and re-verified as open under the lock', async () => {
     visitRow = { id: VISIT, customer_id: CUSTOMER, status: null };
     mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ svc, assertEligibleInTrx, buildCreateParams }) => {
@@ -257,7 +287,46 @@ describe('POST /admin/invoices with an open visit link', () => {
   });
 });
 
+describe('POST /admin/invoices/:id/schedule-send on a linked visit (GitHub P1 #4131 r2)', () => {
+  const INVOICE = '44444444-4444-4444-8444-444444444444';
+  const scheduleSend = (baseUrl) => fetch(`${baseUrl}/admin/invoices/${INVOICE}/schedule-send`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scheduledFor: '2040-03-04T08:00' }),
+  });
+  let visitStatus;
+  let update;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: INVOICE, status: 'scheduled' }]) }));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return qb({ first: jest.fn(async () => ({ payer_statement_id: null, scheduled_service_id: VISIT })), update });
+      if (table === 'scheduled_services') return qb({ first: jest.fn(async () => ({ id: VISIT, status: visitStatus })) });
+      throw new Error(`unexpected table ${table}`);
+    });
+  });
+
+  test.each([['confirmed'], [null]])('refuses a future send while the linked visit is still open (status %s) — the completion would send it first', async (status) => {
+    visitStatus = status;
+    await withServer(async (baseUrl) => {
+      const res = await scheduleSend(baseUrl);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'LINKED_VISIT_OPEN', error: expect.stringContaining('open visit') });
+      expect(update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('schedules normally once the linked visit is completed', async () => {
+    visitStatus = 'completed';
+    await withServer(async (baseUrl) => {
+      const res = await scheduleSend(baseUrl);
+      expect(res.status).toBe(200);
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    });
+  });
+});
+
 describe('GET /admin/invoices/service-records/:customerId', () => {
+  // The visits query is found by call index below — start from a clean call log.
+  beforeEach(() => jest.clearAllMocks());
   test('returns the completed records AND the open visits for the picker', async () => {
     const records = [{ id: 'r1', service_date: '2040-02-01', service_type: 'Quarterly Pest Control Service', status: 'completed', tech_name: 'Adam' }];
     const open = [

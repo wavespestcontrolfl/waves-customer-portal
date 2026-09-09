@@ -12,6 +12,13 @@ import {
   invoiceDepositCreditTotal,
   invoiceListRowDate,
   isAllowedAttachmentFile,
+  VISIT_STATE_CONFLICT_CODES,
+  confirmedBalanceFromError,
+  openVisitBalanceKey,
+  openVisitCreateExpectations,
+  openVisitSendTimingBlocked,
+  reconcileSelectedOpenVisit,
+  reloadsVisitPickerAfterCreateError,
   noticeCandidateLabel,
   orderNoticeCandidates,
   persistedSendDisposition,
@@ -34,6 +41,86 @@ describe("AdminInvoicesPage adminFetch error shape", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("AdminInvoicesPage adminFetch refused payload", () => {
+  it("carries the server's drift figures on a BALANCE_CHANGED refusal so the form can show what would be billed", async () => {
+    vi.stubGlobal("localStorage", { getItem: () => "tok" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ error: "The balance this invoice would bill ($68.00) differs — nothing was created.", code: "BALANCE_CHANGED", expectedBalanceDue: 76.19, balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49 }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    )));
+    try {
+      await expect(adminFetch("/admin/invoices", { method: "POST", body: "{}" })).rejects.toMatchObject({
+        status: 409,
+        code: "BALANCE_CHANGED",
+        body: { balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49 },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("AdminInvoicesPage open-visit link: balance confirmation (Codex P1 r2)", () => {
+  const visit = { id: "v1", deposit_credit: 49, scheduled_date: "2040-03-04" };
+  const lines = [{ description: "Quarterly", quantity: 1, unit_price: 117 }];
+  const key = openVisitBalanceKey({ selectedOpenVisit: visit, lineItems: lines });
+
+  it("sends the previewed deposit AND the previewed balance for the linked create; nothing for an unlinked one", () => {
+    expect(openVisitCreateExpectations({ selectedOpenVisit: visit, balanceDue: 76.19, confirmedBalance: null, balanceKey: key }))
+      .toEqual({ expectedDepositCredit: 49, expectedBalanceDue: 76.19 });
+    expect(openVisitCreateExpectations({ selectedOpenVisit: null, balanceDue: 76.19 })).toEqual({});
+  });
+
+  it("keeps the server's figures from a BALANCE_CHANGED refusal, keyed to the form state; other errors yield nothing", () => {
+    const err = Object.assign(new Error("differs"), { code: "BALANCE_CHANGED", body: { balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49 } });
+    expect(confirmedBalanceFromError(err, key)).toEqual({ key, balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49 });
+    expect(confirmedBalanceFromError(Object.assign(new Error("x"), { code: "DEPOSIT_CREDIT_CHANGED", body: { balanceDue: 68 } }), key)).toBeNull();
+    expect(confirmedBalanceFromError(Object.assign(new Error("x"), { code: "BALANCE_CHANGED", body: {} }), key)).toBeNull();
+  });
+
+  it("the next Create sends the server-confirmed balance while the form still matches — and drops back to the preview once a line changes", () => {
+    const confirmed = { key, balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49 };
+    expect(openVisitCreateExpectations({ selectedOpenVisit: visit, balanceDue: 68, confirmedBalance: confirmed, balanceKey: key }))
+      .toEqual({ expectedDepositCredit: 49, expectedBalanceDue: 68 });
+    const editedKey = openVisitBalanceKey({ selectedOpenVisit: visit, lineItems: [{ ...lines[0], unit_price: 150 }] });
+    expect(editedKey).not.toBe(key);
+    expect(openVisitCreateExpectations({ selectedOpenVisit: visit, balanceDue: 111.5, confirmedBalance: confirmed, balanceKey: editedKey }))
+      .toEqual({ expectedDepositCredit: 49, expectedBalanceDue: 111.5 });
+    // A different visit (or a moved deposit) is a different key too.
+    expect(openVisitBalanceKey({ selectedOpenVisit: { ...visit, deposit_credit: 20 }, lineItems: lines })).not.toBe(key);
+  });
+});
+
+describe("AdminInvoicesPage open-visit link: send timing (Codex P1 r2)", () => {
+  it("blocks a future send time for a linked open visit — the completion sends it — but allows now and draft", () => {
+    const visit = { id: "v1" };
+    expect(openVisitSendTimingBlocked("tomorrow_8", visit)).toBe(true);
+    expect(openVisitSendTimingBlocked("custom", visit)).toBe(true);
+    expect(openVisitSendTimingBlocked("now", visit)).toBe(false);
+    expect(openVisitSendTimingBlocked("draft", visit)).toBe(false);
+    expect(openVisitSendTimingBlocked("custom", null)).toBe(false);
+  });
+});
+
+describe("AdminInvoicesPage open-visit link: picker refresh after a create conflict (Codex P2 r2)", () => {
+  it("reloads the picker for every visit-state conflict code, not only deposit drift", () => {
+    for (const code of ["DEPOSIT_CREDIT_CHANGED", "BALANCE_CHANGED", "visit_not_open", "visit_prepaid", "visit_already_invoiced", "SCHEDULED_PRICE_MOVED"]) {
+      expect(VISIT_STATE_CONFLICT_CODES).toContain(code);
+      expect(reloadsVisitPickerAfterCreateError(code)).toBe(true);
+    }
+    expect(reloadsVisitPickerAfterCreateError(undefined)).toBe(false);
+    expect(reloadsVisitPickerAfterCreateError("HTTP 500")).toBe(false);
+  });
+
+  it("retains the selected visit when the reload no longer lists it (so linkedVisitGone renders) and refreshes it when it does", () => {
+    const stale = { id: "v1", deposit_credit: 49 };
+    expect(reconcileSelectedOpenVisit(stale, [{ id: "v2" }])).toBe(stale);
+    expect(reconcileSelectedOpenVisit(stale, [])).toBe(stale);
+    expect(reconcileSelectedOpenVisit(stale, [{ id: "v1", deposit_credit: 20 }])).toEqual({ id: "v1", deposit_credit: 20 });
+    expect(reconcileSelectedOpenVisit(null, [{ id: "v1" }])).toBeNull();
   });
 });
 

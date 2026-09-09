@@ -971,7 +971,7 @@ router.delete('/:id/attachments/:attachmentId', requireAdmin, async (req, res, n
 // POST / — create invoice manually
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { customerId, serviceRecordId, scheduledServiceId, expectedDepositCredit, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
+    const { customerId, serviceRecordId, scheduledServiceId, expectedDepositCredit, expectedBalanceDue, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
     if (serviceDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceDate))) {
@@ -982,6 +982,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
     if (expectedDepositCredit != null && !(Number.isFinite(Number(expectedDepositCredit)) && Number(expectedDepositCredit) >= 0)) {
       return res.status(400).json({ error: 'expectedDepositCredit must be a non-negative number' });
+    }
+    if (expectedBalanceDue != null && !(Number.isFinite(Number(expectedBalanceDue)) && Number(expectedBalanceDue) >= 0)) {
+      return res.status(400).json({ error: 'expectedBalanceDue must be a non-negative number' });
     }
     // An OPEN visit picked from the Invoices page (owner ruling 2026-09-07):
     // it must be this customer's and still open — a closed or dead visit is
@@ -1059,6 +1062,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // mint if the credit it would apply differs, so the invoice the
         // customer is sent is the balance the operator approved.
         expectedDepositCredit: expectedDepositCredit == null ? null : Number(expectedDepositCredit),
+        // The BALANCE the form previewed (GitHub P1 r2): the helper compares
+        // the created row's authoritative total under the transaction and
+        // refuses (409 BALANCE_CHANGED, nothing created) when the server's
+        // tax/exemption makes it differ — the response carries the real
+        // figures for the operator to confirm.
+        expectedBalanceDue: expectedBalanceDue == null ? null : Number(expectedBalanceDue),
         assertEligibleInTrx: async (trx) => {
           const still = await trx('scheduled_services').where({ id: pickedOpenVisit.id }).forUpdate().first('id', 'customer_id', 'status', 'prepaid_amount');
           if (!still || String(still.customer_id) !== String(customerId) || !isOpenVisitStatus(still.status)) {
@@ -1081,7 +1090,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       try {
         minted = await mintForOpenVisit();
       } catch (err) {
-        if (err?.status === 409) return res.status(409).json({ error: err.message, code: err.code || 'visit_not_open' }); // visit_not_open | visit_prepaid | SCHEDULED_PRICE_MOVED | DEPOSIT_CREDIT_CHANGED
+        if (err?.status === 409) {
+          // visit_not_open | visit_prepaid | SCHEDULED_PRICE_MOVED | DEPOSIT_CREDIT_CHANGED | BALANCE_CHANGED
+          // The drift figures ride along so the form can show the balance
+          // the server would actually bill.
+          const drift = {};
+          for (const k of ['expectedDepositCredit', 'pendingDepositCredit', 'expectedBalanceDue', 'balanceDue', 'invoiceTotal', 'appliedDepositCredit']) {
+            if (err[k] != null) drift[k] = err[k];
+          }
+          return res.status(409).json({ error: err.message, code: err.code || 'visit_not_open', ...drift });
+        }
         throw err;
       }
       if (minted.reused) {
@@ -1654,9 +1672,24 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
     // Phase 2: never queue an accrued invoice into the individual send scheduler —
     // it is delivered on the consolidated statement (processScheduledSends would
     // churn failed sends against the statement-only send guard).
-    const target = await db('invoices').where({ id: req.params.id }).first('payer_statement_id');
+    const target = await db('invoices').where({ id: req.params.id }).first('payer_statement_id', 'scheduled_service_id');
     if (target?.payer_statement_id) {
       return res.status(400).json({ error: 'Invoice is billed on the payer’s monthly statement; it cannot be scheduled for individual send.' });
+    }
+    // An invoice linked to an OPEN visit is never queued for a future send
+    // (GitHub P1 #4131 r2): the completion reuses the linked invoice — it
+    // would find the `scheduled` row, text its pay link in the completion
+    // SMS, and markDeliverySent would clear scheduled_send_at — so the
+    // customer would get it at completion, not at the chosen time. Refusing
+    // here keeps the completion path untouched; send now or keep a draft.
+    if (target?.scheduled_service_id) {
+      const visit = await db('scheduled_services').where({ id: target.scheduled_service_id }).first('id', 'status');
+      if (visit && isOpenVisitStatus(visit.status)) {
+        return res.status(409).json({
+          error: 'This invoice is linked to an open visit — the completion sends it, so a future send time cannot be kept. Send it now or leave it as a draft.',
+          code: 'LINKED_VISIT_OPEN',
+        });
+      }
     }
 
     const [invoice] = await db('invoices')

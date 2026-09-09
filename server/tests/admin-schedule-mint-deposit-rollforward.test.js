@@ -282,6 +282,61 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
     });
   });
 
+  describe('expectedBalanceDue (the operator-previewed BALANCE — GitHub P1 #4131 r2)', () => {
+    it('mints when the created row\'s authoritative total matches the previewed balance to the cent', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 49 });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', total: 76.19, applied_deposit_credit: 49 });
+      mockConsume.mockResolvedValueOnce(49);
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49, expectedBalanceDue: 76.19 });
+
+      expect(result.reused).toBe(false);
+      expect(mockConsume).toHaveBeenCalledWith(expect.objectContaining({ amount: 49 }));
+    });
+
+    it('409s BALANCE_CHANGED inside the transaction when the server total differs (tax exemption / county rate) — nothing consumed, no retry, the real figures ride on the error', async () => {
+      programTransactions(makeTrx(), makeTrx(), makeTrx());
+      mockPending.mockResolvedValue({ amount: 49 });
+      // The form previewed 7% tax on $117 → $125.19 − $49 = $76.19; the
+      // server bills the customer's exemption → $117 − $49 = $68.
+      mockCreate.mockResolvedValue({ id: 'inv-1', total: 68, applied_deposit_credit: 49 });
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49, expectedBalanceDue: 76.19 }),
+      ).rejects.toMatchObject({
+        status: 409, code: 'BALANCE_CHANGED', expectedBalanceDue: 76.19, balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49,
+      });
+      expect(mockCreate).toHaveBeenCalledTimes(1); // terminal — the transaction rolled the create back
+      expect(mockConsume).not.toHaveBeenCalled();
+      expect(mockTrigger).not.toHaveBeenCalled();
+    });
+
+    it('a zero preview refuses a positive server balance — the deposit fell between the two totals', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 120 });
+      // The form (7% tax: $125.19 total) capped the $120 credit at its total
+      // and previewed a $5.19 balance; the server, tax-exempt ($117 total),
+      // caps the credit at $117 and bills $0. Either direction is a mismatch.
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', total: 0, applied_deposit_credit: 117 });
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 120, expectedBalanceDue: 5.19 }),
+      ).rejects.toMatchObject({ status: 409, code: 'BALANCE_CHANGED', balanceDue: 0, appliedDepositCredit: 117 });
+      expect(mockConsume).not.toHaveBeenCalled();
+    });
+
+    it('no balance expectation (every other caller) skips the check entirely', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 49 });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', total: 68, applied_deposit_credit: 49 });
+      mockConsume.mockResolvedValueOnce(49);
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49 });
+      expect(result.invoice.id).toBe('inv-1');
+    });
+  });
+
   it('bubbles an uncredited-mint failure instead of looping', async () => {
     programTransactions(makeTrx());
     mockCreate.mockRejectedValueOnce(new Error('create exploded'));
