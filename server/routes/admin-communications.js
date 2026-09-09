@@ -1207,7 +1207,10 @@ router.post('/call', async (req, res, next) => {
       return res.status(400).json({ error: 'to must be a customer phone, not the admin bridge phone' });
     }
     let bridgePhone = adminPhone;
-    if (relatedCommitmentId && req.techRole !== 'admin') {
+    if (relatedCommitmentId) {
+      // A callback card rings the staff member who took it, whatever their
+      // role: the commitment is assigned and audited under that account, so
+      // the same person must be the one who can press 1.
       const staff = await db('technicians').where({ id: req.technicianId, employment_status: 'active' }).first('id', 'phone');
       bridgePhone = require('../services/tech-line').usableCell(staff);
       if (!bridgePhone) return res.status(409).json({ error: 'Your staff profile needs a cell number before calls can bridge to you' });
@@ -1245,13 +1248,18 @@ router.post('/call', async (req, res, next) => {
     let bridgeClaimId = null;
     if (relatedCommitmentId) bridgeClaimId = await db.transaction(async (trx) => {
       if (!require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
-      // The tech-line bridge uses this durable claim to cover the gap before
-      // call_log is inserted. Commit it before the provider needs the pool.
+      // The same durable claim the tech-line bridge uses covers the gap
+      // before call_log is inserted, keyed to THIS commitment: every card
+      // dials from the shared main line, so a line-wide key would let one
+      // ringing callback block every other customer's card.
       const claim = await trx.raw(`INSERT INTO sms_send_claims (claim_key) VALUES (?)
         ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
-        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${from}`]);
+        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${relatedCommitmentId}`]);
       if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
-      const active = await require('../services/call-bridge').activeBridgeCall({ source, fromPhone: from, customerId: customer?.id }, trx);
+      // The live-call interlock is customer-specific: the linked customer,
+      // or the dialed number when the source call never linked one.
+      const active = await require('../services/call-bridge').activeBridgeCall(
+        { source, customerId: customer?.id || null, toPhone: customer ? null : normalizePhone(to) }, trx);
       if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
       const original = await trx('call_log as cl').whereIn('cl.id', trx('call_commitments').select('call_log_id')
         .where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' })).forUpdate('cl').first('cl.*');

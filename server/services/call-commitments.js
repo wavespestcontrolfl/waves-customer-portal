@@ -1166,9 +1166,13 @@ async function resolveFulfillment(conn, commitment, call) {
           .modify((b) => {
             phoneWhere(b, 'to_phone', phone);
             if (customerId) b.where('customer_id', customerId);
-          }).orderBy('created_at', 'asc').first('id', 'created_at');
+          }).orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+        // The proof is the completed customer leg, so the promise is kept
+        // when that leg ended, not when the staff leg was dialed.
+        const legEnded = Date.parse(connected?.metadata?.customer_leg?.ended_at || '');
         return connected ? { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
-          matched_at: connected.created_at, strength: 'direct', basis: 'callback_customer_conversation' } : null;
+          matched_at: Number.isFinite(legEnded) ? new Date(legEnded) : connected.created_at,
+          strength: 'direct', basis: 'callback_customer_conversation' } : null;
       }
       // A returned callback IS the fulfilment — the phone is the linkage.
       // Same completion predicate as the callbacks digest
