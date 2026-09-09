@@ -5665,7 +5665,7 @@ const EstimateConverter = {
               if (recomputedEnd) standaloneRow.window_end = recomputedEnd;
             }
             if (combinedCapacity && sameTrip) {
-              Object.assign(standaloneRow, VisitCapacity.windowForCapacityService(reservedStart, capacityMembers.length));
+              Object.assign(standaloneRow, VisitCapacity.windowForCapacityService(reservedStart, capacityMembers.length, unit.catalogServiceKey));
               standaloneRow.service_key_snapshot = unit.catalogServiceKey;
             }
             // Duplicate-series guard (P0): this standalone creator was the
@@ -5857,7 +5857,7 @@ const EstimateConverter = {
       if (combinedCapacity) {
         VisitCapacity.assertCapacityServices(reservedStart, capacityMembers);
         const allocation = {
-          ...VisitCapacity.windowForCapacityService(reservedStart, 0),
+          ...VisitCapacity.windowForCapacityService(reservedStart, 0, reservedStart.service_key_snapshot),
           reservation_service_mix: {
             ...combinedCapacity,
             scheduledDate: scheduledDateOnly(reservedStart.scheduled_date),
@@ -5869,7 +5869,7 @@ const EstimateConverter = {
           .update({ reservation_service_mix: allocation.reservation_service_mix,
             ...(combinedCapacity.version === 2 ? { reservation_policy_version: 2 } : {}) });
         await database('scheduled_services').where({ id: reservedStart.id }).update(
-          VisitCapacity.windowForCapacityService(reservedStart, 0),
+          VisitCapacity.windowForCapacityService(reservedStart, 0, reservedStart.service_key_snapshot),
         );
         if (combinedCapacity.version === 2) await require('./scheduling/arrival-route').persistCapacityAllocation(
           database, reservedStart, allocation.reservation_service_mix.allocatedServiceIds);
