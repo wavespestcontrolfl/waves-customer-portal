@@ -161,10 +161,16 @@ function parseRepairedJson(raw) {
   try { return JSON.parse(out); } catch { return null; }
 }
 
-// Per-provider image block shapes (normalized input: { data: base64, mimeType }).
+// Per-provider image block shapes (normalized input: { data: base64, mimeType, label? }).
 const toOpenAIImage = (img) => ({ type: 'input_image', image_url: `data:${img.mimeType || 'image/jpeg'};base64,${img.data}` });
 const toGeminiImage = (img) => ({ inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.data } });
 const toAnthropicImage = (img) => ({ type: 'image', source: { type: 'base64', media_type: img.mimeType || 'image/jpeg', data: img.data } });
+// An image `label` ("Photo 2 (back)") rides as a text part placed immediately
+// before its image on every provider, so a multi-image lane's findings can
+// cite the photo they came from; an unlabeled image is emitted exactly as before.
+const withImageLabels = (images, toImage, toText) => images.flatMap((img) => (
+  img && img.label ? [toText(String(img.label)), toImage(img)] : [toImage(img)]
+));
 
 // The adapter's OWN timeout, as each transport reports it: an
 // AbortSignal.timeout() fetch rejects with a DOMException named TimeoutError
@@ -301,7 +307,7 @@ const statusCode = (provider, status) => `${provider}_${String(status).toLowerCa
 // customer PII (inbound email sender/subject/body, call transcripts,
 // names/addresses).
 function openAIRequest({ model, system, text, images, documents, jsonMode, jsonSchema, maxTokens, reasoningEffort }) {
-  const content = [{ type: 'input_text', text: text || '' }, ...images.map(toOpenAIImage),
+  const content = [{ type: 'input_text', text: text || '' }, ...withImageLabels(images, toOpenAIImage, (label) => ({ type: 'input_text', text: label })),
     ...documents.map((doc) => ({ type: 'input_file', filename: doc.filename, file_data: `data:application/pdf;base64,${doc.data}` }))];
   const body = { model, input: [{ role: 'user', content }], store: false };
   if (system) body.instructions = system;
@@ -314,11 +320,14 @@ function openAIRequest({ model, system, text, images, documents, jsonMode, jsonS
   // drafts), so widening there would let the OpenAI leg bypass route-level
   // size limits.
   const isGpt5 = /^gpt-5(?:\.|-|$)/i.test(String(model || ''));
-  const tinyCap = isGpt5 && Number.isFinite(maxTokens) && maxTokens > 0 && maxTokens < OPENAI_REASONING_FLOOR_TOKENS;
+  // The GPT-6 line takes the same Responses `reasoning` object; its efforts
+  // start at 'low' (no 'none'), so a sub-floor cap lands there instead.
+  const isGpt6 = /^gpt-6(?:\.|-|$)/i.test(String(model || ''));
+  const tinyCap = (isGpt5 || isGpt6) && Number.isFinite(maxTokens) && maxTokens > 0 && maxTokens < OPENAI_REASONING_FLOOR_TOKENS;
   if (maxTokens) body.max_output_tokens = tinyCap && jsonMode ? OPENAI_REASONING_FLOOR_TOKENS : maxTokens;
   // 'none' — the GPT-5.6 line's supported efforts are none/low/medium/
   // high/xhigh/max ('minimal' 400s); tiny caps want zero reasoning tokens.
-  if (isGpt5) body.reasoning = { effort: tinyCap ? 'none' : reasoningEffort };
+  if (isGpt5 || isGpt6) body.reasoning = { effort: tinyCap ? (isGpt6 ? 'low' : 'none') : reasoningEffort };
   return body;
 }
 
@@ -397,12 +406,22 @@ function geminiText(data) {
  */
 const GEMINI_BLOCK_FINISHES = new Set(['SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII']);
 
-function geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature }) {
+// Gemini 3.x Flash thinks at LOW / MEDIUM (its default) / HIGH; it cannot be
+// turned off. A caller's `thinkingLevel` rides generationConfig.thinkingConfig;
+// anything else is ignored with a warning so a typo never fails the leg.
+const GEMINI_THINKING_LEVELS = new Set(['LOW', 'MEDIUM', 'HIGH']);
+
+function geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel }) {
   const promptText = system ? `${system}\n\n${text || ''}` : (text || '');
-  const parts = [...images.map(toGeminiImage), { text: promptText }];
+  const parts = [...withImageLabels(images, toGeminiImage, (label) => ({ text: label })), { text: promptText }];
   const generationConfig = { temperature, maxOutputTokens: maxTokens };
   if (jsonMode) generationConfig.response_mime_type = 'application/json';
   if (jsonMode && jsonSchema) generationConfig.response_json_schema = jsonSchema;
+  if (thinkingLevel != null) {
+    const level = String(thinkingLevel).toUpperCase();
+    if (GEMINI_THINKING_LEVELS.has(level)) generationConfig.thinkingConfig = { thinkingLevel: level };
+    else logger.warn(`[llm] Gemini thinkingLevel "${thinkingLevel}" ignored (LOW | MEDIUM | HIGH)`);
+  }
   return { contents: [{ parts }], generationConfig };
 }
 
@@ -426,7 +445,7 @@ function geminiVerdict(data, candidate, maxTokens) {
   return code;
 }
 
-async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, timeoutMs, laneId, promptVersion, policyLabel } = {}) {
+async function callGemini({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, laneId, promptVersion, policyLabel } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
   const base = { provider: 'gemini', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
@@ -435,7 +454,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
     const resp = await fetch(geminiUrl(model, key), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature })),
+      body: JSON.stringify(geminiRequest({ system, text, images, jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel })),
       ...abortAfter(timeoutMs),
     });
     if (!resp.ok) {
@@ -448,7 +467,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
     const served = { servedModel: data.modelVersion, providerRef: data.responseId, usage: usageOf('gemini', data), latencyMs: elapsedMs(t0), response: out };
     const code = geminiVerdict(data, candidate, maxTokens);
     if (code) return failedLeg(base, served, code);
-    return settleLeg(base, served, out, jsonMode, { model });
+    return settleLeg(base, served, out, jsonMode, { model, usage: served.usage });
   } catch (err) {
     const reason = isTimeoutError(err) ? 'gemini_timeout' : 'error';
     logger.error(`[llm] callGemini failed (${reason}): ${err.message}`);
@@ -465,7 +484,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
 // models (Opus 4.7+, Sonnet 5, Fable) reject sampling controls with a 400, so
 // this leg never forwards it.
 function anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens }) {
-  const content = [...images.map(toAnthropicImage),
+  const content = [...withImageLabels(images, toAnthropicImage, (label) => ({ type: 'text', text: label })),
     ...documents.map((doc) => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data } }))];
   if (text) content.push({ type: 'text', text });
   const req = { model, max_tokens: maxTokens, messages: [{ role: 'user', content }] };
@@ -528,7 +547,8 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
 /**
  * Dispatch a models.ROUTES entry ({ provider, model }) to the matching provider.
  * payload: { system, text, images, documents, jsonMode, jsonSchema, maxTokens, tools, temperature,
- *            anthropicClient, laneId, promptVersion } (`anthropicClient` supports
+ *            thinkingLevel (Gemini), reasoningEffort (OpenAI), anthropicClient, laneId,
+ *            promptVersion } (`anthropicClient` supports
  *            existing injected clients and deterministic tests without bypassing
  *            the router; laneId / promptVersion only label the call-ledger row).
  */

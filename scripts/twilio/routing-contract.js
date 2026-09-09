@@ -49,7 +49,10 @@ const APP_ROUTING = Object.freeze({
   voiceFallbackMethod: 'GET',
   statusCallback: `${PORTAL_ORIGIN}/api/webhooks/twilio/call-status`,
   statusCallbackMethod: 'POST',
-  smsUrl: `${PORTAL_ORIGIN}/api/webhooks/twilio/sms`,
+  // Source persistence failures return 503 before reply consumers run. Twilio
+  // defaults to connection-only retries; explicitly retry server failures.
+  // Fragments are excluded from Twilio's webhook signature computation.
+  smsUrl: `${PORTAL_ORIGIN}/api/webhooks/twilio/sms#rc=2&rp=ct,5xx`,
   smsMethod: 'POST',
   smsFallbackUrl: '',
   smsFallbackMethod: 'POST',

@@ -32,6 +32,7 @@ const { sanitizeZoneShape } = require('./property-zones');
 const { stampedDivergesSql } = require('./stamped-address');
 const { resolveZoneRowsImageDrift } = require('./service-report/zone-drift');
 const { parseETDateTime } = require('../utils/datetime-et');
+const { savepointRead } = require('../utils/savepoint-read');
 
 const STATION_STATUSES = ['ok', 'activity', 'serviced', 'inaccessible'];
 // Who owns a station. Matches the termite_stations.owned_by CHECK exactly —
@@ -291,9 +292,9 @@ async function stationCapWouldOverflow(db, customerId, entries = [], program = '
   const creates = list.filter((entry) => entry && entry.retire !== true
     && (entry.id == null || String(entry.id).trim() === '') && entry.shape != null);
   if (!creates.length) return false;
-  const activeRows = await db('termite_stations')
+  const activeRows = await savepointRead(db, (k) => k('termite_stations')
     .where({ customer_id: customerId, is_active: true, program: normalizeProgram(program) })
-    .select('id', 'geometry_image')
+    .select('id', 'geometry_image'))
     .catch(() => null);
   if (!activeRows) return false; // pre-migration — the sync no-ops anyway
   const activeIds = new Set(activeRows.map((row) => String(row.id)));

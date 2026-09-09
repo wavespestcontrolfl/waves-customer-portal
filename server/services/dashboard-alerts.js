@@ -335,7 +335,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         severity: 'warn',
         count,
         label: `${count} customer${count === 1 ? '' : 's'} at churn risk`,
-        href: '/admin/customers?view=health',
+        href: '/admin/customers?healthRisk=at_risk',
       });
     }
   } catch (err) { logger.error(`[dashboard-alerts] churn_at_risk: ${err.message}`); }

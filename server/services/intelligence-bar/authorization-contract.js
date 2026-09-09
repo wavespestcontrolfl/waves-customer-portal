@@ -147,7 +147,7 @@ const ACTION_LABELS = {
 function tierFor(toolName) {
   if (CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(toolName)) return 'red';
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) || LEGACY_BARE_WRITE_TOOL_NAMES.has(toolName)) return 'yellow';
-  return 'green';
+  return require('./action-policy.json')[toolName]?.kind === 'read' ? 'green' : 'unknown';
 }
 
 // Operator-facing label for a tool in the activity list (what the bar
@@ -238,6 +238,7 @@ function pushLeadStatusDerivedEffects(push, newStatus, { bulk = false } = {}) {
 }
 
 function buildContract({ toolName, params, displayParams, preview, summary }) {
+  if (tierFor(toolName) === 'unknown') throw new Error('This action has no reviewed approval classification');
   const effects = [];
   const seen = new Set();
   const push = (kind, label, extra = {}) => {

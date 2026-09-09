@@ -20,6 +20,18 @@ import { ACH_CONSENT_TEXT, CARD_CONSENT_TEXT, PREPAY_ACH_CONSENT_TEXT, PREPAY_CA
  * canonical v9 text — the summary never replaces the authorization of
  * record, it makes it readable at the moment of decision.
  */
+// Failure copy per tender (bank vs card) for the confirm flow.
+const CARD_FAIL_COPY = {
+  saveFailed: 'We could not save that card. Try another card.',
+  notSaved: 'That card could not be saved. Try again in a moment.',
+  threw: 'We could not save that card. Try again.',
+};
+const BANK_FAIL_COPY = {
+  saveFailed: 'We could not save that bank account. Try a card instead.',
+  notSaved: 'That bank account could not be verified instantly. Use a card to finish booking.',
+  threw: 'We could not save that bank account. Try again or use a card.',
+};
+
 const NAVY = '#04395E';
 
 const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
@@ -29,7 +41,13 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // Auto Pay copy's "nothing charged today" would contradict the charge).
   // The exact surcharged total is quoted in a separate confirm step before
   // any charge (PREPAY_CHARGE_QUOTE).
-  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, prepay = false },
+  // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
+  // method" after a capture already succeeded — the parent retires the
+  // saved intent and remounts this capture (keyed) on a fresh one.
+  // savedFor: what the replayed saved method is "already saved for" —
+  // "this plan" (estimate accept, default), "this visit" (one-time secure
+  // appointment), "Auto Pay" (standalone link). Copy only.
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan' },
   ref,
 ) {
   const mountRef = useRef(null);
@@ -51,6 +69,19 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // re-enters it, so the rendered authorization must match what Stripe
   // holds, not a card default (Codex #3723 r1 P1).
   const [methodType, setMethodType] = useState(intent?.capturedMethodType || 'card');
+  // A succeeded REPLAY renders as a saved-method panel — no Payment Element
+  // is mounted on the finished intent (there is nothing to enter), and the
+  // customer can continue with it or replace it. Before this, a re-tap on
+  // the element was a dead end (customer report 2026-09-08: a credit card
+  // saved, then no way to switch to a bank account).
+  // Only when the caller also names the intent (the confirm returns that id
+  // without touching Stripe); a caller that omits it keeps the element path.
+  const replay = !!intent?.capturedMethodType && !!intent?.setupIntentId;
+  // Stale replay: the element's own retrieve found the intent succeeded but
+  // this intent object predates it (no capturedMethodType) — the consent on
+  // screen may not match the saved tender, so only replacement is offered.
+  const [staleReplay, setStaleReplay] = useState(false);
+  const [replacing, setReplacing] = useState(false);
   const bank = methodType === 'us_bank_account';
   const bankOffered = Array.isArray(intent?.paymentMethodTypes) && intent.paymentMethodTypes.includes('us_bank_account');
   // Refs mirror the two values the confirm gesture must judge SYNCHRONOUSLY
@@ -102,6 +133,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   useEffect(() => {
     let cancelled = false;
     if (!clientSecret || !publishableKey) return undefined;
+    if (replay) {
+      setReady(true);
+      return undefined;
+    }
     loadStripeSdk().then((StripeCtor) => {
       if (cancelled || !mountRef.current) return;
       const stripe = StripeCtor(publishableKey);
@@ -135,10 +170,29 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       }
     });
     return () => { cancelled = true; };
-  }, [clientSecret, publishableKey, loadStripeSdk, glassActive, website]);
+  }, [clientSecret, publishableKey, loadStripeSdk, glassActive, website, replay]);
+
+  const handleReplace = async () => {
+    if (!onReplace || !intent?.setupIntentId) return;
+    setReplacing(true);
+    setError(null);
+    // The parent remounts this capture (keyed on the new intent) on
+    // success; only the failure path returns here.
+    const swapped = await onReplace(intent.setupIntentId);
+    if (!swapped) {
+      setReplacing(false);
+      setError('We could not switch your payment method. Please refresh this page and try again.');
+    }
+  };
+
+  // Tender-specific failure copy picked once per render, so confirmSetup
+  // decides only the flow (GitHub Codex #4144 r2 P2: complexity).
+  const failCopy = bank ? BANK_FAIL_COPY : CARD_FAIL_COPY;
 
   useImperativeHandle(ref, () => ({
-    isReady: () => ready && agreed,
+    // Not ready while a replacement is in flight: the intent this capture
+    // holds is being retired.
+    isReady: () => ready && agreed && !replacing,
     /**
      * Confirm the SetupIntent with what the customer entered. Returns
      * { ok, setupIntentId } or { ok: false, error } — never throws into
@@ -146,14 +200,22 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
      * including the succeeded-replay short-circuit.
      */
     async confirmSetup() {
-      if (!stripeRef.current || !elementsRef.current) {
-        return { ok: false, error: 'The secure card form is still loading — try again in a moment.' };
+      if (replacing) {
+        return { ok: false, error: 'Switching your payment method — one moment.' };
       }
       // The consent must still be ticked for the tender on screen at the
       // moment of confirm — a tender switch re-arms it (see the effect
       // above), and this closure reads the live value.
       if (!agreedRef.current) {
         return { ok: false, error: 'Please check the authorization box to continue.' };
+      }
+      if (replay) {
+        // Consent was ticked for the tender the server told us is saved;
+        // the accept gate re-verifies the intent against Stripe regardless.
+        return { ok: true, setupIntentId: intent.setupIntentId };
+      }
+      if (!stripeRef.current || !elementsRef.current) {
+        return { ok: false, error: 'The secure card form is still loading — try again in a moment.' };
       }
       setError(null);
       // Lock the element for the whole confirm: the tender picked when the
@@ -170,7 +232,8 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           // carries capturedMethodType.
           const replayedTypes = existing.setupIntent.payment_method_types || [];
           if (replayedTypes.includes('us_bank_account') && !intent?.capturedMethodType) {
-            return fail('Your payment method was already saved. Please refresh this page to continue.');
+            setStaleReplay(true);
+            return fail('Your payment method was already saved. Choose "Use a different payment method" below, or refresh this page to continue.');
           }
           return { ok: true, setupIntentId: existing.setupIntent.id };
         }
@@ -180,7 +243,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           redirect: 'if_required',
         });
         if (result.error) {
-          return fail(result.error.message || (bank ? 'We could not save that bank account. Try a card instead.' : 'We could not save that card. Try another card.'));
+          return fail(result.error.message || failCopy.saveFailed);
         }
         const si = result.setupIntent;
         if (si && si.status === 'succeeded') {
@@ -189,14 +252,12 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
         // Instant-verified banks land 'succeeded' like cards; a bank that
         // could not instant-verify never gets here (Stripe surfaces the
         // error above) — no micro-deposit pending state exists at accept.
-        return fail(bank
-          ? 'That bank account could not be verified instantly. Use a card to finish booking.'
-          : 'That card could not be saved. Try again in a moment.');
+        return fail(failCopy.notSaved);
       } catch {
-        return fail(bank ? 'We could not save that bank account. Try again or use a card.' : 'We could not save that card. Try again.');
+        return fail(failCopy.threw);
       }
     },
-  }), [ready, agreed, intent, bank]);
+  }), [ready, agreed, intent, bank, replay, replacing]);
 
   return (
     <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${borderColor}`, textAlign: 'left' }}>
@@ -214,7 +275,20 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
             ? 'After each completed service, that service’s amount is debited from your bank account automatically. Bank transfers have no added card surcharge.'
             : `After each completed service, your ${bankOffered ? 'card or bank account' : 'card'} is charged that service’s amount automatically.`)}
       </div>
+      {replay ? (
+        <div style={{ fontSize: 14, color: NAVY, fontWeight: 600, marginTop: 14 }}>
+          {`Your ${bank ? 'bank account' : 'card'} is already saved for ${savedFor}.`}
+        </div>
+      ) : null}
       <div ref={mountRef} style={{ marginTop: 14 }} />
+      {(replay || staleReplay) && onReplace ? (
+        <button
+          type="button"
+          onClick={handleReplace}
+          disabled={busy || replacing}
+          style={{ background: 'none', border: 'none', padding: 0, marginTop: 10, fontSize: 14, fontWeight: 600, color: NAVY, textDecoration: 'underline', cursor: 'pointer' }}
+        >{replacing ? 'Switching…' : 'Use a different payment method'}</button>
+      ) : null}
       <div style={{ fontSize: 14, color: bodyColor, marginTop: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
         <span aria-hidden="true">🔒</span>
         <span>{`Secured by Stripe — remove your ${bankOffered ? 'payment method' : 'card'} anytime in the Waves app.`}</span>
@@ -228,7 +302,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           // in-flight handler proceeds to /accept on the EARLIER click, so an
           // uncheck landing mid-await would record consent the checkbox no
           // longer shows.
-          disabled={busy}
+          disabled={busy || replacing}
           style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
         />
         <span style={{ fontSize: 14, color: NAVY, lineHeight: 1.5, fontWeight: 600 }}>

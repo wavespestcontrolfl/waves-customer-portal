@@ -105,6 +105,7 @@ export default function EmailAutomationsPanelV2() {
       ) : (
         <Card className="p-0 overflow-hidden">
           {" "}
+          <div className="overflow-x-auto">
           <table className="w-full text-13">
             {" "}
             <thead className="bg-zinc-50 border-b border-hairline border-zinc-200">
@@ -204,7 +205,7 @@ export default function EmailAutomationsPanelV2() {
                 );
               })}
             </tbody>{" "}
-          </table>{" "}
+          </table></div>{" "}
         </Card>
       )}
       {selectedKey && (

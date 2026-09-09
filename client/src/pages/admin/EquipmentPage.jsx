@@ -157,7 +157,6 @@ const CAT_ICONS = {
   other: "",
 };
 
-const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 const EQUIPMENT_SECTIONS = [
   { key: "assets", label: "Assets", Icon: Wrench },
   { key: "maintenance", label: "Maintenance", Icon: Wrench },
@@ -407,6 +406,7 @@ const EMPTY_EQUIP = {
 };
 
 function EquipmentTab({ showToast, editing, setEditing }) {
+  const isMobile = useIsMobile(640);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -812,6 +812,7 @@ function EquipmentEditModal({
 
 // ── Tank Mix Tab ──
 function TankMixTab({ showToast }) {
+  const isMobile = useIsMobile(640);
   const [mixes, setMixes] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -1043,6 +1044,7 @@ function TankMixTab({ showToast }) {
 
 // ── Job Cost Tab ──
 function JobCostTab() {
+  const isMobile = useIsMobile(640);
   const [summary, setSummary] = useState(null);
   const [costs, setCosts] = useState([]);
   const [loading, setLoading] = useState(true);

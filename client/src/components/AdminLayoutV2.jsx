@@ -25,6 +25,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
+import useModalFocus from "../hooks/useModalFocus";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
@@ -98,6 +99,9 @@ export default function AdminLayoutV2() {
   const [user, setUser] = useState(null);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
+  // focus returns to the "Open menu" button (F0014).
+  const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const paletteRef = useRef(null);
   // Global Messages badge: conversations with an unread inbound text. Polled
@@ -224,6 +228,7 @@ export default function AdminLayoutV2() {
         color: "var(--text-primary)",
       }}
     >
+      <a href="#admin-main" className="admin-skip-link">Skip to content</a>
       {/* Mobile top bar — only visible below breakpoint */}
       {isMobile && (
         <div
@@ -309,6 +314,7 @@ export default function AdminLayoutV2() {
       {/* Sidebar */}
       <aside
         id="admin-sidebar"
+        ref={drawerRef}
         // When mobile + closed the sidebar is translated offscreen but still
         // rendered; `inert` pulls it (and its links) out of the tab order and
         // AT tree so a keyboard user can't Tab into the invisible menu.
@@ -623,7 +629,7 @@ export default function AdminLayoutV2() {
       </aside>
 
       {/* Main content */}
-      <div
+      <main id="admin-main" tabIndex={-1}
         style={{
           flex: 1,
           minWidth: 0,
@@ -656,7 +662,7 @@ export default function AdminLayoutV2() {
               : "Verifying staff access…"}
           </div>
         )}
-      </div>
+      </main>
 
       {/* Mobile bottom tab bar */}
       {isMobile && (
