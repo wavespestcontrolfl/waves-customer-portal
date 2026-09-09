@@ -1,3 +1,4 @@
+const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
@@ -609,6 +610,7 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     await db.transaction(async (trx) => {
+      for (const id of [...new Set([req.customerId, primaryId])].sort()) await lockCustomerComms(trx, id);
       if (Object.keys(propertyDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: req.customerId })
           .update({ ...propertyDbUpdates, updated_at: new Date() });
@@ -837,7 +839,8 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     // (marketing flags NULL), so this is always an update — a bare insert
     // here would take the legacy true defaults and mint marketing consent.
     const existing = await ensurePrefs(req.params.customerId);
-    await db('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
+    await withCustomerCommsLock(db, req.params.customerId, trx =>
+      trx('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates));
     if (pendingOptinDispatch) {
       const { dispatchRecipientOptins } = require('../services/recipient-optin');
       void dispatchRecipientOptins(pendingOptinDispatch.claims, pendingOptinDispatch.customer)
