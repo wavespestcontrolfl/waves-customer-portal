@@ -50,6 +50,11 @@ const HELP_RESPONSE_TEMPLATE =
 const STOP_CONFIRMATION_TEMPLATE =
   "You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.";
 
+// A vendor can offer the recipient a reply instruction without asking Waves
+// to stop. Remove only that instruction when screening an enforced pitch;
+// any separate request elsewhere in the text must still win.
+const REPLY_OPT_OUT_INSTRUCTION = /\b(?:reply|respond|text|say)\s+(?:with\s+)?["']?(?:no|stop|unsubscribe)["']?\s+(?:if\s+you\s+(?:want|need)(?:\s+(?:me|us))?\s+to\s+|to\s+)(?:stop\s+(?:texting|messaging|texts?|messages?|sms)(?:\s+(?:you|me))?|unsubscribe|opt\s*out)\b/gi;
+
 function normalizeBody(body) {
   return String(body || '')
     .replace(/[\u2018\u2019]/g, "'")
@@ -71,8 +76,9 @@ function compactKeyword(body) {
     .toUpperCase();
 }
 
-function detectSmsOptCommand(body) {
-  const normalized = normalizeBody(body);
+function detectSmsOptCommand(body, { ignoreReplyInstructions = false } = {}) {
+  const normalized = normalizeBody(ignoreReplyInstructions
+    ? normalizeBody(body).replace(REPLY_OPT_OUT_INSTRUCTION, '') : body);
   if (!normalized) return { action: null };
 
   const tapbackStripped = stripTapbackPrefix(normalized);

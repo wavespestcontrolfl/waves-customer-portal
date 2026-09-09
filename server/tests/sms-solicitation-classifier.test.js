@@ -14,7 +14,7 @@ afterAll(() => {
   else process.env.GATE_SMS_SPAM_CLASSIFIER = savedGate;
 });
 
-test.each([undefined, '', 'false', 'on', 'true'])('gate %s is off; enforcement is unavailable', async (gate) => {
+test.each([undefined, '', 'false', 'on'])('gate %s is off', async (gate) => {
   if (gate === undefined) delete process.env.GATE_SMS_SPAM_CLASSIFIER;
   else process.env.GATE_SMS_SPAM_CLASSIFIER = gate;
   expect(classifierMode()).toBe('off');
@@ -76,7 +76,7 @@ test.each([
 test('model confidence is recorded without taking an enforcement action', async () => {
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.93 } });
   expect(await screenInboundSms({ body: SOFT_PITCH })).toEqual({
-    solicitation: true, confidence: 0.93, method: 'model', mode: 'shadow', version: 'sms-solicitation-v1',
+    solicitation: true, confidence: 0.93, method: 'model', mode: 'shadow', enforced: false, version: 'sms-solicitation-v1',
   });
 });
 
@@ -99,4 +99,29 @@ test('failed or malformed model output remains non-actionable evidence', async (
   expect(await screenInboundSms({ body: SOFT_PITCH })).toMatchObject({ solicitation: false, method: 'model_failed' });
   mockDispatch.mockResolvedValueOnce({ ok: true, json: { solicitation: true, confidence: 'high' } });
   expect(await screenInboundSms({ body: SOFT_PITCH })).toMatchObject({ solicitation: true, confidence: 0, method: 'model' });
+});
+
+test.each([
+  [0.84, false], [0.85, true], [0.99, true], ['high', false],
+])('enforcement requires a confident solicitation: %s', async (confidence, enforced) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence } });
+  expect(await screenInboundSms({ body: SOFT_PITCH })).toMatchObject({ mode: 'enforce', enforced });
+});
+
+test.each([
+  "Please stop texting me. I don't have any leads for you.",
+  'We have exclusive leads. Please remove me from your list.',
+  'Wrong number, we have exclusive leads.',
+  'START', 'HELP',
+])('genuine consent/support commands bypass enforcement: %s', async (body) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  expect(await screenInboundSms({ body })).toBeNull();
+  expect(mockDispatch).not.toHaveBeenCalled();
+});
+
+test('a model failure in enforcement mode keeps ordinary handling', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  mockDispatch.mockRejectedValue(new Error('timeout'));
+  expect(await screenInboundSms({ body: SOFT_PITCH })).toMatchObject({ solicitation: false, enforced: false });
 });

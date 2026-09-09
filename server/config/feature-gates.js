@@ -1225,8 +1225,8 @@ const gates = {
   // Layered spam classifier: records verdicts to call_spam_verdicts (100%
   // precision offline; any discard action is a separate consumer decision).
   callSpamClassifier: process.env.GATE_CALL_SPAM_CLASSIFIER === 'true',
-  // SMS shadow classification is active only for `shadow`; enforcement is unavailable.
-  smsSpamClassifier: String(process.env.GATE_SMS_SPAM_CLASSIFIER || '').trim().toLowerCase() === 'shadow',
+  // Shadow records evidence; true also silences confident unknown-sender pitches.
+  smsSpamClassifier: ['shadow', 'true'].includes(String(process.env.GATE_SMS_SPAM_CLASSIFIER || '').trim().toLowerCase()),
   // Profile-enrichment writer: gate codes/pets/notes from extraction into
   // property_preferences + customers.internal_notes (admin-edit-preserving).
   callProfileEnrichment: process.env.GATE_CALL_PROFILE_ENRICHMENT === 'true',

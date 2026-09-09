@@ -356,17 +356,23 @@ router.post('/sms', async (req, res) => {
         const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
         solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
         if (solicitation) {
-          await updateByTwilioSid(MessageSid, {
+          const recordedVerdict = await updateByTwilioSid(MessageSid, {
+            ...(solicitation.enforced ? { is_read: true, read_at: new Date() } : {}),
             metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spam_verdict: solicitation })]),
             updated_at: new Date(),
           });
+          if (solicitation.enforced && !recordedVerdict?.id) solicitation = { ...solicitation, enforced: false };
         }
       }
-    } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
+    } catch {
+      if (solicitation?.enforced) solicitation = { ...solicitation, enforced: false };
+      logger.warn('[sms-solicitation] screen failed; continuing normal handling');
+    }
+    const solicitationEnforced = Boolean(solicitation?.enforced);
     const solicitationMeta = solicitation ? { spam_verdict: solicitation } : {};
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
-    const optCommand = detectSmsOptCommand(Body);
+    const optCommand = detectSmsOptCommand(Body, { ignoreReplyInstructions: solicitationEnforced });
 
     if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);
@@ -736,7 +742,7 @@ router.post('/sms', async (req, res) => {
       message_type: messageType,
       // Courtesy closers are read on arrival in the legacy log too, so the
       // sms_log-backed unread counts agree with the unified messages row.
-      ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
+      ...((courtesyOnly || unifiedAlreadyRead || solicitationEnforced) ? { is_read: true } : {}),
       metadata: JSON.stringify({
         ...solicitationMeta,
         locationId: numberConfig.locationId,
@@ -752,7 +758,7 @@ router.post('/sms', async (req, res) => {
     // Close the SELECT→INSERT window (hook P1): if the thread was read between
     // the check above and this insert, the read mirror found no legacy row —
     // re-check now that the row exists and mirror the state ourselves.
-    if (!courtesyOnly && !unifiedAlreadyRead && smsLogEntry?.id) {
+    if (!courtesyOnly && !unifiedAlreadyRead && !solicitationEnforced && smsLogEntry?.id) {
       const readNow = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
         .then((r) => r?.is_read === true).catch(() => false);
       if (readNow) await db('sms_log').where({ id: smsLogEntry.id }).update({ is_read: true }).catch(() => {});
@@ -760,6 +766,10 @@ router.post('/sms', async (req, res) => {
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
+
+    // Keep both source rows, then stop before lead creation, quoting,
+    // notifications or any auto-reply. This also covers tracking/tech lines.
+    if (solicitationEnforced) return res.type('text/xml').send('<Response></Response>');
 
     // The same post-ack kick covers both consumed replies and the ordinary
     // path. A failed or interrupted kick is recovered from the persisted row.

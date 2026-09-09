@@ -125,7 +125,7 @@ Affiliate links (blog monetization pilot): `GATE_AFFILIATE_LINKS` — strict opt
 
 Voice recovery evidence: `GATE_VOICE_RELAY_RECOVERY` — off unless exactly `true`, read at write time. Verified lead capture and re-service filing stamp their call metadata in the artifact transaction so a later session can distinguish a committed artifact from a failed write. Unset to disable.
 
-SMS solicitation shadow screen: `GATE_SMS_SPAM_CLASSIFIER=shadow` records a bounded classifier verdict for unknown inbound SMS in `metadata.spam_verdict`. Default off; other values, including `true`, do nothing in this stage. Normal replies, read state, alerts and estimator handling continue. Known relationships, carrier commands, reactions, empty bodies and the AI line bypass screening. See the Twilio entry in `docs/public-route-contracts.md`.
+SMS solicitation screen: `GATE_SMS_SPAM_CLASSIFIER=shadow` records evidence only; `true` also marks confident unknown-sender pitches read and stops their alerts, replies, lead creation and estimator handling. Default off; unset to disable. Known relationships, genuine opt-out requests, carrier commands, reactions, empty bodies and the AI line bypass enforcement. Both message records retain `metadata.spam_verdict`; only an enforced latest inbound is omitted from the unanswered digest. See the Twilio entry in `docs/public-route-contracts.md`.
 
 Call transcription tunables: `OPENAI_TRANSCRIPTION_MODEL` / `OPENAI_TRANSCRIPTION_KEYWORDS` (CSV of literal keyword hints, gpt-transcribe family only), `CALL_PROC_MIN_AUDIO_BYTES_PER_SEC` (partial-download floor, default 3000), `CALL_PROC_EARLY_PROCESS_DELAY_MS` (early verified attempt, default 2 min).
 

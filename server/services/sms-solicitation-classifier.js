@@ -1,7 +1,7 @@
 /**
- * Shadow SMS solicitation screen. Default off; only `shadow` enables it.
- * Unknown senders receive a persisted verdict while ordinary handling
- * continues. This stage cannot mark read, skip routing, or send a reply.
+ * Bounded SMS solicitation screen. Default off; `shadow` records evidence,
+ * `true` allows the webhook to silence confident unknown-sender pitches.
+ * Known relationships and genuine consent requests keep ordinary handling.
  */
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
@@ -11,14 +11,6 @@ const { detectSmsOptCommand, detectHelp } = require('./messaging/opt-out-detecto
 
 const CLASSIFIER_VERSION = 'sms-solicitation-v1';
 const TIMEOUT_MS = 3500;
-
-function bypassesClassification(text) {
-  const cmd = detectSmsOptCommand(text);
-  // Never add a model wait before consent handling. Deterministic pitch
-  // evidence can still be recorded for vendor footers without a model call.
-  if (cmd.action && (/keyword$/.test(String(cmd.detectionMethod || '')) || !isSolicitationPitch(text))) return true;
-  return Boolean(detectHelp(text).help);
-}
 
 const SCHEMA = {
   type: 'object',
@@ -33,6 +25,7 @@ const SCHEMA = {
 function classifierMode() {
   const v = String(process.env.GATE_SMS_SPAM_CLASSIFIER || '').trim().toLowerCase();
   if (v === 'shadow') return 'shadow';
+  if (v === 'true') return 'enforce';
   return 'off';
 }
 
@@ -84,10 +77,15 @@ async function screenInboundSms({ body, hasCustomer, isReaction, isAiLine = fals
   const mode = classifierMode();
   if (mode === 'off') return null;
   const text = String(body || '').trim();
-  if (hasCustomer || isReaction || isAiLine || !text || bypassesClassification(text)) return null;
+  if (hasCustomer || isReaction || isAiLine || !text || detectHelp(text).help) return null;
+  const command = detectSmsOptCommand(text, { ignoreReplyInstructions: mode === 'enforce' });
+  // Consent commands outrank classification. Shadow records only deterministic
+  // pitch evidence for natural-language commands, never a model wait.
+  if (command.action && (mode === 'enforce' || /keyword$/.test(command.detectionMethod) || !isSolicitationPitch(text))) return null;
   const verdict = await classifySolicitation({ body });
+  const enforced = mode === 'enforce' && verdict.solicitation && verdict.confidence >= 0.85;
   logger.info(`[sms-solicitation] ${verdict.method} solicitation=${verdict.solicitation} confidence=${verdict.confidence.toFixed(2)} mode=${mode}`);
-  return { ...verdict, mode };
+  return { ...verdict, mode, enforced };
 }
 
 module.exports = { screenInboundSms, classifierMode };

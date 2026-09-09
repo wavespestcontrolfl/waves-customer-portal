@@ -20,7 +20,10 @@ function mockDb(table) {
 mockDb.raw = jest.fn((sql, bindings) => ({ rows: [], sql, bindings }));
 mockDb.transaction = async (fn) => fn(mockDb);
 jest.mock('../models/db', () => mockDb);
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate === 'webhooks') }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn((gate) => gate === 'webhooks'),
+  gateEnvValue: (gate) => process.env[gate] === 'true',
+}));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -34,7 +37,7 @@ jest.mock('../services/messaging/inbound-dedupe', () => ({
 }));
 jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(async () => ({ message: { id: 'saved-inbound-message' } })),
-  updateByTwilioSid: jest.fn(async () => ({})),
+  updateByTwilioSid: jest.fn(async () => ({ id: 'saved-inbound-message' })),
 }));
 jest.mock('../services/sms-media', () => ({ uploadTwilioMedia: jest.fn(async () => []) }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => ({})), isFailureStatus: jest.fn() }));
@@ -69,14 +72,14 @@ const PITCH = 'Are you open to more booked jobs? Reply "NO" if you need me to st
 const savedGate = process.env.GATE_SMS_SPAM_CLASSIFIER;
 const savedOwner = process.env.ADAM_PHONE;
 
-async function receive(body) {
+async function receive(body, to = numbers.locations.parrish.number) {
   const res = new EventEmitter();
   res.statusCode = 200;
   res.status = (code) => { res.statusCode = code; return res; };
   res.type = () => res;
   res.send = (value) => { res.body = value; return res; };
   await handler({ body: {
-    From: '+12025550101', To: numbers.locations.parrish.number,
+    From: '+12025550101', To: to,
     Body: body, MessageSid: 'SM-synthetic-solicitation',
   } }, res);
   await new Promise(setImmediate);
@@ -164,8 +167,8 @@ test('a failed relationship lookup bypasses classification and keeps the message
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
 });
 
-test('the unsupported true gate does no screening or relationship lookup', async () => {
-  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+test('the disabled gate does no screening or relationship lookup', async () => {
+  delete process.env.GATE_SMS_SPAM_CLASSIFIER;
   await receive('We have exclusive pest leads for you.');
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
@@ -196,4 +199,62 @@ test('failed unified persistence bypasses screening and retains ordinary SMS log
   expect(row.message_body).toBe('Our software team wants to discuss a partnership.');
   expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+});
+
+test.each(['location', 'domain_tracking', 'van_tracking', 'tech_line'])(
+  'an enforced pitch on a %s line persists read without replies or downstream work', async (type) => {
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    const line = numbers.allNumbers.find((entry) => entry.type === (type === 'domain_tracking' ? 'pest_domain' : type));
+    // Turn on tech-line routing only inside this test, using its actual registry.
+    const savedTechGate = process.env.GATE_TECH_LINES;
+    if (type === 'tech_line') process.env.GATE_TECH_LINES = 'true';
+    try {
+      const res = await receive(PITCH, line.number);
+      expect(res.body).toBe('<Response></Response>');
+      expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({
+        isRead: false,
+      }));
+      expect(updateByTwilioSid.mock.calls[0][1]).toMatchObject({ is_read: true, read_at: expect.any(Date) });
+      expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict.enforced).toBe(true);
+      const writes = mockWrites.filter(({ table }) => table === 'sms_log');
+      expect(writes).toHaveLength(1);
+      expect(writes[0].row.is_read).toBe(true);
+      expect(JSON.parse(writes[0].row.metadata).spam_verdict.enforced).toBe(true);
+      expect(mockWrites.some(({ table }) => ['customers', 'activity_log'].includes(table))).toBe(false);
+      expect(recordSuppression).not.toHaveBeenCalled();
+      expect(handleClarifyReply).not.toHaveBeenCalled();
+      expect(startSmsThreadDraft).not.toHaveBeenCalled();
+      expect(processInboundSms).not.toHaveBeenCalled();
+      expect(sendSMS).not.toHaveBeenCalled();
+      expect(require('../services/tech-line').notifyTechLineText).not.toHaveBeenCalled();
+    } finally {
+      if (savedTechGate === undefined) delete process.env.GATE_TECH_LINES;
+      else process.env.GATE_TECH_LINES = savedTechGate;
+    }
+  },
+);
+
+test.each([
+  "Please stop texting me. I don't have any leads for you.",
+  'We have exclusive leads. Please remove me from your list.',
+  `${PITCH}. Please stop texting me.`,
+  'STOP',
+])('a real opt-out outranks pitch markers in enforcement mode: %s', async (body) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  const res = await receive(body);
+  expect(res.body).toContain('unsubscribed');
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
+  expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe('opt_out');
+  expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
+  expect(startSmsThreadDraft).not.toHaveBeenCalled();
+});
+
+test('a rental-service request remains actionable with enforcement enabled', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  await receive('We manage several rentals and can fill your schedule; please quote pest control');
+  expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
+  expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict.enforced).toBe(false);
+  expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+  expect(sendSMS).toHaveBeenCalledTimes(1);
 });
