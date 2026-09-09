@@ -462,6 +462,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
       FROM (
         SELECT message_body, metadata, created_at,
                RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer,
+               REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g') AS peer_full,
                RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) AS endpoint
         FROM sms_log
         -- Rolling 7-day live worklist (codex r15): an unanswered thread
@@ -479,9 +480,13 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         -- A sender marked spam in the inbox (blocked_numbers) is not
         -- "waiting on a reply" — nobody may answer it and the block drops
         -- its next text before it is logged.
+        -- NANP blocks match the last-10 peer key; other country codes
+        -- must match the sender's full digits (codex #4213).
         AND NOT EXISTS (
           SELECT 1 FROM blocked_numbers b
-          WHERE RIGHT(REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g'), 10) = inbound.peer
+          WHERE (REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g') ~ '^1[0-9]{10}$'
+                 AND RIGHT(REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g'), 10) = inbound.peer)
+             OR REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g') = inbound.peer_full
         )
       ORDER BY peer, endpoint, created_at DESC
     )

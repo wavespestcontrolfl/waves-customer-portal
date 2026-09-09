@@ -540,9 +540,10 @@ function ConversationViewV2({
   const contactPhone = thread.contactPhone;
   const contactName = thread.customerName || contactPhone;
   const canOpenProfile = !!(thread.customerName && thread.customerId);
-  // Only a thread with no customer behind it can be spam; a customer's
-  // number is refused server-side anyway (CUSTOMER_NUMBER).
-  const canMarkSpam = !thread.customerName && !!contactPhone && typeof onMarkSpam === "function";
+  // Only a thread with no customer behind it can be spam. customerId is
+  // the authoritative link (a linked customer can lack a display name);
+  // a customer's or open lead's number is refused server-side anyway.
+  const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && typeof onMarkSpam === "function";
   return (
     <div className="flex flex-col h-full">
       {" "}
@@ -858,6 +859,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [smsView, setSmsView] = useState("threads");
   const [activeThread, setActiveThread] = useState(null);
   const [smsSearch, setSmsSearch] = useState("");
+  // Blocked senders (blocked_numbers) keyed like threads. /log does not
+  // exclude them, so a just-blocked thread would otherwise be rebuilt on
+  // reload and keep counting in All / Unknown / Unanswered (codex #4213).
+  const [blockedKeys, setBlockedKeys] = useState(() => new Set());
   // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState("all");
   const [threadLock, setThreadLock] = useState(null);
@@ -904,7 +909,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return Promise.all([
       adminFetch(logUrl).catch(() => ({ messages: [] })),
       adminFetch("/admin/communications/stats").catch(() => null),
-    ]).then(([logData, statsData]) => {
+      adminFetch("/admin/communications/blocked-numbers").catch(() => null),
+    ]).then(([logData, statsData, blockedData]) => {
       if (
         requestSeq !== smsLoadSeqRef.current ||
         normalizedSearch !== smsSearchRef.current
@@ -918,6 +924,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSmsPage(logData.page || page);
       setSmsHasMore(!!logData.hasMore);
       setStats(statsData);
+      if (blockedData && Array.isArray(blockedData.numbers)) {
+        setBlockedKeys(new Set(blockedData.numbers.map((b) => smsThreadKey(b.number))));
+      }
       setLoading(false);
     });
   }, [customer?.id]);
@@ -2113,8 +2122,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     threadList.sort(
       (a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp),
     );
-    return threadList;
-  }, [messages]);
+    return blockedKeys.size
+      ? threadList.filter((t) => !blockedKeys.has(smsThreadKey(t.contactPhone)))
+      : threadList;
+  }, [messages, blockedKeys]);
 
   useEffect(() => {
     if (!activeThread) return;
@@ -2220,6 +2231,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         body: JSON.stringify({ number, reason: "Marked spam from the SMS inbox" }),
       });
       await markMessagesRead(thread);
+      setBlockedKeys((prev) => new Set([...prev, smsThreadKey(number)]));
       setSmsView("threads");
       setActiveThread(null);
       loadData(smsSearch);
