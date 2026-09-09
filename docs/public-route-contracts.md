@@ -85,8 +85,8 @@ cannot create additional starts. The estimate cache separates capacity mode
 from legacy mode. Assigned technicians have independent route capacity;
 unassigned work remains a fixed blocker. Public responses expose no full route,
 provider legs or exact route coordinates. Gate-off availability is unchanged.
-Transactional reservation and route-order persistence belong to the following
-writer stage; this gate remains off until those writers are integrated.
+Estimate reservation and acceptance certify and persist route order as described
+below; the gate remains off until the other booking writers are integrated.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With default-off `GATE_SCHEDULING_CAPACITY`, public slots carry no exact
 coordinates, full route, provider legs or reservation allocation.
