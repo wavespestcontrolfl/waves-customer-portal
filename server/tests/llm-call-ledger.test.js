@@ -148,7 +148,8 @@ describe('llm call ledger', () => {
     it('records openai_incomplete as a failed call WITH usage (tokens were billed)', async () => {
       global.fetch = fetchJson({ ...OPENAI_BODY, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } });
       const { call } = load();
-      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'openai_incomplete' });
+      // A billed failure hands its usage back too (a chain's failure entry carries it — every paid leg is accountable).
+      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'openai_incomplete', usage: expect.objectContaining({ input_tokens: 120, output_tokens: 30, reasoning_tokens: 12 }) });
       await flush();
       const [row] = callRows();
       expect(row).toMatchObject({ ok: false, error_code: 'openai_incomplete', error_class: 'incomplete', input_tokens: 120, output_tokens: 30 });
@@ -158,12 +159,12 @@ describe('llm call ledger', () => {
       const { call } = load();
       global.__llmWarns = [];
       global.fetch = fetchJson({ ...OPENAI_BODY, status: 'failed', error: { code: 'server_error', message: 'rejected input: Jane Doe 941-555-0100' } });
-      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'openai_failed' });
+      expect(await call.callOpenAI({ model: 'm', text: 't' })).toMatchObject({ ok: false, reason: 'openai_failed' });
       // the provider's error MESSAGE can quote the input — only its code and the response id are logged
       expect(global.__llmWarns.join("\n")).toMatch(/OpenAI response failed \(server_error\) \(resp_1\)/);
       expect(global.__llmWarns.join("\n")).not.toMatch(/Jane Doe|941-555/);
       global.fetch = fetchJson({ ...OPENAI_BODY, status: 'cancelled' });
-      expect(await call.callOpenAI({ model: 'm', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'openai_cancelled' });
+      expect(await call.callOpenAI({ model: 'm', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'openai_cancelled' });
       await flush();
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'openai_failed', 'provider', 120], [false, 'openai_cancelled', 'provider', 120]]);
     });
@@ -182,9 +183,9 @@ describe('llm call ledger', () => {
       const { call } = load();
       const refused = { ...OPENAI_BODY, output_text: undefined, output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'I cannot help with that.' }] }] };
       global.fetch = fetchJson(refused);
-      expect(await call.callOpenAI({ model: 'o', text: 't' })).toEqual({ ok: false, reason: 'openai_refusal' });
+      expect(await call.callOpenAI({ model: 'o', text: 't' })).toMatchObject({ ok: false, reason: 'openai_refusal' });
       global.fetch = fetchJson(refused);
-      expect(await call.callOpenAI({ model: 'o', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'openai_refusal' });
+      expect(await call.callOpenAI({ model: 'o', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'openai_refusal' });
       await flush();
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'openai_refusal', 'instruction', 120], [false, 'openai_refusal', 'instruction', 120]]);
     });
@@ -234,7 +235,7 @@ describe('llm call ledger', () => {
         usage: { input_tokens: 50, cached_input_tokens: 10, cache_write_tokens: null, output_tokens: 20, reasoning_tokens: 5 },
       });
       global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ content: { parts: [{ text: 'not json' }] } }] });
-      expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({ ok: false, reason: 'empty_json' });
+      expect(await call.callGemini({ model: 'g', text: 't' })).toMatchObject({ ok: false, reason: 'empty_json' });
       await flush();
       const rows = callRows();
       expect(rows[0]).toMatchObject({ ok: true, provider: 'gemini', served_model: 'gemini-served', input_tokens: 50, cached_input_tokens: 10, output_tokens: 20, reasoning_tokens: 5 });
@@ -246,9 +247,9 @@ describe('llm call ledger', () => {
     it('a MAX_TOKENS finish is a FAILED leg in both modes — gemini_incomplete recorded (with usage) AND returned, like the other providers', async () => {
       const { call } = load();
       global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"g":' }] } }] });
-      expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({ ok: false, reason: 'gemini_incomplete' });
+      expect(await call.callGemini({ model: 'g', text: 't' })).toMatchObject({ ok: false, reason: 'gemini_incomplete' });
       global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: 'The first half of' }] } }] });
-      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'gemini_incomplete' });
+      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'gemini_incomplete' });
       await flush();
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'gemini_incomplete', 'incomplete', 50], [false, 'gemini_incomplete', 'incomplete', 50]]);
     });
@@ -258,11 +259,11 @@ describe('llm call ledger', () => {
     it('every adapter fails an empty text-mode answer as empty_text (→ incomplete) — recorded AND returned, bare dispatch included', async () => {
       const { call } = load();
       global.fetch = fetchJson({ ...OPENAI_BODY, output_text: '   ' });
-      expect(await call.callOpenAI({ model: 'o', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'empty_text' });
+      expect(await call.callOpenAI({ model: 'o', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'empty_text' });
       global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '' }] } }] });
-      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'empty_text' });
+      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'empty_text' });
       mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, content: [{ type: 'text', text: ' ' }] });
-      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'empty_text' });
+      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'empty_text' });
       await flush();
       expect(callRows().map((r) => [r.provider, r.ok, r.error_code, r.error_class])).toEqual([
         ['openai', false, 'empty_text', 'incomplete'], ['gemini', false, 'empty_text', 'incomplete'], ['anthropic', false, 'empty_text', 'incomplete'],
@@ -270,7 +271,7 @@ describe('llm call ledger', () => {
       expect(mockUpdate).not.toHaveBeenCalled();
       // JSON mode is untouched: an empty body there is still empty_json.
       global.fetch = fetchJson({ ...OPENAI_BODY, output_text: '   ' });
-      expect(await call.callOpenAI({ model: 'o', text: 't' })).toEqual({ ok: false, reason: 'empty_json' });
+      expect(await call.callOpenAI({ model: 'o', text: 't' })).toMatchObject({ ok: false, reason: 'empty_json' });
     });
   });
 
@@ -278,11 +279,11 @@ describe('llm call ledger', () => {
     it('a SAFETY finish and a prompt-level block are gemini_refusal (→ instruction) in both modes; another non-STOP finish is its own code', async () => {
       const { call } = load();
       global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'SAFETY', content: { parts: [] } }] });
-      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'gemini_refusal' });
+      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'gemini_refusal' });
       global.fetch = fetchJson({ modelVersion: 'gemini-served', candidates: [], promptFeedback: { blockReason: 'PROHIBITED_CONTENT' }, usageMetadata: GEMINI_BODY.usageMetadata });
-      expect(await call.callGemini({ model: 'g', text: 't' })).toEqual({ ok: false, reason: 'gemini_refusal' });
+      expect(await call.callGemini({ model: 'g', text: 't' })).toMatchObject({ ok: false, reason: 'gemini_refusal' });
       global.fetch = fetchJson({ ...GEMINI_BODY, candidates: [{ finishReason: 'OTHER', content: { parts: [{ text: 'x' }] } }] });
-      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'gemini_finish_other' });
+      expect(await call.callGemini({ model: 'g', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'gemini_finish_other' });
       await flush();
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class])).toEqual([[false, 'gemini_refusal', 'instruction'], [false, 'gemini_refusal', 'instruction'], [false, 'gemini_finish_other', 'infrastructure']]);
     });
@@ -312,9 +313,9 @@ describe('llm call ledger', () => {
     it('a refusal is a FAILED leg in both modes — anthropic_refusal recorded AND returned, partial text never handed back as ok', async () => {
       mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [] });
       const { call } = load();
-      expect(await call.callAnthropic({ model: 'a', text: 't' })).toEqual({ ok: false, reason: 'anthropic_refusal' });
+      expect(await call.callAnthropic({ model: 'a', text: 't' })).toMatchObject({ ok: false, reason: 'anthropic_refusal' });
       mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', content: [{ type: 'text', text: 'I can start by' }] });
-      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'anthropic_refusal' });
+      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'anthropic_refusal' });
       await flush();
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'anthropic_refusal', 'instruction', 200], [false, 'anthropic_refusal', 'instruction', 200]]);
     });
@@ -322,9 +323,9 @@ describe('llm call ledger', () => {
     it('a max_tokens stop is a FAILED leg in both modes — anthropic_incomplete recorded AND returned, like openai_incomplete', async () => {
       const { call } = load();
       mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"c":' }] });
-      expect(await call.callAnthropic({ model: 'a', text: 't' })).toEqual({ ok: false, reason: 'anthropic_incomplete' });
+      expect(await call.callAnthropic({ model: 'a', text: 't' })).toMatchObject({ ok: false, reason: 'anthropic_incomplete' });
       mockAnthropicCreate.mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'max_tokens', content: [{ type: 'text', text: 'The first half of' }] });
-      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toEqual({ ok: false, reason: 'anthropic_incomplete' });
+      expect(await call.callAnthropic({ model: 'a', text: 't', jsonMode: false })).toMatchObject({ ok: false, reason: 'anthropic_incomplete' });
       await flush();
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class, r.input_tokens])).toEqual([[false, 'anthropic_incomplete', 'incomplete', 200], [false, 'anthropic_incomplete', 'incomplete', 200]]);
     });
