@@ -403,6 +403,8 @@ function no_refund_claim(value, record, { spoken }) {
 // ── Third-party disclosure ─────────────────────────────────────────────────
 
 const VISIT_STATUS = 'scheduled|booked|cancelled|canceled|confirmed|rescheduled|postponed|skipped|completed|pending|moved|delayed';
+const VISIT_TIME_RE = new RegExp([...TIME_ANYWHERE_RES.map((re) => re.source), RELATIVE_DAY_RE.source, '\\b(?:today|tonight|(?:this|that|early|late|in the|during the) (?:morning|afternoon|evening|night))\\b'].join('|'), 'i');
+const VISIT_MODIFIERS_RE = new RegExp(`^(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?(?:${VISIT_TIME_RE.source}))*\\s*$`, 'i');
 const DISCLOSURE_VERB = '(?:confirm|verify|deny|say|tell|share|disclose|provide|give)';
 
 // A negative appointment fact is still private. Only a refusal to disclose
@@ -453,7 +455,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
           const uncertain = conditional.slice(0, index).split(/\b(?:and|or)(?!\s+(?:whether|if|not|when)\b)\b/i).every((part, i) => {
             const fact = VISIT_DISCLOSURE_RES.flatMap((re) => [...part.matchAll(re)]).sort((a, b) => a.index - b.index)[0];
             return fact && isDisclosureRefusal((i ? 'whether ' : '') + part.slice(0, fact.index))
-              && /^\s*(?:(?:today|tomorrow|tonight)\s*)?$/i.test(part.slice(fact.index + fact[0].length));
+              && VISIT_MODIFIERS_RE.test(part.slice(fact.index + fact[0].length));
           });
           return uncertain ? 'or whether' : conjunction;
         }));
