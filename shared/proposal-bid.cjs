@@ -7,6 +7,15 @@ const PROPOSAL_UNITS = {
   each: 'each', sqft: 'sq ft', lf: 'linear ft', acre: 'acres', lb: 'lb',
   gal: 'gal', hour: 'hours', day: 'days', trip: 'trips', lump_sum: 'lump sum',
 };
+// Only these units count discrete service units; every other unit (area,
+// length, weight, volume, time, lump sum) is a pricing basis whose quantity
+// must not multiply per-visit costs. A line with no unit keeps the legacy
+// "quantity is a count" reading.
+const PROPOSAL_COUNT_UNITS = ['each', 'trip'];
+const proposalLineServiceCount = (line) => {
+  if (line.unit && !PROPOSAL_COUNT_UNITS.includes(line.unit)) return 1;
+  return Math.max(1, Number(line.quantity) || 1);
+};
 const roundDecimal = (value, places = 4) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
@@ -30,4 +39,4 @@ const formatQuantity = (line) => `${Number(line.quantity).toLocaleString('en-US'
 const formatUnitPrice = (value) => Number(value || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
 const formatLineBasis = (line) => `${formatQuantity(line)} × ${formatUnitPrice(line.unitPrice)}`;
 
-module.exports = { PROPOSAL_UNITS, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis };
+module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis };
