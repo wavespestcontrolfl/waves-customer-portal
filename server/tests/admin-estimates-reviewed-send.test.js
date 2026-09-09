@@ -207,7 +207,10 @@ describe('commercial bid authoring', () => {
     expect(badQuantity.statusCode).toBe(400);
     expect(mutations).toHaveLength(0);
   });
-  test.each([['2099-12-22T04:59:59.999Z', 200], ['2099-12-22T05:00:00Z', 409]])('scheduled proposal edits respect the full Eastern day at %s', async (scheduledAt, status) => {
+  // A pending send is judged at the first five-minute tick it can reach:
+  // 04:55Z (23:55 ET) still fits a 2099-12-21 hold, 04:55:00.001Z first
+  // runs at 05:00Z (pre-push codex P1 on #4309).
+  test.each([['2099-12-22T04:55:00Z', 200], ['2099-12-22T04:55:00.001Z', 409], ['2099-12-22T04:59:59.999Z', 409], ['2099-12-22T05:00:00Z', 409]])('scheduled proposal edits respect the full Eastern day at %s', async (scheduledAt, status) => {
     Object.assign(row, { status: 'scheduled', scheduled_at: new Date(scheduledAt), estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
     const res = await invoke('/:id/proposal', 'put', { proposal: proposal() });
     expect(res.statusCode).toBe(status);
@@ -218,7 +221,7 @@ describe('commercial bid authoring', () => {
     }
   });
   test.each(['draft', 'scheduled', 'send_failed', 'sent', 'viewed'].flatMap(status => [
-    [status, '2099-12-22T04:59:59.999Z', 200], [status, '2099-12-22T05:00:00Z', 409],
+    [status, '2099-12-22T04:55:00Z', 200], [status, '2099-12-22T04:55:00.001Z', 409], [status, '2099-12-22T04:59:59.999Z', 409], [status, '2099-12-22T05:00:00Z', 409],
   ]))('editing a %s sibling respects the group send at %s', async (status, sendAt, expected) => {
     Object.assign(row, { status, estimate_group_id: 'synthetic-group',
       estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
@@ -231,6 +234,8 @@ describe('commercial bid authoring', () => {
         if (key?.status === 'scheduled' && key.estimate_group_id === row.estimate_group_id) pendingSchedule = true;
         if (pendingSchedule && key === 'scheduled_at') {
           expect(operator).toBe('>');
+          // The SQL bound is the last schedule whose tick fits the hold.
+          expect(value.toISOString()).toBe('2099-12-22T04:55:00.000Z');
           builder.first = jest.fn(async () => new Date(sendAt) > value ? { id: 'scheduled-sibling' } : null);
           return builder;
         }

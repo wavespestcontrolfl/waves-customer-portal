@@ -28,6 +28,11 @@ const SCHEDULED_SEND_TICK_MS = 5 * 60 * 1000;
 function earliestScheduledDelivery(scheduledTime, tickMs = SCHEDULED_SEND_TICK_MS) {
   return new Date(Math.ceil(new Date(scheduledTime).getTime() / tickMs) * tickMs);
 }
+// The latest scheduled_at whose first reachable tick still falls inside a
+// hold: a pending send later than this cannot deliver before the day ends.
+function latestReachableSchedule(expiry, tickMs = SCHEDULED_SEND_TICK_MS) {
+  return new Date(Math.floor(new Date(expiry).getTime() / tickMs) * tickMs);
+}
 function assertBidScheduleDate(estimate, scheduledTime) {
   const expiry = proposalExpiry(estimate);
   if (!expiry) return;
@@ -70,4 +75,4 @@ function validateBidFields(proposal) {
   }
   return null;
 }
-module.exports = { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, SCHEDULED_SEND_TICK_MS, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields };
+module.exports = { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, SCHEDULED_SEND_TICK_MS, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields };

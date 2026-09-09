@@ -6,7 +6,7 @@ jest.mock('../models/db', () => {
 const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
-const { proposalExpiry, assertBidSendDate, validateBidFields, assertBidScheduleDate, earliestScheduledDelivery } = require('../services/proposal-bid');
+const { proposalExpiry, assertBidSendDate, validateBidFields, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule } = require('../services/proposal-bid');
 const { roundCents } = require('../../shared/proposal-bid.cjs');
 
 const line = (id, quantity, unitPrice, unit = 'acre') => ({ id, description: `Synthetic ${id}`, quantity, unitPrice, unit, frequency: 'one_time' });
@@ -65,6 +65,8 @@ describe('fixed bid validity', () => {
     expect(earliestScheduledDelivery(new Date('2026-09-23T03:55:00.000Z')).toISOString()).toBe('2026-09-23T03:55:00.000Z');
     expect(earliestScheduledDelivery(new Date('2026-09-23T03:55:00.001Z')).toISOString()).toBe('2026-09-23T04:00:00.000Z');
     expect(earliestScheduledDelivery(new Date('2026-09-23T03:58:30.000Z')).toISOString()).toBe('2026-09-23T04:00:00.000Z');
+    expect(latestReachableSchedule(new Date('2026-09-23T03:59:59.999Z')).toISOString()).toBe('2026-09-23T03:55:00.000Z');
+    expect(latestReachableSchedule(new Date('2026-09-23T04:00:00.000Z')).toISOString()).toBe('2026-09-23T04:00:00.000Z');
     const row = estimate([line('a', 1, 10)], { validThrough: '2026-09-22' });
     expect(() => assertBidScheduleDate(row, new Date('2026-09-23T03:55:00Z'))).not.toThrow();
     expect(() => assertBidScheduleDate(row, new Date('2026-09-23T03:58:00Z'))).toThrow(/too close to the end of the bid validity day/);
