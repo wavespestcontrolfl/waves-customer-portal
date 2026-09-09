@@ -137,3 +137,16 @@ test('a review-policy replay is guarded when its stored body contains only a sho
   expect(await dispatchScheduledSms(row, row.metadata, send, 'review_request')).toMatchObject({ code: 'REVIEW_ASK_SPACING' });
   expect(send).not.toHaveBeenCalled();
 });
+
+
+test('repeated settlement failures preserve accepted evidence for the scheduler recovery handler', async () => {
+  const original = db.getMockImplementation();
+  db.mockImplementation((...args) => {
+    const query = original(...args);
+    query.update = async () => { throw new Error('settlement unavailable'); };
+    return query;
+  });
+  await expect(dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, providerMessageId: 'SM-durable-proof' })))
+    .rejects.toMatchObject({ providerOutcome: { sent: true, providerMessageId: 'SM-durable-proof' }, scheduledReviewAsk: true });
+  expect(row.status).toBe('sending');
+});

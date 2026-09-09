@@ -49,7 +49,13 @@ async function dispatchScheduledSms(msg, meta, send, purpose) {
       const accepted = await acceptedScheduledSms(msg.id, err);
       if (accepted) {
         err.providerOutcome = accepted;
-        await markScheduledSmsSent(msg, meta, accepted, reviewAsk);
+        try {
+          await markScheduledSmsSent(msg, meta, accepted, reviewAsk);
+        } catch (stampErr) {
+          stampErr.providerOutcome = accepted;
+          stampErr.scheduledReviewAsk = reviewAsk;
+          throw stampErr;
+        }
       }
       throw err;
     }
