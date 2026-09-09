@@ -12934,6 +12934,9 @@ router.put('/:id/status', async (req, res, next) => {
             preferenceKey: 'tech_en_route',
             push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'tech_en_route'),
             dedupeKey: trackTransitions.enRouteNotificationKey(svc, enRouteResult.enRouteAt),
+            // The visit this bell is about — its saved property qualifies the
+            // link (GATE_APP_PROPERTY_SCOPE) so the app opens THAT house.
+            appointmentId: svc.id,
             metadata: { scheduledServiceId: svc.id, ...(svc.visit_id ? { visitId: svc.visit_id } : {}) },
           });
         } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
@@ -13034,6 +13037,7 @@ router.put('/:id/status', async (req, res, next) => {
           icon: '\u{1F3E0}',
           link: '/?tab=documents',
           preferenceKey: 'service_completed',
+          appointmentId: svc.id,
           push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'service_complete'),
           dedupeKey: `scheduled-service:${svc.id}:completed`,
           metadata: { scheduledServiceId: svc.id },

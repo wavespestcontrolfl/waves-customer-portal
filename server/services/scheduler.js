@@ -3738,6 +3738,10 @@ function initScheduledJobs() {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
+                service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
+                request_status_version: claimMeta.request_status_version,
+                request_updated_at: claimMeta.request_updated_at } : {}),
               useCustomerChannel: claimMeta.useCustomerChannel === true,
               bundled_review_request_id: claimMeta.bundled_review_request_id,
               // Enqueue provenance survives the replay (codex #3607 r4): the
@@ -4089,6 +4093,16 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 5 MIN — Retry queued service report v1 email deliveries
   // =========================================================================
+  // Saved visit packets outlive their creation gate. Resume through the
+  // canonical member and effect claims after a process restart.
+  cron.schedule('2-57/5 * * * *', async () => {
+    try {
+      await runExclusive('visit-closeout-resume', () => require('./visit-completion-packets').resumePendingVisitCompletions());
+    } catch (err) {
+      logger.error(`[visit-closeout] resume sweep failed (${err.name || 'Error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('*/5 * * * *', async () => {
     try {
       const { processDueServiceReportDeliveries } = require('./service-report/delivery-queue');
