@@ -231,7 +231,7 @@ test('gate off + browser died: a CARD completion still proceeds (card lane unaff
   expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card' }));
 });
 
-test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'])('setup failure deferred by %s queues the same event identity and allows a later event', async (code) => {
+test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('setup failure deferred by %s queues the same event identity and allows a later event', async (code) => {
   state.customer = { id: 'cust-1', phone: '+15550001111' };
   require('../services/sms-template-renderer').renderRequiredSmsTemplate.mockResolvedValue('Please verify your bank account.');
   const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;

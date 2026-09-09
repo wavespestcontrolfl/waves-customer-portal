@@ -201,4 +201,4 @@ function cnamFromEnvelope(addons) {
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return {}; } }
 
-module.exports = { classifyCall, recordVerdict, detectRobocallScriptSignature, CLASSIFIER_VERSION };
+module.exports = { classifyCall, recordVerdict, detectRobocallScriptSignature, cnamFromEnvelope, CLASSIFIER_VERSION };

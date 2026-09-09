@@ -51,7 +51,7 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     metadata,
   });
   if (purpose === 'payment_failure' && paymentId && attemptPaymentId && !sendResult.sent
-    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'].includes(sendResult.code)
+    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(sendResult.code)
     && sendResult.deferred && sendResult.nextAllowedAt) {
     await db('sms_log').insert({
       customer_id: customer.id, direction: 'outbound',

@@ -57,6 +57,7 @@ function flatView(extraction) {
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
+    proposed_start_at: sched.proposed_start_at || null,
     agent_committed_booking: sched.agent_committed_booking === true,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
     follow_up_date_time: sched.follow_up_start_at || null,
@@ -438,8 +439,20 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     }
   }
 
+  // Spam is V2-verdict-first. The V1 legacy classifier calls a legitimate
+  // vendor, referral or property-manager call "spam" (call_type=spam) and
+  // the terminal skip keys on extracted.is_spam, so a V1 verdict killed
+  // calls V2's structured spam_verdict had already cleared — a property
+  // manager arranging service at a tenant's home was discarded with no
+  // summary and no task (2026-09-03 audit). When V2 explicitly says the
+  // CONTENT is not spam and the nature is not a hard-spam class, V1's flag
+  // is cleared; otherwise the OR below still lets either leg raise it.
+  const HARD_SPAM_CALL_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number']);
+  const v2ContentNotSpam = v2Extraction.spam_verdict?.is_spam_content === false
+    && !HARD_SPAM_CALL_NATURES.has(v2Extraction.call_nature);
+  if (v2ContentNotSpam && merged.is_spam === true) adopt('is_spam', false);
   // OR flags — true from either leg wins.
-  if (flat.is_spam === true && merged.is_spam !== true) adopt('is_spam', true);
+  if (flat.is_spam === true && merged.is_spam !== true && !v2ContentNotSpam) adopt('is_spam', true);
   if (flat.is_voicemail === true && merged.is_voicemail !== true) adopt('is_voicemail', true);
   if (flat.quote_requested === true && merged.quote_requested !== true) adopt('quote_requested', true);
   if (flat.quote_promised === true && merged.quote_promised !== true) adopt('quote_promised', true);
@@ -448,8 +461,11 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   // only checks name/phone/non-voicemail — without this a V2-primary rescue
   // of a robocall/wrong-number/vendor call could mint a customer row before
   // the lead veto catches it (codex r2 P2).
-  const SPAM_CALL_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
-  if (SPAM_CALL_NATURES.has(v2Extraction.call_nature) && merged.is_spam !== true) adopt('is_spam', true);
+  // vendor_or_partner is spam-class ONLY when V2 did not clear the content:
+  // a vendor referring a customer or a property manager booking for a
+  // tenant is a callback, not a discard.
+  const SPAM_CALL_NATURES = new Set([...HARD_SPAM_CALL_NATURES, 'vendor_or_partner']);
+  if (SPAM_CALL_NATURES.has(v2Extraction.call_nature) && merged.is_spam !== true && !v2ContentNotSpam) adopt('is_spam', true);
   // Voicemail-class natures likewise trip the voicemail flag itself: the
   // voicemail skip path keys on extracted.is_voicemail, and a schema-valid
   // extraction can carry call_nature='voicemail_message' with meta.is_voicemail
@@ -524,7 +540,11 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   // leads for calls the promoted extractor identified as non-sales
   // (codex r4 P2). Null call_nature leaves V1's verdict alone.
   if (has(v2Extraction.call_nature)) {
-    winner('call_type', mapCallNatureToLegacy(v2Extraction.call_nature));
+    // A vendor call V2 cleared of spam is a non-lead 'other' in the legacy
+    // enum, not 'spam' (codex r3 P2): is_spam=false beside call_type='spam'
+    // would hand every legacy reader a contradictory record.
+    const clearedVendor = v2ContentNotSpam && v2Extraction.call_nature === 'vendor_or_partner';
+    winner('call_type', clearedVendor ? 'other' : mapCallNatureToLegacy(v2Extraction.call_nature));
     const v2IsLead = v2Extraction.call_nature === 'new_lead';
     if (merged.is_lead !== v2IsLead) adopt('is_lead', v2IsLead);
   }

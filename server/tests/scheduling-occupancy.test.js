@@ -198,6 +198,23 @@ describe('findConflictingVisits', () => {
     expect(q.where).toHaveBeenCalledWith('scheduled_date', '2099-01-05');
   });
 
+  test.each(['true', 'false'])('combined work blocks its full span without changing conflict rows (capacity %s)', async (gate) => {
+    const previousGate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = gate;
+    const mix = { version: 2, allocatedServiceIds: ['a', 'b'] };
+    const rows = [30, 40].map((duration, index) => ({ id: mix.allocatedServiceIds[index],
+      window_start: '09:00:00', window_end: `09:${duration}:00`, estimated_duration_minutes: duration,
+      reservation_service_mix: mix }));
+    db.mockReturnValue(makeQuery(rows));
+    try {
+      expect(await findConflictingVisits({ db, date: '2099-01-05', windowStart: '09:50', windowEnd: '10:00' })).toEqual(rows);
+      expect(await findConflictingVisits({ db, date: '2099-01-05', windowStart: '10:10', windowEnd: '10:40' })).toEqual([]);
+    } finally {
+      if (previousGate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = previousGate;
+    }
+  });
+
   test('excludeServiceIds drops the moving batch (falsy entries filtered)', async () => {
     const q = makeQuery([]);
     db.mockReturnValue(q);

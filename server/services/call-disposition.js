@@ -75,9 +75,14 @@ function decideDisposition({ extraction = null, legacy = null, spamVerdict = nul
   // + the prior_complaint_unresolved triage flag; emergency urgency and the
   // legacy pain-point regex back them up. (complaint_or_service_issue is NOT
   // a schema field — a naming ghost from the offline audit tooling.)
+  // Urgency is deliberately NOT a complaint signal: a polite customer who
+  // wants someone out today is a priority booking, not a dispute. Keying
+  // complaint_escalated on emergency_same_day put an "I'm here" arrival call
+  // and two urgent-but-courteous prospects on the owner's complaint path
+  // (2026-09-02..08 audit); after_hours_emergency already carries the
+  // time-critical case to triage.
   const complaint = v2.customer_history?.prior_complaint_mentioned === true
     || (v2.triage_flags || []).includes('prior_complaint_unresolved')
-    || ['emergency_same_day', 'emergency'].includes(v2.service_request?.urgency) // schema enum = emergency_same_day
     || (v1.pain_points || []).some?.((p) => /no.?show|complain|angry|refund|lawyer|legal/i.test(String(p)));
   const knownParty = outcome.isKnownCustomer || !!outcome.customerId;
   if (complaint && knownParty) return done('complaint_escalated', 'complaint_from_known_customer');
