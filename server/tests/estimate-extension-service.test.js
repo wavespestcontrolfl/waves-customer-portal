@@ -48,6 +48,7 @@ const {
   extensionStatusUpdate,
   EXTENDABLE_STATUSES,
   extensionDeliverableUnderGate,
+  fixedBidBlocksExtension,
 } = require('../services/estimate-extension');
 
 const DAY = 86400000;
@@ -105,6 +106,28 @@ describe('extensionStatusUpdate (view-blocking status revival)', () => {
 });
 
 describe('extendEstimate validation (pre-write throws)', () => {
+  it('allows an ordinary group and blocks an unreadable group before a public grant', async () => {
+    const query = { select: jest.fn(async () => [{ estimate_data: { proposal: {} } }]) };
+    for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw']) query[method] = jest.fn(() => query);
+    const database = jest.fn(() => query);
+    const anchor = { id: 'group-anchor', estimate_group_id: 'ordinary-group' };
+    expect(await fixedBidBlocksExtension(database, anchor)).toBe(false);
+    query.select.mockRejectedValueOnce(new Error('read failed'));
+    expect(await fixedBidBlocksExtension(database, anchor)).toBe(true);
+  });
+
+  it.each(['sent', 'expired'])('refuses the entire extension before writing when a %s sibling has fixed validity', async (status) => {
+    const update = jest.fn();
+    const query = { update, select: jest.fn(async () => [{ status, estimate_data: { proposal: { validThrough: '2020-01-01' } } }]) };
+    for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw']) query[method] = jest.fn(() => query);
+    db.mockImplementationOnce(() => query);
+    await expect(extendEstimate({
+      estimate: { id: 'group-anchor', estimate_group_id: 'fixed-group', status: 'viewed', sent_at: PAST, expires_at: PAST },
+      days: 7, silent: true, entryPoint: 'test', workflow: 'test',
+    })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/fixed validity/) });
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('refuses a LIVE sending claim — in-flight finalization owns status and expiry', async () => {
     // Thrown BEFORE any DB access: an extension mid-send would either be
     // overwritten by the send's final expires_at write or steal its claim.
