@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import ServiceRecapModal from './ServiceRecapModal';
+import { completionDraftKey } from '../lib/completion-drafts';
 
 const product = { id: 1, name: 'Example gel', category: 'Insecticide', default_rate: '0.1', default_unit: 'g/spot' };
 const context = { service: { id: 'visit-a', customerName: 'Avery Example', hasPhone: false }, products: [product], existingRecord: null, timeline: [] };
@@ -177,6 +178,54 @@ describe('recap interruption recovery', () => {
       address: { line1: '100 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' },
     });
     expect(noteInput()).toHaveValue('Treatment.');
+  });
+
+  it('asserts only the identity keys the context reported and keeps that draft restorable once newer keys arrive', async () => {
+    const older = { ...context.service, customerId: 'customer-a', serviceType: 'Pest Control', scheduledDate: '2026-01-01' };
+    const newer = { ...older, propertyId: 'property-a', catalogServiceId: 'catalog-a', address: { line1: '100 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' } };
+    let current = older;
+    const request = vi.fn(async (path, options) => {
+      if (path.endsWith('/context')) return { ...structuredClone(context), service: structuredClone(current) };
+      if (options?.method === 'POST') throw new Error('Example outage.');
+      return { ok: true };
+    });
+    const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
+    const first = open();
+    await screen.findByRole('button', { name: 'Example gel', exact: true });
+    fireEvent.change(noteInput(), { target: { value: 'Treatment during the deploy.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Complete Service', exact: true }));
+    await screen.findByText('Example outage.');
+    const payload = JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'POST')[1].body);
+    expect(payload.expectedVisit).toEqual({ customerId: 'customer-a', serviceType: 'Pest Control', scheduledDate: '2026-01-01' });
+    expect(Object.keys(payload.expectedVisit)).not.toContain('propertyId');
+    first.unmount();
+
+    current = newer;
+    open();
+    const restore = await screen.findByRole('button', { name: 'Restore draft', exact: true });
+    expect(restore).toBeEnabled();
+    fireEvent.click(restore);
+    expect(noteInput()).toHaveValue('Treatment during the deploy.');
+  });
+
+  it('re-checks a restored rate against the current label ceiling instead of the one saved with the draft', async () => {
+    let band = '0.1-1';
+    const request = vi.fn(async (path) => (path.endsWith('/context')
+      ? { ...structuredClone(context), products: [{ ...product, default_rate: band }] }
+      : { ok: true }));
+    const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
+    const first = open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Example gel', exact: true }));
+    fireEvent.change(screen.getByLabelText('Application rate for Example gel'), { target: { value: '0.4' } });
+    expect(screen.queryByText(/label max/)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(completionDraftKey('visit-a', 'recap_local_local'))).rates).toEqual({ 1: { rate: '0.4', unit: 'g/spot' } });
+    first.unmount();
+
+    band = '0.1-0.3';
+    open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore draft', exact: true }));
+    expect(screen.getByLabelText('Application rate for Example gel')).toHaveValue(0.4);
+    expect(screen.getByText(/label max 0\.3/)).toBeInTheDocument();
   });
 
   it('warns before unloading dirty edits that device storage could not save', async () => {

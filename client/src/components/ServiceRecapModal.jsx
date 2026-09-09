@@ -75,6 +75,12 @@ function catalogRatePrefill(p, serviceType) {
   return { rate: String(rate), unit: resolved.rateUnit, ...(max != null ? { max } : {}) };
 }
 
+// Current label ceiling for a restored draft rate, only in the rate's own unit.
+function catalogCeiling(product, serviceType, unit) {
+  const prefill = catalogRatePrefill(product, serviceType);
+  return prefill?.max != null && prefill.unit === unit ? prefill.max : null;
+}
+
 function fmtTime(ts) {
   if (!ts) return '';
   try {
@@ -261,6 +267,7 @@ export default function ServiceRecapModal({
     authoritative: selectionAuthoritative.current,
     unrepresented: unrepresentedProducts.current,
     form: { note, message, rates, sendText, includeComms, selected, productById, restoredNames },
+    ceilingFor: (id, unit) => catalogCeiling(productById.get(id), ctx?.service?.serviceType, unit),
   });
   const restoreDraft = () => {
     const form = draft.restoreForm();

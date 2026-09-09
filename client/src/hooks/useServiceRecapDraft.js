@@ -10,16 +10,14 @@ const RESTORE_ERROR = 'Could not verify this draft against the current visit. Cl
 // re-check it under its row lock. Lifecycle status is deliberately not
 // part of it: pending → en_route → on_site keeps the same treatment, and
 // a terminal or concurrent completion shows up in the record identity.
+// Absence is preserved rather than normalized to null: during a rolling
+// deploy an older pod serves a context without the newer keys, and a
+// null asserted for one of those would make a newer pod reject the
+// completion as visit_identity_changed (codex P1 r4).
+const IDENTITY_KEYS = ['customerId', 'propertyId', 'catalogServiceId', 'serviceType', 'scheduledDate', 'address'];
 export function recapVisitIdentity(service) {
   const s = service || {};
-  return {
-    customerId: s.customerId ?? null,
-    propertyId: s.propertyId ?? null,
-    catalogServiceId: s.catalogServiceId ?? null,
-    serviceType: s.serviceType ?? null,
-    scheduledDate: s.scheduledDate ?? null,
-    address: s.address ?? null,
-  };
+  return Object.fromEntries(IDENTITY_KEYS.filter((key) => s[key] !== undefined).map((key) => [key, s[key]]));
 }
 
 export function recapSubmitError(err) {
@@ -43,12 +41,29 @@ function recordIdentity(record) {
 // replaced and the completion would drop it).
 export function recapContextIdentity(ctx, authoritative, unrepresented = []) {
   if (!ctx || !authoritative) return null;
-  return JSON.stringify([recapVisitIdentity(ctx.service), recordIdentity(ctx.existingRecord), [...unrepresented].sort()]);
+  return JSON.stringify({ visit: recapVisitIdentity(ctx.service), record: recordIdentity(ctx.existingRecord), unrepresented: [...unrepresented].sort() });
+}
+
+const sameJson = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+// A saved draft is restorable when the record and unrepresented products
+// match exactly and the live visit agrees on every identity key BOTH
+// contexts report. A key only one side reports (older pod during a
+// rolling deploy) cannot have changed underneath the technician, so it
+// is not a reason to discard the treatment details.
+export function recapDraftCompatible(savedIdentity, liveIdentity) {
+  let saved; let live;
+  try { saved = JSON.parse(savedIdentity); live = JSON.parse(liveIdentity); } catch { return false; }
+  if (!saved?.visit || !live?.visit) return false;
+  return IDENTITY_KEYS.filter((key) => key in saved.visit && key in live.visit).every((key) => sameJson(saved.visit[key], live.visit[key]))
+    && sameJson(saved.record, live.record) && sameJson(saved.unrepresented, live.unrepresented);
 }
 
 // Rates travel only for selected products: deselecting leaves the typed
 // rate in state on purpose, and a snapshot carrying that hidden entry
-// would keep an unchanged form dirty and create a phantom draft.
+// would keep an unchanged form dirty and create a phantom draft. Only the
+// technician-entered rate and unit are saved; the catalog label ceiling
+// is re-derived from the live catalog on restore (codex P2 r4).
 export function recapDraftSnapshot({ note, message, rates, sendText, includeComms, selected, productById, restoredNames }) {
   // Canonical order: a deselect + reselect moves an id to the end of the
   // Set without changing the treatment, and must not read as a new draft.
@@ -58,17 +73,25 @@ export function recapDraftSnapshot({ note, message, rates, sendText, includeComm
     message,
     sendText,
     includeComms,
-    rates: Object.fromEntries(ids.filter((id) => rates[id]).map((id) => [id, rates[id]])),
+    rates: Object.fromEntries(ids.filter((id) => rates[id]).map((id) => [id, { rate: rates[id].rate, unit: rates[id].unit }])),
     selectedProducts: ids.map((id) => ({ id, name: productById.get(id)?.name || restoredNames[id] || String(id) })),
   };
 }
 
-export function restoredRecapForm(saved, hasPhone) {
+// ceilingFor(id, unit) returns the CURRENT catalog label ceiling for a
+// restored rate in its own unit, so the over-label warning on a reopened
+// draft reflects the live catalog rather than the one saved with it.
+export function restoredRecapForm(saved, hasPhone, ceilingFor = () => null) {
   const selectedProducts = Array.isArray(saved?.selectedProducts) ? saved.selectedProducts : [];
+  const savedRates = saved?.rates || {};
   return {
     note: saved?.note || '',
     message: saved?.message || '',
-    rates: saved?.rates || {},
+    rates: Object.fromEntries(selectedProducts.filter((p) => savedRates[p.id]).map((p) => {
+      const { rate, unit } = savedRates[p.id];
+      const max = ceilingFor(p.id, unit);
+      return [p.id, { rate, unit, ...(max != null ? { max } : {}) }];
+    })),
     sendText: saved?.sendText === true && !!hasPhone,
     includeComms: saved?.includeComms !== false,
     selected: new Set(selectedProducts.map((p) => p.id)),
@@ -76,7 +99,7 @@ export function restoredRecapForm(saved, hasPhone) {
   };
 }
 
-export default function useServiceRecapDraft({ serviceId, ctx, loading, loadError, authoritative, unrepresented, submitting, form }) {
+export default function useServiceRecapDraft({ serviceId, ctx, loading, loadError, authoritative, unrepresented, submitting, form, ceilingFor }) {
   const user = getAdminUser();
   const [key] = useState(() => completionDraftKey(serviceId, `recap_${user?.id || 'local'}_${user?.role || 'local'}`));
   const [storageError, setStorageError] = useState('');
@@ -133,7 +156,7 @@ export default function useServiceRecapDraft({ serviceId, ctx, loading, loadErro
   };
 
   const missingSelections = [...form.selected].filter((id) => !form.productById.has(id));
-  const restoreError = candidate && (!ready || sourceIdentity === null || candidate.sourceIdentity !== sourceIdentity)
+  const restoreError = candidate && (!ready || sourceIdentity === null || !recapDraftCompatible(candidate.sourceIdentity, sourceIdentity))
     ? RESTORE_ERROR : '';
   return {
     candidate,
@@ -143,7 +166,7 @@ export default function useServiceRecapDraft({ serviceId, ctx, loading, loadErro
     missingSelections,
     formLocked: submitting || !!candidate,
     submitBlocked: submitting || !!candidate || missingSelections.length > 0,
-    restoreForm: () => restoredRecapForm(candidate, ctx?.service?.hasPhone),
+    restoreForm: () => restoredRecapForm(candidate, ctx?.service?.hasPhone, ceilingFor),
     canClose: () => !storageError || window.confirm('This draft is not saved on this device. Close and lose these changes?'),
     discard,
     finish,
