@@ -98,6 +98,27 @@ postgres('recurring schedule anomaly audit against migrated PostgreSQL', () => {
     expect(await auditRecurringScheduleCoverage({ customerId }, trx)).toMatchObject({ measuredSeries: 0, series: [] });
   });
 
+  test('coverage uses live weekday preferences without rewriting the stored template', async () => {
+    // Thirty-one days from Thursday March 1 lands on Sunday April 1.
+    const parent = await series({ pattern: 'custom', intervalDays: 31, dates: ['2040-03-01', '2040-04-02'] });
+    await trx('scheduled_services').where('id', parent.id).update({ status: 'completed', recurring_ongoing: true, skip_weekends: false });
+    await trx('property_preferences').insert({ customer_id: customerId, preferred_day: 'monday' });
+    const result = await auditRecurringScheduleCoverage({ customerId, now: new Date('2040-03-15T12:00:00Z') }, trx);
+    expect(result.series[0]).toMatchObject({ nextExpectedDate: '2040-04-02', continuationDueDate: '2040-05-03' });
+    expect(result.series[0].intervals[0]).toMatchObject({ expectedDate: '2040-04-02', driftDays: 0 });
+    expect((await trx('scheduled_services').where('id', parent.id).first('skip_weekends')).skip_weekends).toBe(false);
+  });
+
+  test.each([null, 'recurring'])('stored one-time patterns are excluded with catalog billing %s', async (billingType) => {
+    const parent = await series({ pattern: 'one_time', dates: ['2040-03-01'] });
+    const catalog = billingType ? await trx('services').where('billing_type', billingType).first('id') : null;
+    if (billingType) expect(catalog).toBeDefined();
+    await trx('scheduled_services').where('id', parent.id).update({ recurring_ongoing: true, service_id: catalog?.id || null });
+    expect(await auditRecurringScheduleCoverage({ customerId }, trx)).toMatchObject({
+      scannedSeries: 1, measuredSeries: 0, excludedOneTimeSeries: 1, series: [],
+    });
+  });
+
   test('an active hold pauses the matching service family without concealing other recurring plans', async () => {
     const parent = await series({ pattern: 'every_6_weeks', dates: ['2040-03-01'] });
     await trx('scheduled_services').where('id', parent.id).update({ status: 'completed', recurring_ongoing: true });

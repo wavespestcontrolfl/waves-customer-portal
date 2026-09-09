@@ -274,6 +274,7 @@ async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, o
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('./estimate-converter');
   const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
+  const { preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
   const pageSize = normalizeLimit(limit);
   const pageOffset = Math.max(0, parseInt(offset, 10) || 0);
   const roots = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
@@ -289,9 +290,13 @@ async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, o
   const catalogRows = serviceIds.length ? await conn('services').whereIn('id', serviceIds)
     .select('id', 'service_key', 'billing_type') : [];
   const catalog = new Map(catalogRows.map(row => [row.id, row]));
-  const eligible = templates.filter(root => catalog.get(root.service_id)?.billing_type !== 'one_time');
+  const eligible = templates.filter(root => root.recurring_pattern !== 'one_time'
+    && catalog.get(root.service_id)?.billing_type !== 'one_time');
   const rootIds = selected.map(row => row.id);
   const customerIds = [...new Set(selected.map(row => row.customer_id))];
+  const preferences = customerIds.length ? await conn('property_preferences').whereIn('customer_id', customerIds)
+    .select('customer_id', 'preferred_day') : [];
+  const noWeekends = new Set(preferences.filter(preferenceRowBlocksWeekends).map(row => row.customer_id));
   const children = rootIds.length ? await conn('scheduled_services')
     .whereIn('recurring_parent_id', rootIds).whereIn('customer_id', customerIds).select('*') : [];
   const decisions = rootIds.length ? await conn('recurring_plan_alerts')
@@ -306,7 +311,8 @@ async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, o
     const combo = comboRouteFamiliesFromCatalogKey(identity);
     const families = combo.length ? combo : [seedingFamilyKey({ service: identity, name: root.service_type })];
     const historicalRoot = selected.find(row => row.id === root.id);
-    return measureRecurringSeries(root, [historicalRoot, ...children.filter(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)], {
+    const effectiveTemplate = { ...root, skip_weekends: root.skip_weekends || noWeekends.has(root.customer_id) };
+    return measureRecurringSeries(effectiveTemplate, [historicalRoot, ...children.filter(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)], {
       todayET,
       decision: decisions.find(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)?.resolved_action,
       holds: holds.filter(row => row.customer_id === root.customer_id && families.includes(row.family_key)),
