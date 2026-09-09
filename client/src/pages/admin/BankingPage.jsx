@@ -153,7 +153,7 @@ const inputStyle = {
   boxSizing: "border-box",
 };
 const thStyle = {
-  fontSize: 10,
+  fontSize: 11, // UI audit F0373: 11px caption floor
   color: D.muted,
   textTransform: "uppercase",
   letterSpacing: 1,
@@ -377,16 +377,15 @@ function PayoutsTab() {
                           >
                             <thead>
                               <tr>
-                                <th style={{ ...thStyle, fontSize: 9 }}>
+                                <th style={thStyle}>
                                   Customer / Type
                                 </th>
-                                <th style={{ ...thStyle, fontSize: 9 }}>
+                                <th style={thStyle}>
                                   Description
                                 </th>
                                 <th
                                   style={{
                                     ...thStyle,
-                                    fontSize: 9,
                                     textAlign: "right",
                                   }}
                                 >
@@ -395,7 +394,6 @@ function PayoutsTab() {
                                 <th
                                   style={{
                                     ...thStyle,
-                                    fontSize: 9,
                                     textAlign: "right",
                                   }}
                                 >
@@ -404,7 +402,6 @@ function PayoutsTab() {
                                 <th
                                   style={{
                                     ...thStyle,
-                                    fontSize: 9,
                                     textAlign: "right",
                                   }}
                                 >
@@ -1012,7 +1009,7 @@ function ReconciliationTab() {
                 >
                   <div>
                     <div
-                      style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}
+                      style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}
                     >
                       Actual Amount
                     </div>{" "}
@@ -1048,7 +1045,7 @@ function ReconciliationTab() {
                   )}
                   <div>
                     <div
-                      style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}
+                      style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}
                     >
                       Notes
                     </div>{" "}
@@ -1201,7 +1198,7 @@ function ExportsTab() {
           }}
         >
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Start Date
             </div>{" "}
             <input
@@ -1212,7 +1209,7 @@ function ExportsTab() {
             />{" "}
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               End Date
             </div>{" "}
             <input
@@ -1268,7 +1265,7 @@ function ExportsTab() {
         <div style={{ marginBottom: 16 }}>
           <div
             style={{
-              fontSize: 10,
+              fontSize: 11,
               color: D.muted,
               marginBottom: 6,
               textTransform: "uppercase",
@@ -1337,6 +1334,7 @@ function ExportsTab() {
           >
             Preview (first 5 payouts in range)
           </div>{" "}
+          <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr>
@@ -1377,6 +1375,7 @@ function ExportsTab() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>
@@ -1585,7 +1584,7 @@ function PayoutModal({
         <div style={{ marginBottom: 16 }}>
           <div
             style={{
-              fontSize: 10,
+              fontSize: 11,
               color: D.muted,
               marginBottom: 4,
               textTransform: "uppercase",

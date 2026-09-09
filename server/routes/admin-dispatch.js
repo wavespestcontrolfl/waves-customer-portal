@@ -2404,7 +2404,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // routine completion never sweeps unrelated leads.
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
+        // `booking` first: recurring-series-extend-hook.test.js anchors on the
+        // `source: 'service_completed', customerId: svc.customer_id });` tail.
+        await convertLeadFromEvent({ booking: svc, source: 'service_completed', customerId: svc.customer_id });
       } catch (leadErr) {
         logger.warn(`[lead-trigger] status-complete conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
       }
@@ -4449,8 +4451,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const sendOutcome = {};
         try {
           const AppointmentReminders = require('../services/appointment-reminders');
-          const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
-          const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+          // Visit-aware (app property scope, PR 3): the anchor visit's NON-primary
+          // saved property owns notify-primary for the series notice.
+          const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
             return renderRequiredTemplate(result.futurePlacementDays === 3

@@ -105,6 +105,7 @@ export default function EmailAutomationsPanelV2() {
       ) : (
         <Card className="p-0 overflow-hidden">
           {" "}
+          <div className="overflow-x-auto">
           <table className="w-full text-13">
             {" "}
             <thead className="bg-zinc-50 border-b border-hairline border-zinc-200">
@@ -149,11 +150,7 @@ export default function EmailAutomationsPanelV2() {
                     </td>{" "}
                     <td className="px-4 py-3">
                       {" "}
-                      <Badge
-                        tone={
-                          t.asm_group === "newsletter" ? "muted" : "neutral"
-                        }
-                      >
+                      <Badge tone="neutral">
                         {t.asm_group}
                       </Badge>{" "}
                     </td>{" "}
@@ -204,7 +201,7 @@ export default function EmailAutomationsPanelV2() {
                 );
               })}
             </tbody>{" "}
-          </table>{" "}
+          </table></div>{" "}
         </Card>
       )}
       {selectedKey && (
@@ -703,12 +700,10 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
             </p>{" "}
             <div className="flex items-center gap-2 mt-2">
               {" "}
-              <Badge
-                tone={template.asm_group === "newsletter" ? "muted" : "neutral"}
-              >
+              <Badge tone="neutral">
                 {template.asm_group}
               </Badge>{" "}
-              <Badge tone={template.enabled ? "strong" : "muted"}>
+              <Badge tone={template.enabled ? "strong" : "neutral"}>
                 {template.enabled ? "Enabled" : "Disabled"}
               </Badge>{" "}
               <span className="text-11 text-ink-tertiary">
@@ -941,7 +936,7 @@ function StepEditor({
             />
             Step enabled
           </label>
-          {!enabled && <Badge tone="muted">Disabled — skipped</Badge>}
+          {!enabled && <Badge tone="neutral">Disabled — skipped</Badge>}
         </div>{" "}
       </div>{" "}
       <div className="mb-3">

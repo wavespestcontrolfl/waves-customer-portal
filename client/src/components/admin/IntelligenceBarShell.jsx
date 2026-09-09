@@ -29,6 +29,7 @@ import { useRef } from "react";
 import { cn } from "../ui";
 import { useIntelligenceBar } from "../../hooks/useIntelligenceBar";
 import PendingActionsCard from "./PendingActionsCard";
+import IntelligenceTaskCard from "./IntelligenceTaskCard";
 
 export function renderInline(text) {
   const parts = text.split(/(\*\*[^*]+\*\*)/g);
@@ -200,6 +201,13 @@ export default function IntelligenceBarShell({
     response,
     structuredData,
     pendingActions,
+    activeTask,
+    savedTasks,
+    tasksAvailable,
+    taskHistoryError,
+    loadTasks,
+    refreshTask,
+    onActionResolved,
     conversationHistory,
     quickActions,
     expanded,
@@ -243,6 +251,7 @@ export default function IntelligenceBarShell({
           {" "}
           <input
             ref={inputRef}
+            aria-label="Ask Waves AI"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -297,7 +306,7 @@ export default function IntelligenceBarShell({
           }}
         />
         {resolvedHeader}
-        {(response || conversationHistory.length > 0) && (
+        {(response || activeTask || pendingActions.length > 0 || conversationHistory.length > 0) && (
           <button
             onClick={clear}
             className="h-6 px-2 u-label text-ink-secondary border-hairline border-zinc-200 rounded-xs hover:bg-zinc-50 u-focus-ring"
@@ -306,6 +315,17 @@ export default function IntelligenceBarShell({
           </button>
         )}
       </div>
+      {(tasksAvailable || taskHistoryError) && <details className="px-4 pb-3 text-14 text-ink-secondary" onToggle={event => { if (event.currentTarget.open) void loadTasks(); }}>
+        <summary className="min-h-11 flex items-center cursor-pointer u-focus-ring">Saved requests</summary>
+        <p className="mb-2">Clearing a chat does not cancel actions.</p>
+        {taskHistoryError && <div role="status"><p>{taskHistoryError}</p><button type="button" onClick={() => loadTasks()}
+          className="min-h-11 px-3 border-hairline border-zinc-200 rounded-sm u-focus-ring">Retry saved requests</button></div>}
+        {savedTasks.map(task => <button key={task.id} type="button" disabled={loading}
+          onClick={() => refreshTask(task.id)} className="block w-full min-h-11 p-2 text-left border-hairline border-zinc-200 rounded-sm u-focus-ring">
+          {task.target?.target?.label || 'Platform request'} · {task.state.replaceAll('_', ' ')}
+        </button>)}
+        {!savedTasks.length && !taskHistoryError && <p>No saved requests.</p>}
+      </details>}
       {/* Attached photos */}
       {attachments.length > 0 && (
         <div className="px-4 pb-3 flex flex-wrap gap-2">
@@ -324,7 +344,7 @@ export default function IntelligenceBarShell({
                 onClick={() => removeAttachment(i)}
                 title="Remove"
                 aria-label={`Remove ${a.name}`}
-                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-10 leading-none border-hairline border-zinc-200"
+                className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center bg-white/90 text-ink-primary rounded-full text-11 leading-none border-hairline border-zinc-200"
               >
                 ×
               </button>
@@ -431,7 +451,7 @@ export default function IntelligenceBarShell({
                   title={isFav ? "Unpin" : "Pin"}
                   aria-label={isFav ? `Unpin ${p}` : `Pin ${p}`}
                   className={cn(
-                    "h-5 min-w-8 px-1.5 flex items-center justify-center text-10 rounded-xs u-focus-ring transition-colors",
+                    "h-5 min-w-8 px-1.5 flex items-center justify-center text-11 rounded-xs u-focus-ring transition-colors",
                     isFav
                       ? "text-ink-primary"
                       : "text-ink-tertiary hover:text-ink-primary",
@@ -447,7 +467,7 @@ export default function IntelligenceBarShell({
 
       {/* Loading skeleton */}
       {loading && (
-        <div className="px-4 pb-4">
+        <div className="px-4 pb-4" role="status" aria-live="polite" aria-label="Thinking">
           {" "}
           <div className="flex flex-col gap-1.5">
             {skeletonBars.map((w, i) => (
@@ -462,13 +482,15 @@ export default function IntelligenceBarShell({
       )}
 
       {/* Response */}
-      {response && !loading && (
+      {(response || activeTask || pendingActions.length > 0) && !loading && (
         <div
           className="px-4 pb-4 pt-1 border-t border-hairline border-zinc-200 overflow-y-auto"
           style={{ maxHeight: responseMaxHeight }}
+          aria-live="polite"
         >
           {" "}
           <div
+            role={isError ? "alert" : undefined}
             className={cn(
               "text-13 leading-relaxed mt-3",
               isError ? "text-alert-fg" : "text-ink-primary",
@@ -476,27 +498,17 @@ export default function IntelligenceBarShell({
           >
             {renderMarkdown(response)}
           </div>
-          <PendingActionsCard
-            actions={pendingActions}
-            variant="light"
-            onResolved={(action, decision, body) => {
-              // A confirmed write is when the data actually changed — replay
-              // the host's post-query refresh path with the same shape it
-              // already inspects (toolCalls names).
-              if (decision === "confirm" && body?.success && onAfterSubmit) {
-                onAfterSubmit({
-                  toolCalls: [{ name: action.tool }],
-                  confirmedAction: true,
-                  result: body.result,
-                });
-              }
-            }}
-          />
+          {activeTask ? <IntelligenceTaskCard task={activeTask}
+            onSelectTarget={candidate => refreshTask(activeTask.taskId, 'select-target', candidate)}
+            onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask.taskId, 'resume')}
+            onResolved={onActionResolved} />
+            : <PendingActionsCard actions={pendingActions} variant="light" onResolved={onActionResolved} />}
           {responseSlot && responseSlot(structuredData)}
           {/* Follow-up */}
           <div className="mt-3 flex gap-2">
             {" "}
             <input
+              aria-label="Follow-up question"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}

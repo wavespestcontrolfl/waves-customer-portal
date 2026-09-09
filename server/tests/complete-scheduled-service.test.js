@@ -17,7 +17,7 @@ jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
   resolveCompletionProfileForScheduledService: jest.fn(async () => ({})),
 }));
-jest.mock('../services/visit-groups', () => ({ lockStopForRow: jest.fn(async () => {}) }));
+jest.mock('../services/visit-groups', () => ({ lockStopForRow: jest.fn(async () => {}), stopBaseKey: jest.fn(() => 'fixture-stop') }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(async () => null) }));
 
@@ -43,7 +43,7 @@ beforeEach(() => {
     status: 'on_site',
   };
   builder = {};
-  for (const method of ['where', 'leftJoin', 'select', 'orderBy', 'whereNot', 'whereIn', 'whereRaw']) {
+  for (const method of ['where', 'leftJoin', 'select', 'orderBy', 'whereNot', 'whereIn', 'whereRaw', 'forUpdate', 'whereNotNull', 'whereNull', 'limit']) {
     builder[method] = jest.fn(() => builder);
   }
   builder.first = jest.fn(async () => service);
@@ -67,6 +67,38 @@ test.each([
   expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });
 
+const INVALID_AREAS = [false, '', 0, -1, 2500.5, 10000001, {}, []];
+const withLawnGates = async (run) => {
+  process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+  process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+  try {
+    await run();
+  } finally {
+    delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+    delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  }
+};
+
+test.each([undefined, null, 2500, '2500', ...INVALID_AREAS])('lawn visit area %j never blocks a committed completion from replaying', async treatedSqft => {
+  const payload = { success: true, serviceRecordId: 'fixture-record' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+  await withLawnGates(async () => {
+    await expect(complete({ lawnProtocolCompletion: { treatedSqft } })).resolves.toEqual({ status: 200, body: payload });
+  });
+  expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
+});
+
+test.each(INVALID_AREAS)('invalid lawn visit area %j fails a fresh completion attempt after the claim', async treatedSqft => {
+  const completionAttempt = { id: 'fixture-attempt' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+  await withLawnGates(async () => {
+    const result = await complete({ lawnProtocolCompletion: { treatedSqft } });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_completion_area_invalid' } });
+  });
+  expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+  expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ message: 'lawn_completion_area_invalid' }), expect.anything());
+});
+
 test('a missing service returns the existing 404 payload', async () => {
   service = null;
   await expect(complete()).resolves.toEqual({ status: 404, body: { error: 'Service not found' } });
@@ -85,7 +117,7 @@ test('unexpected read failure rejects and preserves completion failure handling'
   const error = new Error('synthetic database failure');
   builder.first.mockRejectedValueOnce(error);
   await expect(complete()).rejects.toBe(error);
-  expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(null, error);
+  expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(null, error, db);
 });
 
 test('a stored completion replays without rewriting or starting a new completion', async () => {
@@ -106,4 +138,18 @@ test('a claim conflict returns its original status and payload', async () => {
     .resolves.toEqual({ status: 409, body: payload });
   expect(attempts.claimCompletionAttempt).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: 'body-key' }), db);
   expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
+});
+
+test('a saved packet blocks the individual replay/resume claim', async () => {
+  service.visit_id = '00000000-0000-4000-8000-000000000105';
+  const result = await complete();
+  expect(result).toMatchObject({ status: 409, body: { code: 'visit_grouped', visitId: service.visit_id } });
+  expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+});
+
+test('packet fields in the submitted form cannot grant packet ownership', async () => {
+  service.visit_id = '00000000-0000-4000-8000-000000000105';
+  const result = await complete({ packetRecord: { itemId: SERVICE_ID }, visitPacketId: SERVICE_ID });
+  expect(result.status).toBe(409);
+  expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });

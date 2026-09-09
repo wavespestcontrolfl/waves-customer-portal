@@ -524,6 +524,7 @@ function RowActionsMenu({ items, label = "More actions" }) {
             <div
               onClick={(e) => e.stopPropagation()}
               className="relative bg-white border-hairline border-zinc-200 rounded-t-md sm:rounded-md w-full sm:w-72 max-w-md shadow-lg overflow-hidden"
+              style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
             >
               {" "}
               <div className="px-4 py-3 border-b border-zinc-200 text-11 uppercase tracking-label text-ink-tertiary font-medium flex items-center justify-between">
@@ -3018,8 +3019,8 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
   );
 }
 
-// Status label color on mobile row. Draft = waves blue, alert = red,
-// accepted = zinc-900, others fall back to ink-tertiary for low emphasis.
+// Status label color on mobile row. Admin stays monochrome: alert = red,
+// accepted = zinc-900, in-flight = ink-secondary, others ink-tertiary.
 function mobileStatusClass(status) {
   if (status === "declined" || status === "expired") return "text-alert-fg";
   if (status === "accepted") return "text-zinc-900";
@@ -3029,7 +3030,7 @@ function mobileStatusClass(status) {
     status === "sent" ||
     status === "viewed"
   )
-    return "text-waves-blue";
+    return "text-ink-secondary";
   return "text-ink-tertiary";
 }
 

@@ -445,7 +445,9 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 // repointing would import components the winner's scalar knows nothing
 // about (and same-family rows would abort the merge on the unique
 // constraint). The loser's rows are explicitly deleted instead.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates']);
+// Field credit allocations retain the account that supplied the accepted
+// value. Their append-only guard must not abort an unrelated account merge.
+const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations']);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert
@@ -484,7 +486,7 @@ const REPOINT_PK_COLUMNS = { customer_refresh_tokens: 'jti' };
 // Everything else: empty winner fields fill from the loser, then the loser's
 // row is removed. Anything not copied survives in the journal snapshot.
 const SINGLETON_BOOLEAN_SEMANTICS = { notification_prefs: 'and', property_preferences: 'or' };
-const CHANNEL_RESTRICTIVENESS = { email: 2, sms: 1, both: 0 };
+const CHANNEL_RESTRICTIVENESS = { email: 3, push: 2, sms: 1, both: 0 };
 // Column defaults that mean "never filled in", not a real choice — a winner
 // holding one of these must still take the loser's actual value (pet details,
 // preferred day) before the loser's row is deleted.
@@ -521,6 +523,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   const updates = {};
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
+    // Choice provenance follows its channel below; it is not SMS consent
+    // and must not pass through the generic boolean AND rule.
+    if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
@@ -529,13 +534,29 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
       table === 'notification_prefs' && col.endsWith('_channel')
       && CHANNEL_RESTRICTIVENESS[winnerVal] !== undefined && CHANNEL_RESTRICTIVENESS[loserVal] !== undefined
     ) {
-      if (CHANNEL_RESTRICTIVENESS[loserVal] > CHANNEL_RESTRICTIVENESS[winnerVal]) updates[col] = loserVal;
+      // A known untouched request Email default must not erase an App
+      // choice. Explicit and historically unknown Email still win.
+      const winnerRank = col === 'request_channel' && winnerVal === 'email' && loserVal === 'push'
+        && winnerRow.request_channel_explicit === false ? -1 : CHANNEL_RESTRICTIVENESS[winnerVal];
+      const loserRank = col === 'request_channel' && loserVal === 'email' && winnerVal === 'push'
+        && loserRow.request_channel_explicit === false ? -1 : CHANNEL_RESTRICTIVENESS[loserVal];
+      if (loserRank > winnerRank) updates[col] = loserVal;
     } else if (isDefaultish(winnerVal) && !isDefaultish(loserVal)) {
       updates[col] = forUpdate(loserVal);
     }
   }
+  if (table === 'notification_prefs' && Object.hasOwn(winnerRow, 'request_channel_explicit')) {
+    const channel = updates.request_channel || winnerRow.request_channel;
+    const matching = [winnerRow, loserRow].filter((row) => row.request_channel === channel);
+    const explicit = matching.some((row) => row.request_channel_explicit === true) ? true
+      : matching.some((row) => row.request_channel_explicit !== false) ? null : false;
+    if (winnerRow.request_channel_explicit !== explicit) updates.request_channel_explicit = explicit;
+  }
   if (Object.keys(updates).length) {
-    await trx(table).where(column, winnerId).update({ ...updates, updated_at: trx.fn.now() });
+    const requestOnly = table === 'notification_prefs'
+      && Object.keys(updates).every((col) => ['request_channel', 'request_channel_explicit'].includes(col));
+    await trx(table).where(column, winnerId).update({ ...updates,
+      ...(!requestOnly ? { updated_at: trx.fn.now() } : {}) });
   }
   await trx(table).where(column, loserId).del();
   return `merged ${Object.keys(updates).length} fields into winner row, dropped loser row`;
@@ -609,6 +630,9 @@ async function repointCustomerProperties(trx, table, column, winnerId, loserId) 
     try {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id }).update({ [column]: winnerId, ...demote });
+        // Per-property appointment toggles follow the property to its new
+        // owner (app property scope, PR 3).
+        if (table === 'customer_properties') await require('./property-notification-prefs').repointPropertyPrefs(id, winnerId, sp);
       });
       moved += 1;
     } catch (e) {
@@ -646,13 +670,14 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
 }
 
 // irrigation_week_plans: UNIQUE(customer_id, week_ending). The row that
-// matters is the DELIVERED one (sent_at) — it is the decision the customer
+// matters is the available one (published_at or sent_at) — it is the decision the customer
 // received and the report renders, and the Monday sweep's first dedupe key
 // (hasSentWeekPlan). Keeping the winner's row blindly could delete the
 // loser's sent snapshot in favour of an unsent one: the report then hides
 // the plan the customer got and the sweep resends a possibly different
-// plan (codex #3565 gh-r15). Rule: a sent row beats an unsent row; both
-// sent or both unsent → the winner's stays.
+// plan (codex #3565 gh-r15). An available row beats a draft; equal
+// availability ranks retain the winner's row. Actual email delivery ranks
+// above app publication, which never mints an email delivery timestamp.
 // "Delivered" for a week-plan row: stamped sent_at, OR a durable customer-week
 // delivery record (email_messages at trigger_event_id
 // `irrigation.weekly:<customer>:<week>`, provider-accepted status) whose
@@ -679,19 +704,25 @@ async function weekPlanDelivered(trx, row, customerId) {
   });
 }
 
-async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id', 'week_ending', 'sent_at', 'decision_hash');
+async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loserId) {
+  const rows = await trx(table).where(column, loserId).select('id', 'week_ending', 'sent_at', 'published_at', 'decision_hash');
   let moved = 0;
   let replaced = 0;
   let dropped = 0;
   let stamped = 0;
-  // Rank: stamped (sent_at) > provider-accepted but unstamped > undelivered.
+  // Rank: stamped email > accepted email awaiting a stamp > app publication
+  // > unpublished draft. The inbox decision must survive a publication collision.
   // The higher rank survives; ties keep the winner's row. A retained row that
   // is accepted-but-unstamped is stamped here — once the two customers'
   // delivery records share one identity, weekPlanDeliveryState may name the
   // deleted row's hash, so the survivor could otherwise never be stamped
   // and the report plan would stay absent (codex gh-r18).
-  const rank = async (row, customerId) => (row ? (row.sent_at ? 2 : (await weekPlanDelivered(trx, row, customerId) ? 1 : 0)) : -1);
+  const rank = async (row, customerId) => {
+    if (!row) return -1;
+    if (row.sent_at) return 3;
+    if (await weekPlanDelivered(trx, row, customerId)) return 2;
+    return row.published_at ? 1 : 0;
+  };
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
@@ -709,7 +740,7 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
     }
-    const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at', 'week_ending', 'decision_hash');
+    const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at', 'published_at', 'week_ending', 'decision_hash');
     const loserRank = await rank(row, loserId);
     const winnerRank = await rank(winnerRow, winnerId);
     let kept;
@@ -726,12 +757,12 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
       dropped += 1;
       kept = winnerRow; keptRank = winnerRank;
     }
-    if (kept && keptRank === 1) {
+    if (kept && keptRank === 2) {
       await trx(table).where({ id: kept.id }).update({ sent_at: trx.fn.now(), updated_at: trx.fn.now() });
       stamped += 1;
     }
   }
-  return `moved ${moved}, replaced ${replaced} winner row(s) with the loser's better-delivered snapshot, dropped ${dropped} duplicate row(s), stamped ${stamped} accepted-but-unstamped survivor(s)`;
+  return `moved ${moved}, replaced ${replaced} winner row(s) with the loser's available snapshot, dropped ${dropped} duplicate row(s), stamped ${stamped} accepted-but-unstamped survivor(s)`;
 }
 
 // collections_flags: at most one ACTIVE row per (customer, flag) — both
@@ -788,7 +819,7 @@ const UNIQUE_COLLISION_HANDLERS = {
   // snapshot survives (sent_at, or a provider-accepted delivery record
   // naming its decision; ties keep the winner's); never abort the merge
   // (codex #3565 gh-r14/r15/r17).
-  irrigation_week_plans: repointWeekPlansKeepSent,
+  irrigation_week_plans: repointWeekPlansKeepAvailable,
   collections_flags: repointFlagsReleaseCollisions,
 };
 
@@ -4318,7 +4349,7 @@ module.exports = {
     isEmptyValue,
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
-    repointWeekPlansKeepSent,
+    repointWeekPlansKeepAvailable,
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,

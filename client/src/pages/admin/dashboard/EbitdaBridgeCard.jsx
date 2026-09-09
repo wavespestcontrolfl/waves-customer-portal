@@ -43,7 +43,7 @@ export default function EbitdaBridgeCard({ bridge }) {
                   {r.label}
                 </span>
                 <span className={cn("u-nums whitespace-nowrap", emphasized ? "font-medium" : "", tone.text, r.kind === "result" && "text-14")}>
-                  {r.kind === "minus" ? `−${fmtMoney(Math.abs(r.amount))}` : fmtMoney(r.amount)}
+                  {r.kind === "minus" || r.amount < 0 ? `−${fmtMoney(Math.abs(r.amount))}` : fmtMoney(r.amount)}
                   {r.marginPct != null && (
                     <span className="text-ink-tertiary font-normal text-11 ml-1.5">{r.marginPct}%</span>
                   )}

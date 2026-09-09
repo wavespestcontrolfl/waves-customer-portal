@@ -19,6 +19,7 @@ const { inspectionCreditReportNote } = require('../inspection-credit');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { legacyTemplateFallbackAllowed } = require('../email-fallback-gate');
+const { isFirstServiceVisit } = require('../customer-visit-history');
 
 const SERVICE_REPORT_FROM_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_REPORT_FROM_NAME = 'Waves Pest Control';
@@ -78,7 +79,7 @@ function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
-function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '' }) {
+function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '', firstReport = false }) {
   const findings = customerActionFindings(Array.isArray(data?.findings) ? data.findings : []);
   const applications = Array.isArray(data?.applications) ? data.applications : [];
   const dynamicContext = data?.dynamicContext || {};
@@ -114,6 +115,14 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     // blocks whose rendered content is empty) — non-credit visits read
     // exactly as before.
     inspection_credit_note: inspectionCreditNote || '',
+    first_report_note: firstReport
+      ? `${data?.serviceLine === 'lawn'
+        ? 'This is your first Waves report. Your lawn score sets a baseline; progress charts develop after at least two scored visits.'
+        : 'This is your first Waves report. Start with Ready to Re-enter where shown, then the service summary and Products Applied.'} Find your reports in Visits → Completed or Documents → Service Reports. Something worries you after we leave? Reply to this email or use Request in the app.`
+      : '',
+    first_report_guide_url: firstReport
+      ? 'https://www.wavespestcontrol.com/pest-control/waves-app-guide/?utm_source=service_report&utm_medium=email&utm_campaign=app_onboarding#read-your-service-report'
+      : '',
     pdf_note: pdf
       ? 'Your PDF service report is attached.'
       : 'A downloadable PDF will be available shortly.',
@@ -520,6 +529,10 @@ async function sendServiceReportV1Email(recordId, {
   }
   const inspectionCreditNote = creditVerdict.note;
 
+  // Optional education is evaluated after the delivery decision and before
+  // the expensive PDF render. History errors/timeouts return false.
+  const firstReport = await isFirstServiceVisit(service.customer_id, service.service_date);
+
   let pdf = null;
   let renderedLawnHistoryIdentity;
   try {
@@ -644,6 +657,7 @@ async function sendServiceReportV1Email(recordId, {
           serviceLabel,
           pdf,
           inspectionCreditNote,
+          firstReport,
         }),
         recipientType: 'customer',
         recipientId: service.customer_id || null,

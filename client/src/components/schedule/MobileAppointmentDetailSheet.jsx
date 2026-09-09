@@ -823,7 +823,7 @@ export default function MobileAppointmentDetailSheet({
                 </button>
               ) : (
                 <div className="rounded-md border-hairline border-zinc-200 bg-zinc-50 px-4 py-4">
-                  <div className="text-15 font-medium text-zinc-900">
+                  <div className="text-14 font-medium text-zinc-900">
                     Cancel appointment for {service.customerName || 'this customer'}? This cannot be undone.
                   </div>
                   {canCancelSeries && (

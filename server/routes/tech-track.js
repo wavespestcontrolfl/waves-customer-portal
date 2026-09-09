@@ -713,7 +713,12 @@ router.post('/:id/rain-out', async (req, res, next) => {
 // What unlocks: missed_photo dispatch_alert detector. With photos
 // landing here, a future cron can flag completions where no photo
 // was attached within N minutes — see action-queue spec.
-router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
+router.post('/:id/photos', (req, res, next) => {
+  upload.single('photo')(req, res, (err) => {
+    if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Photo too large (15 MB max)', code: 'photo_too_large' });
+    return next(err);
+  });
+}, async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
     if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });

@@ -163,17 +163,17 @@ function PageHeader({ onCompose, subscribersActive, sendsData }) {
           </div>{" "}
           <div className="flex flex-wrap gap-2 mt-3">
             {" "}
-            <Badge tone="muted">
+            <Badge tone="neutral">
               {subscribersActive != null
                 ? subscribersActive.toLocaleString()
                 : "—"}{" "}
               active subscribers
             </Badge>{" "}
-            <Badge tone="muted">
+            <Badge tone="neutral">
               {sentCount != null ? sentCount.toLocaleString() : "—"} sent
               campaigns
             </Badge>{" "}
-            <Badge tone={scheduledCount ? "neutral" : "muted"}>
+            <Badge tone="neutral">
               {scheduledCount ?? "—"} scheduled
             </Badge>{" "}
           </div>{" "}
@@ -490,7 +490,7 @@ function PostStatusBadge({ status }) {
   if (status === "sending") return <Badge tone="neutral">Sending…</Badge>;
   if (status === "scheduled") return <Badge tone="neutral">Scheduled</Badge>;
   if (status === "failed") return <Badge tone="alert">Failed</Badge>;
-  return <Badge tone="muted">Draft</Badge>;
+  return <Badge tone="neutral">Draft</Badge>;
 }
 
 function RecentPosts({ posts, loading }) {
@@ -1036,9 +1036,10 @@ function EventInboxView({ onDraftFromEvent }) {
               <button
                 type="button"
                 onClick={doSearch}
-                className="h-8 w-8 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm hover:bg-zinc-50"
+                aria-label="Search"
+                className="h-11 w-11 sm:h-8 sm:w-8 inline-flex items-center justify-center border-hairline border-zinc-300 rounded-sm hover:bg-zinc-50"
               >
-                <Search size={13} strokeWidth={1.75} />
+                <Search size={13} strokeWidth={1.75} aria-hidden />
               </button>
             </div>
           </div>

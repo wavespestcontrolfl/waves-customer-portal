@@ -284,7 +284,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && height >= SLOT_HEIGHT * 2 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 14, padding: '0 5px', background: '#DCFCE7', color: '#166534', fontSize: 9 }}
+            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
             title="Prepaid"
           >$</span>
         )}
@@ -598,7 +598,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer, 
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 14, padding: '0 5px', background: '#DCFCE7', color: '#166534', fontSize: 9 }}
+            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
             title="Prepaid"
           >$</span>
         )}
@@ -658,7 +658,7 @@ function UnassignedRail({ items, onEdit, onTreatmentPlan, onViewCustomer, owesCo
           </button>
         ) : (
           <>
-            <span className="uppercase tracking-label text-ink-tertiary font-medium" style={{ fontSize: 8 }}>Unassigned</span>
+            <span className="uppercase tracking-label text-ink-tertiary font-medium text-11">Unassigned</span>
             <div className="flex items-center gap-2">
               {/* Count rendered in waves-blue + bold so the dispatcher can
                   spot a non-zero unassigned backlog at a glance. */}

@@ -183,11 +183,10 @@ function softenApprovalWording(text) {
     .replace(/\brequires manager approval\b/gi, "flagged for review")
     .trim();
 }
-// Rig-calibration states worth a closeout advisory line. Deliberately
-// excludes 'equipment_selection_required' — with no equipment step left in
-// the closeout, "select equipment" would be permanent noise.
+// Rig-calibration states worth a closeout advisory line. A missing or
+// ambiguous rig is not one (the plan falls back to the protocol's default
+// carrier); only a calibration that exists but is stale or unverified is.
 const CALIBRATION_ADVISORY_CODES = new Set([
-  "missing_calibration",
   "expired_calibration",
   "calibration_not_field_verified",
 ]);
@@ -1409,6 +1408,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
   const isCompletedVisit =
     String(service.status || "").toLowerCase() === "completed";
+  // Terminal rows (completed / cancelled / skipped / no_show) are records,
+  // not live stops: no cancel action, and no scheduling hint that could
+  // retarget them onto a live day (Codex #4120 r4 P2 + r5 P2).
+  const isTerminalVisit = [
+    "completed",
+    "cancelled",
+    "skipped",
+    "no_show",
+  ].includes(String(service.status || "").toLowerCase());
   // Re-entry windows for a COMPLETED visit (interior/exterior dry-down
   // minutes on the customer report). Same posture as the time-on-site
   // correction: OUTSIDE `form`, saved through the dedicated admin-only
@@ -1532,16 +1540,39 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     durationMinutes: slotCheckDuration,
     excludeServiceIds: [service.id],
   });
+  // The Service address picker's state lives ahead of the hint hook: a
+  // pending selection is a hint input (declared here, rendered below).
+  const [addressOptions, setAddressOptions] = useState([]);
+  const [addressState, setAddressState] = useState("loading");
+  const [selectedPropertyId, setSelectedPropertyId] = useState("");
   // Advisory drive-detour suggestions for the same fixed day — picking a
-  // chip only fills the window fields (never saves).
-  const { bestTimes } = useBestTimes({
+  // chip only fills the window fields (never saves). A terminal visit's
+  // date/window edit is a record correction: there is no route to price,
+  // and the range chip would move the finished (or cancelled / skipped /
+  // no-show) visit onto a live day (update-details allows the edit) — no
+  // hint at all (Codex #4120 r4 P2, r5 P2).
+  const { bestTimes, picked, bestInRange } = useBestTimes({
+    enabled: !isTerminalVisit,
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
     durationMinutes: slotCheckDuration,
+    // update-details writes this duration, so the arrival simulation may
+    // adopt it; the move surfaces leave the stored estimate in place.
+    durationEdit: true,
     technicianId: form.technicianId || undefined,
     excludeServiceIds: [service.id],
+    // The picked verdict prices ONE technician's route; with the visit set
+    // to Unassigned the gap-mode fallback would name and quote whichever
+    // technician's gap matches, and saving keeps the visit unassigned. Chips
+    // stay (picking one adopts its technician); no verdict (Codex #4120 r6 P2).
+    pickedStart: form.technicianId ? form.windowStart : undefined,
+    pickedEnd: form.windowEnd,
+    rangeFrom: etDateString(),
+    // A re-picked Service address is where the save sends the visit —
+    // score there, and re-score when the selection changes (Codex r7 P2).
+    propertyId: selectedPropertyId || undefined,
   });
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
@@ -1664,9 +1695,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
-  const [addressOptions, setAddressOptions] = useState([]);
-  const [addressState, setAddressState] = useState("loading");
-  const [selectedPropertyId, setSelectedPropertyId] = useState("");
   const selectedProperty = addressOptions.find((property) => property.id === selectedPropertyId);
   useEffect(() => {
     let cancelled = false;
@@ -2477,12 +2505,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   // no_show is terminal on the server too (the status route 409s a
   // no_show → cancelled transition) — don't offer a cancel that must fail.
-  const canCancelAppointment = ![
-    "completed",
-    "cancelled",
-    "skipped",
-    "no_show",
-  ].includes(String(service.status || "").toLowerCase());
+  const canCancelAppointment = !isTerminalVisit;
 
   const handleCancelAppointment = async () => {
     if (cancelling) return;
@@ -3425,7 +3448,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               </div>{" "}
             </div>{" "}
           </aside>{" "}
-          <main className="order-1 md:order-2 min-w-0 flex flex-col">
+          <div className="order-1 md:order-2 min-w-0 flex flex-col">
             {" "}
             <section style={{ ...sectionStyle, order: 2 }}>
               {" "}
@@ -3897,8 +3920,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               />{" "}
               <BestTimeHint
                 bestTimes={bestTimes}
+                picked={picked}
+                bestInRange={bestInRange}
                 currentStart={form.windowStart}
+                currentDate={form.scheduledDate}
                 currentTechnicianId={form.technicianId}
+                onPickDate={(slot) =>
+                  setForm((f) => ({
+                    ...f,
+                    scheduledDate: slot.date,
+                    windowStart: slot.start,
+                    windowEnd: slot.end,
+                    technicianId: !f.technicianId && slot.technicianId
+                      ? slot.technicianId
+                      : f.technicianId,
+                  }))
+                }
                 onPick={(slot) =>
                   // An unassigned visit searched all techs, so the detour
                   // is slot.technicianId's — adopt that tech with the
@@ -4532,7 +4569,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 </div>
               )}
             </section>{" "}
-          </main>{" "}
+          </div>{" "}
         </div>{" "}
       </div>{" "}
       {cancelOpen && (
@@ -4987,6 +5024,9 @@ function JobCardProduct({ p, D }) {
 
 function JobCardTank({ tank, serviceId, D }) {
   const [gallons, setGallons] = useState(110);
+  // A rig row picked in place of the 110 / 1 gal presets: a full tank of
+  // that rig, dosed on its own carrier and volume.
+  const [rigId, setRigId] = useState(null);
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [picked, setPicked] = useState(null);
@@ -5014,6 +5054,10 @@ function JobCardTank({ tank, serviceId, D }) {
     };
   }, [q]);
 
+  const rigs = tank?.rigs || [];
+  const rig = rigs.find((r) => r.equipmentSystemId === rigId) || null;
+  const pickedRigId = rig?.equipmentSystemId || null;
+
   useEffect(() => {
     if (!picked) {
       setMix(null);
@@ -5023,25 +5067,39 @@ function JobCardTank({ tank, serviceId, D }) {
     setBusy(true);
     // Never show the previous product's verdict beside the new one.
     setMix(null);
-    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
+    const volume = pickedRigId ? `rig=${encodeURIComponent(pickedRigId)}` : `gallons=${gallons}`;
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [picked, gallons, serviceId]);
+  }, [picked, gallons, pickedRigId, serviceId]);
 
-  const pill = (g) => ({
+  const pill = (selected) => ({
     flex: 1,
     minHeight: 44,
     borderRadius: 2,
-    border: `1px solid ${gallons === g ? D.heading : D.inputBorder}`,
-    background: gallons === g ? D.heading : D.card,
-    color: gallons === g ? D.white : D.text,
+    border: `1px solid ${selected ? D.heading : D.inputBorder}`,
+    background: selected ? D.heading : D.card,
+    color: selected ? D.white : D.text,
     fontSize: 12,
     fontWeight: 500,
     textTransform: "uppercase",
     letterSpacing: "0.06em",
     cursor: "pointer",
+  });
+  // A rig row carries the rig's full name, so it reads in sentence case.
+  const rigRow = (selected) => ({
+    ...pill(selected),
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    padding: "0 12px",
+    fontSize: 14,
+    textTransform: "none",
+    letterSpacing: 0,
+    textAlign: "left",
   });
 
   return (
@@ -5049,16 +5107,27 @@ function JobCardTank({ tank, serviceId, D }) {
       title="Tank"
       defaultOpen
       D={D}
-      right={tank && !tank.calibrated ? <JobCardChip tone="hold" label={tank.unavailable ? "Unavailable" : "Not calibrated"} D={D} /> : null}
+      right={tank && !tank.calibrated ? <JobCardChip tone="hold" label="No carrier" D={D} /> : null}
     >
       <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
         {tank && !tank.calibrated && (
-          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld {tank.unavailable ? "until the check succeeds" : "until a calibrated rig is on file"}; per-gallon dilutions still mix.</div>
+          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld until a rig calibration or protocol carrier is on file; per-gallon dilutions still mix.</div>
         )}
         <div style={{ display: "flex", gap: 8 }}>
-          <button type="button" style={pill(110)} onClick={() => setGallons(110)}>110 gal</button>
-          <button type="button" style={pill(1)} onClick={() => setGallons(1)}>1 gal</button>
+          <button type="button" style={pill(!rig && gallons === 110)} onClick={() => { setGallons(110); setRigId(null); }}>110 gal</button>
+          <button type="button" style={pill(!rig && gallons === 1)} onClick={() => { setGallons(1); setRigId(null); }}>1 gal</button>
         </div>
+        {rigs.length > 0 && (
+          <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 14, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Rigs · full tank</div>
+            {rigs.map((r) => (
+              <button key={r.equipmentSystemId} type="button" style={rigRow(r.equipmentSystemId === pickedRigId)} onClick={() => setRigId(r.equipmentSystemId)}>
+                <span>{r.name}</span>
+                <span style={{ fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{r.tankCapacityGal} gal</span>
+              </button>
+            ))}
+          </div>
+        )}
         <input
           value={q}
           onChange={(e) => { setQ(e.target.value); setPicked(null); }}
@@ -5115,7 +5184,7 @@ function JobCardTank({ tank, serviceId, D }) {
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {gallons} gal{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
@@ -5522,10 +5591,11 @@ export function ProtocolPanel({ service, onClose }) {
       {jobCardEnabled && (
         <div style={{ padding: "12px 16px 0" }}>
           <IntelligenceBarShell
+            key={service.id}
             context="dispatch"
             buildPageData={() => ({
-              scheduledServiceId: service.id,
-              customerId: service.customerId,
+              appointment_id: service.id,
+              customer_id: service.customerId,
               serviceType: panelServiceType,
               date: service.scheduledDate || service.date || null,
             })}
@@ -6950,7 +7020,12 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   });
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start select, never submits the reschedule.
-  const { bestTimes: manualBestTimes } = useBestTimes({
+  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange } = useBestTimes({
+    // Same route check as the manual save and the edit form: under
+    // GATE_ADMIN_ARRIVAL_WINDOWS the verdict and the chips must not endorse
+    // an hour the save would refuse for another customer's window
+    // (Codex #4120 r5 P1).
+    arrivalWindows: true,
     date: manualDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
@@ -6960,6 +7035,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     // The reschedule submit can't change assignment, so an unassigned
     // visit's all-tech detours would be unactionable — no tech, no hint.
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
+    pickedStart: manualTime,
+    rangeFrom: etDateString(),
   });
 
   // One POST path for the suggested and custom pickers. A 409
@@ -7427,14 +7504,20 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 </div>{" "}
                 {/* Appointment windows ALWAYS start on the hour (owner
                     directive) — an hour select instead of a free time input
-                    so an off-hour start can't be submitted. */}
+                    so an off-hour start can't be submitted. From 06:00 up to
+                    the last hour whose window still ends by 20:00, the admin
+                    day end (window-rules) — the save rejects a later end, and
+                    the arrival-window hints never recommend one, so every
+                    option is savable and every recommendation is an option
+                    (Codex #4120 r6 P1). */}
                 <select
                   value={manualTime}
                   onChange={(e) => setManualTime(e.target.value)}
                   style={inputSt}
                 >
-                  {Array.from({ length: 13 }, (_, i) => {
-                    const h = i + 6;
+                  {Array.from({ length: 14 }, (_, i) => i + 6)
+                    .filter((h) => h * 60 + durationMinutes <= 20 * 60)
+                    .map((h) => {
                     const value = `${String(h).padStart(2, "0")}:00`;
                     const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
                     return (
@@ -7477,9 +7560,13 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           {showManual && (
             <BestTimeHint
               bestTimes={manualBestTimes}
+              picked={manualPicked}
+              bestInRange={manualBestInRange}
               currentStart={manualTime}
+              currentDate={manualDate}
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={(slot) => setManualTime(slot.start)}
+              onPickDate={(slot) => { setManualDate(slot.date); setManualTime(slot.start); }}
               style={{ marginTop: 10 }}
             />
           )}
@@ -10200,7 +10287,7 @@ function RecapCapture({ serviceId }) {
             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 8 }}>
               <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#3f3f46,#18181b)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 500, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: D.heading, textTransform: "capitalize" }}>{m.role}</div>
                 <div style={{ fontSize: 11.5, color: "#111" }}>“{m.caption}”</div>
               </div>
               <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 500 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
@@ -10219,7 +10306,7 @@ function RecapCapture({ serviceId }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,13,.7)", zIndex: 50, display: "flex", alignItems: "flex-end" }} onClick={() => setPendingFile(null)}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: D.card, borderRadius: "18px 18px 0 0", border: `1px solid ${D.border}`, padding: "16px 14px 22px", maxHeight: "82%", overflowY: "auto" }}>
             <div style={{ width: 40, height: 4, background: D.border, borderRadius: 3, margin: "0 auto 12px" }} />
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
+            <div style={{ fontWeight: 500, fontSize: 16, color: D.heading, textAlign: "center" }}>What were you doing?</div>
             <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {(showMore ? [...RECAP_CHIPS_TOP, ...RECAP_CHIPS_MORE] : RECAP_CHIPS_TOP).map((c) => (
@@ -20132,7 +20219,7 @@ export function CompletionPanel({
                     {" "}
                     <span style={{ fontSize: 14, color: D.text, flex: 1 }}>
                       {row.label}:{" "}
-                      <span style={{ color: D.white }}>
+                      <span style={{ color: D.heading, fontWeight: 500 }}>
                         {formatReentryStepperMinutes(row.value)}
                       </span>
                     </span>{" "}

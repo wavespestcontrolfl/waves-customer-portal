@@ -3,6 +3,7 @@
 // scheduled_services.prepaid_* columns already exist per-visit; this module
 // fans a series-level payment across siblings and reconstructs the "visit X of
 // Y · N more covered" context for the appointment detail UI.
+const { recordAuditEvent } = require('./audit-log');
 
 // Statuses that should NOT receive a prepayment stamp. A completed visit
 // already has its books closed; cancelled / no-show / skipped are dead rows
@@ -12,6 +13,26 @@
 // other dispatch flows already use it as the operator-driven "we did not
 // service this row" outcome.
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'no_show', 'rescheduled', 'skipped']);
+
+// The annual-prepay writer's method. Manual writers never create or replace
+// it: annual coverage is applied by annual-prepay-renewals after its funding
+// and service-scope checks, and the completion billing gate trusts that
+// authority only while the method and term link survive.
+const ANNUAL_PREPAY_METHOD = 'annual_prepay_invoice';
+
+function hasAnnualCoverage(row) {
+  return !!(row?.annual_prepay_term_id || row?.prepaid_method === ANNUAL_PREPAY_METHOD);
+}
+
+// Embed the annual-coverage refusal IN a manual single-visit stamp UPDATE
+// (bulk mark-prepaid, POST /:id/prepaid) so an annual activation that lands
+// between a pre-read and the write is never overwritten with a manual method
+// (Codex #4030 r7 P1). IS DISTINCT FROM keeps a NULL method eligible.
+function withoutAnnualCoverage(query) {
+  return query
+    .whereNull('annual_prepay_term_id')
+    .whereRaw('prepaid_method IS DISTINCT FROM ?', [ANNUAL_PREPAY_METHOD]);
+}
 
 // Series rows of the same family share `recurring_parent_id`. The parent row
 // itself has `recurring_parent_id IS NULL` and is identified by its own id
@@ -27,6 +48,10 @@ function resolveSeriesParentId(service) {
 // `lock: true` (inside a transaction) takes FOR UPDATE on the rows the stamp
 // will UPDATE — the non-terminal family only, filtered in SQL — so the
 // eligibility read and the stamps see one row state (stampSeriesPrepaid).
+// A NULL status is a live visit (service-cadence convention; the annual
+// writer's own predicate) — a bare NOT IN evaluates unknown and would drop a
+// legacy null-status sibling from the locked set, so an annual term or stamp
+// it carries could never refuse the manual write (Codex #4030 r7 P1).
 // Terminal rows are deliberately NOT locked: the series cancel locks its
 // cancellable children first and touches the (possibly completed) parent
 // last for the recurring_ongoing clear; locking the whole family here in
@@ -39,7 +64,10 @@ async function fetchSeriesRows(db, parentId, { lock = false } = {}) {
       this.where('recurring_parent_id', parentId).orWhere('id', parentId);
     })
     .orderBy(['scheduled_date', 'window_start', 'id']);
-  return lock ? q.whereNotIn('status', [...TERMINAL_STATUSES]).forUpdate() : q;
+  if (!lock) return q;
+  return q.where(function liveRows() {
+    this.whereNull('status').orWhereNotIn('status', [...TERMINAL_STATUSES]);
+  }).forUpdate();
 }
 
 // Round to cents so per-visit stamps reconcile to the series total without
@@ -58,6 +86,33 @@ function splitTotalAcrossVisits(totalDollars, visitCount) {
   return slices;
 }
 
+async function retireActiveAllocationAudits(trx, { customerId, parentId, ids }) {
+  const audits = await trx('audit_log as allocation')
+    .where({
+      'allocation.action': 'prepaid_series.allocated',
+      'allocation.resource_type': 'scheduled_service',
+    })
+    .whereIn('allocation.resource_id', ids)
+    .whereRaw("allocation.metadata->>'customer_id' = ?", [customerId])
+    .whereNotExists(function activeClear() {
+      this.select(trx.raw('1')).from('audit_log as cleared')
+        .where({
+          'cleared.action': 'prepaid_series.cleared',
+          'cleared.resource_type': 'prepaid_series_allocation',
+        })
+        .whereRaw('cleared.resource_id = allocation.id');
+    })
+    .select('allocation.id');
+  for (const allocation of audits) {
+    await recordAuditEvent({
+      actor_type: 'system', action: 'prepaid_series.cleared',
+      resource_type: 'prepaid_series_allocation', resource_id: allocation.id,
+      metadata: { customer_id: customerId, series_parent_id: parentId, reason: 'superseded' },
+      critical: true, trx,
+    });
+  }
+}
+
 // Stamp every eligible row in a recurring series with its share of a single
 // prepayment. Eligible = not in a terminal status (completed / cancelled /
 // no_show). Returns the stamped rows so the caller can echo them back to the
@@ -69,12 +124,31 @@ async function stampSeriesPrepaid(db, {
   note,
   useExistingTransaction = false,
 }) {
+  const amount = ['number', 'string'].includes(typeof totalAmount) ? Number(totalAmount) : NaN;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    const err = new Error('Series prepayment must be a positive amount');
+    err.status = 400;
+    err.statusCode = 400;
+    err.isOperational = true;
+    throw err;
+  }
+  // Annual coverage is applied by annual-prepay-renewals after its funding
+  // and service-scope checks. A manual stamp cannot manufacture that evidence.
+  if (method === ANNUAL_PREPAY_METHOD) {
+    const err = new Error('Use the annual prepay workflow to apply annual coverage');
+    err.status = 409;
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
   const anchor = await db('scheduled_services')
     .where({ id: anchorServiceId })
     .first();
   if (!anchor) {
     const err = new Error('Scheduled service not found');
     err.status = 404;
+    err.statusCode = 404;
+    err.isOperational = true;
     throw err;
   }
   const parentId = resolveSeriesParentId(anchor);
@@ -98,9 +172,43 @@ async function stampSeriesPrepaid(db, {
     if (!eligible.length) {
       const err = new Error('No eligible visits in this series to mark prepaid');
       err.status = 400;
+      err.statusCode = 400;
+      err.isOperational = true;
       throw err;
     }
-    slices = splitTotalAcrossVisits(Number(totalAmount), eligible.length);
+    if (eligible.some((row) => row.customer_id !== anchor.customer_id)) {
+      const err = new Error('Series contains visits for another customer; reconcile the series before recording prepayment');
+      err.status = 409;
+      err.statusCode = 409;
+      err.isOperational = true;
+      throw err;
+    }
+    // Never replace even pending/stale annual linkage with a cash stamp:
+    // that changes which coverage authority the completion billing gate trusts.
+    if (eligible.some(hasAnnualCoverage)) {
+      const err = new Error('Series has annual prepay coverage; reconcile that term before recording a manual prepayment');
+      err.status = 409;
+      err.statusCode = 409;
+      err.isOperational = true;
+      throw err;
+    }
+    if (Math.round(amount * 100) < eligible.length) {
+      const err = new Error('Series prepayment must allocate at least one cent to every covered visit');
+      err.status = 400;
+      err.statusCode = 400;
+      err.isOperational = true;
+      throw err;
+    }
+    // An explicit series restamp is an amendment, including a repair after a
+    // visit was cleared. Retire the prior allocation evidence atomically
+    // before writing the replacement; a single-visit clear remains the path
+    // that intentionally leaves evidence for reconciliation.
+    await retireActiveAllocationAudits(trx, {
+      customerId: anchor.customer_id,
+      parentId,
+      ids: eligible.map((row) => row.id),
+    });
+    slices = splitTotalAcrossVisits(amount, eligible.length);
     for (let i = 0; i < eligible.length; i++) {
       const row = eligible[i];
       const amt = slices[i];
@@ -113,7 +221,17 @@ async function stampSeriesPrepaid(db, {
           prepaid_at: now,
         })
         .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at', 'scheduled_date']);
-      if (updated) updatedRows.push(updated);
+      if (!updated) throw new Error('Series prepayment did not update every locked visit');
+      // Retain the allocation even if every live stamp is later erased. The
+      // audit and money marker commit together, including booking transactions.
+      await recordAuditEvent({
+        actor_type: 'system', action: 'prepaid_series.allocated',
+        resource_type: 'scheduled_service', resource_id: row.id,
+        metadata: { customer_id: anchor.customer_id, series_parent_id: parentId,
+          prepaid_amount: amt, prepaid_method: method || null, prepaid_at: now.toISOString() },
+        critical: true, trx,
+      });
+      updatedRows.push(updated);
     }
   });
   return {
@@ -123,6 +241,27 @@ async function stampSeriesPrepaid(db, {
     seriesTotal: Number(totalAmount),
     updatedRows,
   };
+}
+
+// The existing explicit whole-series clear retires its allocation evidence.
+// Single-visit clears intentionally leave it outstanding for reconciliation.
+async function clearSeriesPrepaid(db, anchor) {
+  const parentId = resolveSeriesParentId(anchor);
+  return db.transaction(async (trx) => {
+    // Same live-row lock order as stamping/cancellation. Lock even erased
+    // stamps so a concurrent payment cannot be retired without being cleared.
+    await fetchSeriesRows(trx, parentId, { lock: true });
+    const family = await fetchSeriesRows(trx, parentId);
+    const ids = family.filter((row) => row.customer_id === anchor.customer_id).map((row) => row.id);
+    const cleared = await trx('scheduled_services').whereIn('id', ids)
+      .whereNotNull('prepaid_amount')
+      .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null })
+      .returning(['id']);
+    await retireActiveAllocationAudits(trx, {
+      customerId: anchor.customer_id, parentId, ids,
+    });
+    return { success: true, clearedCount: cleared.length, seriesParentId: parentId };
+  });
 }
 
 // Build the "visit X of Y · N more covered" context for the appointment detail
@@ -224,10 +363,14 @@ async function listCustomerPrepaidPlans(db, customerId) {
 
 module.exports = {
   TERMINAL_STATUSES,
+  ANNUAL_PREPAY_METHOD,
+  hasAnnualCoverage,
+  withoutAnnualCoverage,
   resolveSeriesParentId,
   fetchSeriesRows,
   splitTotalAcrossVisits,
   stampSeriesPrepaid,
+  clearSeriesPrepaid,
   buildPrepaidSeriesContext,
   listCustomerPrepaidPlans,
 };

@@ -112,6 +112,7 @@ describe("TwilioService.sendTechEnRoute", () => {
       "Bryan",
       null,
       "track-token",
+      { scheduledServiceId: "svc-9" },
     );
 
     expect(shortenOrPassthrough).toHaveBeenCalledWith(
@@ -139,6 +140,9 @@ describe("TwilioService.sendTechEnRoute", () => {
         to: "+15551112222",
         body: "Hello Sam! Bryan is on the way.\n\nTrack live: https://portal.wavespestcontrol.com/l/abc23\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.",
         purpose: "tech_en_route",
+        // The visit id rides to the push sink so an App-delivered en-route
+        // push deep-links to the visit's house (GitHub codex #4207 r11 P1).
+        appointmentId: "svc-9",
       }),
     );
     expect(result.success).toBe(true);

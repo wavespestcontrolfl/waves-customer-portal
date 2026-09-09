@@ -5,11 +5,30 @@
  * carrying accountId / customerId / customer) and returns the ids ordered
  * primary first. Shared by the notification and schedule routes so the
  * account-scoped reads agree on what "my properties" means.
+ *
+ * Two property models coexist (docs/multi-property-model.md):
+ *   - sibling PROFILES: a second `customers` row sharing account_id (the
+ *     frozen customer_accounts pattern; what accountPropertyIds returns);
+ *   - SAVED PROPERTIES: `customer_properties` rows under one customer (what
+ *     admin booking, estimates and lawn history read).
+ * Under GATE_APP_PROPERTY_SCOPE the app reads the UNION of both —
+ * accountSavedProperties — and the session names the selected saved
+ * property (req.propertyId, validated by middleware/auth). resolveSessionScope
+ * + scopeVisitsToProperty give every property-aware read one rule.
  */
 const db = require('../models/db');
+const { gateEnvValue } = require('../config/feature-gates');
+
+function appPropertyScopeEnabled() {
+  return gateEnvValue('GATE_APP_PROPERTY_SCOPE');
+}
+
+function accountIdOf(req) {
+  return req.accountId || req.customer?.account_id || req.customerId;
+}
 
 async function accountPropertyIds(req, knex = db) {
-  const accountId = req.accountId || req.customer?.account_id || req.customerId;
+  const accountId = accountIdOf(req);
   const rows = await knex('customers')
     .where({ active: true })
     .whereNull('deleted_at')
@@ -37,4 +56,285 @@ async function resolvePrimaryProfileId(req, knex = db, { onError = 'fallback' } 
   return primary?.id || req.customerId;
 }
 
-module.exports = { accountPropertyIds, resolvePrimaryProfileId };
+// ---------------------------------------------------------------------------
+// Saved-property (customer_properties) scope — GATE_APP_PROPERTY_SCOPE
+// ---------------------------------------------------------------------------
+
+const PROFILE_COLUMNS = [
+  'id', 'account_id', 'profile_label', 'is_primary_profile', 'active', 'waveguard_tier',
+  'address_line1', 'address_line2', 'city', 'state', 'zip',
+];
+
+// Same profile set and order as GET /auth/properties' sibling list, so the
+// two lists agree on which profile comes first.
+async function accountProfiles(req, knex = db) {
+  const accountId = accountIdOf(req);
+  return knex('customers')
+    .where({ active: true })
+    .whereNull('deleted_at')
+    .where(function () {
+      this.where({ account_id: accountId }).orWhere({ id: accountId });
+    })
+    .orderBy('is_primary_profile', 'desc')
+    .orderBy('profile_label', 'asc')
+    .orderBy('created_at', 'asc')
+    .select(PROFILE_COLUMNS);
+}
+
+function addressOf(row) {
+  return {
+    line1: row?.address_line1 || null,
+    line2: row?.address_line2 || null,
+    city: row?.city || null,
+    state: row?.state || null,
+    zip: row?.zip || null,
+  };
+}
+
+// One selectable entry = (profile, saved property). A profile with no saved
+// property row yet (no address on file, so the lazy primary could not be
+// created) still lists once, keyed to the profile, so the customer can reach
+// it exactly as the sibling list allows today.
+function savedPropertyEntry(profile, property) {
+  return {
+    key: `${profile.id}:${property ? property.id : 'profile'}`,
+    customerId: profile.id,
+    propertyId: property ? property.id : null,
+    isPrimaryProfile: profile.is_primary_profile === true,
+    profileLabel: profile.profile_label || (profile.is_primary_profile === true ? 'Primary' : 'Service property'),
+    isPrimaryProperty: property ? property.is_primary === true : true,
+    label: property?.label || null,
+    relationship: property?.relationship || null,
+    occupancyType: property?.occupancy_type || null,
+    tier: profile.waveguard_tier || null,
+    address: addressOf(property || profile),
+  };
+}
+
+// The session's current selection among the entries: the validated claim
+// (req.propertyId) when it names one of the signed-in profile's entries, else
+// that profile's primary, else its first entry.
+function selectedEntryFor(req, entries) {
+  const mine = entries.filter((e) => String(e.customerId) === String(req.customerId));
+  const byClaim = req.propertyId ? mine.find((e) => String(e.propertyId) === String(req.propertyId)) : null;
+  const chosen = byClaim || mine.find((e) => e.isPrimaryProperty) || mine[0] || null;
+  return chosen
+    ? { key: chosen.key, customerId: chosen.customerId, propertyId: chosen.propertyId }
+    : { key: null, customerId: req.customerId, propertyId: null };
+}
+
+async function accountSavedProperties(req, knex = db) {
+  // Lazy require: customer-properties pulls in the stamped-address and
+  // dedupe modules; route tests mock this module wholesale.
+  const customerProperties = require('./customer-properties');
+  // C4 cancelled read-only session (authenticateAllowInactive): list ONLY
+  // the signed-in profile — the same fallback as the sibling list in
+  // routes/auth.js. The active-only profile query would drop the cancelled
+  // customer's own row and offer sibling switches that /select-property
+  // (an active-only route) cannot honor.
+  const profiles = req.customer && req.customer.active !== true
+    ? [req.customer]
+    : await accountProfiles(req, knex);
+  const entries = [];
+  for (const profile of profiles) {
+    // Same lazy primary the admin list makes (ensurePrimaryProperty): a
+    // profile created by a path that skipped the property table still lists
+    // its one address. Best-effort — a failure lists the profile itself.
+    // ACTIVE profiles only (codex #4199 r1 P2): a cancelled read-only
+    // session must not create a property row after cancellation.
+    if (profile.active === true) {
+      await customerProperties.ensurePrimaryProperty(profile.id).catch(() => {});
+    }
+    // A failed READ propagates (pre-push codex P1): swallowing it would
+    // answer 200 with the profile missing and `selected` wrong, and the
+    // client could never tell it needs to retry. Only the lazy WRITE above is
+    // best-effort — the list is still correct for the rows that exist.
+    const rows = await customerProperties.listProperties(profile.id);
+    if (!rows.length) {
+      // No ACTIVE rows. A profile that has NEVER had a property row (no
+      // address to build one from) still lists once, keyed to the profile.
+      // A profile whose rows were all RETIRED by the office is left out
+      // (codex #4199 r1 P2): listing its mirrored address would make a
+      // deliberately retired address selectable again, and selecting it
+      // would resolve to a zero-property scope showing customer-wide visits.
+      const everHadRow = await knex('customer_properties').where({ customer_id: profile.id }).first('id');
+      if (!everHadRow) entries.push(savedPropertyEntry(profile, null));
+      continue;
+    }
+    for (const row of rows) entries.push(savedPropertyEntry(profile, row));
+  }
+  const selected = selectedEntryFor(req, entries);
+  // C4 cancelled read-only session: exactly ONE entry — the current selection
+  // (or the primary). /auth/select-property is not a cancelled read, so a
+  // picker would only offer switches that 401; and resolveSessionScope leaves
+  // a cancelled session unscoped, so its reads stay customer-wide as today.
+  if (req.customer && req.customer.active !== true && selected.key) {
+    const only = entries.filter((e) => e.key === selected.key);
+    return { properties: only, selected };
+  }
+  return { properties: entries, selected };
+}
+
+// The signed-in profile's property scope for one request:
+//   { customerId, enabled, multi, property }
+// enabled=false (gate off) → callers keep today's customer-wide reads.
+// multi=false (0–1 active properties) → same: no property predicate at all,
+// so single-home customers are byte-for-byte unaffected.
+// property = the validated claim's row, else the primary, else the first.
+// Scope shape: { customerId, enabled, multi, scoped, closed, property }
+//   enabled  — the gate is on and the session is not cancelled
+//   property — the validated claim's row, else the primary, else the first
+//   multi    — 2+ active properties (drives the picker)
+//   scoped   — the property predicate applies: 2+ active properties, OR the
+//              resolved row is NOT the primary (a lone secondary after staff
+//              retired the primary must not inherit the primary's unstamped
+//              visits — codex #4207 r2)
+//   closed   — the profile HAS property rows but every one is retired: no
+//              house to show anything under, so the reads match nothing
+//              (the picker omits such profiles too). A profile that never
+//              had a row keeps today's customer-wide reads.
+async function resolveSessionScope(req, knex = db) {
+  const customerId = req.customerId;
+  const unscoped = { customerId, enabled: false, multi: false, scoped: false, closed: false, property: null };
+  // Gate off — or a C4 cancelled read-only session (req.customerInactive):
+  // no property scoping at all, today's customer-wide reads.
+  if (!appPropertyScopeEnabled() || req.customerInactive === true) return unscoped;
+  const readActiveRows = () => knex('customer_properties')
+    .where({ customer_id: customerId, active: true })
+    .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
+    .select('id', 'is_primary', 'label', 'relationship', 'occupancy_type', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+  // READ first. This resolver runs on every scoped read — including the
+  // tracker's 15-second poll — and ensurePrimaryProperty opens a transaction
+  // that takes FOR UPDATE on the customers row before it checks anything
+  // (codex #4207 GitHub r1 P2): steady-state polling must not queue billing
+  // and scheduling writes behind a lock it never needed. The lazy primary is
+  // attempted only for a profile with NO row at all (never had one); once it
+  // exists, or once every row is retired, this is a plain read.
+  let rows = await readActiveRows();
+  if (!rows.length) {
+    const everHadRow = !!(await knex('customer_properties').where({ customer_id: customerId }).first('id'));
+    if (!everHadRow) {
+      const customerProperties = require('./customer-properties');
+      await customerProperties.ensurePrimaryProperty(customerId).catch(() => {});
+      rows = await readActiveRows();
+    }
+    if (!rows.length) return { customerId, enabled: true, multi: false, scoped: everHadRow, closed: everHadRow, property: null };
+  }
+  const property = (req.propertyId && rows.find((r) => String(r.id) === String(req.propertyId)))
+    || rows.find((r) => r.is_primary === true)
+    || rows[0];
+  const multi = rows.length > 1;
+  // One active row that IS the primary: today's customer-wide reads —
+  // unless the profile also has a RETIRED row (GitHub codex r4 P1): visits
+  // still stamped to a retired secondary must not surface, actionable,
+  // under the remaining primary. Keep the predicate (primary OR unstamped)
+  // whenever a retired row exists. A profile that never had a second row is
+  // byte-identical to today.
+  let scoped = multi || property.is_primary !== true;
+  if (!scoped) {
+    const retiredRow = await knex('customer_properties').where({ customer_id: customerId, active: false }).first('id');
+    scoped = !!retiredRow;
+  }
+  return { customerId, enabled: true, multi, scoped, closed: false, property };
+}
+
+// The visit rule. A property's visits are the customer's visits stamped with
+// that property, plus UNSTAMPED visits when the property is the primary —
+// the same reading dispatch applies to a row with property_id NULL. Applied
+// only when the scope is enabled AND the customer has 2+ active properties.
+function scopeVisitsToProperty(qb, scope, alias = 'scheduled_services') {
+  qb.where(`${alias}.customer_id`, scope.customerId);
+  return applyPropertyPredicate(qb, scope, alias);
+}
+
+// The property half of the visit rule alone — for queries that already carry
+// their own customer predicate (the schedule list, confirm/reschedule
+// lookups, the tracking canonical query). No-op unless the scope is enabled
+// AND the customer has 2+ active properties, so gate-off and single-home
+// queries stay byte-identical to today's.
+function applyPropertyPredicate(qb, scope, alias = 'scheduled_services') {
+  if (!scope || !scope.enabled || !scope.scoped) return qb;
+  // Every property retired: nothing to show a visit under — match no row
+  // (ids are never NULL; the fakes in every route test know whereNull).
+  if (scope.closed || !scope.property) return qb.whereNull(`${alias}.id`);
+  const column = `${alias}.property_id`;
+  const { id, is_primary: isPrimary } = scope.property;
+  return qb.where(function () {
+    this.where(column, id);
+    if (isPrimary === true) this.orWhereNull(column);
+  });
+}
+
+// Distribute visit rows (ordered date asc, window asc) onto the unified
+// entries and keep each entry's FIRST visit: Map<entry.key, visit>. Same
+// reading as the visit rule — a profile with one entry owns every visit of
+// that customer; on a multi-property profile a stamped visit belongs to the
+// entry with that property, an unstamped one to the PRIMARY entry only (a
+// profile whose primary was retired has no owner for them — exactly what
+// applyPropertyPredicate shows), and a visit stamped to a property that is
+// no longer listed belongs to nobody.
+function assignVisitsToEntries(entries, visits) {
+  const byCustomer = new Map();
+  for (const entry of entries) {
+    const key = String(entry.customerId);
+    if (!byCustomer.has(key)) byCustomer.set(key, []);
+    byCustomer.get(key).push(entry);
+  }
+  const next = new Map();
+  for (const visit of visits) {
+    const mine = byCustomer.get(String(visit.customer_id)) || [];
+    if (!mine.length) continue;
+    let target = null;
+    // A stamped visit belongs to the entry with that property — a stamp to
+    // a property no longer listed (retired) belongs to nobody, even on a
+    // profile with one remaining primary (GitHub codex r4 P1). An unstamped
+    // visit belongs to the primary entry; a profile-keyed entry (no saved
+    // row, propertyId null) is its own primary and can only ever have
+    // unstamped visits.
+    if (visit.property_id) target = mine.find((e) => e.propertyId != null && String(e.propertyId) === String(visit.property_id)) || null;
+    else target = mine.find((e) => e.isPrimaryProperty) || null;
+    if (target && !next.has(target.key)) next.set(target.key, visit);
+  }
+  return next;
+}
+
+// True when the session is scoped to a NON-primary saved property — the one
+// case where customer-wide self-serve surfaces (the re-service picker, its
+// request guard) must step aside, because they act on the primary address.
+function isSecondarySelection(scope) {
+  if (!scope || !scope.enabled || !scope.scoped) return false;
+  // All retired (closed): the primary mirror is a retired address too.
+  if (scope.closed || !scope.property) return true;
+  return scope.property.is_primary !== true;
+}
+
+// The selection a scoped READ was actually resolved to (uncapped codex r1m
+// P1) — for /auth/me and the reads that carry a resolved scope (/schedule,
+// /schedule/next, /tracking/*, /services?propertyScoped=1). Never the raw
+// token claim: this names the fallback the server chose — a claim-less multi-property session → the primary's id, a
+// lone secondary after the primary was retired → that secondary, every row
+// retired → closed. propertyId is null when no property predicate applied
+// (single home, never-had-row profile) or the scope is closed — the client
+// reads null as "the primary / the profile" and `closed` as "no house".
+function resolvedScopePayload(scope) {
+  if (!scope || !scope.enabled) return { enabled: false, propertyId: null, closed: false };
+  return {
+    enabled: true,
+    propertyId: scope.scoped && scope.property ? String(scope.property.id) : null,
+    closed: scope.closed === true,
+  };
+}
+
+module.exports = {
+  accountPropertyIds,
+  resolvePrimaryProfileId,
+  appPropertyScopeEnabled,
+  resolvedScopePayload,
+  accountSavedProperties,
+  resolveSessionScope,
+  scopeVisitsToProperty,
+  applyPropertyPredicate,
+  assignVisitsToEntries,
+  isSecondarySelection,
+  _test: { savedPropertyEntry, selectedEntryFor },
+};

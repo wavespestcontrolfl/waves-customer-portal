@@ -535,6 +535,20 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.deleted).toBe(true);
   });
 
+  it.each([
+    ['sms', 'push', 'push'], ['push', 'sms', null],
+    ['both', 'push', 'push'], ['push', 'email', 'email'], ['email', 'push', null],
+    [null, 'push', 'push'], ['push', null, null],
+  ])('notification_prefs: payment problems merge %s + %s preserves the least-SMS choice', async (winner, loser, expected) => {
+    const { trx, state } = stubTrx({
+      winnerRow: { customer_id: 'W', payment_issue_channel: winner },
+      loserRow: { customer_id: 'L', payment_issue_channel: loser },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated?.payment_issue_channel ?? null).toBe(expected);
+    expect(state.deleted).toBe(true);
+  });
+
   it('property_preferences: empty jsonb defaults ([]/{}) count as empty; real details copy stringified', async () => {
     const { trx, state } = stubTrx({
       winnerRow: { id: 'p1', customer_id: 'W', special_features: [], pets_structured: {}, watering_days: null, created_at: 'x', updated_at: 'x' },
@@ -833,12 +847,12 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
-  it('registers irrigation_week_plans with the keep-sent handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
-    const { UNIQUE_COLLISION_HANDLERS, repointWeekPlansKeepSent } = dedupe._test;
-    expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointWeekPlansKeepSent);
+  it('registers irrigation_week_plans with the keep-available handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointWeekPlansKeepAvailable } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointWeekPlansKeepAvailable);
   });
 
-  describe('repointWeekPlansKeepSent (codex #3565 gh-r15: the delivered snapshot survives)', () => {
+  describe('repointWeekPlansKeepAvailable (codex #3565 gh-r15: the delivered snapshot survives)', () => {
     // Minimal in-memory irrigation_week_plans with the (customer_id,
     // week_ending) unique enforced on update, so the handler's collision
     // branches run against real row state.
@@ -883,7 +897,49 @@ describe('executeMerge', () => {
       trx.rows = rows;
       return trx;
     };
-    const { repointWeekPlansKeepSent } = dedupe._test;
+    const { repointWeekPlansKeepAvailable } = dedupe._test;
+
+    it('retains an app publication over a draft without inventing email delivery', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, published_at: '2026-08-24T10:00:00Z' },
+      ]);
+      await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(trx.rows).toEqual([{ id: 'l1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, published_at: '2026-08-24T10:00:00Z' }]);
+    });
+
+    it('keeps the winner when both plans are published', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, published_at: '2026-08-24T10:00:00Z' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, published_at: '2026-08-24T11:00:00Z' },
+      ]);
+      await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(trx.rows.map(row => row.id)).toEqual(['w1']);
+      expect(trx.rows[0].sent_at).toBeNull();
+    });
+
+    it.each([
+      [WINNER, 'stamped'], [LOSER, 'stamped'],
+      [WINNER, 'provider_accepted'], [LOSER, 'provider_accepted'],
+    ])('keeps %s actual email decision over a different publication (%s)', async (emailedCustomer, evidence) => {
+      const emailedId = emailedCustomer === WINNER ? 'w1' : 'l1';
+      const rows = [WINNER, LOSER].map((customerId, index) => ({
+        id: index === 0 ? 'w1' : 'l1', customer_id: customerId, week_ending: '2026-08-23',
+        decision_hash: `hash-${customerId}`,
+        sent_at: customerId === emailedCustomer && evidence === 'stamped' ? '2026-08-24T10:00:00Z' : null,
+        published_at: customerId === emailedCustomer ? null : '2026-08-24T09:00:00Z',
+      }));
+      const messages = evidence === 'provider_accepted' ? [{
+        trigger_event_id: `irrigation.weekly:${emailedCustomer}:2026-08-23`, status: 'sent',
+        categories: JSON.stringify([`plan:hash-${emailedCustomer}`]),
+      }] : [];
+      const trx = fakeTrx(rows, messages);
+      await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(trx.rows).toEqual([expect.objectContaining({
+        id: emailedId, customer_id: WINNER, decision_hash: `hash-${emailedCustomer}`,
+        sent_at: evidence === 'stamped' ? '2026-08-24T10:00:00Z' : 'NOW()',
+      })]);
+    });
 
     it('moves a non-colliding week and drops the loser copy when the winner already SENT that week', async () => {
       const trx = fakeTrx([
@@ -891,7 +947,7 @@ describe('executeMerge', () => {
         { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' },
         { id: 'l2', customer_id: LOSER, week_ending: '2026-08-16', sent_at: '2026-08-17T10:00:00Z' },
       ]);
-      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      const out = await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/moved 1, replaced 0 .* dropped 1/);
       expect(trx.rows.map((r) => [r.id, r.customer_id]).sort()).toEqual([['l2', WINNER], ['w1', WINNER]]);
     });
@@ -901,7 +957,7 @@ describe('executeMerge', () => {
         { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null },
         { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' },
       ]);
-      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      const out = await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/replaced 1/);
       expect(trx.rows).toEqual([{ id: 'l1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' }]);
     });
@@ -915,7 +971,7 @@ describe('executeMerge', () => {
         // A pre-provider failure on the winner's side is not a delivery.
         { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'failed', categories: JSON.stringify(['irrigation', 'plan:hash-w']) },
       ]);
-      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      const out = await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/replaced 1 .* stamped 1/);
       // The accepted-but-unstamped survivor is stamped so the report can render it.
       expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, 'NOW()']]);
@@ -926,7 +982,7 @@ describe('executeMerge', () => {
         { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
         { id: 'l2', customer_id: LOSER, week_ending: '2026-08-16', sent_at: null, decision_hash: 'hash-old' },
       ], [{ trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'delivered', categories: JSON.stringify(['plan:hash-l']) }]);
-      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      const out = await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/moved 2, .* stamped 1/);
       expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, 'NOW()'], ['l2', WINNER, null]]);
     });
@@ -939,7 +995,7 @@ describe('executeMerge', () => {
         { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-w']) },
         { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-l']) },
       ]);
-      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      const out = await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/replaced 1 .* stamped 0/);
       expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, '2026-08-24T10:01:00Z']]);
     });
@@ -952,7 +1008,7 @@ describe('executeMerge', () => {
         { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'delivered', categories: JSON.stringify(['plan:hash-w']) },
         { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-l']) },
       ]);
-      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      const out = await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/replaced 0 .* dropped 1 duplicate row\(s\), stamped 1/);
       expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['w1', WINNER, 'NOW()']]);
     });
@@ -962,7 +1018,7 @@ describe('executeMerge', () => {
         { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
         { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
       ], [{ trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-older']) }]);
-      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      const out = await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/replaced 0 .* dropped 1/);
       expect(trx.rows.map((r) => r.id)).toEqual(['w1']);
     });
@@ -972,7 +1028,7 @@ describe('executeMerge', () => {
         { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null },
         { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null },
       ]);
-      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      const out = await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/replaced 0 .* dropped 1/);
       expect(trx.rows.map((r) => r.id)).toEqual(['w1']);
     });
@@ -980,7 +1036,7 @@ describe('executeMerge', () => {
     it('rethrows a non-unique failure', async () => {
       const trx = fakeTrx([{ id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null }]);
       trx.transaction = async () => { throw new Error('connection reset'); };
-      await expect(repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER)).rejects.toThrow('connection reset');
+      await expect(repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER)).rejects.toThrow('connection reset');
     });
   });
 
@@ -996,6 +1052,23 @@ describe('executeMerge', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
     expect(result.repointed['customer_tags.customer_id']).toMatch(/moved 1, dropped 1/);
     expect(state.tagsDropped).toBe(1);
+  });
+
+  it('retains immutable field credit ownership while merging ordinary account references', async () => {
+    const { trx, state } = buildTrx({
+      winner: { id: WINNER, phone: '+19995550003' }, loser: { id: LOSER, phone: '9995550003' },
+      fkRows: [
+        { table_name: 'field_credit_allocations', column_name: 'customer_id' },
+        { table_name: 'leads', column_name: 'customer_id' },
+      ],
+      updates: { field_credit_allocations: 1 },
+    });
+    db.transaction.mockImplementation(async fn => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.repointUpdates).not.toContain('field_credit_allocations');
+    expect(result.repointed['field_credit_allocations.customer_id']).toBeUndefined();
+    expect(state.repointUpdates).toContain('leads');
+    expect(state.retired).toBeTruthy();
   });
 
   it('repoints customer-typed polymorphic recipients (notifications, email_messages)', async () => {

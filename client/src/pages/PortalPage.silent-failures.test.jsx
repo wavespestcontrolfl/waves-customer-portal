@@ -4,8 +4,13 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const native = vi.hoisted(() => ({ enabled: false }));
+vi.mock('../native/platform', async (importOriginal) => ({
+  ...await importOriginal(), isNativeApp: () => native.enabled,
+}));
 
 // Any api method not explicitly mocked returns a forever-pending promise, so
 // untested widgets sit in their loading states instead of crashing the render.
@@ -23,9 +28,11 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { ScheduleTab, PropertyTab, ServiceTracker, DashboardTab } from './PortalPage';
+import { ScheduleTab, PropertyTab, ServiceTracker, DashboardTab, ServicesTab } from './PortalPage';
 import NotificationBell from '../components/NotificationBell';
 import InstallPrompt from '../components/InstallPrompt';
+import { PortalReadProvider } from '../hooks/usePortalRead';
+import { PortalRefreshArea } from '../components/portal/PortalRefresh';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -36,6 +43,8 @@ const customer = {
 const futureDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 beforeEach(() => {
+  native.enabled = false;
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   api.getSchedule.mockResolvedValue({ upcoming: [] });
@@ -64,7 +73,153 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('open service reports', () => {
+  it('retains previously loaded older visits when going offline and revisiting the tab', async () => {
+    api.getServices.mockResolvedValueOnce({ services: [{ id: 'recent', type: 'Recent fixture treatment', date: '2024-02-01' }], total: 2 })
+      .mockResolvedValueOnce({ services: [{ id: 'older', type: 'Older fixture treatment', date: '2024-01-01' }] });
+    const view = (show) => <PortalReadProvider enabled><PortalRefreshArea>{show && <ServicesTab />}</PortalRefreshArea></PortalReadProvider>;
+    const { rerender } = render(view(true));
+    fireEvent.click(await screen.findByRole('button', { name: 'Load More Visits', exact: true }));
+    await screen.findByRole('button', { name: /Older fixture treatment/ });
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    expect(screen.getByText('Older fixture treatment', { exact: true })).toBeInTheDocument();
+    rerender(view(false));
+    rerender(view(true));
+    expect(await screen.findByText('Older fixture treatment', { exact: true })).toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['refresh', 'offline'])('keeps the existing report iframe mounted during %s', async (transition) => {
+    native.enabled = true;
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    const visits = { services: [{ id: 'visit-report', date: futureDate, type: 'Fixture treatment', reportUrl: '/report/fixture' }] };
+    let finishRead;
+    api.getServices.mockResolvedValueOnce(visits).mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }));
+    render(<PortalReadProvider enabled><PortalRefreshArea><ServicesTab /></PortalRefreshArea></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: /Fixture treatment/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Download', exact: true }));
+    const frame = screen.getByRole('dialog').querySelector('iframe');
+    expect(frame).not.toBeNull();
+    if (transition === 'offline') {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+      fireEvent(window, new Event('offline'));
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    }
+    expect(screen.getByRole('heading', { name: 'Saved completed visits' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog').querySelector('iframe')).toBe(frame);
+    if (transition === 'offline') {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+      fireEvent(window, new Event('online'));
+    }
+    await act(async () => finishRead(visits));
+    expect(screen.getByRole('dialog').querySelector('iframe')).toBe(frame);
+    fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
+    expect(document.body.style.position).not.toBe('fixed');
+  });
+});
+
+describe('dashboard appointment confirmation', () => {
+  it('keeps billing available and the next visit read-only when its refresh fails', async () => {
+    api.getBalance.mockResolvedValue({ currentBalance: 123 });
+    api.getNextService.mockResolvedValueOnce({ next: { id: 'visit-next', date: futureDate, serviceType: 'Next fixture treatment', customerConfirmed: false } })
+      .mockRejectedValueOnce(new Error('Next visit unavailable'));
+    render(<PortalReadProvider enabled><PortalRefreshArea><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></PortalRefreshArea></PortalReadProvider>);
+    await screen.findByRole('button', { name: 'Confirm Visit', exact: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    await screen.findByText('Couldn’t refresh these details. Showing the last loaded information.', { exact: true });
+    expect(screen.getByRole('heading', { name: 'Saved next visit' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm Visit', exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Pay now/ })).toBeEnabled();
+  });
+
+  it('keeps the rest of Home available when refreshing the latest completed visit fails', async () => {
+    api.getBalance.mockResolvedValue({ currentBalance: 123 });
+    api.getNextService.mockResolvedValue({ next: { id: 'visit-next', date: futureDate, serviceType: 'Next fixture treatment', customerConfirmed: false } });
+    api.getServices.mockResolvedValueOnce({ services: [{ id: 'visit-last', date: '2024-01-01', type: 'Completed fixture treatment' }] })
+      .mockRejectedValueOnce(new Error('Latest visit unavailable'));
+    render(<PortalReadProvider enabled><PortalRefreshArea><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></PortalRefreshArea></PortalReadProvider>);
+    await screen.findByText('Completed fixture treatment');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm Visit', exact: true })).toBeEnabled());
+    expect(screen.getByRole('heading', { name: 'Saved completed visit' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Pay now/ })).toBeEnabled();
+    expect(screen.getByText('Completed fixture treatment', { exact: true })).toBeInTheDocument();
+  });
+
+  it('does not confirm a replacement appointment when an earlier confirmation finishes', async () => {
+    let finishConfirmation;
+    api.confirmAppointment.mockImplementationOnce(() => new Promise(resolve => { finishConfirmation = resolve; }));
+    api.getNextService.mockResolvedValueOnce({ next: {
+      id: 'visit-a', date: futureDate, serviceType: 'First appointment', customerConfirmed: false,
+    } }).mockResolvedValue({ next: {
+      id: 'visit-b', date: futureDate, serviceType: 'Replacement appointment', customerConfirmed: false,
+    } });
+    render(<PortalReadProvider enabled><PortalRefreshArea><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></PortalRefreshArea></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Visit', exact: true }));
+    expect(api.confirmAppointment).toHaveBeenCalledWith('visit-a');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    expect(await screen.findByText('Replacement appointment')).toBeInTheDocument();
+    await act(async () => { finishConfirmation({ success: true }); });
+    await waitFor(() => expect(api.getNextService).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole('button', { name: 'Confirm Visit', exact: true })).toBeEnabled();
+    expect(screen.queryByText('Confirmed', { exact: true })).not.toBeInTheDocument();
+  });
+});
+
 describe('schedule survives notification-preference failures', () => {
+  it('revalidates the full schedule when confirmation overlaps a refresh', async () => {
+    let confirm;
+    let staleRefresh;
+    let canonicalRefresh;
+    const oldSchedule = { upcoming: [{ id: 'visit-a', date: futureDate, serviceType: 'Original fixture appointment', status: 'pending', customerConfirmed: false, windowStart: '09:00' }] };
+    api.confirmAppointment.mockImplementationOnce(() => new Promise(resolve => { confirm = resolve; }));
+    api.getSchedule.mockResolvedValueOnce(oldSchedule)
+      .mockImplementationOnce(() => new Promise(resolve => { staleRefresh = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { canonicalRefresh = resolve; }));
+    render(<PortalReadProvider enabled><PortalRefreshArea><ScheduleTab customer={customer} properties={[]} /></PortalRefreshArea></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: /Confirm/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    await act(async () => confirm({ success: true }));
+    expect(api.getSchedule).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole('heading', { name: 'Saved upcoming visits' })).toBeInTheDocument();
+    await act(async () => canonicalRefresh({ upcoming: [{ id: 'visit-b', date: futureDate, serviceType: 'Replacement fixture appointment', status: 'pending', customerConfirmed: false, windowStart: '10:00' }] }));
+    await act(async () => staleRefresh(oldSchedule));
+    expect(screen.getByText('Replacement fixture appointment')).toBeInTheDocument();
+    expect(screen.queryByText('Original fixture appointment')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Confirm/i })).toBeEnabled();
+  });
+
+  it('refreshes the next-visit summaries for the other properties on the account', async () => {
+    const properties = [{ id: customer.id, profileLabel: 'Home' }, { id: 'cust-2', profileLabel: 'Second property' }];
+    api.getAccountUpcoming.mockResolvedValueOnce({ properties: [{ id: 'cust-2', next: {
+      date: futureDate, serviceType: 'Original other-property service',
+    } }] }).mockResolvedValue({ properties: [{ id: 'cust-2', next: {
+      date: futureDate, serviceType: 'Updated other-property service',
+    } }] });
+    render(<PortalReadProvider enabled><PortalRefreshArea><ScheduleTab customer={customer} properties={properties} /></PortalRefreshArea></PortalReadProvider>);
+    expect(await screen.findByText('Original other-property service')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    expect(await screen.findByText('Updated other-property service')).toBeInTheDocument();
+    expect(screen.queryByText('Original other-property service')).not.toBeInTheDocument();
+    expect(api.getAccountUpcoming).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes visits without replacing an unsaved service-contact edit', async () => {
+    api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [{
+      id: customer.id, label: 'Home', preferences: {},
+      serviceContacts: [{ firstName: 'Fixture', lastName: '', phone: '', email: '' }],
+    }] });
+    render(<PortalReadProvider enabled><PortalRefreshArea><ScheduleTab customer={customer} properties={[]} /></PortalRefreshArea></PortalReadProvider>);
+    const input = await screen.findByLabelText('First name');
+    fireEvent.change(input, { target: { value: 'Unsaved edit' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText('First name')).toHaveValue('Unsaved edit');
+    expect(api.getPropertyNotificationPrefs).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps valid appointments visible and offers a prefs retry', async () => {
     api.getSchedule.mockResolvedValue({
       upcoming: [{ id: 'svc-1', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', windowStart: '09:00' }],

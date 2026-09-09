@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { ArrowLeft, Leaf } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
@@ -36,7 +37,6 @@ function adminFetch(path, options = {}) {
 }
 
 const scoreColor = (v) => (v >= 75 ? D.green : v >= 50 ? D.amber : D.red);
-const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
 
 function resizeImage(dataUrl, maxEdge = 1600, quality = 0.85) {
   return new Promise((resolve) => {
@@ -100,6 +100,7 @@ const EMPTY_TURF_PROFILE = {
 // AssessmentsHubPage: the hub owns the AdminCommandHeader, so skip ours and
 // render the Back action as an inline button instead.
 export default function LawnAssessmentPanel({ embedded = false }) {
+  const isMobile = useIsMobile(768);
   // 'profile' step lets the tech edit a customer's turf profile from
   // the lawn-care surface — feeds the WaveGuard plan engine later.
   const [step, setStep] = useState("select"); // select, capture, analyzing, review, history, profile

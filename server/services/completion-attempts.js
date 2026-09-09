@@ -104,6 +104,21 @@ function completionRequestHashSegments(body) {
   return { core, mode };
 }
 
+// A packet member hashes the projection its packet snapshot persists: photo
+// bytes upload once in the record phase and are deleted from the saved form,
+// so the effects resume can only ever present the metadata. Hashing the bytes
+// would strand every photo-bearing packet on completion_resume_payload_mismatch.
+function withoutPhotoBytes(body) {
+  const projected = structuredClone(body || {});
+  if (projected.gaugePhoto && typeof projected.gaugePhoto === 'object') delete projected.gaugePhoto.data;
+  if (Array.isArray(projected.completionPhotos)) {
+    for (const photo of projected.completionPhotos) {
+      if (photo && typeof photo === 'object') delete photo.data;
+    }
+  }
+  return projected;
+}
+
 function hashCompletionRequest(body) {
   const { core, mode } = completionRequestHashSegments(body);
   return `${core}:${mode}`;
@@ -646,10 +661,10 @@ async function markCompletionAttemptSucceeded(attempt, { record, invoice, respon
   });
 }
 
-async function markCompletionAttemptSideEffectsPending(attempt, { record, response }, knex = db) {
+async function markCompletionAttemptSideEffectsPending(attempt, { record, response, deferred = false }, knex = db) {
   if (!attempt?.id) return;
   await knex('service_completion_attempts').where({ id: attempt.id }).update({
-    status: 'side_effects_running',
+    status: deferred ? 'side_effects_pending' : 'side_effects_running',
     service_record_id: record?.id || null,
     response,
     error: null,
@@ -796,6 +811,7 @@ module.exports = {
   claimCompletionAttempt,
   completionStatusForService,
   hashCompletionRequest,
+  withoutPhotoBytes,
   hasCommittedCompletionAttempt,
   // The single timer-vs-operator classification rule, shared with the
   // completion route's intake gate (liveTimeOnSitePlan) so the idempotency

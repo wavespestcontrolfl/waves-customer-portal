@@ -581,6 +581,7 @@ function assertBulkGuideTemplate(template = {}) {
 
 async function loadTemplateByKey(key) {
   const row = await db('document_templates as dt')
+    .whereNot('dt.audience', 'staff')
     .leftJoin('document_template_versions as active_version', 'dt.active_version_id', 'active_version.id')
     .where('dt.template_key', key)
     .select(

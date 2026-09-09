@@ -291,6 +291,10 @@ router.put('/preferences', async (req, res, next) => {
 
 router.post('/test', async (req, res, next) => {
   try {
+    const preview = req.body?.preview;
+    if (preview !== undefined && preview !== 'irrigation') {
+      return res.status(400).json({ error: 'Unknown notification preview' });
+    }
     const status = PushService.status();
     if (!status.available || !status.configured) {
       return res.status(503).json({
@@ -301,10 +305,12 @@ router.post('/test', async (req, res, next) => {
     }
 
     const result = await PushService.sendToAdminUser(req.technicianId, {
-      title: 'Waves test notification',
-      body: 'Push is working on this device.',
+      title: preview === 'irrigation' ? 'Your weekly watering plan' : 'Waves test notification',
+      body: preview === 'irrigation'
+        ? 'Preview only: Your watering plan is ready. Check this week’s watering guidance in the Waves app.'
+        : 'Push is working on this device.',
       url: '/admin/communications#notifications',
-      tag: 'waves-test',
+      tag: preview === 'irrigation' ? 'waves-irrigation-preview' : 'waves-test',
       priority: 'normal',
       vibrate: [150],
       silent: false,

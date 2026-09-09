@@ -1,0 +1,241 @@
+/* Customer 360 lives inside AdminLayoutV2's content box. Its height inherits
+   useAdminViewport's --admin-vh, including Safari toolbar and keyboard changes. */
+.c360-workspace-page { height: 100%; min-height: 0; }
+.c360-workspace { display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; min-height: 0; overflow: hidden; border: 1px solid #e4e4e7; border-radius: 8px; background: #fff; color: #18181b; }
+.c360-workspace-detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.c360-workspace-toolbar { display: flex; align-items: center; flex-shrink: 0; gap: 8px; min-height: 53px; padding: 4px 18px; border-bottom: 1px solid #e4e4e7; }
+.c360-embedded { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.c360-embedded > .c360-panel { container: customer360 / inline-size; position: relative; width: 100%; max-width: none; min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; scroll-padding-top: 65px; }
+.c360-embedded > .c360-panel > * { flex-shrink: 0; }
+.c360-workspace-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 18px 24px; padding: 24px 28px; }
+.c360-workspace-identity { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
+.c360-workspace-name { min-width: 0; flex: 1; }
+.c360-workspace-name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.c360-workspace-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 9px; font-size: 14px; color: #71717a; }
+.c360-workspace-actions .c360-more-action { position: relative; }
+.c360-workspace-contact { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 24px; color: #52525b; font-size: 14px; line-height: 1.6; }
+.c360-workspace-contact > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.c360-workspace-contact > div > span { overflow-wrap: anywhere; }
+.c360-additional-contacts { grid-column: 1 / -1; font-size: 14px; color: #71717a; }
+.c360-additional-contacts summary { cursor: pointer; padding: 4px 0; }
+.c360-additional-contacts > div { display: flex; gap: 8px; flex-wrap: wrap; padding: 6px 0; }
+.c360-additional-contacts a { color: #52525b; }
+.c360-embedded .c360-alerts { padding: 16px 28px; }
+.c360-embedded .c360-alerts > div { height: auto; min-height: 36px; padding: 6px 10px; font-size: 14px; white-space: normal; }
+/* Already inset by the admin shell; the sticky strip also carries safe-area
+   padding so it remains clear in Safari's expanded/standalone viewport. */
+.c360-section-navigation { position: sticky; top: 0; z-index: 20; display: flex; flex-shrink: 0; min-width: 0; padding-top: env(safe-area-inset-top, 0px); border-bottom: 1px solid #e4e4e7; background: #fff; }
+.c360-embedded .c360-tab-content { padding: 26px 28px; flex: 1 0 auto; }
+.c360-embedded .c360-overview-content { display: flex; flex-direction: column; }
+.c360-embedded .c360-overview-billing { padding: 20px; border: 1px solid #e4e4e7; border-radius: 6px; }
+.c360-embedded .c360-property-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.c360-embedded .c360-billing-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.c360-embedded .c360-section-heading { margin-top: 20px; margin-bottom: 13px; font-size: 18px; color: #27272a; }
+.c360-activity { min-width: 0; }
+.c360-activity-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e4e4e7; }
+.c360-activity-filter { width: auto; max-width: 64%; }
+.c360-activity-list { padding: 0 12px; }
+.c360-activity-event { border-bottom: 1px solid #e4e4e7; }
+.c360-activity-event:last-child { border: 0; }
+.c360-activity-event > summary { display: flex; align-items: flex-start; gap: 11px; padding: 17px 0; list-style: none; cursor: pointer; }
+.c360-activity-event > summary::-webkit-details-marker { display: none; }
+.c360-activity-icon { flex-shrink: 0; display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid #e4e4e7; border-radius: 50%; background: #fafafa; color: #71717a; }
+.c360-activity-copy { flex: 1; min-width: 0; font-size: 14px; line-height: 1.6; }
+.c360-activity-copy > strong { display: block; font-weight: 500; overflow-wrap: anywhere; }
+.c360-activity-copy > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: #71717a; margin-top: 5px; overflow-wrap: anywhere; }
+.c360-activity-date { max-width: 81px; text-align: right; font-size: 14px; line-height: 1.6; color: #71717a; flex-shrink: 0; }
+.c360-activity-description { padding: 0 3px 18px 41px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; color: #52525b; }
+.c360-activity-footer { padding: 12px; border-top: 1px solid #e4e4e7; font-size: 14px; color: #71717a; }
+/* The Waves sidebar consumes part of tablet widths. Size contract forms by
+   their available content width, so Safari's date inputs remain usable. */
+@container customer360 (max-width: 700px) {
+  .c360-contract-grid { grid-template-columns: minmax(0, 1fr); }
+  .c360-contract-grid > * { min-width: 0; grid-column: auto; }
+  .c360-contract-form-header { flex-wrap: wrap; }
+}
+@media (max-width: 1439px) and (min-width: 1280px) {
+  .c360-workspace-header { padding-left: 22px; padding-right: 22px; }
+}
+@media (max-width: 1279px) {
+  .c360-workspace { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 767px) {
+  .c360-workspace { border-radius: 6px; }
+  .c360-workspace-toolbar { gap: 5px; padding: 2px 7px; }
+  .c360-workspace-toolbar > span { display: none; }
+  .c360-workspace-header { grid-template-columns: minmax(0, 1fr); padding: 22px 17px; gap: 16px; }
+  .c360-workspace-identity { gap: 11px; }
+  .c360-workspace-name-row { gap: 7px; }
+  .c360-workspace-meta { gap: 8px; line-height: 1.5; }
+  .c360-workspace-actions { display: flex; gap: 7px; }
+  .c360-workspace-actions .c360-more-action { margin-left: 0; }
+  .c360-workspace-contact { flex-direction: column; gap: 10px; }
+  .c360-workspace-contact > div { align-items: flex-start; width: 100%; }
+  .c360-workspace-contact > div > span { padding-top: 10px; }
+  .c360-embedded .c360-alerts { padding: 12px 17px; }
+  .c360-embedded .c360-tab-content { padding: 22px 16px; }
+  .c360-embedded .c360-property-grid { grid-template-columns: 1fr; }
+  .c360-activity-toolbar { gap: 5px; padding: 9px; }
+  .c360-activity-filter { max-width: 63%; }
+  .c360-activity-list { padding: 0 9px; }
+  .c360-activity-event > summary { gap: 8px; }
+  .c360-activity-date { max-width: 66px; }
+}
+
+/* Quiet controls and clear search fields follow the existing Waves UI kit. */
+.c360-search-field { display: block; position: relative; min-width: 0; }
+.c360-search-field > svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #71717a; pointer-events: none; }
+.c360-activity-search { flex: 1 1 180px; }
+.c360-invoices-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.c360-invoice-reference { display: inline-block; padding: 7px 0; color: #27272a; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
+.c360-embedded .c360-payment-method-default { flex-shrink: 0; min-height: 26px; height: auto; padding: 2px 8px; font-size: 14px; line-height: 1.5; letter-spacing: 0; text-transform: none; white-space: nowrap; background: #fff; color: #52525b; border: 1px solid #d4d4d8; border-radius: 4px; }
+.c360-estimate-card { padding: 20px; }
+.c360-estimate-reference { display: inline-flex; gap: 6px; align-items: center; font-size: 17px; font-weight: 500; color: #27272a; text-decoration: none; overflow-wrap: anywhere; }
+.c360-estimate-reference:hover { text-decoration: underline; }
+.c360-estimate-totals { display: flex; flex-wrap: wrap; gap: 20px 38px; margin: 20px 0; padding: 15px 0; border-top: 1px solid #e4e4e7; border-bottom: 1px solid #e4e4e7; }
+.c360-estimate-totals dt { font-size: 14px; color: #71717a; }
+.c360-estimate-totals dd { margin: 6px 0 0; font-size: 18px; font-weight: 500; color: #27272a; }
+
+.c360-estimate-applications { margin: 0 0 20px; }
+.c360-estimate-applications dl { margin: 0; }
+.c360-estimate-applications dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid #f4f4f5; font-size: 14px; }
+.c360-estimate-applications dt { color: #71717a; }
+.c360-estimate-applications dd { margin: 0; text-align: right; font-weight: 500; }
+.c360-contracts-heading { margin-bottom: 22px; }
+.c360-contracts-heading p { margin-top: 7px; }
+.c360-contract-section { margin-bottom: 14px; border: 1px solid #e4e4e7; border-radius: 7px; background: #fff; }
+.c360-contract-section > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; cursor: pointer; list-style: none; }
+.c360-contract-section > summary::-webkit-details-marker { display: none; }
+.c360-contract-section > summary:focus-visible { outline: 2px solid #52525b; outline-offset: -2px; border-radius: 7px; }
+.c360-contract-section > summary strong { display: block; font-size: 16px; font-weight: 500; }
+.c360-contract-section > summary span span { display: block; margin-top: 5px; font-size: 14px; line-height: 1.5; color: #71717a; }
+.c360-contract-section > summary > svg { flex-shrink: 0; transform: rotate(-90deg); color: #71717a; }
+.c360-contract-section[open] > summary > svg { transform: rotate(0); }
+.c360-contract-section[open] > summary { border-bottom: 1px solid #e4e4e7; }
+.c360-contract-section-body { padding: 20px; }
+.c360-contract-section-body > div { margin-top: 0; margin-bottom: 0; }
+.c360-contract-section-body > div > .overflow-x-auto { margin-bottom: 0; }
+.c360-contract-form { border: 0; }
+.c360-contract-form-header { flex-direction: column; align-items: stretch; padding: 0 0 18px; }
+.c360-contract-form-header .c360-contract-form-actions { justify-content: flex-start; }
+.c360-contract-form-header > button.c360-contract-form-actions { align-self: flex-start; }
+.c360-contract-form-duplicate-title { display: none; }
+@container customer360 (max-width: 700px) {
+  .c360-contract-section > summary { padding: 16px; }
+  .c360-contract-section-body { padding: 16px; }
+  .c360-contract-form > .c360-contract-grid { padding-left: 0; padding-right: 0; }
+  .c360-contract-section-body > .c360-contract-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.c360-contract-records { display: grid; gap: 14px; }
+.c360-contract-record { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px 20px; padding: 18px; border: 1px solid #e4e4e7; border-radius: 6px; background: #fff; font-size: 14px; }
+.c360-contract-record > div { min-width: 0; }
+.c360-contract-record-document { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
+.c360-contract-record-status { text-align: right; }
+.c360-contract-record-signed { text-align: right; }
+.c360-contract-field-label { display: block; font-size: 14px; color: #71717a; margin-bottom: 4px; }
+.c360-contract-record-delivery, .c360-contract-record-actions { grid-column: 1 / -1; }
+.c360-contract-record-actions { padding-top: 14px; border-top: 1px solid #e4e4e7; }
+.c360-contract-record-delivery span { height: auto; min-height: 24px; letter-spacing: 0; text-transform: none; line-height: 1.5; padding: 3px 7px; }
+.c360-contract-record-actions > div { gap: 8px; }
+@container customer360 (max-width: 700px) {
+  .c360-contract-record { padding: 14px; gap: 12px; }
+}
+
+.c360-unread-count { display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 11px; background: #27272a; color: #fff; font-size: 14px; }
+.c360-billing-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 24px; }
+.c360-billing-content .c360-overview-billing { margin-bottom: 24px; }
+.c360-billing-content .c360-estimates { padding: 24px 0; margin-bottom: 24px; border-top: 1px solid #e4e4e7; border-bottom: 1px solid #e4e4e7; }
+.c360-tab-content > .c360-activity { margin: 28px 0; }
+.c360-details-content { margin-bottom: 28px; }
+.c360-contracts-content { margin-top: 28px; }
+.c360-directory-page { color: #18181b; }
+.customer-directory-table th:nth-child(1) { width: 20%; }
+.customer-directory-table th:nth-child(2) { width: 24%; }
+.customer-directory-table th:nth-child(3) { width: 20%; }
+.customer-directory-table th:nth-child(4) { width: 13%; }
+.customer-directory-table th:nth-child(5) { width: 17%; }
+.customer-directory-table th:last-child { width: 48px; }
+.customer-directory-identity > span { display: block; margin-top: 5px; color: #71717a; }
+.c360-directory-page .customer-directory-table button.customer-directory-name { display: block; padding: 0; border: 0; background: transparent; text-align: left; color: #18181b; font-size: 16px; font-weight: 500; min-height: 24px; line-height: 1.6; }
+.customer-directory-name:hover, .customer-directory-property a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.customer-directory-property a { color: #52525b; text-decoration: none; }
+.customer-directory-sort { display: flex; align-items: center; gap: 6px; border: 0; padding: 0; background: transparent; color: #52525b; font: inherit; }
+.customer-directory-attention > span { display: block; margin-bottom: 5px; }
+.customer-directory-attention .customer-directory-health { display: flex; align-items: center; gap: 6px; color: #52525b; }
+.customer-directory-health i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.customer-directory-actions details { position: relative; }
+.customer-directory-actions summary { display: grid; place-items: center; width: 40px; min-height: 44px; border: 1px solid #d4d4d8; border-radius: 6px; background: #fff; cursor: pointer; list-style: none; }
+.customer-directory-actions summary::-webkit-details-marker { display: none; }
+.customer-directory-actions summary:focus-visible { outline: 2px solid #52525b; outline-offset: 2px; }
+.customer-directory-editor > td { padding: 16px; }
+@media (max-width: 1100px) {
+  .customer-directory-table .customer-directory-record { position: relative; }
+  .customer-directory-identity { padding-right: 48px !important; }
+  .c360-directory-page .customer-directory-table button.customer-directory-name { min-height: 44px; }
+  .customer-directory-attention > span { grid-column: 2; }
+  .customer-directory-actions { position: absolute; top: 16px; right: 16px; }
+  .customer-directory-table .customer-directory-editor { display: block; padding: 0; }
+  .customer-directory-table .customer-directory-editor > td { padding: 0 16px 16px; }
+}
+@media (min-width: 768px) and (max-width: 1100px) {
+  .c360-workspace-header { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Operational summary follows the office's next-action order. */
+.c360-operational-summary { order: -1; display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 0 32px; margin-bottom: 24px; }
+.c360-operational-summary > section { min-width: 0; padding: 22px 0; border-bottom: 1px solid #e4e4e7; font-size: 15px; line-height: 1.65; overflow-wrap: anywhere; }
+.c360-operational-summary h2 { font-size: 15px; font-weight: 500; color: #71717a; margin-bottom: 10px; }
+.c360-operational-summary h3 { font-size: 22px; font-weight: 500; line-height: 1.35; margin-bottom: 10px; letter-spacing: -.4px; }
+.c360-operational-summary p { margin: 8px 0; }
+.c360-operational-summary ul { list-style: disc; padding-left: 18px; }
+.c360-operational-summary details { margin-top: 14px; font-size: 14px; color: #71717a; }
+.c360-operational-summary summary { cursor: pointer; color: #27272a; }
+.c360-next-service { grid-column: 1; grid-row: 1; }
+.c360-latest-message { grid-column: 1; grid-row: 2; }
+.c360-latest-service { grid-column: 1; grid-row: 3; }
+.c360-attention-summary { grid-column: 2; grid-row: 1; }
+.c360-access-summary { grid-column: 2; grid-row: 2; }
+.c360-account-summary { grid-column: 2; grid-row: 3; }
+.c360-summary-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 16px; }
+.c360-summary-excerpt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.c360-message-sheet .c360-conversation { font-size: 15px; }
+.c360-message-sheet #sms-compose-v2 { margin-top: 14px; }
+.c360-service-records { margin-top: 24px; padding: 16px 0; border-top: 1px solid #e4e4e7; }
+.c360-service-records > summary { font-size: 16px; font-weight: 500; cursor: pointer; margin-bottom: 16px; }
+.c360-unread-count { background: #fff; color: #18181b; }
+.c360-recipient-overrides > summary { cursor: pointer; font-size: 15px; padding: 14px 0; }
+.c360-sticky-identity { position: sticky; top: 0; z-index: 21; background: #fff; padding: 8px 28px; border-bottom: 1px solid #e4e4e7; font-size: 14px; font-weight: 500; }
+.c360-sticky-identity { display: none; }
+.c360-header-past .c360-sticky-identity { display: block; }
+.c360-header-past .c360-section-navigation { top: 38px; }
+@container customer360 (max-width: 800px) {
+  .c360-operational-summary { grid-template-columns: minmax(0, 1fr); }
+  .c360-operational-summary > section { grid-column: auto; grid-row: auto; }
+  .c360-embedded .c360-billing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 767px) {
+  .c360-workspace-header { gap: 10px; padding: 14px 16px; }
+  .c360-workspace-meta { margin-top: 4px; }
+  .c360-workspace-meta > span:not(:first-child) { display: none; }
+  .c360-workspace-actions { gap: 6px; }
+  .c360-workspace-contact { flex-direction: row; gap: 10px; }
+  .c360-workspace-contact > div { width: auto; }
+  .c360-workspace-contact > div > span { display: none; }
+  .c360-contact-action.ui-control { border: 0; padding: 4px; }
+  .c360-sticky-identity { padding: 8px 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .c360-operational-summary > section { padding: 18px 0; }
+  .c360-operational-summary h3 { font-size: 21px; }
+}
+.c360-operational-summary a { color: #27272a; }
+
+@media (max-width: 767px) {
+  .c360-workspace-header { position: relative; }
+  .c360-workspace-identity { padding-right: 32px; }
+  .c360-workspace-actions .c360-more-action { position: absolute; right: 10px; top: 10px; }
+}
+
+.c360-service-records { scroll-margin-top: 100px; }
+
+.c360-embedded > .c360-panel { overflow-anchor: none; }

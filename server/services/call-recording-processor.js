@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -107,7 +107,7 @@ const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, 
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
-const { classifyCall, recordVerdict } = require('./call-spam-classifier');
+const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
@@ -976,13 +976,13 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
 
 // Name normalization + nickname-aware first-name matching live in
 // utils/name-match.js (shared with the Zelle notice reconciler, 2026-09-02).
-const { normalizeNamePart, firstNameVariants, sameFirstName } = require('../utils/name-match');
+const { normalizeNamePart, firstNameVariants, sameFirstName, sameSpokenFirstName, spokenFirstNameVariants } = require('../utils/name-match');
 
 function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const customerFirst = normalizeNamePart(customer.first_name);
   if (!extractedFirst || !customerFirst) return true;
-  if (!sameFirstName(extractedFirst, customerFirst)) return false;
+  if (!sameSpokenFirstName(extractedFirst, customerFirst)) return false;
 
   const extractedLast = normalizeNamePart(extracted.last_name);
   const customerLast = normalizeNamePart(customer.last_name);
@@ -1153,6 +1153,19 @@ function summarizeKnownCaller(customer) {
     addressCity: String(customer.city || '').trim() || null,
     addressZip: String(customer.zip || '').trim() || null,
   };
+}
+
+// Carrier caller-ID (CNAM) name for the extraction prompt, from the Twilio
+// AddOns envelope the voice webhook persisted. Only when the caller is NOT
+// withheld and the lookup succeeded; a business-line or "WIRELESS CALLER"
+// style placeholder carries no name and is dropped.
+function callerIdNameForPrompt(call) {
+  try {
+    const meta = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
+    const name = String(cnamFromEnvelope(meta.addons) || '').trim();
+    if (!name || /wireless caller|unknown|unavailable|anonymous|private|^\d+$/i.test(name)) return null;
+    return name.slice(0, 80);
+  } catch (_e) { return null; }
 }
 
 // Fail-open V1 address-conflict demotion, shared by the ENFORCE path and the
@@ -2642,7 +2655,7 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
       const row = await query.orderBy('created_at', 'desc').first();
       return { lead: row || null, matchedVia: row ? 'phone' : null };
     }
-    const variants = firstNameVariants(extractedFirst);
+    const variants = spokenFirstNameVariants(extractedFirst);
     const FIRST_NORM = "LOWER(REGEXP_REPLACE(first_name, '[^a-zA-Z0-9]', '', 'g'))";
     const LAST_NORM = "LOWER(REGEXP_REPLACE(last_name, '[^a-zA-Z0-9]', '', 'g'))";
     const compatQuery = query.clone().whereRaw(
@@ -3668,18 +3681,27 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // booking txn would leave it aborted after a SQL error and doom the COMMIT,
 // rolling back the booking. The savepoint contains a conversion failure to
 // the conversion alone; the booking still commits.
-async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false }) {
+// `booking` — the scheduled_services row this conversion is about. Assessment
+// identity is derived HERE from the row (name or catalog FK via the shared
+// services/assessment-booking predicate), never supplied by callers, so every
+// entry point — the four in-file booking paths and the outbound-review
+// confirm hook — agrees on what an assessment is.
+async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, booking = null }) {
   if (!leadId) return false;
   try {
     return await trx.transaction(async (inner) => {
+      const keepOpenForAssessment = !!booking
+        && await require('./assessment-booking').isAssessmentBooking(booking, inner);
       // Quote still owed (the agent promised to send an estimate after the
-      // call): the booked appointment does NOT close the deal. Claim the lead
-      // for the customer so it can't be reused elsewhere, log the booking on
-      // its timeline, but leave the status OPEN so it stays in the leads
-      // pipeline until the quote is actually sent/worked. The customer is
-      // deliberately NOT promoted to 'won' either — their pipeline_stage keeps
-      // mirroring the open lead.
-      if (keepOpenForQuote) {
+      // call), or the booked visit is a Waves Assessment (an assessment is
+      // not a win — owner ruling 2026-09-08): the booked appointment does NOT
+      // close the deal. Claim the lead for the customer so it can't be reused
+      // elsewhere, log the booking on its timeline, but leave the status OPEN
+      // so it stays in the leads pipeline until the quote is actually
+      // sent/worked. The customer is deliberately NOT promoted to 'won'
+      // either — their pipeline_stage keeps mirroring the open lead.
+      if (keepOpenForQuote || keepOpenForAssessment) {
+        const keepOpenReason = keepOpenForQuote ? 'quote promised' : 'assessment booked';
         const ownedOrUnclaimedOpen = (q) =>
           q.whereNull('customer_id').orWhere('customer_id', customerId);
         // The reused lead can carry a CLOSED status (lost / unresponsive /
@@ -3707,19 +3729,24 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
           await inner('lead_activities').insert({
             lead_id: leadId,
             activity_type: 'appointment_booked',
-            description: 'Appointment booked by phone — lead kept OPEN: agent promised to send a quote after the call',
+            description: keepOpenForQuote
+              ? 'Appointment booked by phone — lead kept OPEN: agent promised to send a quote after the call'
+              : 'Appointment booked by phone — lead kept OPEN: an assessment is not a win',
             performed_by: 'system',
             metadata: JSON.stringify({
               customerId,
-              triggerSource: 'appointment_booked_quote_pending',
+              triggerSource: keepOpenForQuote ? 'appointment_booked_quote_pending' : 'appointment_booked_assessment',
               scheduledServiceId,
               callSid,
             }),
           });
         }
-        logger.info(`[call-proc] Lead ${leadId} kept open (quote promised) despite phone booking for ${callSid}`);
+        logger.info(`[call-proc] Lead ${leadId} kept open (${keepOpenReason}) despite phone booking for ${callSid}`);
         return false;
       }
+      // Customer 360 and lead mutations lock customer before lead. Acquire
+      // the promotion's write lock before the lead UPDATE in this savepoint.
+      if (customerId) await inner('customers').where({ id: customerId }).forNoKeyUpdate().first('id');
       // Ownership guard: leadId can come from the phone-only existing-lead
       // lookup, and a caller phone can be shared across leads. Only a lead
       // that is unclaimed (customer_id NULL) or already belongs to the
@@ -6069,6 +6096,9 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
     // booking (the duplicate-appointment path).
     knownCaller: opts.knownCaller,
+    // Carrier caller-ID name as a NAME CANDIDATE (2026-09-02..08 audit:
+    // "Smith" won over a spelled S-M-Y-T-H-E and caller ID SMYTHE).
+    callerIdName: opts.callerIdName,
     // Cross-call threading: prior call from this number, so a continuation
     // completes the earlier record instead of restarting from nothing.
     priorCall: opts.priorCall,
@@ -6267,6 +6297,85 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
 }
 
 // ══════════════════════════════════════════════════════════════
+// ── Tech follow-up calls ──────────────────────────────────────────────────
+// A technician's own-line call from the visit brief (source tech-click,
+// routes/tech-line.js) is a field follow-up to a visit the bridge already
+// linked to its customer — not a lead call. None of the lead pipeline
+// applies to it: customer/lead upserts, the routing gate's triage cards,
+// auto-booking and the approved-but-unbooked audit, the new_lead drip and
+// newsletter enrollment, follow-up SMS, the "Inbound call" interaction, CSR
+// scoring. processRecording finalizes such a call at ONE seam (below the
+// extraction, above voicemail routing) instead of excluding the source
+// branch by branch (codex #4072 r1 / r4 / r6 / r7 / r8).
+function isTechFollowUpCall(call) {
+  return call?.source === 'tech-click';
+}
+
+// Commitments — what Waves promised and what the caller agreed to, as
+// evidence-linked rows (services/call-commitments.js). Runs after
+// finalization, fenced on this pass's GENERATION (the token is already
+// cleared by finalization — same fence the detached estimator lanes use).
+// Seeds from the V2 extraction plus one bounded model pass; a human-touched
+// row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never blocks
+// the call.
+async function recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration }) {
+  if (!transcription || extracted?.is_spam || !isEnabled('callCommitments')) return;
+  try {
+    const commitmentsStartedAt = Date.now();
+    const settled = await db('call_log').where({ id: call.id }).first('transcript_structured', 'processing_status');
+    if (settled && settled.processing_status !== 'spam') {
+      const commitmentSummary = await require('./call-commitments').recordCallCommitments({
+        conn: db,
+        call: { ...call, transcript_structured: settled.transcript_structured ?? call.transcript_structured },
+        transcript: transcription,
+        v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
+        procGeneration,
+      });
+      logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+  }
+}
+
+// Terminal write for a tech follow-up call: the transcript is already
+// stored; this lands the extraction, summary and sentiment the Calls tab
+// reads, marks the call processed and releases the claim in one
+// token-fenced statement, then records commitments. No lead, booking,
+// automation, SMS, interaction or CSR write ever runs for the call.
+async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result }) {
+  const written = await db('call_log')
+    .where({ id: call.id })
+    .where('processing_token', procToken)
+    .update({
+      ai_extraction: JSON.stringify(extracted),
+      call_summary: extracted.call_summary || null,
+      transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
+      sentiment: extracted.sentiment || null,
+      processing_status: 'processed',
+      processing_token: null,
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",
+        [JSON.stringify({
+          ...stageTimings,
+          total_ms: Date.now() - processingStartedAt.getTime(),
+          generation: procGeneration,
+          started_at: processingStartedAt.toISOString(),
+          finished_at: new Date().toISOString(),
+          tech_follow_up: true,
+        })],
+      ),
+      updated_at: new Date(),
+    });
+  if (!written) {
+    logger.warn(`[call-proc] Skipped tech follow-up terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
+    return { success: false, skipped: true, reason: 'terminal_write_ownership_lost', callSid };
+  }
+  await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
+  logger.info(`[call-proc] Completed tech follow-up processing for ${maskSid(callSid)}: customer=${call.customer_id || null}`);
+  return { success: true, callSid, customerId: call.customer_id || null, extracted, techFollowUp: true };
+}
+
 const CallRecordingProcessor = {
   // Re-used by the bounce audio-reverify lane (email-bounce-reverify.js) —
   // full pipeline incl. the letter-fidelity contact-dictation second pass,
@@ -7407,6 +7516,7 @@ const CallRecordingProcessor = {
           callId: call.id,
           bookableServiceNames,
           knownCaller,
+          callerIdName: callerIdNameForPrompt(call),
           priorCall,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
@@ -7491,6 +7601,10 @@ const CallRecordingProcessor = {
       // A NULL call_nature stays out of the hold: the schema reserves null
       // for truly indeterminate calls, where legacy creation behavior stands.
       'other',
+      // A vendor / referral partner is never a customer, whether V1 called
+      // the call spam or V2 cleared it (codex r3 P2): the cleared call keeps
+      // its summary and disposition, not a customer row.
+      'vendor_or_partner',
     ]);
     const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
       && v2Result?.status === 'valid'
@@ -7523,6 +7637,14 @@ const CallRecordingProcessor = {
         // like the enforce path's approved-booking re-assert (codex P2).
         if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
+    }
+
+    // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
+    // Extraction is final here and no side effect has run yet: the call
+    // keeps its transcript, extraction, summary and commitments, and
+    // nothing of the lead pipeline below touches it.
+    if (isTechFollowUpCall(call)) {
+      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
     }
 
     // ── Voicemail routing ──
@@ -7854,6 +7976,7 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
     // below reads it, so the ask does not depend on the routing mode
@@ -8268,6 +8391,12 @@ const CallRecordingProcessor = {
               ? routingResult.appointmentBlockingFlags
               : [routingResult.reason || 'routing_rejected'];
             const triageReasons = blockingReasons;
+            // A held scheduling CHANGE (cancel / reschedule / coordination on
+            // an existing visit) is owed work. The card files below, but
+            // review_status is driven by bridgeNeedsConfirmation alone, so the
+            // call itself looked fully processed (2026-09-02..08 audit: a
+            // cancellation, two reschedules and a re-treat with no owner).
+            if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
@@ -13141,6 +13270,7 @@ const CallRecordingProcessor = {
                       scheduledServiceId: primaryRow.id,
                       callSid,
                       keepOpenForQuote: callQuotePromised,
+                      booking: primaryRow,
                     });
                   }
                   if (isAttachedManualBooking) {
@@ -13277,6 +13407,7 @@ const CallRecordingProcessor = {
                       scheduledServiceId: primaryRow.id,
                       callSid,
                       keepOpenForQuote: callQuotePromised,
+                      booking: primaryRow,
                     });
                   }
                   // Deliberately NO ensureCallFollowUpVisit on an attached
@@ -13616,6 +13747,7 @@ const CallRecordingProcessor = {
                       scheduledServiceId: created.id,
                       callSid,
                       keepOpenForQuote: callQuotePromised,
+                      booking: created,
                     });
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
@@ -13659,6 +13791,7 @@ const CallRecordingProcessor = {
                       scheduledServiceId: existingByKey.id,
                       callSid,
                       keepOpenForQuote: callQuotePromised,
+                      booking: existingByKey,
                     });
                   }
                   // This is exactly the retry whose first attempt may have
@@ -14619,7 +14752,14 @@ const CallRecordingProcessor = {
                     try {
                       const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
                       const freshCustomer = await db('customers').where({ id: customerId }).first();
-                      const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
+                      // The visit's NON-primary saved property owns the confirmation
+                      // toggle (app property scope, PR 3): resolve the row through
+                      // the visit; an unreadable property under enforcement reads as
+                      // opted out below (held email, never a send on unknown settings).
+                      const prefsRow = await require('./appointment-reminders').visitPrefsRow(customerId, scheduledServiceId);
+                      if (!prefsRow || prefsRow.__prefsUnavailable === true) {
+                        throw new Error('notification preferences unreadable for the call-booking confirmation');
+                      }
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
                       const { filterRecipientsByOptin } = require('./recipient-optin');
                       const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
@@ -15738,7 +15878,7 @@ const CallRecordingProcessor = {
           // a terminal status with a log line and nothing else — no review
           // flag, no card, no sweep — the one honest-failure state nobody
           // could see.
-          ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
+          ...(bridgeNeedsConfirmation.length || schedulingChangeHeld || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
             ? { review_status: 'open' } : {}),
           metadata: db.raw(
             "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",
@@ -16043,31 +16183,8 @@ const CallRecordingProcessor = {
     if (finalized > 0) {
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
 
-      // Commitments — what Waves promised and what the caller agreed to, as
-      // evidence-linked rows (services/call-commitments.js). Runs after
-      // finalization, fenced on this pass's GENERATION (the token is already cleared by
-      // finalization — same fence the detached estimator lanes use). Seeds
-      // from the V2 extraction plus one bounded model pass; a human-touched
-      // row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never
-      // blocks the call.
-      if (transcription && !extracted.is_spam && isEnabled('callCommitments')) {
-        try {
-          const commitmentsStartedAt = Date.now();
-          const settled = await db('call_log').where({ id: call.id }).first('transcript_structured', 'processing_status');
-          if (settled && settled.processing_status !== 'spam') {
-            const commitmentSummary = await require('./call-commitments').recordCallCommitments({
-              conn: db,
-              call: { ...call, transcript_structured: settled.transcript_structured ?? call.transcript_structured },
-              transcript: transcription,
-              v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
-              procGeneration,
-            });
-            logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
-          }
-        } catch (err) {
-          logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
-        }
-      }
+      // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
+      await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization
@@ -16791,6 +16908,9 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  isTechFollowUpCall,
+  finalizeTechFollowUpCall,
+  recordCommitmentsStep,
   recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,

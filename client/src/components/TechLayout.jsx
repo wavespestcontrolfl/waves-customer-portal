@@ -3,6 +3,8 @@ import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
+import TechFieldShell from './tech/TechFieldShell';
+import useStaffDocumentsAvailable from '../hooks/useStaffDocumentsAvailable';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -25,6 +27,7 @@ const NAV_ITEMS = [
   // for technician logins (the estimate APIs 403 them regardless).
   { path: '/tech/estimate', icon: '📋', label: 'Estimate', adminOnly: true },
   { path: '/tech/protocols', icon: '📖', label: 'Protocols' },
+  { path: '/tech/documents', icon: '📄', label: 'Documents', controlledDocuments: true },
 ];
 
 export default function TechLayout() {
@@ -35,6 +38,7 @@ export default function TechLayout() {
   const [authStatus, setAuthStatus] = useState(() => (
     getAdminAuthToken() ? 'checking' : 'unauthenticated'
   ));
+  const controlledDocumentsAvailable = useStaffDocumentsAvailable(authStatus === 'ready');
 
   useEffect(() => {
     const token = getAdminAuthToken();
@@ -197,8 +201,8 @@ export default function TechLayout() {
           <button
             type="button"
             onClick={() => {
-              const next = location.pathname.startsWith('/tech')
-                ? location.pathname
+              const next = /^\/tech(?:\/|$)/i.test(location.pathname)
+                ? `${location.pathname}${location.search}`
                 : '/tech';
               navigate(`/admin/login?next=${encodeURIComponent(next)}`);
             }}
@@ -222,12 +226,14 @@ export default function TechLayout() {
     );
   }
 
+  const pathname = location.pathname.toLowerCase().replace(/\/+$/, '') || '/tech';
   const isActive = (item) => {
-    if (item.exact) return location.pathname === item.path;
-    return location.pathname.startsWith(item.path);
+    if (item.exact) return pathname === item.path;
+    return pathname.startsWith(item.path);
   };
 
   return (
+    <TechFieldShell techName={techName} techRole={techRole} documentsAvailable={controlledDocumentsAvailable}>
     <div style={{
       minHeight: '100dvh',
       background: DARK.bg,
@@ -271,7 +277,9 @@ export default function TechLayout() {
           44px links) plus the home-indicator safe area on notched iPhones. */}
       <main style={{ flex: 1, padding: '16px', paddingBottom: 'calc(80px + env(safe-area-inset-bottom, 0px))', overflowY: 'auto' }}>
         <AddToHomeScreenHint />
-        <Outlet />
+        {pathname === '/tech/documents' && !controlledDocumentsAvailable
+          ? <p style={{ fontSize: 14, color: DARK.text }}>Staff documents are unavailable.</p>
+          : <Outlet />}
       </main>
 
       {/* Bottom nav */}
@@ -288,7 +296,7 @@ export default function TechLayout() {
         padding: '8px 0 env(safe-area-inset-bottom, 8px)',
         zIndex: 50,
       }}>
-        {NAV_ITEMS.filter((item) => !item.adminOnly || techRole === 'admin').map((item) => {
+        {NAV_ITEMS.filter((item) => (!item.adminOnly || techRole === 'admin') && (!item.controlledDocuments || controlledDocumentsAvailable)).map((item) => {
           const active = isActive(item);
           return (
             <Link
@@ -312,7 +320,7 @@ export default function TechLayout() {
             >
               <span style={{ fontSize: 22 }}>{item.icon}</span>
               <span style={{
-                fontSize: 12, fontWeight: active ? 700 : 500,
+                fontSize: 14, fontWeight: active ? 700 : 500,
                 fontFamily: "'Montserrat', sans-serif",
               }}>{item.label}</span>
             </Link>
@@ -320,5 +328,6 @@ export default function TechLayout() {
         })}
       </nav>
     </div>
+    </TechFieldShell>
   );
 }

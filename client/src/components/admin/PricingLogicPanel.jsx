@@ -11,18 +11,19 @@ const canEditPricing = () => getAdminUser()?.role === "admin";
 
 const ROBOTO = "'Roboto', Arial, sans-serif";
 
+// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 const D = {
-  bg: "#F1F5F9",
+  bg: "#F4F4F5",
   card: "#FFFFFF",
-  border: "#E2E8F0",
-  teal: "#0A7EC2",
-  green: "#16A34A",
-  amber: "#F0A500",
-  red: "#C0392B",
-  purple: "#7C3AED",
-  text: "#334155",
-  muted: "#64748B",
-  white: "#fff",
+  border: "#E4E4E7",
+  teal: "#18181B",
+  green: "#15803D",
+  amber: "#A16207",
+  red: "#991B1B",
+  purple: "#18181B",
+  text: "#27272A",
+  muted: "#71717A",
+  white: "#FFFFFF",
   input: "#FFFFFF",
 };
 
@@ -35,7 +36,13 @@ const af = (p, o = {}) =>
       "Content-Type": "application/json",
       ...o.headers,
     },
-  }).then((r) => r.json());
+  }).then(async (r) => {
+    // A 401/403/500 JSON body is not data — throw so a technician's 403 on
+    // save is reported instead of reading as success (same as PricingLogicPage).
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    return body;
+  });
 
 // ── Category tabs ──
 const TABS = [
@@ -55,14 +62,16 @@ const TABS = [
 ];
 
 // Category pill color map for changelog entries
+// Explicit map so bug/leak keep their semantic red/amber while the rest
+// stay on the zinc ramp (the label carries the category).
 const CATEGORY_COLORS = {
-  bug: "#C0392B", // red
-  leak: "#F0A500", // amber
-  rule: "#0A7EC2", // blue
-  cost: "#16A34A", // green
-  architecture: "#7C3AED", // purple
-  documentation: "#64748B", // gray
-  infrastructure: "#0EA5E9", // teal
+  bug: "#991B1B", // red — a defect
+  leak: "#A16207", // amber — money leaking
+  rule: "#18181B",
+  cost: "#3F3F46",
+  architecture: "#18181B",
+  documentation: "#71717A",
+  infrastructure: "#3F3F46",
 };
 
 // ── Changelog Tab ──
@@ -1310,12 +1319,17 @@ function ConfigCard({ config, onUpdate }) {
   const handlePathUpdate = async (path, newVal) => {
     const updated = setAtPath(data, path, newVal);
     setSaving(true);
-    await af(`/admin/pricing-config/${config.config_key}`, {
-      method: "PUT",
-      body: JSON.stringify({ data: updated }),
-    });
-    onUpdate(config.config_key, updated);
-    setSaving(false);
+    try {
+      await af(`/admin/pricing-config/${config.config_key}`, {
+        method: "PUT",
+        body: JSON.stringify({ data: updated }),
+      });
+      onUpdate(config.config_key, updated);
+    } catch (e) {
+      alert("Save failed: " + e.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleRawSave = async () => {
@@ -1328,9 +1342,10 @@ function ConfigCard({ config, onUpdate }) {
       });
       onUpdate(config.config_key, parsed);
       setRawEdit(false);
-      setSaving(false);
     } catch (e) {
-      alert("Invalid JSON: " + e.message);
+      alert("Save failed: " + e.message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1765,13 +1780,18 @@ function LawnBracketsTab() {
     );
     setTracks((prev) => ({ ...prev, [activeTrack]: updated }));
     setSaving(true);
-    await af(`/admin/pricing-config/lawn-brackets/${activeTrack}`, {
-      method: "PUT",
-      body: JSON.stringify({
-        brackets: [{ sqft_bracket: sqft, tier, monthly_price: newPrice }],
-      }),
-    });
-    setSaving(false);
+    try {
+      await af(`/admin/pricing-config/lawn-brackets/${activeTrack}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          brackets: [{ sqft_bracket: sqft, tier, monthly_price: newPrice }],
+        }),
+      });
+    } catch (e) {
+      alert("Save failed: " + e.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (loading)
@@ -1929,10 +1949,14 @@ function DiscountRulesTab() {
         r.service_key === serviceKey ? { ...r, [field]: value } : r,
       ),
     );
-    await af(`/admin/pricing-config/discount-rules/${serviceKey}`, {
-      method: "PUT",
-      body: JSON.stringify({ [field]: value }),
-    });
+    try {
+      await af(`/admin/pricing-config/discount-rules/${serviceKey}`, {
+        method: "PUT",
+        body: JSON.stringify({ [field]: value }),
+      });
+    } catch (e) {
+      alert("Save failed: " + e.message);
+    }
   };
 
   if (loading)

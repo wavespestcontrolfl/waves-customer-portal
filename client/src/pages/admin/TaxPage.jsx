@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import {
   BarChart3,
   Bot,
@@ -72,7 +73,7 @@ function Badge({ children, color, small, fontSize }) {
         borderRadius: 9999,
         // fontSize override: newer surfaces hold the repo's 14px floor
         // without disturbing the legacy tabs' compact badges
-        fontSize: fontSize || (small ? 10 : 11),
+        fontSize: fontSize || 11, // UI audit F0373: compact badges hold the 11px floor
         fontWeight: 500,
         background: `${color || D.muted}22`,
         color: color || D.muted,
@@ -85,6 +86,7 @@ function Badge({ children, color, small, fontSize }) {
   );
 }
 function StatCard({ label, value, color, sub, onClick }) {
+  const isMobile = useIsMobile(640);
   return (
     <div
       onClick={onClick}
@@ -168,7 +170,6 @@ const daysUntil = (due) => {
   );
 };
 
-const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 const PRIORITY_COLORS = { high: D.red, medium: D.amber, low: D.teal };
 const STATUS_COLORS = {
   upcoming: D.blue,
@@ -237,6 +238,7 @@ const TAX_LEAF_BY_KEY = Object.fromEntries(TAX_SECTIONS.map((s) => [s.key, s]));
 // TAX RATES TAB
 // ═══════════════════════════════════════════════════════════════
 function TaxRatesTab() {
+  const isMobile = useIsMobile(640);
   const [rates, setRates] = useState([]);
   useEffect(() => {
     adminFetch("/admin/tax/rates")
@@ -310,11 +312,11 @@ function TaxRatesTab() {
               <div style={{ fontSize: 11, color: D.muted }}>
                 Zone: {r.serviceZone}
               </div>{" "}
-              <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>
+              <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
                 Effective: {fmtD(r.effectiveDate)}
               </div>
               {r.notes && (
-                <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+                <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
                   {r.notes}
                 </div>
               )}
@@ -473,7 +475,7 @@ function ServiceTaxabilityTab() {
             </Badge>
           )}
           {s.flStatuteRef && (
-            <span style={{ fontSize: 10, color: "#64748b" }}>
+            <span style={{ fontSize: 11, color: "#64748b" }}>
               {s.flStatuteRef}
             </span>
           )}
@@ -649,7 +651,7 @@ function EquipmentTab() {
         >
           {" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Name *
             </div>
             <input
@@ -659,7 +661,7 @@ function EquipmentTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Make/Model
             </div>
             <input
@@ -671,7 +673,7 @@ function EquipmentTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Category
             </div>{" "}
             <select
@@ -696,7 +698,7 @@ function EquipmentTab() {
             </select>
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Purchase Date
             </div>
             <input
@@ -709,7 +711,7 @@ function EquipmentTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Cost *
             </div>
             <input
@@ -723,7 +725,7 @@ function EquipmentTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Method
             </div>{" "}
             <select
@@ -951,6 +953,7 @@ function ExpensesTab() {
     String(new Date().getFullYear()),
   );
   const [categorizing, setCategorizing] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // YEAR-wide uncategorized count from the summary (grouped by category, so
   // the null-category bucket is the whole year's backlog) — NOT just the 50
@@ -1005,6 +1008,9 @@ function ExpensesTab() {
 
   const handleAdd = async () => {
     if (!form.description || !form.amount || !form.expenseDate) return;
+    // Money-recording write — single-flight so a double click records one row.
+    if (saving) return;
+    setSaving(true);
     try {
       await adminFetch("/admin/tax/expenses", {
         method: "POST",
@@ -1022,6 +1028,8 @@ function ExpensesTab() {
       load();
     } catch (e) {
       alert("Failed: " + e.message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1126,7 +1134,7 @@ function ExpensesTab() {
         >
           {" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Category
             </div>{" "}
             <select
@@ -1146,7 +1154,7 @@ function ExpensesTab() {
             </select>
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Description *
             </div>
             <input
@@ -1158,7 +1166,7 @@ function ExpensesTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Amount *
             </div>
             <input
@@ -1172,7 +1180,7 @@ function ExpensesTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Date *
             </div>
             <input
@@ -1185,7 +1193,7 @@ function ExpensesTab() {
             />
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, color: D.muted, marginBottom: 2 }}>
               Vendor
             </div>
             <input
@@ -1198,6 +1206,7 @@ function ExpensesTab() {
           </div>{" "}
           <button
             onClick={handleAdd}
+            disabled={saving}
             style={{
               background: D.green,
               border: "none",
@@ -1206,10 +1215,11 @@ function ExpensesTab() {
               color: "#fff",
               fontSize: 12,
               fontWeight: 500,
-              cursor: "pointer",
+              cursor: saving ? "default" : "pointer",
+              opacity: saving ? 0.5 : 1,
             }}
           >
-            Save
+            {saving ? "Saving…" : "Save"}
           </button>{" "}
           <button
             onClick={() => setShowAdd(false)}
@@ -1273,7 +1283,7 @@ function ExpensesTab() {
               <span style={{ fontFamily: MONO, fontSize: 11, color: D.green }}>
                 {fmtM(c.deductible)} deductible
               </span>{" "}
-              <span style={{ fontSize: 10, color: D.muted }}>
+              <span style={{ fontSize: 11, color: D.muted }}>
                 {c.count} items
               </span>{" "}
             </div>
@@ -1714,7 +1724,7 @@ function AdvisorTab() {
                       : "1px solid transparent",
                   borderRadius: 4,
                   padding: "3px 8px",
-                  fontSize: 10,
+                  fontSize: 11,
                   color: alertFilter === s ? D.heading : D.muted,
                   cursor: "pointer",
                   textTransform: "capitalize",
@@ -1790,7 +1800,7 @@ function AdvisorTab() {
                       borderRadius: 4,
                       padding: "3px 10px",
                       color: "#fff",
-                      fontSize: 10,
+                      fontSize: 11,
                       cursor: "pointer",
                     }}
                   >
@@ -1806,7 +1816,7 @@ function AdvisorTab() {
                       borderRadius: 4,
                       padding: "3px 10px",
                       color: "#fff",
-                      fontSize: 10,
+                      fontSize: 11,
                       cursor: "pointer",
                     }}
                   >
@@ -1822,7 +1832,7 @@ function AdvisorTab() {
                       borderRadius: 4,
                       padding: "3px 8px",
                       color: D.muted,
-                      fontSize: 10,
+                      fontSize: 11,
                       cursor: "pointer",
                     }}
                   >
@@ -1969,7 +1979,7 @@ function AdvisorTab() {
                       Action: {rc.action_required}
                     </div>
                   )}
-                  <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
                     {rc.source}{" "}
                     {rc.effective_date && `· Effective ${rc.effective_date}`}
                   </div>{" "}
@@ -2080,7 +2090,7 @@ function AdvisorTab() {
                     </span>
                   )}
                   {d.irs_reference && (
-                    <span style={{ fontSize: 10, color: D.muted }}>
+                    <span style={{ fontSize: 11, color: D.muted }}>
                       {d.irs_reference}
                     </span>
                   )}
@@ -2262,6 +2272,7 @@ function ExemptionsTab() {
 // MILEAGE TAB
 // ═══════════════════════════════════════════════════════════════
 function MileageTab() {
+  const isMobile = useIsMobile(640);
   const [entries, setEntries] = useState([]);
   const [stats, setStats] = useState(null);
   const [statsError, setStatsError] = useState(null);
@@ -2535,7 +2546,7 @@ function MileageTab() {
         <div style={{ display: "flex", gap: 6, alignItems: "flex-end" }}>
           {" "}
           <div>
-            <label style={{ fontSize: 10, color: D.muted, display: "block" }}>
+            <label style={{ fontSize: 11, color: D.muted, display: "block" }}>
               Date
             </label>
             <input
@@ -2548,7 +2559,7 @@ function MileageTab() {
             />
           </div>{" "}
           <div>
-            <label style={{ fontSize: 10, color: D.muted, display: "block" }}>
+            <label style={{ fontSize: 11, color: D.muted, display: "block" }}>
               From
             </label>
             <input
@@ -2561,7 +2572,7 @@ function MileageTab() {
             />
           </div>{" "}
           <div>
-            <label style={{ fontSize: 10, color: D.muted, display: "block" }}>
+            <label style={{ fontSize: 11, color: D.muted, display: "block" }}>
               To
             </label>
             <input
@@ -2574,7 +2585,7 @@ function MileageTab() {
             />
           </div>{" "}
           <div>
-            <label style={{ fontSize: 10, color: D.muted, display: "block" }}>
+            <label style={{ fontSize: 11, color: D.muted, display: "block" }}>
               Miles
             </label>
             <input
@@ -2686,7 +2697,7 @@ function MileageTab() {
                   <th
                     key={h}
                     style={{
-                      fontSize: 10,
+                      fontSize: 11,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: 1,
@@ -2806,6 +2817,7 @@ function MileageTab() {
 // REVENUE TAB (Sales Tax Reconciliation)
 // ═══════════════════════════════════════════════════════════════
 function RevenueTab() {
+  const isMobile = useIsMobile(640);
   const [month, setMonth] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -3473,6 +3485,7 @@ function PnlTab() {
 // EXPORTS TAB
 // ═══════════════════════════════════════════════════════════════
 function ExportsTab() {
+  const isMobile = useIsMobile(640);
   const [year, setYear] = useState(String(new Date().getFullYear()));
   const [startDate, setStartDate] = useState(
     `${new Date().getFullYear()}-01-01`,
@@ -3742,6 +3755,7 @@ function ExportsTab() {
 // ACCOUNTS RECEIVABLE TAB
 // ═══════════════════════════════════════════════════════════════
 function AccountsReceivableTab() {
+  const isMobile = useIsMobile(640);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -3852,7 +3866,7 @@ function AccountsReceivableTab() {
         <StatCard
           label="Total Outstanding"
           value={fmtM(s.total)}
-          color={s.total > 500 ? D.red : D.white}
+          color={s.total > 500 ? D.red : D.heading}
           sub={`${s.count} invoices`}
         />{" "}
         <StatCard label="Current" value={fmtM(s.current)} color={D.green} />{" "}
@@ -3907,7 +3921,7 @@ function AccountsReceivableTab() {
                   <th
                     key={h}
                     style={{
-                      fontSize: 10,
+                      fontSize: 11,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: 1,
@@ -4012,7 +4026,7 @@ function AccountsReceivableTab() {
                             borderRadius: 4,
                             padding: "3px 10px",
                             color: D.amber,
-                            fontSize: 10,
+                            fontSize: 11,
                             fontWeight: 500,
                             cursor:
                               sending === inv.id ? "not-allowed" : "pointer",
@@ -4785,6 +4799,7 @@ function BankImportTab() {
 }
 
 export default function TaxPage() {
+  const isMobile = useIsMobile(640);
   const [activeTab, setActiveTab] = useState("overview");
   // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
   // on (status is the one bank-import endpoint that answers while dark).
@@ -4800,20 +4815,28 @@ export default function TaxPage() {
   const [quickPnl, setQuickPnl] = useState(null);
   const [arSummary, setArSummary] = useState(null);
 
+  const [dashboardError, setDashboardError] = useState(false);
+  // The overview used to render nothing while /admin/tax/dashboard loaded
+  // and stay blank forever when it failed; it now says which, with a retry.
+  const loadDashboard = useCallback(() => {
+    setDashboardError(false);
+    adminFetch("/admin/tax/dashboard")
+      .then(setDashboard)
+      .catch(() => setDashboardError(true));
+  }, []);
+
   useEffect(() => {
     adminFetch("/admin/tax/bank-import/status")
       .then((s) => setBankImportOn(!!s?.enabled))
       .catch(() => {});
-    adminFetch("/admin/tax/dashboard")
-      .then(setDashboard)
-      .catch(() => {});
+    loadDashboard();
     adminFetch("/admin/tax/pnl?period=mtd")
       .then(setQuickPnl)
       .catch(() => {});
     adminFetch("/admin/tax/accounts-receivable")
       .then((d) => setArSummary(d?.summary))
       .catch(() => {});
-  }, []);
+  }, [loadDashboard]);
 
   const d = dashboard;
 
@@ -4875,6 +4898,40 @@ export default function TaxPage() {
               </button>
             );
           })}
+        </div>
+      )}
+      {!d && activeTab === "overview" && (
+        <div
+          style={{
+            padding: 48,
+            textAlign: "center",
+            color: dashboardError ? D.red : D.muted,
+            fontSize: 14,
+          }}
+        >
+          {dashboardError ? (
+            <>
+              <div role="alert">Could not load the tax overview</div>
+              <button
+                type="button"
+                onClick={loadDashboard}
+                style={{
+                  marginTop: 12,
+                  background: D.card,
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 6,
+                  padding: "6px 14px",
+                  color: D.heading,
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            "Loading overview…"
+          )}
         </div>
       )}
       {/* Dashboard stats */}
@@ -5220,7 +5277,7 @@ export default function TaxPage() {
               >
                 Download Tax Package
               </button>{" "}
-              <div style={{ fontSize: 10, color: D.muted }}>
+              <div style={{ fontSize: 11, color: D.muted }}>
                 ZIP with all CSVs + README
               </div>{" "}
             </div>{" "}

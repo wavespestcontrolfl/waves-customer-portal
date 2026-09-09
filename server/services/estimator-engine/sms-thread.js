@@ -81,6 +81,10 @@ const QUOTE_HINT_RE = new RegExp(
   'i',
 );
 
+// Vendor pitches stop before triage; ambiguous customer wording stays
+// eligible for the quote classifier and draft pipeline.
+const { isSolicitationPitch } = require('../sms-solicitation-detector');
+
 // Markers that the sender is REPLACING the previous ask rather than
 // continuing it. Deliberately narrow — an explicit correction word plus a
 // trigger body that itself names nothing out of scope; the grounded
@@ -126,12 +130,12 @@ Decide three things about the sender's message:
 - service_offered: does the request map to a service Waves offers? (true when it's unclear which service they mean)
 - relates_to_existing_job: is this coordinating, scheduling, or adding detail to a visit that is ALREADY BOOKED, or asking for work the customer's CURRENT services already cover — including a third party texting on a customer's behalf? Pricing for a NEW or ADDITIONAL service is a quote request even from an existing customer at a known address (quote_request true, relates_to_existing_job false) — e.g. a pest-control customer asking what a mosquito program costs.
 
-NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
+NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers, and any business-to-business pitch TO Waves (lead generation, marketing or ads, software, staffing/recruiting, another contractor offering Waves their services or a partnership).
 
 Message: ${JSON.stringify(text)}`
       : `An SMS arrived at Waves Pest Control (pest control + lawn care). Decide if the sender is asking for a QUOTE or PRICING for a service (new or additional service, "how much", "can you give me a price", describing a pest/lawn problem they want serviced).
 
-NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
+NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers, and any business-to-business pitch TO Waves (lead generation, marketing or ads, software, staffing/recruiting, another contractor offering Waves their services or a partnership).
 
 Message: ${JSON.stringify(text)}`;
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
@@ -291,7 +295,7 @@ async function runThreadDraft({
  * (the lead-intake state machine, where the customer picked a service).
  */
 async function startSmsThreadDraft({
-  phone, triggerBody = '', skipIntentGate = false, skipCooldown = false, dryRun = false,
+  phone, triggerBody = '', triggerSmsLogId, skipIntentGate = false, skipCooldown = false, dryRun = false,
   scopeCheckOnly = false, precomputedTriage,
   // Clarify-reply re-draft: the unsent automated draft this thread draft
   // replaces (retired inside the dedupe transaction, only on a real insert).
@@ -366,11 +370,21 @@ async function startSmsThreadDraft({
         return result;
       }
     }
+    // A vendor pitch is never a quote request — on the primary path AND on
+    // the skipIntentGate resumes (lead-intake / clarify), with or without
+    // scope guards, before triage is loaded or a model call is spent.
+    // Terminal: a caller's legacy fallback must not draft it either
+    // (codex #4212 r1/r2).
+    if (isSolicitationPitch(triggerBody)) {
+      result.skipped = 'no_quote_intent_regex_solicitation';
+      result.terminal = true;
+      return result;
+    }
     // Grounding for the classifier (fail-open → ungrounded prompt); a
     // prechecked call reuses the pre-check's triage (may be null — that IS
     // the pre-check's fail-open outcome, reused as-is).
     const triage = guarded
-      ? (prechecked ? precomputedTriage : await loadThreadTriageContext({ phone, triggerBody }))
+      ? (prechecked ? precomputedTriage : await loadThreadTriageContext({ phone, triggerBody, triggerSmsLogId }))
       : null;
     // Second deterministic pass over the CURRENT exchange only: "Do you
     // do power washing?" followed minutes later by "How much?" — the ask

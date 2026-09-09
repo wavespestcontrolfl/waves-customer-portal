@@ -74,6 +74,7 @@ const LANE_RUNTIME = {
   response_drafter: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
+  'sms-commitment-fulfillment': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'sms-commitment-fulfillment', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
@@ -129,6 +130,9 @@ const LANE_RUNTIME = {
   // direct_sdk: both relay implementations stream through the Anthropic SDK, not llm/call.js (Codex r14).
   // M3 (Codex r19): replies go straight to the caller mid-call; the ordered transcript is written back to call_log on close.
   voice_relay: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
+  // Optional manual replay judge: no business writes; ordinary call ledger
+  // and traces remain available. Event cadence avoids expected silence alarms.
+  voice_relay_judge: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
 
   // ── Photos & property ──
   // direct_sdk: the photo lanes call Anthropic directly and Gemini over raw HTTP, not llm/call.js (Codex r13);

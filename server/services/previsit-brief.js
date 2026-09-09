@@ -70,7 +70,13 @@ const WDO_BRIEF_TYPE = 'wdo_inspection';
 // pre-tightening bodies (e.g. a cached retired-name mention) forever.
 // v4: schema-constrained output (jsonSchema) — separates prompt-only JSON
 // briefs from provider-constrained ones in the cache key.
-const PROMPT_VERSION = 'previsit_brief_v4';
+// v5: the validator repair round. Bumped so templates capped under v4
+// (llm_attempts at the cap, same grounding) hash differently and get their
+// one repair round instead of returning validator_capped forever.
+// v6: visit.oneTime fact + 'one-time' grounding token — the bump invalidates
+// same-hash validator_capped templates so capped visits regenerate (codex
+// #4198 r1 P2).
+const PROMPT_VERSION = 'previsit_brief_v6';
 
 // Deterministic validator rejections repeat on every retry while the
 // grounding (and prompt version) are unchanged — the same facts produce the
@@ -818,6 +824,15 @@ async function assembleGrounding(svc, dbh = db) {
       serviceType: serviceIdentity,
       scheduledDate: calendarDay(svc.scheduled_date),
       isRecurring: !!svc.is_recurring,
+      // One-off stop: present ONLY when the canonical recurring-lineage
+      // trio is clear (is_recurring / recurring_parent_id / recurring_pattern
+      // — same set as previsit-card-request-sweep and pay-v2) AND the visit
+      // is not a plan callback. A series
+      // booster carries is_recurring=false WITH a parent id and must never
+      // ground a "one-time" cadence claim (codex #4198 r1 P1).
+      // Free re-service callbacks carry no lineage markers but exist only
+      // for covered plan customers — never a one-time stop (codex #4198 r2 P1).
+      ...(!svc.is_recurring && !svc.recurring_parent_id && !svc.recurring_pattern && !svc.is_callback ? { oneTime: true } : {}),
       // Omitted entirely when history is unreadable — the model must not
       // see (and the template must not assert) a first-visit claim that an
       // outage manufactured.
@@ -1376,6 +1391,13 @@ function findUngroundedClaim(body, grounding) {
   const groundedValueText = [
     ...collectFactValues(grounding.llmFacts),
     ...(grounding.llmFacts?.visit?.isRecurring === true ? ['recurring'] : []),
+    // The mirror image: visit.oneTime === true (set only when the whole
+    // recurring-lineage trio is clear) is the only one-off-stop fact.
+    // Without this token every truthful "one-time" brief on a one-off
+    // visit re-templates (52 of ~230 rejections in the week to 2026-09-08
+    // were ungrounded_novel_term:one-time). Recurring visits and series
+    // boosters still reject it (cadence-binding test).
+    ...(grounding.llmFacts?.visit?.oneTime === true ? ['one-time'] : []),
     // visit.newCustomer === true is likewise the only first-visit fact —
     // without this token every truthful "Initial visit" re-templates (r14).
     ...(grounding.llmFacts?.visit?.newCustomer === true ? ['initial'] : []),
@@ -2372,6 +2394,59 @@ function validateBriefJson(json, grounding) {
   return { body };
 }
 
+// The repair round's addendum: each validator reason
+// (`ungrounded_<kind>:<term>` or a bare shape code) becomes one plain
+// instruction the model can act on. Terms are the validator's own cleaned
+// text (cleanText, ≤60 chars) — never raw model output.
+function describeRejection(reason) {
+  const m = /^([a-z_]+?)(?::(.*))?$/s.exec(String(reason || ''));
+  const code = m?.[1] || String(reason || '');
+  const term = (m?.[2] || '').trim();
+  const quoted = term ? `"${term}"` : 'that claim';
+  if (/^ungrounded_(?:novel_)?(?:term|product|target|names|targets)$/.test(code)) {
+    return `${quoted} does not appear in the facts — remove it, or replace it with the exact wording the facts use.`;
+  }
+  if (code === 'truncated_product_term') {
+    return `${quoted} is a shortened product name — use the exact catalog name from the facts or leave it out.`;
+  }
+  if (/conflict$|appointment_state$/.test(code)) {
+    return `the facts say the opposite about ${quoted} — state only what the facts say, in their polarity.`;
+  }
+  if (code === 'ungrounded_instruction') return `${quoted} is not an instruction the facts give — drop it.`;
+  if (code === 'ungrounded_contact_request') return `the facts record no customer request by ${quoted} — drop it.`;
+  if (/number|numeric/.test(code)) return `the number ${quoted} is not in the facts — remove it.`;
+  if (/not_an_object|not_array|empty_output|no_json|missing|invalid/.test(code)) {
+    return 'the response was not the complete JSON object — return every required key with the right types.';
+  }
+  return `rejected as ${code}${term ? ` (${term})` : ''} — remove or reword it using only the facts.`;
+}
+
+function repairNote(rejections) {
+  const lines = [...new Set(rejections.map(describeRejection))].map((l) => `- ${l}`);
+  return [
+    'REPAIR ROUND — your previous draft was rejected by the grounding validator.',
+    'Rewrite the whole brief so every claim, term, product, pest and status word is copied from the facts above:',
+    ...lines,
+    'Keep everything else that was grounded. Do not mention this note.',
+  ].join('\n');
+}
+
+// The stored brief's cache key: the prompt version plus everything that
+// lands in the brief. A PROMPT_VERSION bump therefore invalidates every
+// cached brief AND every validator-capped template (the cap is keyed on
+// this hash). promptVersion is a parameter only so a test can build the
+// hash a previous version stored.
+function groundingHashFor(g, promptVersion = PROMPT_VERSION) {
+  return crypto.createHash('sha256')
+    .update(`${promptVersion}|${stableStringify({
+      llmFacts: g.llmFacts,
+      access: g.access,
+      productGuidance: g.productGuidance,
+      lastVisitProducts: g.lastVisitProducts,
+    })}`)
+    .digest('hex');
+}
+
 async function generateBriefBody(grounding, deps = {}) {
   // missKind rides back to the generator so deterministic validator
   // rejections can be attempt-capped; anything else keeps retrying.
@@ -2403,19 +2478,44 @@ async function generateBriefBody(grounding, deps = {}) {
       // 1000 truncated real responses mid-JSON (prod 08-14/15: 36 empty_json
       // legs + "not_an_object (response truncated at max_tokens=1000)") —
       // the body plus mentioned_terms self-report doesn't reliably fit.
-      maxTokens: 2000,
-      // 2000 crosses OPENAI_REASONING_FLOOR_TOKENS, which would silently
+      // 2000 still cut ~1 leg in 7 (anthropic_incomplete, 09-05..07).
+      maxTokens: 3000,
+      // 3000 crosses OPENAI_REASONING_FLOOR_TOKENS, which would silently
       // flip the GPT fallback from 'none' to default 'low' reasoning on
       // this high-volume summarization lane (codex #3423 r2) — the raise
       // is JSON headroom only, never a reasoning upgrade.
       reasoningEffort: 'none',
       ...payload,
     }, opts));
+  const attempt = (rejections) => callModel({
+    system: SYSTEM_PROMPT,
+    text: `Grounding facts:\n${JSON.stringify(grounding.llmFacts, null, 2)}`
+      + (rejections?.length ? `\n\n${repairNote(rejections)}` : ''),
+  }, { validate });
+  // The validator's verdicts on a response: every leg OUR validator
+  // rejected (the dispatcher marks them `validator: true`; the verdict set
+  // is the provenance check for injected call paths), or the
+  // defense-in-depth verdict on a body the caller handed back unvalidated.
+  const validatorRejections = (resp) => (resp?.failures || [])
+    .filter((f) => f?.validator === true || validatorVerdicts.has(String(f?.reason || '')))
+    .map((f) => String(f.reason));
   try {
-    const resp = await callModel({
-      system: SYSTEM_PROMPT,
-      text: `Grounding facts:\n${JSON.stringify(grounding.llmFacts, null, 2)}`,
-    }, { validate });
+    let resp = await attempt(null);
+    let verdict = resp?.ok && resp.json ? validateBriefJson(resp.json, grounding) : null;
+    let rejections = verdict?.reason ? [verdict.reason] : validatorRejections(resp);
+    // ONE repair round: a validator rejection is deterministic for this
+    // grounding, and the fallback leg re-fails the same way on the same
+    // prompt — ~90% of live briefs fell to the template for ordinary
+    // prose ("one-time", "pets") the facts never literally contain
+    // (09-05..07: 56 of 63 chains). Handing the model the exact rejected
+    // terms fixes the draft in place; a second rejection is final.
+    if (!(resp?.ok && resp.json && !verdict?.reason) && rejections.length) {
+      // Codes only: the term half of a reason is model-derived prose
+      // (mentioned_terms, extracted references) and must not reach logs.
+      logger.info(`[previsit-brief] repair round after validator rejection (${[...new Set(rejections.map((r) => String(r).split(':')[0]))].join(' | ')})`);
+      resp = await attempt(rejections);
+      verdict = resp?.ok && resp.json ? validateBriefJson(resp.json, grounding) : null;
+    }
     if (!resp || !resp.ok || !resp.json) {
       logger.warn(`[previsit-brief] LLM miss (${resp?.reason || 'no json'}); using deterministic template`);
       // Every leg rejected by OUR validator = deterministic for this
@@ -2430,7 +2530,6 @@ async function generateBriefBody(grounding, deps = {}) {
     // Defense in depth: the dispatcher already ran this validator per leg,
     // but injected/mocked call paths may not — never trust an unvalidated
     // response into the stored brief.
-    const verdict = validateBriefJson(resp.json, grounding);
     if (verdict.reason) {
       logger.warn(`[previsit-brief] LLM output rejected (${verdict.reason}); using deterministic template`);
       return fallback('validator');
@@ -2480,14 +2579,7 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
 
   // Input-hash cache: everything that lands in the stored brief hashes in,
   // so any grounding change regenerates and an unchanged route no-ops.
-  const hashOf = (g) => crypto.createHash('sha256')
-    .update(`${PROMPT_VERSION}|${stableStringify({
-      llmFacts: g.llmFacts,
-      access: g.access,
-      productGuidance: g.productGuidance,
-      lastVisitProducts: g.lastVisitProducts,
-    })}`)
-    .digest('hex');
+  const hashOf = groundingHashFor;
   const groundingHash = hashOf(grounding);
 
   const existing = parseStoredBrief(svc.pre_service_brief);
@@ -2741,6 +2833,9 @@ module.exports = {
     loadCatalogVocabulary,
     templateBriefBody,
     generateBriefBody,
+    describeRejection,
+    repairNote,
+    groundingHashFor,
     buildAccessBlock,
     safeTargets,
     stableStringify,

@@ -35,7 +35,10 @@ const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 const { isBillingDayMatch } = require('./billing-helpers');
 const { isPaused } = require('./autopay-eligibility');
 
-async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint }) {
+async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0 }) {
+  const metadata = { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode,
+    ...(attemptPaymentId ? { notificationEventKey: `payment-problem:attempt:${attemptPaymentId}:${messageType}` } : {}),
+  };
   const sendResult = await sendCustomerMessage({
     to: customer.phone,
     body,
@@ -45,8 +48,24 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     customerId: customer.id,
     entryPoint,
     // RESOLVED lane AT SEND TIME (codex #3607 r2 + r5) — see autopay-sms-digest.js.
-    metadata: { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode },
+    metadata,
   });
+  if (purpose === 'payment_failure' && paymentId && attemptPaymentId && !sendResult.sent
+    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(sendResult.code)
+    && sendResult.deferred && sendResult.nextAllowedAt) {
+    await db('sms_log').insert({
+      customer_id: customer.id, direction: 'outbound',
+      from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: customer.phone,
+      message_body: body, message_type: messageType, status: 'scheduled',
+      scheduled_for: new Date(sendResult.nextAllowedAt),
+      metadata: JSON.stringify({ ...metadata, entry_point: 'billing_failure_deferred',
+        payment_id: paymentId, attempt_payment_id: attemptPaymentId, retry_count: retryCount,
+        customer_id: customer.id, replay_purpose: 'payment_failure', original_block_code: sendResult.code,
+        refresh_customer_phone: true, resolve_from_by_customer: true,
+      }),
+    });
+    return { ...sendResult, scheduled: true };
+  }
   if (sendResult.blocked || sendResult.sent === false) {
     throw new Error(`billing SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
   }
@@ -167,6 +186,7 @@ const BillingCron = {
 
     const todayDay = etParts(now).day;
     let charged = 0;
+    let processing = 0;
     let skipped = 0;
     let failed = 0;
 
@@ -296,10 +316,12 @@ const BillingCron = {
 
         // Charge
         const paymentResult = await service.chargeMonthly(customer.id);
-        charged++;
+        const settled = paymentResult?.status === 'paid';
+        if (settled) charged++;
+        else processing++;
 
-        // Log success + update next_charge_date (next month, same billing_day)
-        await logAutopay(customer.id, 'charge_success', {
+        // Log settlement state + update next_charge_date (next month, same billing_day)
+        await logAutopay(customer.id, settled ? 'charge_success' : 'charge_processing', {
           // Below monthly_rate when a retention offer slot applied this month — log the charged amount.
           amountCents: Math.round(parseFloat(paymentResult?.amount ?? customer.monthly_rate) * 100),
           paymentMethodId: customer.autopay_payment_method_id || null,
@@ -317,6 +339,9 @@ const BillingCron = {
         const nextChargeDate = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
         await db('customers').where({ id: customer.id })
           .update({ next_charge_date: nextChargeDate });
+
+        // The webhook settles async payments; do not send a paid SMS now.
+        if (!settled) continue;
 
         // Extract receipt URL and include in confirmation SMS
         let receiptUrl = null;
@@ -348,7 +373,7 @@ const BillingCron = {
           logger.error(`[billing-cron] Payment confirmation SMS failed: ${smsErr.message}`);
         }
 
-        logger.info(`[billing-cron] Charged $${customer.monthly_rate} for customer id=${customer.id}`);
+        logger.info(`[billing-cron] Charged $${paymentResult.amount} for customer id=${customer.id}`);
       } catch (err) {
         failed++;
         logger.error(`[billing-cron] Failed to charge customer id=${customer.id}: ${err.message}`);
@@ -504,6 +529,7 @@ const BillingCron = {
             purpose: 'payment_failure',
             messageType: 'autopay_charge_failed',
             entryPoint: 'monthly_billing_failure',
+            paymentId: err.paymentRecord?.id, attemptPaymentId: err.paymentRecord?.id,
           });
         } catch (smsErr) {
           logger.error(`[billing-cron] SMS notification failed: ${smsErr.message}`);
@@ -552,9 +578,9 @@ const BillingCron = {
       }
     }
 
-    logger.info(`[billing-cron] Monthly billing complete: ${charged} charged, ${skipped} skipped, ${failed} failed out of ${customers.length} customers`);
+    logger.info(`[billing-cron] Monthly billing complete: ${charged} charged, ${processing} processing, ${skipped} skipped, ${failed} failed out of ${customers.length} customers`);
 
-    return { charged, skipped, failed, total: customers.length };
+    return { charged, processing, skipped, failed, total: customers.length };
   },
 
   // =========================================================================
@@ -609,6 +635,7 @@ const BillingCron = {
 
     let retried = 0;
     let succeeded = 0;
+    let processing = 0;
     let failedAgain = 0;
 
     for (const payment of failedPayments) {
@@ -1065,6 +1092,7 @@ const BillingCron = {
               purpose: 'payment_failure',
               messageType: 'autopay_retry_final_failed',
               entryPoint: 'autopay_retry_final_failed',
+              paymentId: payment.id, attemptPaymentId: err.paymentRecord?.id, retryCount: newRetryCount,
             });
           } catch (smsErr) {
             logger.error(`[billing-cron] Final SMS failed: ${smsErr.message}`);
@@ -1251,6 +1279,7 @@ const BillingCron = {
               purpose: 'payment_failure',
               messageType: 'autopay_retry_failed',
               entryPoint: 'autopay_retry_failed',
+              paymentId: payment.id, attemptPaymentId: err.paymentRecord?.id, retryCount: newRetryCount,
             });
           } catch (smsErr) {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);
@@ -1345,17 +1374,22 @@ const BillingCron = {
         }
       }
 
-      succeeded++;
+      const settled = newPayment?.status === 'paid';
+      if (settled) succeeded++;
+      else processing++;
 
       // Log what was ACTUALLY collected — the retry recomputes the
       // total for the customer's current tender (a credit-card failure
       // retried on ACH/debit collects less than the old surcharged
       // gross), and autopay_log is the billing-dispute audit trail.
-      await logAutopay(payment.customer_id, 'retry_success', {
+      await logAutopay(payment.customer_id, settled ? 'retry_success' : 'retry_processing', {
         amountCents: Math.round(parseFloat(newPayment?.amount ?? baseAmount) * 100),
         paymentId: newPayment?.id || null,
         details: { source: 'autopay', retry_count: payment.retry_count + 1, original_payment_id: payment.id, original_amount: payment.amount },
       }).catch((logErr) => logger.error(`[billing-cron] retry_success log failed: ${logErr.message}`));
+
+      // Async retries remain disarmed above; the webhook handles settlement or bounce.
+      if (!settled) continue;
 
       // Send success SMS with receipt
       let retryReceiptUrl = null;
@@ -1389,9 +1423,9 @@ const BillingCron = {
       logger.info(`[billing-cron] Retry succeeded for customer id=${customer.id}: $${newPayment?.amount ?? baseAmount}`);
     }
 
-    logger.info(`[billing-cron] Retries complete: ${retried} attempted, ${succeeded} succeeded, ${failedAgain} failed again`);
+    logger.info(`[billing-cron] Retries complete: ${retried} attempted, ${succeeded} succeeded, ${processing} processing, ${failedAgain} failed again`);
 
-    return { retried, succeeded, failed: failedAgain };
+    return { retried, succeeded, processing, failed: failedAgain };
   },
 };
 

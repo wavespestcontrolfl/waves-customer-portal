@@ -1,0 +1,442 @@
+# Intelligence Bar foundation review split
+
+The implementation assignment remains platform-wide. This split narrows review
+units without reducing the capability denominator or claiming unverified parity.
+All branches remain drafts; production migration, gate activation, and customer
+communications are outside the development/testing authorization.
+
+## Dependency order
+
+| Part | Branch | Scope |
+| --- | --- | --- |
+| A | `feat/ib-registry-coverage-foundation` / #4041 | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
+| B1 | `feat/ib-target-validation-foundation` / #4062 | Current-request identity resolution, fresh parent/child validation and scoped reader input preparation. |
+| B2 | `feat/ib-target-context-foundation` / #4044 | Scoped domain readers, provider outcome classification and identity-bound review publishing. |
+| C | `feat/ib-task-recovery-foundation` / #4049 | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
+| D | `feat/ib-platform-foundation` / #4019 | Route and UI integration, durable conversation continuation, desktop/mobile and real dev-database acceptance tests. |
+
+Property #4021 and inventory #4029 remain dependent on D. Existing-customer
+estimate work is preserved separately until these foundations are integrated.
+
+## Why the split is required
+
+The original #4019 review had meaningful rounds on `a5ff3dd9b2`, `228b347`,
+`8b67`, `ab89c7e`, and `1cb0b90`. Earlier actionable findings were repaired;
+the fourth round had only P2 findings. The fifth round found new P1s:
+review IDs were not scoped to the selected customer (3946394606), and History
+could describe an unknown outcome as executed or failed (3946394610).
+Its P2s concerned omitted conversation identity during continuation
+(3946394614) and full task context retained in pending-action parameters
+(3946394616). These are assigned to B/C/D above and require regression proof.
+The original scope stopped receiving pushes at `1cb0b90` under the
+`waves-ship` round-cap rule. Integration resumes only after the smaller parts
+are independently reviewable.
+
+## Evidence boundaries
+
+Part A starts from main `4322d6203563083feac3d4980bddba313f6c38de`.
+Its manifest retains all 1,732 previously recorded sites, including historical
+sites and four task/receipt transport sites introduced only in D. All 1,732
+remain unsupported/unverified in A. The current main source scan finds 1,647
+sites; historical rows are retained rather than erased when handlers move or
+disappear. The one changed query fingerprint is checked against that exact
+main source. No runtime or browser proof is attributed to A.
+
+The platform implementation document is the full-stack evidence ledger from
+#4019. Its execution, UI, migration, and test evidence applies to the recorded
+integrated commits, not to this catalog-only branch. Part D restores the five current
+reviewed transport exceptions after checking their exact fingerprints. The five
+retired transport rows remain unsupported historical entries. None of
+those exceptions grants domain-action coverage.
+
+Part A local checks: catalog/coverage unit suites (9 tests) passed. The coverage
+and domain-rule gates must pass before push. It has no DB or UI change, so no
+migration or browser run is claimed for this split.
+
+Part A main integration at `801b4fbf303ece9fc58f7340f10b33a29b5cfcf2`
+adds four commercial-proposal request sites to the retained census, all
+unmapped, for 1,736 cumulative unsupported/unverified sites. The existing
+write-gate scanner now recognizes `action-registry.js` as a non-tool helper;
+catalog, coverage, and write-gate suites pass all 46 tests. These resolve the
+first CI run's exact failures (new upstream sites and the helper allowlist).
+
+Part C persists request identity, runner leases, action-step deduplication and
+actor/session-bound recovery through the existing confirmation store. It adds
+the `ib_tasks` migration and extends the existing daily Eastern retention tick;
+it does not add a worker/job system or authorize background writes. The platform
+gate defaults off. Route and conversation-cursor integration remain in D.
+
+Before storage, the same target validator replaces full resolution context with
+IDs, an exact-action fingerprint, and a fingerprint of the freshly authorized
+records. Confirmation compares both again. This preserves raw-number SMS,
+vendor replies, explicit unlinked records, and approved bulk cohorts without
+retaining their names, addresses, candidates or request text in receipt params.
+The existing sweep strips old private context only after approval expiry,
+including receipts whose task FK is already null; results and receipt IDs stay.
+
+Part C validation: 79 unit/contract/scheduler tests passed and six tests passed
+against the already-migrated isolated Postgres database. The latter cover
+request replay, competing resumes, predecessor gating, privacy-preserving
+confirmation hashes, non-resumable reads/attachments, and legacy retention.
+Their recorded provider outcomes are synthetic ledger fixtures; no provider or
+domain send ran. Full natural-language/route/UI proof is required in D.
+
+Part B introduces the target-context reader for integration in D. Review IDs
+participate in the same parent/customer checks as other records; an unlinked
+review needs its native deep link or an explicit UUID, and cannot be substituted
+for a selected customer. Its approval pin includes raw customer attribution,
+location, content, and review identity separately from the public-copy grounding
+fingerprint. The existing publisher checks that pin inside its claim and after
+the Google read; its local-only path also rechecks under the review row lock.
+The route must call review read validation even with no customer target and
+carry the server-authored pin through confirmation; those calls belong to D.
+
+History now uses the same outcome classifier as receipts, including unknown,
+provider-accepted, partial, failed, blocked, and completed states. Copied shared
+email/provider changes preserve uncertain sends and acceptance IDs; copied
+customer/bulk-lead changes compare full-precision versions under existing locks.
+Part B uses controlled provider/unit fixtures; the integrated dev-DB/browser
+proof remains in D. No real communication or publication is authorized for QA.
+
+### Deferred P2s in B
+
+- `server/services/intelligence-bar/task-context.js:229`: the shared target
+  validator exceeds the structural complexity warning. Its ordered ownership,
+  bulk-cohort, and recipient checks remain together; moving them into one-use
+  helpers would only relocate the decisions. Further simplification must
+  preserve every independently tested authorization path.
+
+Part A review remediation validates arguments again inside registry execution.
+Trusted confirmation and private version pins use the server action context;
+model-supplied approval or private fields fail schema validation. Discovery is
+not offered on the technician surface. The coverage gate now proves baseline
+IDs and fingerprints against source at a commit already merged on main and
+retains dynamic admin verb-wrapper calls. All 1,736 recorded sites remain
+unsupported/unverified. Backend registrations remain a manual inventory in
+this split; automated backend drift enforcement is deferred to the final
+capability reconciliation, so this gate currently enforces frontend sites only.
+
+Part B review remediation resolves prepositional and overlapping customer
+selectors before considering page fallback. Target versions use PostgreSQL
+`updated_at::text` throughout fresh page, operator, full-name and single-name
+lookups. Two isolated Postgres tests verify microsecond preservation and
+misspelling refusal with actual synthetic rows, rolled back after each test.
+The affected six service/confirmation suites pass 165 tests.
+
+The shared outcome classifier now requires affirmative success. Optimizer
+no-op, unavailable tax-advisor, and empty bulk-update paths explicitly block;
+dry runs remain previews. Estimate flag toggles report success only after an
+affected row. Message-only, warning-only and unnormalized legacy output stays
+unknown. Legacy payout, SEO enqueue and SEO approval results still need
+individual lifecycle adapters before those capabilities can be verified; no
+platform coverage is claimed for them by this split.
+
+Part A integrates merged main `e7c4e9eb4` and records its changed property-editor
+request as unsupported. Optional request calls now join the census; registry
+tests detect omitted tool modules, and the dedicated agent-estimate workflow
+preloads its own authorized estimate tools. Broader payload/helper dependency
+fingerprinting remains deferred alongside backend drift enforcement. Current
+fingerprints describe call expressions; changes outside those expressions still
+require manual review until final capability reconciliation.
+
+Part C after parent integration passes 110 unit/contract/scheduler tests and
+eight isolated Postgres tests (six recovery, two targeting). Registry, coverage
+and domain-rule gates pass. The new task schema remains the unchanged
+`20260906000061_ib_task_receipts` migration already tested on the dedicated
+dev database; no production migration or gate activation is authorized.
+
+### Deferred P2s in C
+
+- `server/services/intelligence-bar/task-context.js:231`: compact approval
+  proof adds decisions to the already-complex shared target validator. The
+  ordered relationship, recipient and proof checks remain together; extracting
+  one-use helpers would only move branches. Further simplification must keep
+  every tested authorization path.
+
+Part D preserves private execution pins outside model schemas, the native
+owner/idempotency endpoint and persisted approval formats. Its 29 PostgreSQL
+route scenarios pass, including durable receipts returned after Continue.
+The shared hook/shell and global bar pass 33 client tests. Desktop/mobile Chrome
+verifies target selection, confirmation, continuation, Clear/reload recovery,
+A-only persistence, expiry and review cancellation with zero publishing.
+The shared ProtocolPanel consumes the existing task card/endpoints and remounts
+by appointment ID. Trusted confirmation receipts survive failed status reads.
+The current census retains 1,746 sites, including seven reviewed task transport
+exceptions and 1,739 unsupported/unverified entries; no domain parity is inferred.
+
+Main integration at `db70ae441` adds the three new prep-guide/Quick Links
+request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
+Their baseline fingerprints are proved against that already-merged main
+revision. The former Communications handlers remain recorded as historical
+sites; moving the UI does not remove work from the capability denominator.
+
+
+## Target validation review split
+
+The broad B review ran on `f523688`, `f05c6ec`, `3dc3e90`, `9d72925`, and
+`cb4b81f`. Round five identified a new P1 (3947072372): the standalone
+validator accepted a name-only SMS input without establishing a customer ID.
+Its P2 (3947072379) found that email/call/lead page references did not establish
+the owning customer even though they constrained child record selection.
+The broad review stopped at `cb4b81f`; B1 now isolates target validation from
+the scoped reader and provider adapters in B2. B2 preserves its history and
+will be retargeted to B1 before receiving integration changes.
+
+B1 rejects name-only SMS proposals, including the unsupported camel-case alias,
+until the caller supplies a canonical resolved customer ID. Email, call and
+lead references establish a freshly read customer only in the request's target
+clause, never inside message or note content. Regression tests resolve the
+actual viewed child without manually injecting a customer target, reject a
+same-customer sibling and missing/deleted records, and reread phone data.
+
+B1 has no provider calls, migrations, live-route wiring or UI change. Its
+isolated PostgreSQL tests run in rollback transactions. Approval proof storage
+and resume belong to C; actual request/confirmation acceptance remains in D.
+Exact product/formulation request binding remains required in inventory #4029;
+this resolver does not claim inventory write verification or complete parity.
+
+B1 independent review also closed incidental page/note authority for unlinked
+leads and estimates and normalized UUID comparisons to PostgreSQL identity.
+The final scope passes 147 distinct unit/write-boundary cases and five isolated
+PostgreSQL cases. No provider adapter or live action ran in those checks.
+
+Shared-wrapper remediation in A detects known admin requests regardless of
+source directory. Five existing dispatch, equipment and Terminal request sites
+are proved against merged main and retained as unsupported, for 1,744 cumulative
+sites. Generic lookup verbs cannot turn an unsupported capability into a match.
+The final catalog/coverage suites pass 23 tests.
+
+B1 fresh name authority queries up to two normalized matches before accepting an
+unlinked lead or estimate. A duplicate inserted after resolution invalidates
+both model-proposed IDs; explicit viewed-record selection still distinguishes
+them. Linked and other-status duplicates count, while deleted leads do not.
+The final checks pass 148 unit/write-boundary tests and 13 real PostgreSQL tests.
+Generic action-object refusal hints (3947287736) remain deferred: recipient
+parsing must preserve earlier explicit targets across compound clauses.
+
+B2 message search rereads the resolved customer's saved phone before including
+unlinked historical messages. Foreign linked rows, stale supplied numbers and
+unavailable customers are excluded. The final parent-integrated checks pass
+20 isolated PostgreSQL tests and 143 targeting/reader/pinning/history unit tests;
+earlier unchanged provider/publisher checks remain recorded above.
+
+Customer-ID-only searches retain linked history after a phone-number change; only unlinked messages depend on the current saved phone. An explicit phone selector still narrows the results. The final seven adapter DB cases and 32 reader/pinning/history tests pass after this correction, and independent review closed it.
+
+The final D integration passes 29 route/database scenarios (84.38 seconds),
+262 server unit/contract cases and 43 client cases. Production build and
+coverage/domain/brand gates pass. Shared-shell desktop/mobile recovery is
+rerun against the final integrated parent code with independent A-only database
+read-back. Final GitHub Codex review is pending its shared usage-limit reset;
+all PRs remain drafts and no production or merge action is authorized.
+
+B1 also binds explicit child identifiers in the request, requires a deliberate
+reference for customerless calls, and freshly validates every child owner.
+Emails inherit a converted lead's customer and reject deleted or conflicting
+ownership; an address-only reply requires exactly one matching thread. Relevant
+page hints survive stale auxiliary hints, including compound “this customer and
+that estimate” requests. Name lookup now uses the same punctuation and space
+normalization as request matching. The resulting scope passes 154 unit/write
+boundary cases and 19 rollback-only PostgreSQL cases. No provider was called.
+
+B2 propagates Gmail uncertainty through the native email route and editor.
+The existing tab-scoped draft store saves an attempt before submission, retains
+the guard through reloads and quota failures, and requires explicit Sent-folder
+reconciliation before another send. Gmail acceptance requires its message ID;
+inbox-refresh failure cannot become a send failure. The shared Gmail client
+also rejects ID-less responses as unknown, so the existing outreach claim and
+manual reconciliation path retain their send lock. This closes native-tab retry
+behavior, not cross-device/server idempotency; that remains Phase 3 work.
+
+Controlled desktop (1440) and mobile (390) browser checks covered compose/reply
+uncertainty, reload, both reconciliation verdicts and no duplicate send. Three
+screenshots were inspected; no JavaScript errors or horizontal overflow appeared.
+The provider was stubbed in browser QA. Actual native-route tests and the real
+Google SDK with a controlled transporter separately cover outcome classification.
+The parent-integrated database suites pass 26 rollback-only cases.
+
+C normalizes UUID identity in scalar selectors, nested product fields and bulk
+sets while preserving exact approval parameters and hashes. Legacy keys must
+prove their original canonical input before semantic replay; preview-only
+bindings that cannot be reconstructed require reconciliation. New task actions
+record a hash-bound step-key version so a legitimate distinct successor is
+still possible. The final checks pass 155 unit cases and 33 isolated PostgreSQL
+cases, including pending, accepted and unknown legacy replay. Independent
+review found no actionable issue; no provider or domain send ran.
+
+The next B1 correction generalizes canonical name-selector guards to all
+classified writes, including lead status, and requires explicit current-request
+evidence for customerless appointments. A capped name query preserves its raw
+completeness evidence before filtering incidental matches; incomplete cohorts
+cannot become approved subsets. Independent compound actions retain their
+explicit estimate IDs, while message-body commands grant no record authority.
+Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
+PostgreSQL tests. Independent review closed both additional edge cases before
+the fifth remote review. No provider, customer message or production write ran.
+
+Scoped email history now resolves effective ownership through converted leads
+for search candidates, owned/foreign Gmail thread sets and complete-thread
+read/draft validation. Missing/deleted lead links or conflicting direct and
+lead owners refuse before model egress. The controlled PostgreSQL suite covers
+lead-only success, mixed-thread isolation, contradictory links, ownership
+changes and deletion. Its eight cases pass; the affected email-outcome and
+operational-read units add 16 passes. No live model/provider was called.
+
+The shared outcome classifier now also replaces the older route-local failure
+predicate in B2, so a blocked optimizer preview cannot create an approval card
+and blocked commit/execute results cannot return success. The existing route
+confirmation suite passes 49 cases, including both new outcome regressions.
+This brings the adapter's blocked-result contract forward from D so the smaller
+B2 review unit has the same behavior before downstream route integration.
+
+Post-merge main integration at `a7c689301` records the nine request sites that
+reached main after Part A's final head: the Customer 360 workspace and unread
+conversation hooks from `481ad658f`, and the controlled staff documents from
+`f4b3490f5`. Each is proved against that already-merged revision and retained
+as unsupported/unverified, for 1,753 cumulative sites. Nothing gains coverage;
+this restores the drift gate on main without grandfathering any new action.
+
+Codex review of that integration tightened one matcher: React state setters
+that merely end in `Request` (`setLinkRequest`, `setNewLeadRequest`,
+`setRequest`) perform no request and no longer produce rows, and neither do lazy
+`import()` module loads, for 1,744 cumulative sites. Dynamic and glued-suffix endpoints stay recorded as
+unresolved / `:param` routes pending hand mapping; the scanner is per-file and
+cannot resolve a shared helper's callers or tell a query suffix from a path
+segment, so nothing else left the denominator.
+
+Main integration at `1bd165d6f` (#4016, SMS commitment follow-up) records the
+`OwedCommitmentsSummary` component's two request sites — the collection GET now
+takes the `open` / `sms` collection as a template segment, and the Mark done /
+Dismiss PATCH moved lines — proved against that merged revision and retained
+as unsupported/unverified; the superseded fixed-`open` GET row leaves the
+denominator, which stays at 1,744 cumulative sites. Nothing gains coverage.
+
+## B1 selection follow-up
+
+Target validation #4062 stopped receiving pushes at `600841fa52` after its
+fifth review introduced a new P1: an unmatched explicit customer name could
+accept a stale `selectedTarget` (3948877186). Review history: round 1
+`265f8c4173` had two P1/four P2; round 2 `7c15c116e7` had two P1/three P2;
+round 3 on the same head had two P1/one P2; round 4 `27897bb40c` had two
+P1/one P2; round 5 `600841fa52` had one P1/three P2. `e18a438cf` later merged
+main after catalog #4041 squash-merged (graft merge, no conflicts).
+
+`fix/ib-target-selection` is the focused child of B1 that fixes that P1. Its
+first shape (five heads, `b9b2793b5` … `a4676a38b`) also carried a named-cohort
+grammar ("both A and B", "these customers …", "all of these …": member runs,
+field-set tails, action-clause splits, member matching, merged single-name
+lookups). Rounds 2–5 each found a new P1 in that grammar and none in the
+selection rule, so it hit the round cap. Owner decision 2026-09-08: fail closed
+on named cohorts. The current shape keeps two rules and deletes the grammar:
+
+- A selection is bound to the request's own fresh candidates. It is accepted
+  only as one of the rows this exact request resolved to (duplicate-name
+  disambiguation, the one flow that supplies a selection); a request that
+  named nobody, matched nothing, hit the lookup cap, or asked for a set has
+  no candidate to select and refuses with `context_mismatch`. No
+  stale-selection grammar is load-bearing: an unrecognized phrasing can only
+  over-refuse, never choose a customer.
+- A set quantifier is never a target. Any request containing `both`,
+  `these customers` or `all of these` resolves to no targets and
+  `ambiguous: true`, so the caller asks for one target at a time; write
+  validation and read preparation refuse an ambiguous context, and a selection
+  is refused. This is deliberately literal: first-name cohorts with no fresh
+  match ("text both Alice and Bob"), field pairs ("both the phone and email")
+  and product pairs all refuse, because any evidence-based narrowing is the
+  cohort grammar the round cap retired. Duplicate-name ambiguity stays
+  distinct: an operator selection among complete same-name matches resolves
+  it. Nothing downstream executes on a multi-customer cohort:
+  `prepareReadInput` fills `customer_id` only from exactly one target, and the
+  route reads `targets` solely as read-scope ids.
+
+A capped name lookup refuses any selection, and `prepareReadInput` refuses an
+ambiguous context or an unresolved explicit name (`namesRequested` now travels
+in the context) before the empty-target broad-read fallback, so neither a
+refused cohort nor an unresolved name widens into an unscoped read. An explicit
+email or phone recipient is a contact, never a name. `namesTargetCustomer` no
+longer accepts a name after `both` or `and`, and the
+resolver keeps page errors in the page shape and anchors its recipient/review
+matches, so its structural warning falls below the pre-split level.
+
+The first remote round on the rebuilt head added `set`/`edit`/`mark`/`make`
+to the selector verbs (a stale selection could survive "Set Alice Owner
+inactive"), normalized the quantifier spellings (`those customers`, `all of
+those`, repeated whitespace) on a contact-free clause so `both@example.invalid`
+is a recipient, listed the common field nouns (`status`, `billing`, …) as
+non-names so "Update customer status" keeps a selected customer, and took the
+resolver under the structural threshold by making a broken page hint fail
+closed for a page-referencing request even when a selection is supplied.
+
+The second round added the ordinary set spellings (`all customers`,
+`each`/`every customer`), stripped contact literals before the full-name
+lookup as well, listed every `update_customer` field and the opening
+contractions as non-names, and reads a `null` selection as absent.
+
+The third round added the determiner forms (`all the customers`, `all of the
+customers`, `each of the customers`, `every one of the customers`), made
+`rename`/`relabel` selector verbs, and closed partly resolved compound
+evidence: when one action clause accepted a customer and another clause's
+person reference matches nobody ("update Jhon Smith and text Alice Owner"),
+the request has no target, is ambiguous, and refuses any selection. A request
+that resolved nobody keeps the plain unresolved-name handling, and a resolved
+clause may still carry service nouns. `account`/`profile`/`record` and the
+record nouns (`appointment`, `estimate`, `invoice`, …) are non-names. The
+thing being sent introduces its recipient too (`send the response to`,
+`forward the estimate to`), closing B2's open recipient-phrase thread here.
+
+The fourth round qualified the set grammar (up to two qualifiers between the
+quantifier and the noun: `all active customers`, `each overdue customer`; a
+deictic qualifier such as `all of this customer's fields` still names one
+account), required every person reference in a clause to resolve (a token
+modifying a non-person noun, `flea` in `flea treatment`, is not a person
+reference; `and also`/`and then` open a clause), and made two distinct
+stated recipients refuse any selection while duplicate rows of one stated
+name still accept it. Communication objects (`message`, `receipt`, `text`,
+`link`, …) and the pests and lawn work a request names are non-names.
+
+The fifth round stopped at the cap with two new P1s (`all accounts` missed the
+set grammar; the partial-evidence check pooled name tokens, so `update Alice
+Missing and also text Alice Jones` accepted Alice Jones). Owner decision
+2026-09-09: server-bound selections plus a whole-reference check. A selection
+is now accepted only as one of the request's own candidates (above), the set
+noun takes every customer synonym (`customer`, `account`, `client`,
+`profile`, `record`), and each person reference is the whole name run after
+its selector, resolved only against a customer whose full name it starts with
+or, for a bare single name, whose first or last name it is. Both P1 examples
+fail safely with and without a selection, in the unit and PostgreSQL suites.
+The function words that can follow a selector (`on`, `about`, `after`, …)
+are non-names, which fixes a phone-read over-refusal found downstream.
+
+The finished-commit review found two more P1s in the same direction and a P2,
+fixed in place: a name run must equal the stored name exactly (`Update Alice
+Jones Jr` no longer resolves Alice Jones as a prefix; an unlisted trailing word
+such as `soon` is refused rather than assumed), the qualifier run between a
+set quantifier and its noun is unbounded (`all active residential lawn
+customers` is a set; a deictic word still ends the run), and a selected
+customer id is lowercased before candidate matching.
+
+The integration round on the cascade head found three more P1s and a P2 in
+the resolver, fixed in place: a numeric count or bare plural person noun
+(`Update 2 customers and this customer`, `Text three clients`, `Update
+customers`) is a set; every occurrence of a repeated name token is its own
+reference (`Forward Alice Jones's estimate to Alice Missing` states two
+people, so the unresolved one refuses the request); a bare name before a
+function or temporal word (`Text Alice tomorrow and update Bob Jones`) is
+still a stated person, while a token before an object noun (`Bermuda sod`)
+only modifies that noun; and a name run continues through a non-name word
+that continues a matched customer's own name, so `Update Alice Link Jr` is
+compared whole against Alice Link and refused.
+
+Validation: 165 target cases pass (141 unit and 24 rollback-only isolated
+PostgreSQL cases). No model, provider, production query, migration, merge or
+gate change occurred.
+
+#4120 (three-line best-time hint) records the first `reviewed_exception` row.
+The `useBestTimes` hint request moved into a `search` wrapper, so the census
+sees a new site (`16c8f8f115eaeffba01b983c`) rather than a changed one, and a
+pre-merge branch cannot prove a baseline. The row is excepted, not covered:
+admin date pickers fire this POST automatically to decorate the picked hour
+and the best hours, a read-only ranking over the same find-time engine the
+`find_available_slots` read tool already exposes, gated by
+`GATE_BEST_TIME_HINTS`, with no write or approval. The superseded
+`useBestTimes` row stays as history; the denominator is 1,745 recorded sites,
+1,744 unsupported/unverified. No domain action gains coverage.

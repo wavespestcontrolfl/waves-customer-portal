@@ -2,23 +2,32 @@ const db = require('../models/db');
 const { createHash } = require('node:crypto');
 const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-et');
 
-const MONTH_RECURRENCE_INTERVALS = {
-  monthly_nth_weekday: 1,
-  monthly: 1,
+// Minimum plausible gap in DAYS between two visits of a series, per
+// recurring_pattern: ~70% of the nominal interval (a month counts 21 days).
+// The too-close checks flag gaps SMALLER than this; a longer gap is never an
+// anomaly here. Patterns absent from this map (and `custom` rows without an
+// interval) are excluded from the audit — the month-only map used to drop
+// `every_6_weeks` (48 future visits) and every `custom` series (94, at 14
+// or 42 days) silently (ops-inbox triage 2026-09-05 lane 4).
+const MIN_GAP_DAYS_BY_PATTERN = {
+  monthly_nth_weekday: 21,
+  monthly: 21,
   // Seasonal mosquito (9x Feb–Oct): monthly spacing IN season, so the 1-month
-  // too-close threshold (21 days) applies; the Oct→Feb winter gap is longer
-  // than any threshold and can never false-positive (the checks only flag
-  // gaps SMALLER than the minimum). Absent from this map the inner join
-  // dropped every seasonal row before the duplicate/too-close checks ran.
-  seasonal_feb_oct: 1,
-  bimonthly: 2,
-  quarterly: 3,
-  triannual: 4,
-  semiannual: 6,
-  biannual: 6,
-  annual: 12,
-  yearly: 12,
+  // threshold applies; the Oct→Feb winter gap is longer than any threshold
+  // and can never false-positive.
+  seasonal_feb_oct: 21,
+  every_6_weeks: 29,
+  bimonthly: 42,
+  quarterly: 63,
+  triannual: 84,
+  semiannual: 126,
+  biannual: 126,
+  annual: 252,
+  yearly: 252,
 };
+// `custom` carries its own recurring_interval_days: same 70% rule.
+const CUSTOM_MIN_GAP_SQL = `CASE WHEN COALESCE(p.recurring_interval_days, s.recurring_interval_days) > 0
+            THEN round(COALESCE(p.recurring_interval_days, s.recurring_interval_days) * 0.7)::integer END`;
 
 function normalizeLimit(value) {
   const parsed = parseInt(value, 10);
@@ -37,18 +46,18 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
     ? ['cancelled', 'rescheduled']
     : ['cancelled', 'rescheduled', 'completed'];
   const statusPlaceholders = terminalStatuses.map(() => '?').join(', ');
-  const intervalsValues = Object.entries(MONTH_RECURRENCE_INTERVALS)
+  const intervalsValues = Object.entries(MIN_GAP_DAYS_BY_PATTERN)
     .map(() => '(?::text, ?::integer)')
     .join(', ');
-  const intervalBindings = Object.entries(MONTH_RECURRENCE_INTERVALS)
-    .flatMap(([pattern, months]) => [pattern, months]);
+  const intervalBindings = Object.entries(MIN_GAP_DAYS_BY_PATTERN)
+    .flatMap(([pattern, minGapDays]) => [pattern, minGapDays]);
 
   return {
     sql: `
-      WITH intervals(pattern, months) AS (
+      WITH intervals(pattern, min_gap_days) AS (
         VALUES ${intervalsValues}
       ),
-      active_series AS (
+      series_rows AS (
         SELECT
           s.id,
           s.customer_id,
@@ -58,15 +67,20 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
           s.status,
           s.recurring_parent_id,
           COALESCE(p.recurring_pattern, s.recurring_pattern) AS pattern,
+          COALESCE(i.min_gap_days, CASE WHEN COALESCE(p.recurring_pattern, s.recurring_pattern) = 'custom'
+            THEN ${CUSTOM_MIN_GAP_SQL} END) AS min_gap_days,
           COALESCE(p.scheduled_date, s.scheduled_date)::date AS parent_date,
           COALESCE(p.skip_weekends, s.skip_weekends) AS skip_weekends,
           COALESCE(p.weekend_shift, s.weekend_shift) AS weekend_shift
         FROM scheduled_services s
         LEFT JOIN scheduled_services p ON p.id = s.recurring_parent_id
         LEFT JOIN customers c ON c.id = s.customer_id
-        JOIN intervals i ON i.pattern = COALESCE(p.recurring_pattern, s.recurring_pattern)
+        LEFT JOIN intervals i ON i.pattern = COALESCE(p.recurring_pattern, s.recurring_pattern)
         WHERE s.is_recurring = true
           AND s.status NOT IN (${statusPlaceholders})
+      ),
+      active_series AS (
+        SELECT * FROM series_rows WHERE min_gap_days IS NOT NULL
       ),
       child_anomalies AS (
         SELECT
@@ -85,14 +99,13 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
           a.weekend_shift,
           CASE
             WHEN a.scheduled_date <= a.parent_date THEN 'child_on_or_before_parent'
-            WHEN (a.scheduled_date - a.parent_date) < (i.months * 21) THEN 'child_too_close_to_parent'
+            WHEN (a.scheduled_date - a.parent_date) < a.min_gap_days THEN 'child_too_close_to_parent'
           END AS issue
         FROM active_series a
-        JOIN intervals i ON i.pattern = a.pattern
         WHERE a.recurring_parent_id IS NOT NULL
           AND (
             a.scheduled_date <= a.parent_date
-            OR ((a.scheduled_date - a.parent_date) > 0 AND (a.scheduled_date - a.parent_date) < (i.months * 21))
+            OR ((a.scheduled_date - a.parent_date) > 0 AND (a.scheduled_date - a.parent_date) < a.min_gap_days)
           )
       ),
       sequenced AS (
@@ -121,10 +134,9 @@ function buildRecurringScheduleAnomalySql({ includeCompleted = false, limit = 10
           s.weekend_shift,
           'consecutive_too_close' AS issue
         FROM sequenced s
-        JOIN intervals i ON i.pattern = s.pattern
         WHERE s.prev_date IS NOT NULL
           AND (s.scheduled_date - s.prev_date) > 0
-          AND (s.scheduled_date - s.prev_date) < (i.months * 21)
+          AND (s.scheduled_date - s.prev_date) < s.min_gap_days
       )
       SELECT * FROM child_anomalies
       UNION ALL
@@ -169,6 +181,172 @@ async function auditRecurringScheduleAnomalies(options = {}, conn = db) {
     limit,
     anomalyCount: anomalies.length,
     anomalies,
+  };
+}
+
+// Coverage is a measurement of stored visits, not permission to create or move
+// one. Keep calendar-month/seasonal/nth-weekday rules in the existing seeder.
+function recurringCadenceDate(row = {}) {
+  if (row.date_exception) return formatDateOnly(row.date_exception_cadence_date);
+  return formatDateOnly(row.recurring_dispatch_due_date || row.scheduled_date);
+}
+
+function nextCoverageDate(template, row, ordinal = 0, blackoutDates = null) {
+  const seeder = require('./recurring-appointment-seeder');
+  const pattern = seeder.normalizeRecurringPattern(template.recurring_pattern);
+  const baseDate = recurringCadenceDate(template);
+  const previousDate = recurringCadenceDate(row);
+  if (!baseDate || !previousDate || !pattern || (pattern === 'custom' && !(Number(template.recurring_interval_days) > 0))) return null;
+  let position = 0;
+  for (const candidate of seeder.recurringDateCandidates(baseDate, pattern, {
+    recurrenceOptions: { nth: template.recurring_nth, weekday: template.recurring_weekday, intervalDays: template.recurring_interval_days },
+    skipWeekends: !!template.skip_weekends, weekendShift: template.weekend_shift, blackoutDates,
+    maxAttempts: Math.max(ordinal + 1, seeder.etDateDiffDays(baseDate, previousDate) + 1) * 4 + 30,
+  })) {
+    position++;
+    if (position > ordinal && candidate > previousDate) return candidate;
+  }
+  return null;
+}
+
+function measureRecurringSeries(template, visits, { todayET = etDateString(), decision = null, holds = [], blackoutDates = null } = {}) {
+  const { etDateDiffDays } = require('./recurring-appointment-seeder');
+  const retained = visits.filter(row => row.is_recurring && !row.is_callback && !row.followup_included
+    && !['cancelled', 'skipped', 'no_show'].includes(row.status));
+  // A parked reschedule remains owed work. Its date is the abandoned slot,
+  // so it cannot establish future placement or actual visit spacing.
+  const awaitingPlacement = retained.filter(row => row.status === 'rescheduled');
+  const live = retained.filter(row => row.status !== 'rescheduled')
+    .sort((a, b) => formatDateOnly(a.scheduled_date).localeCompare(formatDateOnly(b.scheduled_date))
+      || String(a.id).localeCompare(String(b.id)));
+  const upcoming = live.filter(row => row.status !== 'completed' && formatDateOnly(row.scheduled_date) >= todayET);
+  const overdue = live.filter(row => row.status !== 'completed' && formatDateOnly(row.scheduled_date) < todayET);
+  const completed = live.filter(row => row.status === 'completed');
+  // Compare cadence positions independently of actual appointment order: an
+  // exception can move past the following application. Unknown legacy
+  // positions keep their spacing measurements without erasing the known
+  // positions of other visits in the same series.
+  const cadenceOrder = live.filter(row => recurringCadenceDate(row))
+    .sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b)));
+  const followingDates = new Map(cadenceOrder.map((row, index) => [row.id, nextCoverageDate(template, row, index, blackoutDates)]));
+  const expectedDates = new Map(cadenceOrder.slice(1).map((row, index) => [row.id, followingDates.get(cadenceOrder[index].id)]));
+  const paused = holds.some(hold => hold.status === 'active' && formatDateOnly(hold.starts_on) <= todayET && formatDateOnly(hold.resume_on) > todayET);
+  const stopped = decision === 'cancel_series' || (decision === 'let_lapse' && upcoming.length === 0 && awaitingPlacement.length === 0);
+  const intervals = live.slice(1).map((row, index) => {
+    const previous = live[index];
+    const from = formatDateOnly(previous.scheduled_date);
+    const to = formatDateOnly(row.scheduled_date);
+    const expected = expectedDates.get(row.id) ?? null;
+    const cadenceDate = recurringCadenceDate(row);
+    return {
+      previousAppointmentId: previous.id, appointmentId: row.id,
+      previousDate: from, scheduledDate: to, intervalDays: etDateDiffDays(from, to),
+      expectedDate: expected,
+      // Actual spacing remains visible for an exception; cadence drift uses
+      // its original slot, so an agreed move does not rewrite the plan.
+      cadenceDate, driftDays: expected && cadenceDate ? etDateDiffDays(expected, cadenceDate) : null,
+      dateException: !!(previous.date_exception || row.date_exception),
+      overlapsHold: holds.some(hold => formatDateOnly(hold.starts_on) <= to && formatDateOnly(hold.resume_on) > from),
+      basis: previous.status === 'completed' && row.status === 'completed' ? 'completed_visit_dates' : 'scheduled_visit_dates',
+    };
+  });
+  const lastCompleted = completed.at(-1);
+  const next = upcoming[0];
+  const nextExpectedDate = lastCompleted
+    ? (recurringCadenceDate(lastCompleted) && followingDates.get(cadenceOrder.filter(row => row.status === 'completed').at(-1)?.id)) || null
+    : recurringCadenceDate(live[0] || template);
+  const issues = stopped || paused ? [] : Object.entries({
+    ongoing_plan_has_no_future_visit: template.recurring_ongoing && upcoming.length === 0,
+    overdue_uncompleted_visits: overdue.length > 0,
+    rescheduled_visits_awaiting_placement: awaitingPlacement.length > 0,
+  }).filter(([, present]) => present).map(([issue]) => issue);
+  return {
+    parentId: template.id, customerId: template.customer_id, propertyId: template.property_id || null,
+    serviceType: template.service_type, pattern: template.recurring_pattern,
+    ongoing: !!template.recurring_ongoing,
+    paused, stopped,
+    issues, lastCompletedScheduledDate: formatDateOnly(lastCompleted?.scheduled_date), nextExpectedDate,
+    nextRecordedDate: formatDateOnly(next?.scheduled_date),
+    nextTimedVisitDate: formatDateOnly(upcoming.find(row => row.window_start)?.scheduled_date),
+    continuationDueDate: template.recurring_ongoing && recurringCadenceDate(live.at(-1)) ? followingDates.get(cadenceOrder.at(-1)?.id) || null : null,
+    upcomingVisits: upcoming.length, untimedUpcomingVisits: upcoming.filter(row => !row.window_start).length,
+    overdueVisits: overdue.length,
+    awaitingPlacementVisits: awaitingPlacement.length,
+    daysSinceLastCompletedVisit: etDateDiffDays(formatDateOnly(lastCompleted?.scheduled_date), todayET),
+    intervals,
+  };
+}
+
+async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, offset = 0, customerId } = {}, conn = db) {
+  const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
+  const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('./estimate-converter');
+  const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
+  const { preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
+  const pageSize = normalizeLimit(limit);
+  const pageOffset = Math.max(0, parseInt(offset, 10) || 0);
+  const roots = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
+    .where('s.is_recurring', true).whereNull('s.recurring_parent_id')
+    .where('c.active', true).whereNull('c.deleted_at')
+    .where(q => q.whereNull('c.pipeline_stage').orWhereNotIn('c.pipeline_stage', FORMER_CUSTOMER_STAGES))
+    .modify(q => { if (customerId) q.where('s.customer_id', customerId); })
+    .select('s.*')
+    .orderBy('s.id').limit(pageSize + 1).offset(pageOffset);
+  const selected = roots.slice(0, pageSize);
+  const templates = selected.map(root => overlayRecurringTemplateOverrides(root, { recurring_template_overrides: true }));
+  const serviceIds = [...new Set(templates.map(row => row.service_id).filter(Boolean))];
+  const catalogRows = serviceIds.length ? await conn('services').whereIn('id', serviceIds)
+    .select('id', 'service_key', 'billing_type') : [];
+  const catalog = new Map(catalogRows.map(row => [row.id, row]));
+  const eligible = templates.filter(root => root.recurring_pattern !== 'one_time'
+    && catalog.get(root.service_id)?.billing_type !== 'one_time');
+  const rootIds = selected.map(row => row.id);
+  const customerIds = [...new Set(selected.map(row => row.customer_id))];
+  const preferences = customerIds.length ? await conn('property_preferences').whereIn('customer_id', customerIds)
+    .select('customer_id', 'preferred_day') : [];
+  const noWeekends = new Set(preferences.filter(preferenceRowBlocksWeekends).map(row => row.customer_id));
+  const children = rootIds.length ? await conn('scheduled_services')
+    .whereIn('recurring_parent_id', rootIds).whereIn('customer_id', customerIds).select('*') : [];
+  // Include the next projected occurrence plus the canonical nudge search.
+  // Current closure rules are shared with generation; a read failure cannot
+  // certify an expected date on an assumed-open day.
+  const horizonDates = [...selected, ...children].map(recurringCadenceDate).filter(Boolean);
+  for (const template of eligible) {
+    const rows = [template, ...children.filter(row => row.recurring_parent_id === template.id)]
+      .filter(row => recurringCadenceDate(row)).sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b)));
+    const next = nextCoverageDate(template, rows.at(-1), rows.length - 1);
+    if (next) horizonDates.push(next);
+  }
+  horizonDates.sort();
+  const blackoutDates = horizonDates.length ? await require('./scheduling/blackout-dates').getBlackoutLayers(
+    horizonDates[0], etDateString(addETDays(parseETDateTime(`${horizonDates.at(-1)}T12:00`), 75)), conn,
+  ) : null;
+  const decisions = rootIds.length ? await conn('recurring_plan_alerts')
+    .whereIn('recurring_parent_id', rootIds).whereIn('customer_id', customerIds)
+    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc').orderBy('id', 'desc')
+    .select('recurring_parent_id', 'customer_id', 'resolved_action') : [];
+  const holds = customerIds.length ? await conn('plan_holds').whereIn('customer_id', customerIds)
+    .whereNot('status', 'cancelled').select('customer_id', 'family_key', 'starts_on', 'resume_on', 'status') : [];
+  const todayET = etDateString(now);
+  const series = eligible.map(root => {
+    const identity = catalog.get(root.service_id)?.service_key || root.service_key_snapshot;
+    const combo = comboRouteFamiliesFromCatalogKey(identity);
+    const families = combo.length ? combo : [seedingFamilyKey({ service: identity, name: root.service_type })];
+    const historicalRoot = selected.find(row => row.id === root.id);
+    const effectiveTemplate = { ...root, skip_weekends: root.skip_weekends || noWeekends.has(root.customer_id) };
+    return measureRecurringSeries(effectiveTemplate, [historicalRoot, ...children.filter(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)], {
+      todayET,
+      blackoutDates,
+      decision: decisions.find(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)?.resolved_action,
+      holds: holds.filter(row => row.customer_id === root.customer_id && families.includes(row.family_key)),
+    });
+  });
+  return {
+    asOfDate: todayET, limit: pageSize, offset: pageOffset, hasMore: roots.length > pageSize,
+    scannedSeries: selected.length, excludedOneTimeSeries: selected.length - eligible.length,
+    measuredSeries: series.length, seriesWithIssues: series.filter(row => row.issues.length).length,
+    // This is scheduled-date evidence, not measured elapsed field time. Signed
+    // drift is displayed without inventing a new global warning tolerance.
+    basis: 'stored_visit_dates', series,
   };
 }
 
@@ -394,7 +572,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
 }
 
 module.exports = {
-  MONTH_RECURRENCE_INTERVALS,
+  MIN_GAP_DAYS_BY_PATTERN,
   auditRecurringScheduleAnomalies,
   buildRecurringScheduleAnomalySql,
   formatAnomaly,
@@ -402,4 +580,6 @@ module.exports = {
   normalizeLimit,
   acceptedScheduleFindings,
   findAcceptedRecurringScheduleGaps,
+  auditRecurringScheduleCoverage,
+  measureRecurringSeries,
 };

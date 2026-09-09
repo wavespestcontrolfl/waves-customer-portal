@@ -65,8 +65,10 @@ const { technicianReportCustomerCopy, containsReportAccessCode } = require('../s
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
-  resolveSeriesParentId,
+  clearSeriesPrepaid,
   buildPrepaidSeriesContext,
+  hasAnnualCoverage,
+  withoutAnnualCoverage,
 } = require('../services/prepaid-series');
 // Single-visit prepaid stamp: refuse only rows that are genuinely over.
 // NOT the series helper's TERMINAL_STATUSES — that set also skips
@@ -75,8 +77,29 @@ const {
 // without a replacement (routes/schedule.js), and staff must still be able
 // to record its payment (pre-push hook on #3878).
 const PREPAID_STAMP_REFUSED_STATUSES = ['completed', 'cancelled', 'no_show', 'skipped'];
+// Why a single-visit stamp UPDATE matched no row, in the order the route
+// reports it: a terminal status, then annual coverage (Codex #4030 r7 P1).
+// Both predicates are embedded in the UPDATE itself; this only names the
+// refusal for the operator.
+const PREPAID_STAMP_REFUSALS = [
+  {
+    refused: (row) => PREPAID_STAMP_REFUSED_STATUSES.includes(String(row.status || '').toLowerCase()),
+    body: (row) => ({
+      error: `This visit is already ${row.status} — it can't be marked prepaid. Refresh and try again.`,
+      code: 'visit_terminal',
+    }),
+  },
+  {
+    refused: hasAnnualCoverage,
+    body: () => ({
+      error: 'This visit has annual prepay coverage — reconcile that term before recording a manual prepayment.',
+      code: 'annual_prepay_coverage',
+    }),
+  },
+];
 const {
   auditRecurringScheduleAnomalies,
+  auditRecurringScheduleCoverage,
 } = require('../services/recurring-schedule-audit');
 const {
   detectWaveGuardPlanKeys,
@@ -1147,8 +1170,11 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
       // sentinel) — safeSendAppointment then treats the primary as opted
       // out rather than texting past a possibly-stored explicit opt-out.
-      const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
-      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+      // Visit-aware (app property scope, PR 3): a NON-primary saved property
+      // owns notify-primary, so the recipient list follows it. Same sentinel
+      // on a failed read or an unreadable property under enforcement.
+      const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
+      const noticeOutcome = {};
       const apptTime = parseETDateTime(noticeTime);
       const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
       const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
@@ -1189,6 +1215,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
+        sendOutcome: noticeOutcome,
         preDispatchCheck: async () => {
           const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
           if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
@@ -1210,7 +1237,11 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
             : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the reschedule text was sent' };
         },
       });
-      if (!sent) error = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+      if (!sent) {
+        error = noticeOutcome.retryable === true
+          ? 'customer was not notified: notification preferences could not be read — send the reschedule notice again'
+          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+      }
     }
   } catch (e) {
     error = e.message;
@@ -1380,6 +1411,30 @@ function copyAddonDiscountFields(target, source, cols) {
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
   if (cols.service_key_snapshot) target.service_key_snapshot = source.service_key_snapshot || null;
   if (cols.service_category_snapshot) target.service_category_snapshot = source.service_category_snapshot || null;
+}
+
+// Required child scope belongs to the visit's transaction. A failed copy must
+// roll back the extension so a retry cannot mistake a partial visit for a refill.
+async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons) {
+  if (dueAddons.length === 0) return;
+  const cols = await conn('scheduled_service_addons').columnInfo();
+  for (const addon of dueAddons) {
+    const data = {
+      scheduled_service_id: scheduledServiceId,
+      service_id: addon.service_id || null,
+      service_name: addon.service_name,
+      estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
+    };
+    for (const field of ['estimated_duration_minutes', 'recurring_interval_days', 'recurring_nth', 'recurring_weekday']) {
+      if (cols[field] && addon[field] != null) data[field] = addon[field];
+    }
+    for (const field of ['recurring_pattern', 'weekend_shift']) {
+      if (cols[field] && addon[field]) data[field] = addon[field];
+    }
+    if (cols.skip_weekends && addon.skip_weekends !== undefined) data.skip_weekends = addon.skip_weekends;
+    copyAddonDiscountFields(data, addon, cols);
+    await conn('scheduled_service_addons').insert(data);
+  }
 }
 
 function httpError(status, message) {
@@ -2446,18 +2501,8 @@ async function resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) {
 // below are the whole contract: nothing outside them is ever propagated or
 // overlaid, so a corrupted jsonb value can't rewrite dates, status, or
 // ownership on spawned rows.
-const PRICE_SERVICE_SERVICE_KEYS = [
-  'service_type', 'service_id', 'service_key_snapshot', 'service_category_snapshot', 'is_callback',
-];
-const PRICE_SERVICE_PRICE_KEYS = [
-  'estimated_price', 'primary_line_price',
-  'discount_type', 'discount_amount', 'discount_dollars',
-  'discount_id', 'discount_name',
-  'discount_service_key_filter', 'discount_service_category_filter', 'discount_max_dollars',
-  'line_discount_id', 'line_discount_name', 'line_discount_type',
-  'line_discount_amount', 'line_discount_dollars',
-];
-const PRICE_SERVICE_OVERRIDE_KEYS = new Set([...PRICE_SERVICE_SERVICE_KEYS, ...PRICE_SERVICE_PRICE_KEYS]);
+const { PRICE_SERVICE_SERVICE_KEYS, PRICE_SERVICE_PRICE_KEYS, PRICE_SERVICE_OVERRIDE_KEYS,
+  parseTemplateOverrides, overlayRecurringTemplateOverrides } = require('../services/recurring-template-overrides');
 
 function normalizePriceServiceScope(scope) {
   return scope === 'following' ? 'following' : 'this_only';
@@ -2530,30 +2575,6 @@ function readProvenanceOverrides(raw) {
   const out = {};
   for (const key of PROVENANCE_OVERRIDE_KEYS) if (value[key] !== undefined) out[key] = value[key];
   return out;
-}
-
-function parseTemplateOverrides(raw) {
-  let value = raw;
-  if (typeof value === 'string') {
-    try { value = JSON.parse(value); } catch { return null; }
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const filtered = {};
-  for (const [key, val] of Object.entries(value)) {
-    if (PRICE_SERVICE_OVERRIDE_KEYS.has(key)) filtered[key] = val;
-  }
-  return Object.keys(filtered).length > 0 ? filtered : null;
-}
-
-// The row every extension writer should COPY from: the parent overlaid with
-// its stamped template overrides. Gate off = the parent verbatim, so the
-// kill switch restores today's copy-the-parent behavior byte-for-byte.
-function overlayRecurringTemplateOverrides(parent, cols) {
-  if (!parent || !cols?.recurring_template_overrides) return parent;
-  if (!isEnabled('editApptPriceServiceScope')) return parent;
-  const overrides = parseTemplateOverrides(parent.recurring_template_overrides);
-  if (!overrides) return parent;
-  return { ...parent, ...overrides };
 }
 
 // Merge (never replace wholesale) so a later price-only edit keeps an
@@ -5842,7 +5863,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (totalAmount > 0) {
           await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
-            totalAmount: Number(totalAmount),
+            totalAmount,
             method: method || 'cash',
             note: note || null,
             useExistingTransaction: true,
@@ -6411,11 +6432,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const estimateRefusedAcceptance = !!(linkedEstimate
           && linkedEstimate.status !== 'accepted'
           && !estimateAutoAccepted);
+        // A Waves Assessment is not a closed deal either (owner ruling
+        // 2026-09-08): the converter judges that from the booked row itself
+        // (`booking: svc` below — name or catalog FK, never the client's
+        // label alone) and reports converted:false, so the promotion below
+        // stays off too. The lead stays open and the customer row keeps its
+        // lead stage until the quote is accepted.
         if (!estimateRefusedAcceptance) {
           try {
             const { convertLeadFromEvent } = require('../services/lead-estimate-link');
             const conversion = await convertLeadFromEvent({
               source: isRecurring ? 'recurring_service_booked' : 'appointment_booked',
+              booking: svc,
               // The estimate this booking rode in on: passing it lets the
               // authoritative estimate-link tier (leads.estimate_id) resolve
               // the exact FK-linked lead before the customer/contact
@@ -7301,12 +7329,22 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'mark_prepaid': {
             const amt = Number(payload?.totalAmount);
             if (!Number.isFinite(amt) || amt <= 0) throw Object.assign(new Error('totalAmount must be a positive number'), { isValidation: true });
-            await db('scheduled_services').where({ id }).update({
-              prepaid_amount: amt,
-              prepaid_method: payload?.method || 'cash',
-              prepaid_note: payload?.note || null,
-              prepaid_at: new Date(),
-            });
+            // Annual coverage is refused IN the UPDATE, not by a pre-read: an
+            // annual-prepay activation stamping the row between a SELECT and
+            // an unconditional UPDATE would be overwritten with a manual
+            // method, and completion would skip the annual coverage
+            // validator for an already-paid visit (Codex #4030 r7 P1).
+            const stamped = await withoutAnnualCoverage(db('scheduled_services').where({ id }))
+              .update({
+                prepaid_amount: amt,
+                prepaid_method: payload?.method || 'cash',
+                prepaid_note: payload?.note || null,
+                prepaid_at: new Date(),
+              })
+              .returning(['id']);
+            const unstamped = stamped.length ? null : await db('scheduled_services').where({ id }).first('id');
+            if (!stamped.length && !unstamped) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
+            if (!stamped.length) throw Object.assign(new Error('Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
             break;
           }
         }
@@ -11276,7 +11314,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (applyToSeries) {
       const result = await stampSeriesPrepaid(db, {
         anchorServiceId: req.params.id,
-        totalAmount: amt,
+        totalAmount: amount,
         method,
         note,
       });
@@ -11289,9 +11327,14 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // skips): a visit cancelled between the ownership read and this write
     // — including by a concurrent series cancel — must not end up holding
     // money for a visit that never runs (Codex #3878 r1 P1 / hook r2).
+    // Annual coverage is refused by the same UPDATE: this is the third
+    // manual writer next to the series fan-out and the bulk action, and a
+    // manual method replacing the annual one would hide paid coverage from
+    // the completion billing gate (Codex #4030 r7 P1).
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
       .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
+      .modify(withoutAnnualCoverage)
       .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: amt,
@@ -11301,13 +11344,10 @@ router.post('/:id/prepaid', async (req, res, next) => {
       })
       .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
     if (!updated.length) {
-      const current = await db('scheduled_services').where({ id: req.params.id }).first('status');
-      if (current && PREPAID_STAMP_REFUSED_STATUSES.includes(String(current.status || '').toLowerCase())) {
-        return res.status(409).json({
-          error: `This visit is already ${current.status} — it can't be marked prepaid. Refresh and try again.`,
-          code: 'visit_terminal',
-        });
-      }
+      const current = await db('scheduled_services').where({ id: req.params.id })
+        .first('status', 'annual_prepay_term_id', 'prepaid_method');
+      const refusal = current && PREPAID_STAMP_REFUSALS.find(({ refused }) => refused(current));
+      if (refusal) return res.status(409).json(refusal.body(current));
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
     logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);
@@ -11358,20 +11398,7 @@ router.delete('/:id/prepaid', async (req, res, next) => {
       }
       const anchor = await db('scheduled_services').where({ id: req.params.id }).first();
       if (!anchor) return res.status(404).json({ error: 'Scheduled service not found' });
-      const parentId = resolveSeriesParentId(anchor);
-      const cleared = await db('scheduled_services')
-        .where(function () {
-          this.where('recurring_parent_id', parentId).orWhere('id', parentId);
-        })
-        .whereNotNull('prepaid_amount')
-        .update({
-          prepaid_amount: null,
-          prepaid_method: null,
-          prepaid_note: null,
-          prepaid_at: null,
-        })
-        .returning(['id']);
-      return res.json({ success: true, clearedCount: cleared.length, seriesParentId: parentId });
+      return res.json(await clearSeriesPrepaid(db, anchor));
     }
     const cleared = await db('scheduled_services').where({ id: req.params.id })
       .modify((q) => technicianLiveVisitFilter(req, q))
@@ -12278,13 +12305,12 @@ async function reconcileRecurringSeriesVisitCount(trx, {
 // lock (hashed-key pattern shared with booking's self-booking-confirm /
 // slot-reserve locks), and EVERY read runs after the lock inside the same
 // transaction — the second runner sees the first's committed insert and
-// no-ops via the upcoming-count / existing-dates checks. The add-on mirror
-// and reminder registration run post-commit (their writers tolerate their
-// own failures and, for reminders, use a separate connection that must only
-// see a committed visit row) — same ordering the pre-lock code had.
+// no-ops via the upcoming-count / existing-dates checks. Required add-ons
+// commit with the visit; reminder registration follows the commit because its
+// writer uses a separate connection.
 async function runRecurringSeriesMaintenance(conn, svc) {
   const parentId = svc.recurring_parent_id || svc.id;
-    const runLocked = async (trx) => {
+  const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the auto-extend
     // insert serializes against a concurrent merge-undo of this customer.
@@ -12301,33 +12327,6 @@ async function runRecurringSeriesMaintenance(conn, svc) {
     ? await runLocked(conn)
     : await conn.transaction(runLocked);
   if (spawnedVisit) {
-    // Post-commit: mirror the parent's add-on lines onto the auto-extended
-    // visit so a multi-service ongoing series keeps its full scope (and
-    // billing) past the seeded window. Best-effort — an add-on failure must
-    // not void the already-committed visit (pre-lock semantics).
-    try {
-      if (spawnedVisit.dueAddons.length > 0) {
-        const addonCols = await conn('scheduled_service_addons').columnInfo();
-        for (const addon of spawnedVisit.dueAddons) {
-          const addonData = {
-            scheduled_service_id: spawnedVisit.scheduledServiceId,
-            service_id: addon.service_id || null,
-            service_name: addon.service_name,
-            estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-          };
-          if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
-          if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
-          if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
-          if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
-          if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
-          if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
-          if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
-          if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
-          copyAddonDiscountFields(addonData, addon, addonCols);
-          await conn('scheduled_service_addons').insert(addonData);
-        }
-      }
-    } catch (e) { logger.warn(`[recurring] Auto-extend addon mirror failed (non-blocking): ${e.message}`); }
     // Register the reminder row — without it the auto-extended visit never
     // enters appointment_reminders, so the customer gets no 72h/24h texts
     // for it (the cron reads only that table). No confirmation SMS,
@@ -12351,7 +12350,7 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 }
 
 // The lock-held body: returns the spawned-visit payload (for the wrapper's
-// post-commit add-on mirror + reminder registration) when an auto-extend row
+// post-commit reminder registration) when an auto-extend row
 // landed and survived the cancellation re-check, else null.
 async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
   let spawnedVisit = null;
@@ -12484,15 +12483,8 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           copyBillToFields(nextData, parent, cols);
           copyStampedServiceAddressFields(nextData, parent, cols);
           await anchorSoleProperty(nextData, cols, conn);
-          let parentAddons = [];
-          try {
-            // Nested transaction = savepoint: a missing
-            // scheduled_service_addons table (pre-migration env) must not
-            // abort the outer locked transaction — the extend proceeds
-            // addon-less, matching the pre-lock tolerance.
-            parentAddons = await conn.transaction((sp) =>
-              sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
-          } catch { parentAddons = []; }
+          // Required scope must be readable before creating any child.
+          const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
           const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
           const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
           // Anchored-split series (self-booked funnels, wizard plans): the
@@ -12535,11 +12527,10 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
               logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
             }
           }
-          // Hand the surviving insert back to the wrapper — the add-on
-          // mirror and reminder registration run post-commit there, so an
-          // add-on failure can't void the visit and the reminder writer
-          // (separate connection) only ever sees a committed row.
+          // Persist all due scope before the wrapper can observe a committed
+          // extension or register its reminder.
           if (autoExtLive && autoExtRow?.id) {
+            await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons);
             // Visit groups: stamp ONLY after the post-insert cancellation
             // re-check passes — stamping earlier could mint a visit whose
             // member this same transaction compensating-deletes.
@@ -12550,7 +12541,6 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
               scheduledDate: nextStr,
               windowStart: parent.window_start,
               serviceType: childIdentity.service_type,
-              dueAddons: parentAddons.length > 0 ? dueAddons : [],
             };
           }
         }
@@ -12949,6 +12939,9 @@ router.put('/:id/status', async (req, res, next) => {
             preferenceKey: 'tech_en_route',
             push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'tech_en_route'),
             dedupeKey: trackTransitions.enRouteNotificationKey(svc, enRouteResult.enRouteAt),
+            // The visit this bell is about — its saved property qualifies the
+            // link (GATE_APP_PROPERTY_SCOPE) so the app opens THAT house.
+            appointmentId: svc.id,
             metadata: { scheduledServiceId: svc.id, ...(svc.visit_id ? { visitId: svc.visit_id } : {}) },
           });
         } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
@@ -13049,6 +13042,7 @@ router.put('/:id/status', async (req, res, next) => {
           icon: '\u{1F3E0}',
           link: '/?tab=documents',
           preferenceKey: 'service_completed',
+          appointmentId: svc.id,
           push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'service_complete'),
           dedupeKey: `scheduled-service:${svc.id}:completed`,
           metadata: { scheduledServiceId: svc.id },
@@ -16911,6 +16905,11 @@ router.get('/recurring-anomalies', requireAdmin, async (req, res, next) => {
       includeCompleted,
       limit: req.query.limit,
     });
+    // Opt-in read-only measurements; the existing anomaly response stays
+    // unchanged unless the caller asks for series coverage.
+    if (req.query.includeCoverage === 'true') {
+      audit.coverage = await auditRecurringScheduleCoverage({ limit: req.query.limit, offset: req.query.coverageOffset });
+    }
     res.json({ success: true, ...audit });
   } catch (err) { next(err); }
 });
@@ -17155,10 +17154,8 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
 // only spawns visits on the isOngoing branch; the fixed-plan branch can only
 // insert an ALERT row, never a billable visit.
 //
-// Add-on mirroring + reminder registration run POST-COMMIT (maintenance
-// pattern): an add-on failure must not void committed visits, and the
-// reminder writer uses a separate connection that can only see committed
-// rows.
+// Add-ons commit with the extended visits and alert resolution. Reminder
+// registration follows the commit because its writer uses another connection.
 async function runRecurringAlertAction(conn, { idParam, action, count, adminUserId }) {
   // Resolve alert row (may be derived id) — unlocked peek for fast 404s;
   // everything the writes depend on is re-read inside the lock below.
@@ -17187,16 +17184,8 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
 
   let outcome = null;
   let parent = null;
-  let parentAddons = [];
   let ongoingStopped = 0;
-  // Hoisted: the post-commit add-on mirror needs the same blackout layers
-  // the in-trx date generators used.
-  let alertBlackoutDates = null;
-  const spawned = []; // committed inserts → post-commit addon/reminder steps
-
-  // B6: effective weekend rule captured out of the locked closure for the
-  // post-commit add-on mirror.
-  let alertSkipEffective = false;
+  const spawned = []; // committed inserts → post-commit reminder registration
   const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the spawn inserts
@@ -17289,21 +17278,12 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     // stays the operator's raw value (provenance — see reconcile).
     const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
     const skipParent = skipParentStamp || await customerPrefersNoWeekends(trx, parent.customer_id);
-    // Captured for the post-commit add-on mirror, which runs OUTSIDE this
-    // locked closure but must match the dates it generated.
-    alertSkipEffective = skipParent;
     const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
 
     // Pull parent's add-on lines once so we can mirror them onto each new
     // row spawned by extend / convert_ongoing — multi-service recurring
     // appointments would otherwise lose their secondary services here.
-    // Savepoint (nested transaction), NOT a bare try/catch: a missing
-    // scheduled_service_addons table (pre-migration env) must not abort the
-    // outer locked transaction — same tolerance as the auto-extend path.
-    try {
-      parentAddons = await trx.transaction((sp) =>
-        sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
-    } catch { parentAddons = []; }
+    const parentAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: parentId });
     const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
     // Extension rows keep invoice-on-complete stamping (fix: extended visits
     // of a pay-per-visit plan completed uninvoiced) — resolved once here,
@@ -17318,7 +17298,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
     const seriesDateSeed = await loadActiveSeriesDates(trx, parentId);
     seriesDateSeed.add(baseDateStr);
-    alertBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
+    const alertBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
 
     let created = 0;
     // Visits the action still OWES: extend owes its requested count and
@@ -17526,6 +17506,10 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         { statusCode: 409, isOperational: true, code: 'EXTENSION_SHORTFALL' },
       );
     }
+    for (const row of spawned) {
+      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, row.date, alertBlackoutDates, skipParent);
+      await insertRecurringChildAddons(trx, row.id, dueAddons);
+    }
     // Resolve/insert the alert row in the SAME transaction — the resolution
     // IS the idempotency claim a concurrent click's in-lock re-read checks.
     if (alert) {
@@ -17562,35 +17546,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
   if (outcome.status !== 200 || outcome.body.alreadyResolved) return outcome;
 
   // ——— Post-commit side effects (maintenance pattern) ———
-  // Mirror parent's addon rows onto each freshly-committed child. Best-effort
-  // — if it fails the child still exists and dispatch can re-add.
-  const mirrorAddons = async (childId, childDate) => {
-    if (!Array.isArray(parentAddons) || parentAddons.length === 0 || !childId) return;
-    try {
-      const addonCols = await conn('scheduled_service_addons').columnInfo();
-      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate, alertBlackoutDates, alertSkipEffective);
-      for (const addon of dueAddons) {
-        const addonData = {
-          scheduled_service_id: childId,
-          service_id: addon.service_id || null,
-          service_name: addon.service_name,
-          estimated_price: addon.estimated_price != null ? addon.estimated_price : null,
-        };
-        if (addonCols.base_price && addon.base_price != null) addonData.base_price = addon.base_price;
-        if (addonCols.estimated_duration_minutes && addon.estimated_duration_minutes != null) addonData.estimated_duration_minutes = addon.estimated_duration_minutes;
-        if (addonCols.recurring_pattern && addon.recurring_pattern) addonData.recurring_pattern = addon.recurring_pattern;
-        if (addonCols.recurring_interval_days && addon.recurring_interval_days != null) addonData.recurring_interval_days = addon.recurring_interval_days;
-        if (addonCols.recurring_nth && addon.recurring_nth != null) addonData.recurring_nth = addon.recurring_nth;
-        if (addonCols.recurring_weekday && addon.recurring_weekday != null) addonData.recurring_weekday = addon.recurring_weekday;
-        if (addonCols.skip_weekends && addon.skip_weekends !== undefined) addonData.skip_weekends = addon.skip_weekends;
-        if (addonCols.weekend_shift && addon.weekend_shift) addonData.weekend_shift = addon.weekend_shift;
-        copyAddonDiscountFields(addonData, addon, addonCols);
-        await conn('scheduled_service_addons').insert(addonData);
-      }
-    } catch (e) { logger.warn(`[recurring-alerts] addon mirror failed (non-blocking): ${e.message}`); }
-  };
   for (const row of spawned) {
-    await mirrorAddons(row.id, row.date);
     // Register the reminder row — without it the extended visit never
     // enters appointment_reminders, so the 72h/24h cron skips it. Runs
     // post-commit: the reminder writer (separate connection) must only

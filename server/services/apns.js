@@ -94,7 +94,7 @@ function apnsCollapseId(tag) {
 function buildApnsPayload(notification = {}) {
   const { title, body, badge, sound, url, aps: _ignore, ...rest } = notification;
   const aps = {
-    alert: { title: title || 'Waves Pest Control', body: body || '' },
+    alert: { title: title || 'Waves', body: body || '' },
     sound: sound || 'default',
   };
   if (typeof badge === 'number') aps.badge = badge;
@@ -120,7 +120,12 @@ function classifyApnsResponse(status, reason) {
   if (status === 410 || reason === 'Unregistered') {
     return { ok: false, expired: true, reason: reason || 'unregistered' };
   }
-  return { ok: false, expired: false, reason: reason || `apns_status_${status || 0}` };
+  const retryable = status === 429 || status >= 500 || reason === 'IdleTimeout';
+  // Apple requires a 15-minute delay for 5xx responses. Token-update
+  // throttling has its own 20-minute floor; ordinary throttling waits a minute.
+  const retryAfterMs = status >= 500 ? 15 * 60000 : reason === 'TooManyProviderTokenUpdates' ? 20 * 60000 : 60000;
+  return { ok: false, expired: false, reason: reason || `apns_status_${status || 0}`,
+    ...(retryable ? { retryable: true, retryAfterMs } : {}) };
 }
 
 /**
@@ -147,7 +152,7 @@ function send(deviceToken, notification) {
     try {
       client = http2.connect(cfg.production ? HOST_PROD : HOST_SANDBOX);
     } catch (err) {
-      return resolve({ ok: false, failed: true, reason: err.message });
+      return resolve({ ok: false, failed: true, retryable: true, reason: err.message });
     }
     let settled = false;
     const finish = (result) => {
@@ -162,10 +167,10 @@ function send(deviceToken, notification) {
     // reaches them. destroy() fails the leg and prevents late delivery.
     const wallClockKiller = setTimeout(() => {
       try { client.destroy(); } catch { /* noop */ }
-      finish({ ok: false, failed: true, reason: 'apns_timeout' });
+      finish({ ok: false, failed: true, retryable: true, reason: 'apns_timeout' });
     }, APNS_REQUEST_TIMEOUT_MS);
 
-    client.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
+    client.on('error', (err) => finish({ ok: false, failed: true, retryable: true, reason: err.message }));
 
     // Any synchronous throw building/sending the request also fails soft.
     try {
@@ -189,10 +194,10 @@ function send(deviceToken, notification) {
       req.on('response', (headers) => { status = headers[':status']; });
       req.setEncoding('utf8');
       req.on('data', (chunk) => { data += chunk; });
-      req.on('error', (err) => finish({ ok: false, failed: true, reason: err.message }));
+      req.on('error', (err) => finish({ ok: false, failed: true, retryable: true, reason: err.message }));
       req.setTimeout(APNS_REQUEST_TIMEOUT_MS, () => {
         try { req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* noop */ }
-        finish({ ok: false, failed: true, reason: 'apns_timeout' });
+        finish({ ok: false, failed: true, retryable: true, reason: 'apns_timeout' });
       });
       req.on('end', () => {
         let reason = null;

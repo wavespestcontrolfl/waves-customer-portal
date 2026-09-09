@@ -74,6 +74,7 @@ export default function PayersPage() {
   const [form, setForm] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState(""); // a failed list must not read as "no payers"
   const [detailPayer, setDetailPayer] = useState(null); // open the statements/AR sheet
   const [arOpen, setArOpen] = useState(false); // cross-payer AR aging dialog
 
@@ -83,11 +84,16 @@ export default function PayersPage() {
       const params = new URLSearchParams();
       if (search.trim()) params.set("search", search.trim());
       if (includeInactive) params.set("includeInactive", "true");
+      setLoadError("");
       const r = await adminFetch(`/admin/payers?${params.toString()}`);
-      const data = await r.json();
+      const data = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
       setPayers(Array.isArray(data?.payers) ? data.payers : []);
-    } catch {
+    } catch (e) {
+      // UI audit F0502: a 403/500/network failure used to collapse into
+      // "No payers yet" — the reassuring answer — with no retry.
       setPayers([]);
+      setLoadError(e?.message || "Could not load payers.");
     } finally {
       setLoading(false);
     }
@@ -211,6 +217,15 @@ export default function PayersPage() {
                     Loading…
                   </TD>
                 </TR>
+              ) : loadError ? (
+                <TR>
+                  <TD colSpan={6} className="text-center py-6 text-alert-fg" role="alert">
+                    {loadError}{" "}
+                    <Button size="sm" variant="ghost" onClick={load}>
+                      Retry
+                    </Button>
+                  </TD>
+                </TR>
               ) : payers.length === 0 ? (
                 <TR>
                   <TD colSpan={6} className="text-center text-zinc-400 py-6">
@@ -305,7 +320,7 @@ export default function PayersPage() {
                 placeholder="Street"
               />
             </Field>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <Field label="City">
                 <Input
                   value={form.billing_city || ""}

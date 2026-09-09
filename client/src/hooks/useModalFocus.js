@@ -16,6 +16,8 @@ const FOCUSABLE_SELECTOR = [
 ].join(', ');
 
 function isAvailable(element) {
+  // :disabled includes controls disabled by their fieldset while saving.
+  if (element.matches(':disabled')) return false;
   if (element.closest('[hidden], [aria-hidden="true"]')) return false;
   let current = element;
   while (current instanceof HTMLElement) {
@@ -106,7 +108,7 @@ export default function useModalFocus(active = true, onEscape = null) {
         typeof previouslyFocused.focus === 'function' &&
         document.contains(previouslyFocused)
       ) {
-        previouslyFocused.focus();
+        previouslyFocused.focus({ preventScroll: true });
       }
     };
   }, [active]);

@@ -9,6 +9,7 @@ import React, {
 import { createPortal } from 'react-dom';
 import useModalFocus from '../../hooks/useModalFocus';
 import { cn } from './cn';
+import { useUiDensity } from './UiSurface';
 
 const DialogTitleContext = createContext(null);
 
@@ -19,21 +20,23 @@ export function Dialog({
   onClose,
   children,
   size = 'md',
+  layer = 120,
   className,
   style,
   'aria-label': ariaLabel,
 }) {
   const panelRef = useModalFocus(open, onClose);
+  const density = useUiDensity();
   const titleId = useId();
   // aria-labelledby must reference an element that actually exists. Some
   // dialogs (e.g. bare confirmation prompts) render only a DialogBody, so
   // the ID is only wired up once a DialogTitle registers itself — otherwise
   // screen readers announce a dialog with a dangling label reference.
   // Callers without a title can pass an explicit aria-label instead.
-  const [hasTitle, setHasTitle] = useState(false);
-  const registerTitle = useCallback(() => {
-    setHasTitle(true);
-    return () => setHasTitle(false);
+  const [registeredTitleId, setRegisteredTitleId] = useState();
+  const registerTitle = useCallback((id) => {
+    setRegisteredTitleId(id);
+    return () => setRegisteredTitleId((current) => current === id ? undefined : current);
   }, []);
 
   useEffect(() => {
@@ -67,26 +70,37 @@ export function Dialog({
   return createPortal(
     <div
       className={cn(
-        // z-[120] sits decisively above ALL shell chrome — mobile header (90),
-        // tab bar (95), sidebar backdrop (99), sidebar (100) — and above the
-        // C360 estimates panel (110). At the old z-[100] the overlay TIED the
-        // sidebar and only won by portal DOM order. Palette/notification
-        // popovers (9998/9999) still deliberately beat modals.
-        'fixed inset-0 z-[120] flex items-center justify-center p-4',
+        // The default layer (120) sits decisively above ALL shell chrome —
+        // mobile header (90), tab bar (95), sidebar backdrop (99), sidebar
+        // (100) — and above the C360 estimates panel (110). At the old z-[100]
+        // the overlay TIED the sidebar and only won by portal DOM order.
+        // Palette/notification popovers (9998/9999) still deliberately beat
+        // modals. A dialog opened from INSIDE a higher fixed overlay (the
+        // Customer 360 profile is z-[1000]) passes `layer`, mirroring Sheet —
+        // otherwise it paints beneath the overlay that opened it.
+        'fixed inset-0 flex items-center justify-center p-4',
         // `!` beats the inline safe-area padding below; that padding stays for
         // every card layout (compact dialogs, and content dialogs from `sm` up).
         !isCompact && 'max-sm:!p-0',
       )}
       role="dialog"
+      data-ui-density={density}
       aria-modal="true"
       aria-label={ariaLabel}
-      aria-labelledby={!ariaLabel && hasTitle ? titleId : undefined}
+      aria-labelledby={!ariaLabel ? registeredTitleId : undefined}
+      // The dialog is portaled to <body>, but React still bubbles its
+      // synthetic events through the REACT tree — so a click inside it would
+      // reach whatever opened it (a row's onClick, an overlay's onClose).
+      // A modal owns its clicks: stop them at the boundary.
+      onClick={(e) => e.stopPropagation()}
       style={{
         paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
         paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
         paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
         paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))',
         ...style,
+        // Stacking is owned by `layer`, never by a caller's style.zIndex.
+        zIndex: layer,
       }}
     >
       <div
@@ -127,17 +141,19 @@ export function DialogHeader({ className, children, ...rest }) {
   );
 }
 
-export function DialogTitle({ className, children, ...rest }) {
+export function DialogTitle({ id, className, children, ...rest }) {
   const context = useContext(DialogTitleContext);
-  // Tell the parent Dialog a title exists so it can point aria-labelledby
-  // at us; registerTitle returns its own cleanup for unmount.
+  const resolvedId = id || context?.titleId;
+  const registerTitle = context?.registerTitle;
+  // Register the rendered ID, including a caller's custom ID. Depending on
+  // the stable callback avoids rerunning registration on a parent render.
   useEffect(
-    () => (context?.registerTitle ? context.registerTitle() : undefined),
-    [context],
+    () => registerTitle?.(resolvedId),
+    [registerTitle, resolvedId],
   );
   return (
     <h2
-      id={rest.id || context?.titleId}
+      id={resolvedId}
       className={cn('text-18 font-medium tracking-tight text-zinc-900', className)}
       {...rest}
     >

@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { BarChart3, Truck } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { etDateString } from "../../lib/timezone";
+import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -114,7 +115,6 @@ const SEV_COLORS = {
   medium: D.amber,
   low: D.teal,
 };
-const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
 const FLEET_SECTIONS = [
   { key: "fleet", label: "Fleet Overview", Icon: Truck },
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
@@ -397,6 +397,7 @@ function FleetTab({
   showToast,
   loadFleet,
 }) {
+  const isMobile = useIsMobile(768);
   if (loading)
     return (
       <div style={{ color: D.muted, textAlign: "center", padding: 40 }}>
@@ -573,6 +574,7 @@ function FleetTab({
 // EQUIPMENT CARD + EXPANDED DETAIL
 // ═══════════════════════════════════════════════════════════════════
 function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
+  const isMobile = useIsMobile(768);
   const [detail, setDetail] = useState(null);
   const [mileage, setMileage] = useState(null);
   const [recordForm, setRecordForm] = useState(false);
@@ -664,7 +666,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                 {overdue ? "OVERDUE: " : "Next: "}
                 {nm.task_name}
                 {nm.next_due_at && (
-                  <span>({new Date(nm.next_due_at).toLocaleDateString()})</span>
+                  <span>({formatETDateOnly(nm.next_due_at)})</span>
                 )}
               </div>
             )}
@@ -716,9 +718,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
               label="Purchase Date"
               value={
                 detail.equipment.purchase_date
-                  ? new Date(
-                      detail.equipment.purchase_date,
-                    ).toLocaleDateString()
+                  ? formatETDateOnly(detail.equipment.purchase_date)
                   : null
               }
             />{" "}
@@ -734,7 +734,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
               label="Warranty"
               value={
                 detail.equipment.warranty_expiration
-                  ? `Expires ${new Date(detail.equipment.warranty_expiration).toLocaleDateString()}`
+                  ? `Expires ${formatETDateOnly(detail.equipment.warranty_expiration)}`
                   : null
               }
             />{" "}
@@ -855,7 +855,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                         >
                           {s.is_overdue && "OVERDUE "}
                           {s.next_due_at
-                            ? new Date(s.next_due_at).toLocaleDateString()
+                            ? formatETDateOnly(s.next_due_at)
                             : ""}
                           {s.next_due_miles
                             ? ` / ${fmtN(s.next_due_miles)} mi`
@@ -1029,7 +1029,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                       >
                         {" "}
                         <td style={{ padding: "6px 8px", color: D.text }}>
-                          {new Date(r.performed_at).toLocaleDateString()}
+                          {formatETDate(r.performed_at)}
                         </td>{" "}
                         <td style={{ padding: "6px 8px", color: D.text }}>
                           {r.task_name}
@@ -1333,7 +1333,7 @@ function EquipmentCard({ eq, isExpanded, onToggle, showToast, loadFleet }) {
                       >
                         {" "}
                         <td style={{ padding: "4px 6px", color: D.text }}>
-                          {new Date(l.log_date).toLocaleDateString()}
+                          {formatETDateOnly(l.log_date)}
                         </td>{" "}
                         <td
                           style={{
@@ -1407,7 +1407,8 @@ function InfoRow({ label, value }) {
 // ═══════════════════════════════════════════════════════════════════
 // RECORD MAINTENANCE FORM
 // ═══════════════════════════════════════════════════════════════════
-function MaintenanceForm({ equipmentId, schedules, onDone }) {
+export function MaintenanceForm({ equipmentId, schedules, onDone }) {
+  const isMobile = useIsMobile(768);
   const [form, setForm] = useState({
     scheduleId: "",
     maintenanceType: "scheduled",
@@ -1437,9 +1438,11 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
     set("scheduleId", id);
   };
 
+  const [error, setError] = useState("");
   const submit = async () => {
     if (!form.taskName) return;
     setSaving(true);
+    setError("");
     try {
       await af(`/admin/equipment-maintenance/${equipmentId}/records`, {
         method: "POST",
@@ -1475,6 +1478,8 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
       onDone();
     } catch (e) {
       console.error(e);
+      // Stay open with the operator's form intact and say why (UI audit F0441).
+      setError(`Save failed: ${e.message}`);
     }
     setSaving(false);
   };
@@ -1752,6 +1757,11 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
           </>
         )}
       </div>{" "}
+      {error && (
+        <div role="alert" style={{ color: D.red, fontSize: 13, marginTop: 12 }}>
+          {error}
+        </div>
+      )}
       <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
         {" "}
         <button
@@ -1772,7 +1782,8 @@ function MaintenanceForm({ equipmentId, schedules, onDone }) {
 // ═══════════════════════════════════════════════════════════════════
 // LOG MILEAGE FORM
 // ═══════════════════════════════════════════════════════════════════
-function MileageForm({ vehicleId, currentMiles, onDone }) {
+export function MileageForm({ vehicleId, currentMiles, onDone }) {
+  const isMobile = useIsMobile(768);
   const today = etDateString();
   const [form, setForm] = useState({
     logDate: today,
@@ -1796,9 +1807,11 @@ function MileageForm({ vehicleId, currentMiles, onDone }) {
       ? ((totalMiles - parseFloat(form.personalMiles || 0)) * 0.7).toFixed(2)
       : "0.00";
 
+  const [error, setError] = useState("");
   const submit = async () => {
     if (!form.odometerStart || !form.odometerEnd) return;
     setSaving(true);
+    setError("");
     try {
       await af(`/admin/equipment-maintenance/${vehicleId}/mileage`, {
         method: "POST",
@@ -1818,6 +1831,7 @@ function MileageForm({ vehicleId, currentMiles, onDone }) {
       onDone();
     } catch (e) {
       console.error(e);
+      setError(`Save failed: ${e.message}`);
     }
     setSaving(false);
   };
@@ -1955,6 +1969,11 @@ function MileageForm({ vehicleId, currentMiles, onDone }) {
           <span style={{ color: D.green, fontWeight: 700 }}>
             ${irsDeduction}
           </span>{" "}
+        </div>
+      )}
+      {error && (
+        <div role="alert" style={{ color: D.red, fontSize: 13, marginTop: 12 }}>
+          {error}
         </div>
       )}
       <div style={{ marginTop: 12 }}>
@@ -2654,7 +2673,7 @@ function AnalyticsTab({
                         </span>
                       )}
                       {s.next_due_at
-                        ? new Date(s.next_due_at).toLocaleDateString()
+                        ? formatETDateOnly(s.next_due_at)
                         : "--"}
                     </td>{" "}
                     <td style={{ padding: "8px" }}>

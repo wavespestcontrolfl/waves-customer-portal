@@ -39,6 +39,7 @@ function wire({ delThrows = null } = {}) {
   });
   // Cleanup runs in its own advisory-locked transaction (nested savepoint
   // for the optional table); the mock trx is db itself.
+  db.isTransaction = true;
   db.raw = jest.fn(async () => ({}));
   db.transaction = jest.fn(async (fn) => fn(db));
   return { sup, cache, customers };

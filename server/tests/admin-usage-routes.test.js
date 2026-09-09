@@ -435,6 +435,9 @@ describe('admin usage: page-key registry tracks the App.jsx route table', () => 
     const block = src.slice(start, end);
     const fromRoutes = new Set(['dashboard']); // the bare /admin index
     for (const match of block.matchAll(/<Route path="([^"]+)"/g)) {
+      // The admin catch-all (path="*") redirects to the dashboard; it is
+      // not a page and never beacons on its own.
+      if (match[1] === '*') continue;
       const first = match[1].split('/')[0];
       fromRoutes.add(first === '_design-system' ? 'design-system' : first);
     }
