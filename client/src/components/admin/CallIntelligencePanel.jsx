@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Badge, Button, Input, Select, cn } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import { dueMoment } from "../../utils/commitment-due";
 import { etDatetimeLocalToISO, etDatetimeLocalValue, formatETDateTime } from "../../lib/timezone";
 
 const PHASE_LABEL = {
@@ -76,7 +77,8 @@ function Row({ label, children }) {
 export function commitmentStatusTone(c) {
   if (c.status === "fulfilled") return "strong";
   if (c.status === "dismissed") return "neutral";
-  return (c.effective_due_at || c.due_at) && new Date(c.effective_due_at || c.due_at).getTime() < Date.now() ? "alert" : "neutral";
+  const due = dueMoment(c);
+  return due && new Date(due).getTime() < Date.now() ? "alert" : "neutral";
 }
 
 // `onCallChanged` fires after a correction that changes the CALL ROW itself
