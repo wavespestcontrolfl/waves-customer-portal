@@ -54,6 +54,23 @@ test.each([
   expect(visit.validateAssessmentJson({ json: answer({ photo_quality }) }, 2)).toBe('incomplete_photo_quality');
 });
 
+test.each([[1], { toString: '1' }].map((reference) => [reference]))('rejects non-scalar photo references before normalization: %j', (reference) => {
+  const json = answer({ findings: [finding({ photo_refs: [reference] })] });
+  expect(visit.validateAssessmentJson({ json }, 2)).toBe('malformed_assessment');
+});
+
+test('boolean photo numbers cannot manufacture traceable evidence or a complete quality read', () => {
+  const json = answer({ findings: [finding({ photo_refs: [true] })] });
+  expect(visit.normalizeAssessment(json, 2).findings[0]).toMatchObject({ photo_refs: [], can_determine: false, label: 'general lawn stress' });
+  expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [{ photo: true, quality: 'adequate' }, { photo: 2, quality: 'adequate' }] }) }, 2)).toBe('incomplete_photo_quality');
+});
+
+test('scalar fields reject containers and undeclared aliases instead of reaching shared coercion helpers', () => {
+  for (const fields of [{ name: { toString: 'invalid' } }, { observed_evidence: [[1]] }, { name: '', primary_finding: { toString: 'invalid' } }]) {
+    expect(visit.validateAssessmentJson({ json: answer({ findings: [finding(fields)] }) }, 2)).toBe('malformed_assessment');
+  }
+});
+
 test.each([false, undefined, 'true'])('an indeterminate clean-lawn finding does not assert health: %s', (can_determine) => {
   const result = visit.normalizeAssessment(answer({ findings: [finding({ name: 'No major visible stress', photo_refs: [], can_determine })] }), 2);
   expect(result.findings[0]).toMatchObject({ can_determine: false, confidence: 'unknown', label: 'general lawn stress' });

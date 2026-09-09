@@ -17,11 +17,12 @@ const STRESS_SIGNALS = ['fungal_activity', 'insect_damage', 'drought_stress', 'm
 const NO_STRESS_LABEL = 'no major visible stress';
 
 const clip = (value, max) => String(value == null ? '' : value).trim().slice(0, max);
+const photoNumber = (value) => (typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN);
 
 function uniqueInts(values, max) {
   const out = [];
   for (const value of Array.isArray(values) ? values : []) {
-    const n = Number(value);
+    const n = photoNumber(value);
     if (Number.isInteger(n) && n >= 1 && n <= max && !out.includes(n)) out.push(n);
   }
   return out.sort((a, b) => a - b);
@@ -46,7 +47,7 @@ function scoreOrNull(raw, min, max) {
 function normalizePhotoQuality(list, photoCount) {
   const rows = Array.from({ length: photoCount }, (_, i) => ({ photo: i + 1, quality: UNRATED_QUALITY, issue: 'not rated by the model' }));
   for (const entry of Array.isArray(list) ? list : []) {
-    const index = Number(entry?.photo) - 1;
+    const index = photoNumber(entry?.photo) - 1;
     if (!Number.isInteger(index) || index < 0 || index >= photoCount) continue;
     if (!PHOTO_QUALITY.includes(entry?.quality)) continue;
     rows[index] = { photo: index + 1, quality: entry.quality, issue: clip(entry.issue, 200) };
@@ -61,10 +62,12 @@ function zoneFromRefs(photoRefs, photoZones = []) {
 
 function containerShape(schema) {
   if (schema.type === 'object') {
-    return { type: 'object', properties: Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, containerShape(value)])) };
+    return { type: 'object', additionalProperties: false, properties: Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, containerShape(value)])) };
   }
   if (schema.type === 'array') return { type: 'array', items: containerShape(schema.items) };
-  return {};
+  // Scalar coercion may preserve a numeric string, but an object/array in a
+  // scalar position is malformed and can throw from String/Number conversion.
+  return { not: { anyOf: [{ type: 'object' }, { type: 'array' }] } };
 }
 
 const hasResponseShape = new Ajv().compile(containerShape(RESPONSE_SCHEMA));
@@ -90,7 +93,7 @@ function ratesEveryPhoto(list, photoCount) {
   if (!Array.isArray(list) || list.length !== photoCount) return false;
   const rated = new Set();
   for (const entry of list) {
-    const photo = Number(entry?.photo);
+    const photo = photoNumber(entry?.photo);
     if (Number.isInteger(photo) && photo >= 1 && photo <= photoCount && PHOTO_QUALITY.includes(entry?.quality)) rated.add(photo);
   }
   return rated.size === photoCount;
