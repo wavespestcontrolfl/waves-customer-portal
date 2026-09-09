@@ -141,11 +141,24 @@ test('a selection is bound to the request\'s own fresh candidates', async () => 
     expect(await Context.resolve({ prompt, pageData: { customer_id: B } })).toMatchObject({ target: null, targets: [], ambiguous: true });
     expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B } })).toMatchObject({ code: 'context_mismatch' });
   }
-  // A whole reference that starts with the customer's full name, or a bare first name, still resolves.
-  for (const prompt of ['Text Alice Jones soon and update Alice Jones', 'Update Alice Jones and text Alice']) {
+  // A whole reference equal to the customer's full name, or a bare first name, still resolves; an uppercase selection matches its lowercase candidate.
+  for (const prompt of ['Text Alice Jones tomorrow and update Alice Jones', 'Update Alice Jones and text Alice']) {
     expect((await Context.resolve({ prompt, pageData: {} })).target).toMatchObject({ customer_id: B, provenance: 'current_request_lookup' });
-    expect((await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B } })).target).toMatchObject({ customer_id: B, provenance: 'operator_selection' });
+    expect((await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B.toUpperCase() } })).target).toMatchObject({ customer_id: B, provenance: 'operator_selection' });
   }
+  // A longer reference than the stored name is unresolved, never a suffix match; an unlisted trailing word fails closed the same way.
+  for (const prompt of ['Update Alice Jones Jr', 'Text Alice Jones Sr about the invoice', 'Text Alice Jones soon and update Alice Jones']) {
+    expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B } })).toMatchObject({ code: 'context_mismatch' });
+  }
+});
+
+test('a cohort noun keeps its set reading under any number of qualifiers', async () => {
+  for (const prompt of ['Update all active residential lawn customers from this account', 'Text every overdue quarterly pest control client', 'Remind each of the paused monthly mosquito accounts']) {
+    expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  }
+  expect((await Context.resolve({ prompt: "Update all of this customer's fields", pageData: { customer_id: A } })).target).toMatchObject({ customer_id: A });
 });
 
 test('quantifier spellings are normalized and contact literals are ignored', async () => {
