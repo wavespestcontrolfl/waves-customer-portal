@@ -1,4 +1,4 @@
-import { Button } from "../ui";
+import { buttonStyles, Button } from "../ui";
 import { formatETDateOnly, formatETDateTime, formatETTime, etDatetimeLocalToISO } from "../../lib/timezone";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -6,7 +6,7 @@ const date = (value) => formatETDateOnly(value, { month: "long", day: "numeric" 
 
 function NextAppointment({ isAdmin, customer, upcoming, instructions, onViewServices }) {
   const next = upcoming[0];
-  if (!next) return <section className="c360-next-service"><h2>Next appointment</h2><p>No upcoming appointment.</p>{isAdmin && <a className="c360-outline-link u-focus-ring" href={`/admin/schedule?customer=${customer.id}`}>Book appointment</a>}</section>;
+  if (!next) return <section className="c360-next-service"><h2>Next appointment</h2><p>No upcoming appointment.</p>{isAdmin && <a className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })} href={`/admin/schedule?customer=${customer.id}`}>Book appointment</a>}</section>;
   const windowTime = (value) => formatETTime(etDatetimeLocalToISO(`${String(next.scheduled_date).slice(0, 10)}T${String(value).slice(0, 5)}`));
   const appointmentHref = `/admin/schedule?date=${String(next.scheduled_date).slice(0, 10)}&appointment=${encodeURIComponent(next.id)}`;
   return <section className="c360-next-service"><h2>Next appointment</h2>
@@ -14,8 +14,8 @@ function NextAppointment({ isAdmin, customer, upcoming, instructions, onViewServ
     <p>{date(next.scheduled_date)} · {next.window_start ? `${windowTime(next.window_start)}${next.window_end ? `–${windowTime(next.window_end)}` : " · End not set"}` : "Window not set"}</p>
     <p>{next.technician_name || "Unassigned"} · {String(next.status || "Status not set").replaceAll("_", " ")}</p>
     {instructions && <p className="c360-appointment-note">{instructions}</p>}
-    <div className="c360-summary-actions"><a className="c360-outline-link u-focus-ring" href={appointmentHref}>View appointment</a><a className="u-focus-ring" href={appointmentHref}>Reschedule</a></div>
-    {upcoming.length > 1 && <p className="text-ink-secondary">{upcoming.length - 1} more upcoming · <button type="button" onClick={onViewServices}>View service records</button></p>}
+    <div className="c360-summary-actions"><a className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })} href={appointmentHref}>View appointment</a><a className="u-focus-ring" href={appointmentHref}>Reschedule</a></div>
+    {upcoming.length > 1 && <p className="text-ink-secondary">{upcoming.length - 1} more upcoming · <button data-ui-text-action type="button" onClick={onViewServices}>View service records</button></p>}
   </section>;
 }
 
@@ -23,7 +23,7 @@ function LatestCommunication({ comms, loading, error, customer, onMessage }) {
   const latest = comms[0];
   return <section className="c360-latest-message"><h2>Latest communication</h2>
     {error ? <p>Communication history is unavailable. Open the conversation to retry.</p> : loading ? <p>Loading communication…</p> : latest ? <><p className="text-ink-secondary">{latest.channel === "voice" ? "Call" : latest.direction === "inbound" ? "Received" : "Outbound"} · {formatETDateTime(latest.createdAt, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p><p className="c360-summary-excerpt">{latest.aiSummary || latest.body || "Attachment"}</p></> : <p>No communication recorded.</p>}
-    {customer.phone && <Button variant="secondary" onClick={onMessage}>Open conversation</Button>}
+    {customer.phone && <Button variant="secondary" aria-haspopup="dialog" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); onMessage(); }}>Open conversation</Button>}
   </section>;
 }
 

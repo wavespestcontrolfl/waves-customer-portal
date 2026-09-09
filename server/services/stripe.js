@@ -707,8 +707,11 @@ const StripeService = {
    * Create or retrieve a Stripe customer, store stripe_customer_id on customers table.
    * Returns the Stripe customer ID.
    */
-  async ensureStripeCustomer(customerId) {
-    const customer = await db('customers').where({ id: customerId }).first();
+  // `database`: the caller's transaction handle when this runs under a
+  // held row lock (standalone Auto Pay replacement) — the customer read
+  // and the link-back write must not take a second pool connection.
+  async ensureStripeCustomer(customerId, { database = db } = {}) {
+    const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
     // Already linked
@@ -742,7 +745,7 @@ const StripeService = {
 
       const stripeCustomerId = stripeCustomer.id;
 
-      await db('customers')
+      await database('customers')
         .where({ id: customerId })
         .update({ stripe_customer_id: stripeCustomerId });
 
@@ -818,7 +821,9 @@ const StripeService = {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
-    const stripeCustomerId = await this.ensureStripeCustomer(customerId);
+    // opts.database: transaction handle for the customer link-up (see
+    // ensureStripeCustomer).
+    const stripeCustomerId = await this.ensureStripeCustomer(customerId, { database: opts.database });
 
     const paymentMethodTypes = paymentMethodType === 'us_bank_account'
       ? ['us_bank_account']
@@ -1062,6 +1067,27 @@ const StripeService = {
     return stripe.setupIntents.retrieve(setupIntentId, options);
   },
 
+  /**
+   * Retire a SUCCEEDED SetupIntent the customer chose to replace (a succeeded
+   * intent cannot be canceled, so the retirement rides its metadata), and
+   * link it to its replacement. The accept gate and the deterministic-
+   * idempotency mint both read the stamps from Stripe — the same source they
+   * already re-derive trust from — so a retired capture is never enrolled,
+   * and a mint that replays it follows `replaced_by` to the live capture.
+   */
+  async retireSetupIntent(setupIntentId, { replacedBy = null } = {}) {
+    if (!setupIntentId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.setupIntents.update(setupIntentId, {
+      metadata: {
+        retired: 'true',
+        retired_at: new Date().toISOString(),
+        ...(replacedBy ? { replaced_by: String(replacedBy) } : {}),
+      },
+    });
+  },
+
   async retrievePaymentMethod(paymentMethodId) {
     if (!paymentMethodId) return null;
     const stripe = getStripe();
@@ -1133,10 +1159,17 @@ const StripeService = {
    * tender family's parameters (Stripe rejects a key reuse with different
    * params).
    */
-  async createRecurringCardSetupIntent({ estimateId, generation = 0, paymentMethodType = 'card' }) {
+  async createRecurringCardSetupIntent({ estimateId, generation = 0, paymentMethodType = 'card', replacing = null }) {
     const stripe = getStripe();
     if (!stripe) return null;
     const withBank = paymentMethodType === 'card_or_bank';
+    // A replacement ("use a different payment method") is keyed on the
+    // intent it replaces instead of a generation: unbounded replacements
+    // without a durable counter, and re-requesting the same replacement
+    // replays the same fresh intent.
+    const salt = replacing
+      ? `_after_${replacing}`
+      : (Number(generation) > 0 ? `_g${Number(generation)}` : '');
     return stripe.setupIntents.create({
       payment_method_types: withBank ? ['card', 'us_bank_account'] : ['card'],
       usage: 'off_session',
@@ -1155,16 +1188,22 @@ const StripeService = {
         purpose: 'estimate_recurring_card',
         estimate_id: String(estimateId),
       },
-    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${withBank ? '_cb' : ''}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${withBank ? '_cb' : ''}${salt}` });
   },
 
   // "Secure your appointment" card capture (appointment-card-request funnel)
   // — same card-only, off-session shape as the recurring-accept intent, keyed
   // to the request row so the /secure/:token page's verify can pin the intent
   // to ITS appointment and reject any other SetupIntent id echoed back.
-  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0 }) {
+  // `replacing`: the "use a different payment method" mint — keyed on the
+  // retired intent's id (unbounded, no generation consumed) so re-requesting
+  // the same replacement replays the same fresh intent.
+  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0, replacing = null }) {
     const stripe = getStripe();
     if (!stripe) return null;
+    const salt = replacing
+      ? `_after_${String(replacing)}`
+      : (Number(generation) > 0 ? `_g${Number(generation)}` : '');
     return stripe.setupIntents.create({
       payment_method_types: ['card'],
       usage: 'off_session',
@@ -1173,8 +1212,9 @@ const StripeService = {
         purpose: 'appointment_card_request',
         request_id: String(requestId),
         scheduled_service_id: String(scheduledServiceId),
+        ...(replacing ? { replaces: String(replacing) } : {}),
       },
-    }, { idempotencyKey: `appointment_card_request_${requestId}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+    }, { idempotencyKey: `appointment_card_request_${requestId}${salt}` });
   },
 
   /**

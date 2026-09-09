@@ -132,7 +132,7 @@ describe('cancel_plan confirmed (server-derived)', () => {
       requestId: 'req-3', processed: true, visitsPulled: 0, scope: [], remaining: [], tierBefore: null, tierAfter: null,
       effectiveDate: '2026-08-31', lateFeeWaived: false, prepayDisposition: null, confirmationChannels: [], confirmationRequested: false, errors: [],
     });
-    await executeTool('cancel_plan', { customer_id: CUSTOMER, preview_fingerprint: 'f'.repeat(64), confirmed: true }, { technicianId: 'admin-1', confirmed: true });
+    await executeTool('cancel_plan', { customer_id: CUSTOMER, _approved_cancel_plan_fingerprint: 'f'.repeat(64), confirmed: true }, { technicianId: 'admin-1', confirmed: true });
     expect(mockCommit).toHaveBeenCalledWith(expect.objectContaining({ previewFingerprint: 'f'.repeat(64) }));
   });
 

@@ -333,6 +333,19 @@ const TRIGGER_REGISTRY = {
       link: '/admin/communications#tab=calls',
     }),
   },
+  // Staff alert for a repeat window, gated by GATE_REPEAT_CALLER_BELL.
+  repeat_caller: {
+    label: 'Repeat caller',
+    category: 'missed_call',
+    priority: 'high',
+    group: 'Communication',
+    allowContactDetails: true,
+    build: (p) => ({
+      title: `Repeat caller — ${p.name || 'unknown number'}`,
+      body: `${p.phone || 'unknown number'} has called ${p.count} times in the last 3 hours (${p.unanswered} unanswered)${p.line ? ` on ${p.line}` : ''}.`,
+      link: '/admin/communications#tab=calls',
+    }),
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -778,6 +791,11 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'customer_missed_call') {
     return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
   }
+  if (triggerKey === 'repeat_caller') {
+    // The persisted delivery identity survives a newer call reclaiming a
+    // push-only attempt. Different caller windows still have distinct tags.
+    return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
+  }
   if (triggerKey === 'customer_email_received') {
     // Per-email tag: same-tag pushes replace each other without renotifying,
     // so two customer emails must not collapse into one banner (hook P1).
@@ -816,7 +834,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null, dedupeKey = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -865,6 +883,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       activeAdmins = await recipientQuery.select('id', 'role');
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
+      if (dedupeKey) return { bellWritten: false, push: null, retryable: true };
     }
 
     const prefsByUser = new Map(prefs.map((p) => [p.admin_user_id, p]));
@@ -879,6 +898,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       })
       .map((u) => u.id);
     let bellWritten = false;
+    let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
     // banners, some are bells"): the bell policy is evaluated ONCE per event,
     // independent of any user's bell/push preference, and gates BOTH the
@@ -916,16 +936,20 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             built.title,
             built.body,
             { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
+              ...(dedupeKey ? { dedupeKey } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
+          if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
         }
       }
     }
 
-    const stats = { bellWritten, push: null };
+    const stats = { bellWritten, push: null,
+      ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
+    };
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
@@ -942,7 +966,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       // Caller-supplied last-moment check (e.g. "is the SMS still unread?").
       // Fail open: a throwing check still pushes.
       if (enabledUserIds.length > 0 && typeof beforePush === 'function') {
-        const stillWanted = await Promise.resolve(beforePush()).catch(() => true);
+        const stillWanted = await Promise.resolve(beforePush({ dispatching: false })).catch(() => true);
         if (stillWanted === false) {
           stats.push = { sent: 0, skipped: 'superseded_before_push' };
           return stats;
@@ -1015,13 +1039,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
 
         // Second look right before the send: the badge fan-out above can take
         // up to ~1.5s and a thread opened in that window must not buzz (P2).
-        if (typeof beforePush === 'function') {
-          const stillWanted = await Promise.resolve(beforePush()).catch(() => true);
-          if (stillWanted === false) {
-            stats.push = { sent: 0, skipped: 'superseded_before_push' };
-            return stats;
-          }
-        }
+        // The push service runs it after its subscription lookup, so a
+        // durable claim taken here is only burned when a handoff follows.
+        const beforeDispatch = typeof beforePush === 'function'
+          ? () => Promise.resolve(beforePush({ dispatching: true })).catch(() => true)
+          : null;
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
@@ -1038,11 +1060,16 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               renotify: triggerKey === 'sms_reply',
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
-          }
+          },
+          { beforeDispatch },
         );
+        if (stats.push?.superseded) stats.push = { sent: 0, skipped: 'superseded_before_push' };
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
+      // A resumed event owns its retry: a failure before any handoff (the
+      // subscription lookup) must not read as a delivered push.
+      if (dedupeKey) { stats.push = null; stats.retryable = true; stats.error = e.message; }
     }
     return stats;
   } catch (err) {

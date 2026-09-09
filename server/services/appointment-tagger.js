@@ -4,7 +4,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
-const { sendNewRecurringWelcome, isNewRecurringSignupCandidate } = require('./new-recurring-welcome-sms');
+const { sendNewRecurringWelcome, isNewRecurringSignupCandidate, queueOneTimeWelcomeEmail } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { isEnabled } = require('../config/feature-gates');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
@@ -110,6 +110,8 @@ class AppointmentTagger {
       });
     }
 
+    if (suppressWelcome) return;
+
     // Welcome text on the customer's first RECURRING service. All WaveGuard
     // tiers are included (Bronze too) so the experience matches the
     // estimate-converter self-accept path; the is_recurring guard keeps the
@@ -120,7 +122,7 @@ class AppointmentTagger {
     // count is blind to imported customers whose visit history lives only
     // in scheduled_services (2026-07-16 misfire). Idempotent via
     // sendNewRecurringWelcome.
-    if (!suppressWelcome && service.waveguard_tier && service.is_recurring) {
+    if (service.waveguard_tier && service.is_recurring) {
       // An auto-derived LABEL-ONLY tier (GATE_AUTO_WAVEGUARD_TIER stamp on a
       // per-visit customer) must not satisfy this member gate — the tier
       // stamp is contractually comms-silent, and pre-gate these customers
@@ -135,6 +137,9 @@ class AppointmentTagger {
       if (isNewSignup) {
         await this.triggerWelcomeSequence(service);
       }
+    }
+    if (service.is_recurring === false) {
+      await queueOneTimeWelcomeEmail(service);
     }
   }
 
