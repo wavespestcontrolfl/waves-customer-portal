@@ -809,6 +809,26 @@ router.post('/sms', async (req, res, next) => {
     const dispatch = async () => {
       const sendAndSettle = async () => {
         let result;
+        let bareReviewReservationId = null;
+        const settleBareReview = async (outcome) => {
+          if (!bareReviewReservationId) return;
+          // A real provider log replaces the pre-send evidence. Otherwise
+          // keep the reservation: even a failed UPDATE must retain the hold.
+          if (outcome?.sent === true) {
+            try {
+              const logged = outcome.providerMessageId && await db('sms_log')
+                .where({ twilio_sid: outcome.providerMessageId, direction: 'outbound' }).first('id');
+              if (logged) await db('sms_log').where({ id: bareReviewReservationId }).del();
+              else await db('sms_log').where({ id: bareReviewReservationId }).update({
+                status: 'sent', twilio_sid: outcome.providerMessageId || null, updated_at: new Date(),
+              });
+            } catch (stampErr) {
+              logger.warn(`[communications] accepted review keeps its reservation (${bareReviewReservationId}): ${stampErr.message}`);
+            }
+          } else if (outcome?.blocked || (outcome?.sent === false && !outcome.retryable && !outcome.deferred)) {
+            await db('sms_log').where({ id: bareReviewReservationId }).del();
+          }
+        };
         try {
           // Recheck the held inline claim at the actual provider boundary.
           if (claimedReviewRequestId && !(await require('../services/review-request')
@@ -816,8 +836,30 @@ router.post('/sms', async (req, res, next) => {
             return { sent: false, blocked: true, code: 'REVIEW_CLAIM_LOST', httpStatus: 409,
               reason: 'This review link was claimed by another send. Remove it and re-insert if still needed.' };
           }
+          if (reviewLooking && !claimedReviewRequestId) {
+            const metadata = JSON.stringify({ manual_send_reservation: true, review_ask_reservation: true });
+            if (manualReservationId) {
+              const [reserved] = await db('sms_log').where({ id: manualReservationId }).update({ metadata }).returning('id');
+              if (!reserved?.id) throw new Error('Manual send reservation was lost before review dispatch');
+              bareReviewReservationId = manualReservationId;
+            } else {
+              const [reservation] = await db('sms_log').insert({
+                customer_id: trustedCustomerId, direction: 'outbound',
+                from_phone: fromNumber || TWILIO_NUMBERS.getOutboundNumber(), to_phone: to,
+                message_body: cleanBody, status: 'sending', message_type: 'manual',
+                admin_user_id: req.technicianId || null, metadata,
+              }).returning('id');
+              if (!reservation?.id) throw new Error('Could not reserve review ask before sending');
+              bareReviewReservationId = reservation.id;
+            }
+            // Ownership moves to the review settlement under this lock. The
+            // general cleanup and 30-minute sweep must not erase uncertainty.
+            manualReservationId = null;
+          }
           result = await sendMessage();
+          await settleBareReview(result);
         } catch (err) {
+          await settleBareReview(err.providerOutcome);
           if (claimedReviewRequestId) {
             reviewSettlementAttempted = true;
             try {
