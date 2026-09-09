@@ -845,6 +845,12 @@ module.exports = {
   safeConditionLabel,
   safeCustomerSummary,
   SUMMARY_CAUSE_RE,
+  // The PII pieces of scrubCustomerText, for a consumer that must keep
+  // agronomic wording intact (the eval's prior-summary fixture).
+  CUSTOMER_TEXT_URL,
+  CUSTOMER_TEXT_EMAIL,
+  CUSTOMER_TEXT_PHONE,
+  STREET_ADDRESS,
   lowerConfidence,
   CONDITION_LABEL_VALUES,
   MINIMAL_SAFE_SUMMARY,
