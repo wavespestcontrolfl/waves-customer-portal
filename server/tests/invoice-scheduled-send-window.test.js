@@ -238,13 +238,33 @@ describe('processScheduledSends send-window handling', () => {
     expect(updateArgs.scheduled_send_attempts).toBeUndefined();
   });
 
-  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD'])('scheduled delivery held by %s skips email so the invoice cannot finalize', async (code) => {
+  test.each([0, 2, 4])('a temporary App failure after %s attempts spends an attempt and applies backoff', async (attempts) => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const update = chain();
+    db.mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [{ ...dueRow, scheduled_send_attempts: attempts }] }))
+      .mockReturnValueOnce(chain({ returning: [{ id: 'inv-1' }] }))
+      .mockReturnValueOnce(update);
+    sendSpy.mockResolvedValue({ ok: false, creditApplied: 0,
+      sms: { code: 'APP_PROVIDER_RETRY', deferred: true, retryAfterMs: 900000, nextAllowedAt: new Date(Date.now() + 900000).toISOString() },
+    });
+    const jitter = jest.spyOn(Math, 'random').mockReturnValue(0);
+    const startedAt = Date.now();
+    try {
+      expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 1, deferred: 0 });
+      expect(update.update.mock.calls[0][0]).toMatchObject({ status: 'scheduled', scheduled_send_attempts: attempts + 1 });
+      expect(update.update.mock.calls[0][0].scheduled_send_at.getTime()).toBeGreaterThanOrEqual(startedAt + 900000 * (2 ** attempts));
+    } finally { jitter.mockRestore(); }
+  });
+
+  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('scheduled delivery held by %s skips email so the invoice cannot finalize', async (code) => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
       const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
       err.code = code;
       err.deferred = true;
       err.nextAllowedAt = WINDOW_OPEN.toISOString();
+      if (code === 'APP_PROVIDER_RETRY') err.retryAfterMs = 900000;
       throw err;
     });
     try {
@@ -266,13 +286,14 @@ describe('processScheduledSends send-window handling', () => {
       expect(result.ok).toBe(false);
       expect(result.sms.code).toBe(code);
       expect(result.sms.nextAllowedAt).toBe(WINDOW_OPEN.toISOString());
+      if (code === 'APP_PROVIDER_RETRY') expect(result.sms.retryAfterMs).toBe(900000);
       expect(result.email.code).toBe(code);
     } finally {
       smsSpy.mockRestore();
     }
   });
 
-  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD'])('direct delivery held by %s is queued before the email sends', async (code) => {
+  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('direct delivery held by %s is queued before the email sends', async (code) => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
       const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');

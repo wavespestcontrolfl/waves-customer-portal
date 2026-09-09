@@ -194,7 +194,10 @@ async function sendCustomerMessage(input) {
   const { preDispatchCheck, withSmsHandoff, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
-  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || input.channel !== 'sms'
+  // Request lifecycle email companions have no text leg. Keep their App
+  // intent even when the saved choice or gate changes before dispatch.
+  if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
+  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms'
     || input.audience !== 'lead' || input.purpose !== 'conversational' || input.entryPoint !== 'lead_response_auto_reply')) {
     return { sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies' };
   }
@@ -495,6 +498,9 @@ async function sendCustomerMessage(input) {
   }
 
   if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
+    if (sendInput.metadata?.appOnly === true) {
+      return { sent: false, blocked: true, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
+    }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
       // The scan captured App; Email/Both now require a different set of
@@ -516,12 +522,13 @@ async function sendCustomerMessage(input) {
     return {
       sent: false,
       blocked: false,
-      code: 'PROVIDER_FAILURE',
+      code: providerOutcome.code === 'APP_PROVIDER_RETRY' ? providerOutcome.code : 'PROVIDER_FAILURE',
       reason: providerOutcome.error || 'provider returned no message id',
       retryable: !!providerOutcome.retryable,
       deferred: !!providerOutcome.retryable,
       terminal: providerOutcome.terminal === true,
       nextAllowedAt: retryAt ? retryAt.toISOString() : undefined,
+      ...(providerOutcome.code === 'APP_PROVIDER_RETRY' ? { retryAfterMs: providerOutcome.retryAfterMs } : {}),
       providerErrorCode: providerOutcome.providerErrorCode,
       providerHttpStatus: providerOutcome.providerHttpStatus,
       // true = the provider layer already raised twilio_failure for this event.
