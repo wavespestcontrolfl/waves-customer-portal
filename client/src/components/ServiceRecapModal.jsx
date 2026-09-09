@@ -254,6 +254,9 @@ export default function ServiceRecapModal({
   const record = ctx?.existingRecord;
   const recordIdentity = !ctx || !selectionAuthoritative.current || loadError ? null : JSON.stringify([
     ctx.service?.status ?? null,
+    ctx.service?.serviceType ?? null,
+    ctx.service?.customerId ?? null,
+    ctx.service?.scheduledDate ?? null,
     record ? [record.id, record.status, record.technician_notes, (record.products || []).map((p) => JSON.stringify([
       p.product_id, p.product_name, p.product_category, p.active_ingredient, p.moa_group, p.application_rate, p.rate_unit,
     ])).sort()] : null,
