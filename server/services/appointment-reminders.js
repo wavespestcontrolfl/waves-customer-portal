@@ -1614,6 +1614,11 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     if (sendOptions.sendOutcome && typeof sendOptions.sendOutcome === 'object') {
       sendOptions.sendOutcome.retryable = true;
       sendOptions.sendOutcome.lastCode = 'PREFERENCES_UNAVAILABLE';
+      // A RECOGNIZED hold code: deliverAppointmentNotice keys its "leave the
+      // row unmarked, no email fallback" path on blockedCode (GitHub codex
+      // #4299 r6 P1) — an unreadable row must never fall through to an
+      // email that re-resolves without the property's reminder toggle.
+      sendOptions.sendOutcome.blockedCode = 'REMINDER_PREFERENCES_HOLD';
     }
     logger.warn(`[appt-remind] notification preferences unreadable for customer ${customer?.id || 'unknown'} — ${messageType} held for retry`);
     return false;
@@ -3084,6 +3089,14 @@ const AppointmentReminders = {
         // the final day.
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
           const prefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
+          // Unreadable (a failed read, or the visit's saved property unreadable
+          // under enforcement): every value below is a fail-open default —
+          // hold this tier now, row unmarked, next tick re-decides (GitHub
+          // codex #4299 r6 P1).
+          if (prefs.unavailable) {
+            logger.warn(`[appt-remind] 72h reminder for ${r.scheduled_service_id} held: notification preferences unreadable`);
+            continue;
+          }
           // Email-first promotion under GATE_REMINDER_72H_EMAIL_FIRST
           // (one-time visits only; never past an unreadable prefs row or an
           // explicit Text choice) — see resolve72hChannel for the contract.
@@ -3310,6 +3323,10 @@ const AppointmentReminders = {
         // ── 24-hour reminder ──
         if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25) {
           const prefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
+          if (prefs.unavailable) {
+            logger.warn(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held: notification preferences unreadable`);
+            continue;
+          }
           const channel24 = prefs.reminder24hChannel;
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still

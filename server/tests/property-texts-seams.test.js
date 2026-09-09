@@ -170,7 +170,7 @@ describe('safeSendAppointment on an unreadable preferences row', () => {
     const sent = await safeSendAppointment({ id: 'c1', phone: '+19415550100', first_name: 'Pat' }, PREFS_UNAVAILABLE, renderBody, 'appointment_cancelled', 'appointment_cancelled', {}, { sendOutcome });
     expect(sent).toBe(false);
     expect(renderBody).not.toHaveBeenCalled();
-    expect(sendOutcome).toMatchObject({ retryable: true, lastCode: 'PREFERENCES_UNAVAILABLE' });
+    expect(sendOutcome).toMatchObject({ retryable: true, lastCode: 'PREFERENCES_UNAVAILABLE', blockedCode: 'REMINDER_PREFERENCES_HOLD' });
   });
 });
 
@@ -204,6 +204,18 @@ describe('en-route no-channel alert', () => {
   test('is judged on the visit (scheduledServiceId threaded to alertNoReachableChannel)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/twilio'), 'utf8');
     expect(src).toMatch(/alertNoReachableChannel\(\{ customerId, kind: "en_route", scheduledServiceId \}\)/);
+  });
+});
+
+describe('reminder cron tiers on unreadable preferences', () => {
+  test('both tiers hold right after the prefs read (source guard)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
+    const reads = [...src.matchAll(/const prefs = await getReminderPrefs\(r\.customer_id, \{ scheduledServiceId: r\.scheduled_service_id \}\);/g)];
+    expect(reads.length).toBe(2);
+    for (const m of reads) {
+      const after = src.slice(m.index, m.index + 700);
+      expect(after).toMatch(/if \(prefs\.unavailable\) \{[\s\S]{0,260}continue;/);
+    }
   });
 });
 
