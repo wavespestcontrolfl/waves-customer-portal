@@ -190,8 +190,13 @@ run('callback ledger on PostgreSQL', () => {
   // evidence is placed strictly after the persisted review it must follow.
   const afterReview = async (id, ms = 1) => new Date(new Date((await trx('call_commitments').where({ id }).first()).reviewed_at).getTime() + ms);
   const tick = () => new Promise((resolve) => { setTimeout(resolve, 5); });
-  const returnedCall = (at) => trx('call_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: phone,
-    status: 'completed', duration_seconds: 120, created_at: at, updated_at: at });
+  // Evidence in the shape the callback bridge requires: this promise's own
+  // attempt (source-call link), a completed customer leg, a valid
+  // non-voicemail extraction.
+  const returnedCall = (at, callId) => trx('call_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: phone,
+    status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+    metadata: { relatedCallId: callId, customer_leg: { status: 'completed', duration_seconds: 120, ended_at: at.toISOString() } },
+    created_at: at, updated_at: at });
 
   test('a claimed callback still closes on its own returned-call evidence', async () => {
     const ledger = require('../services/call-commitments');
@@ -199,7 +204,7 @@ run('callback ledger on PostgreSQL', () => {
     const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
     await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at, now });
     expect((await trx('call_commitments').where({ id: row.id }).first()).human_state).toBe('confirmed');
-    await returnedCall(await afterReview(row.id));
+    await returnedCall(await afterReview(row.id), row.call_log_id);
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
     expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
     // Reopening the callback does not let the SAME evidence close it again;
@@ -209,7 +214,7 @@ run('callback ledger on PostgreSQL', () => {
     await cards.actOnCallback(trx, row.id, { action: 'reopen', actorId: staff.id, expectedAt: kept.updated_at, now: new Date() });
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
     expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('open');
-    await returnedCall(await afterReview(row.id));
+    await returnedCall(await afterReview(row.id), row.call_log_id);
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
     // A human verdict on any other promise is still never rewritten.
     const other = await seed({ source: 'ai', last_seen_generation: 1, kind: 'send_report', commitment_key: `fixture:report:${randomUUID()}` });
@@ -222,7 +227,7 @@ run('callback ledger on PostgreSQL', () => {
     const row = await seed({ source: 'ai', last_seen_generation: 1 });
     const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
     await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at, now });
-    await returnedCall(await afterReview(row.id));
+    await returnedCall(await afterReview(row.id), row.call_log_id);
     const source = await trx('call_log').where({ id: row.call_log_id }).first();
     // The evidence lookup yields to a concurrent reopen before it resolves;
     // the source call is passed in so that lookup is the first call_log read.

@@ -201,6 +201,18 @@ run('callback bridge on PostgreSQL', () => {
     expect(new Date(kept.fulfilled_at).toISOString()).toBe(legEnded);
   });
 
+  test('a callback placed from the existing call log (source-call link only) closes on its completed customer leg', async () => {
+    const row = await seed();
+    const legEnded = new Date().toISOString();
+    const [outbound] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      metadata: { relatedCallId: row.call_log_id, customer_leg: { status: 'completed', duration_seconds: 90, ended_at: legEnded } } }).returning('id');
+    expect(await require('../services/call-commitments').refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    const kept = await conn('call_commitments').where({ id: row.id }).first();
+    expect(kept.fulfillment).toMatchObject({ record_id: outbound.id, basis: 'callback_customer_conversation' });
+    expect(new Date(kept.fulfilled_at).toISOString()).toBe(legEnded);
+  });
+
   test.each(['conversation', 'voicemail', 'short', 'unrelated'])('fulfillment requires the matching customer conversation: %s', async (evidence) => {
     const row = await seed();
     const legEnded = new Date(Date.now() - 600000).toISOString();

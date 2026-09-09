@@ -1174,7 +1174,10 @@ async function resolveFulfillment(conn, commitment, call) {
         const connected = await conn('call_log').where('direction', 'outbound')
           .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
           .where('created_at', '>', after).where('v2_extraction_status', 'valid')
-          .whereRaw("metadata->>'relatedCommitmentId' = ?", [commitment.id])
+          // Placed from the card (commitment link) or from the existing
+          // call-log callback action (source-call link): both are this
+          // promise's own attempts, and only their customer leg counts.
+          .whereRaw("(metadata->>'relatedCommitmentId' = ? OR metadata->>'relatedCallId' = ?)", [commitment.id, commitment.call_log_id])
           .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
           .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
           .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
