@@ -3274,7 +3274,9 @@ router.post('/outbound-amd', async (req, res) => {
 
     // Decide BEFORE hanging up: if the text cannot go, leave the admin on
     // the voicemail greeting to decide for themselves.
-    const pre = await voicemailTextPrecheck({ phone: customerNumber, customerId: row?.customer_id || null });
+    const rowMeta = foldVoiceMetadata(row?.metadata, {});
+    const relatedCallId = rowMeta.relatedCallId || null;
+    const pre = await voicemailTextPrecheck({ phone: customerNumber, customerId: row?.customer_id || null, relatedCallId });
     if (!pre.ok) {
       logger.info(`[outbound-amd] Voicemail detected but text skipped (${pre.skipped}) — customer leg left up (call_log ${callLogId || 'n/a'})`);
       await patchCallLogMetadata(callLogId, { voicemail_text: { outcome: 'skipped', reason: pre.skipped } });
@@ -3309,6 +3311,7 @@ router.post('/outbound-amd', async (req, res) => {
       callSid: CallSid || null,
       callerId: callerIdNumber,
       reason: why.reason,
+      relatedCallId,
     });
     await patchCallLogMetadata(callLogId, {
       voicemail_text: result.sent

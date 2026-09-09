@@ -12,6 +12,12 @@
  *                   channel, or our own bridge call — the bridge does not
  *                   fire after hours, so the lead row is the primary signal).
  *
+ *   Suppression (not a reason): nonServiceCaller() — the call we are
+ *   returning was classified as something other than a service contact
+ *   (other / spam / robocall / wrong number / vendor / job applicant — the
+ *   audit's example: a stranger reporting a Waves van parked too close at
+ *   Walmart). Owner ruling 2026-09-09: those callers get no text at all.
+ *
  *   Suppression (not a reason): visitInProgress() — the technician is en
  *   route to or on site at this customer right now. Those calls are about
  *   finding the address or getting access; the customer just received the
@@ -59,6 +65,9 @@ const VISIT_IN_PROGRESS_WINDOW_MS = 3 * 60 * 60 * 1000;
 const ARRIVAL_TEXT_TYPES = ['tech_en_route', 'tech_arrived'];
 // Same set context-aggregator uses to keep junk calls out of customer context.
 const NON_CONTACT_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
+// Natures that mean "not a customer or prospect contacting us about service"
+// — returning such a call never earns a text (owner ruling 2026-09-09).
+const NON_SERVICE_NATURES = new Set([...NON_CONTACT_NATURES, 'other', 'job_applicant']);
 const LOOKBACK_MS = 48 * 60 * 60 * 1000;
 
 function last10(phone) {
@@ -156,6 +165,30 @@ async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
   )
     .orderBy('created_at', 'desc')
     .first('id', 'created_at');
+}
+
+/**
+ * Was the call we are returning a non-service contact? Looks at the exact
+ * call the callback button pointed at (relatedCallId), else the most recent
+ * inbound call from them inside the lookback — whatever its nature. True →
+ * the send layer skips the text entirely.
+ */
+async function nonServiceCaller({ customerId, phone, relatedCallId = null, before = new Date() } = {}) {
+  const at = new Date(before);
+  const since = new Date(at.getTime() - LOOKBACK_MS);
+  let row = null;
+  if (relatedCallId && relatedCallId !== 'undefined') {
+    row = await db('call_log').where({ id: relatedCallId, direction: 'inbound' }).first('id', 'ai_extraction_enriched');
+  }
+  if (!row) {
+    const phoneLast10 = last10(phone);
+    if (!customerId && !phoneLast10) return false;
+    row = await fromContact(
+      db('call_log').where('direction', 'inbound').where('created_at', '<', at).where('created_at', '>=', since),
+      { customerId, phoneLast10, phoneColumn: 'from_phone' },
+    ).orderBy('created_at', 'desc').first('id', 'ai_extraction_enriched');
+  }
+  return !!row && NON_SERVICE_NATURES.has(callNature(row));
 }
 
 /**
@@ -285,9 +318,11 @@ module.exports = {
   QUOTE_REQUEST_SOURCES,
   QUOTE_FORM_CHANNELS,
   NON_CONTACT_NATURES,
+  NON_SERVICE_NATURES,
   VISIT_IN_PROGRESS_WINDOW_MS,
   resolveOutboundCallReason,
   visitInProgress,
+  nonServiceCaller,
   isSubstantiveText,
   _private: { last10, callNature, parseMetadata },
 };

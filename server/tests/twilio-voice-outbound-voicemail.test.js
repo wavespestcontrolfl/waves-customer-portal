@@ -201,7 +201,7 @@ describe('POST /outbound-amd', () => {
     const res = mockRes();
     await amd()(req('machine_start'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
-    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: null });
+    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: null, relatedCallId: null });
     expect(twilio.__calls).not.toHaveBeenCalled();
     expect(sendOutboundVoicemailText).not.toHaveBeenCalled();
     const patches = metadataPatches();
@@ -219,7 +219,7 @@ describe('POST /outbound-amd', () => {
     await amd()(req('machine_start'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
     // The precheck sees the linked customer (visit-in-progress suppression).
-    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: 'cust-9' });
+    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: 'cust-9', relatedCallId: null });
 
     const patches = metadataPatches();
     // Order matters: the detected stamp lands BEFORE the hangup so the dial
@@ -241,6 +241,7 @@ describe('POST /outbound-amd', () => {
       callSid: 'CA_child',
       callerId: MAIN_LINE,
       reason: 'generic',
+      relatedCallId: null,
     });
     expect(patches[2]).toEqual({ voicemail_text: { outcome: 'sent', provider_sid: 'SM_sent', reason: 'generic', template_key: 'outbound_voicemail_missed_you', evidence: {} } });
   });
@@ -251,8 +252,10 @@ describe('POST /outbound-amd', () => {
     resolveOutboundCallReason.mockResolvedValueOnce({ reason: 'returning_call', evidence: { related_call_id: 'in-1' } });
     sendOutboundVoicemailText.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM_2', templateKey: 'outbound_voicemail_returning_call' });
     await amd()(req('machine_start'), mockRes());
-    // The resolver sees the call_log row (source + metadata + created_at) and the DIALED number from the query.
+    // The resolver sees the call_log row (source + metadata + created_at) and the DIALED number from the query;
+    // the precheck sees the callback's related inbound call for the non-service check.
     expect(resolveOutboundCallReason).toHaveBeenCalledWith({ call: row, phone: CUSTOMER });
+    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: 'cust-9', relatedCallId: 'in-1' });
     expect(sendOutboundVoicemailText).toHaveBeenCalledWith(expect.objectContaining({ reason: 'returning_call' }));
     expect(metadataPatches()[2]).toEqual({ voicemail_text: { outcome: 'sent', provider_sid: 'SM_2', reason: 'returning_call', template_key: 'outbound_voicemail_returning_call', evidence: { related_call_id: 'in-1' } } });
   });

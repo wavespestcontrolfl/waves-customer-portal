@@ -21,8 +21,10 @@ const {
   REASONS,
   LOOKBACK_MS,
   VISIT_IN_PROGRESS_WINDOW_MS,
+  NON_SERVICE_NATURES,
   resolveOutboundCallReason,
   visitInProgress,
+  nonServiceCaller,
   isSubstantiveText,
   _private,
 } = require('../services/outbound-call-reason');
@@ -301,6 +303,26 @@ describe('resolveOutboundCallReason', () => {
     ]));
     expect(q.raws[0][0]).toContain('c.phone');
     expect(q.raws[0][1]).toEqual(['9415550101']);
+  });
+
+  test('nonServiceCaller: the call being returned (relatedCallId) has a non-service nature → true', async () => {
+    expect([...NON_SERVICE_NATURES].sort()).toEqual(['job_applicant', 'other', 'robocall', 'spam_solicitation', 'vendor_or_partner', 'wrong_number']);
+    installDb({ call_log: [{ id: 'in-9', ai_extraction_enriched: { call_nature: 'other' } }] });
+    await expect(nonServiceCaller({ customerId: 'cust-1', phone: PHONE, relatedCallId: 'in-9', before: T0 })).resolves.toBe(true);
+    expect(state.queries).toHaveLength(1);
+    expect(state.queries[0].wheres[0]).toEqual([{ id: 'in-9', direction: 'inbound' }]);
+  });
+
+  test('nonServiceCaller: no relatedCallId → the most recent inbound call inside 48h decides, whatever its nature', async () => {
+    installDb({ call_log: [{ id: 'in-1', created_at: hoursAgo(1), ai_extraction_enriched: { call_nature: 'job_applicant' } }] });
+    await expect(nonServiceCaller({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+    installDb({ call_log: [{ id: 'in-1', created_at: hoursAgo(1), ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    await expect(nonServiceCaller({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+    installDb({ call_log: [{ id: 'in-raw', created_at: hoursAgo(1), ai_extraction_enriched: null }] });
+    await expect(nonServiceCaller({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+    installDb({});
+    await expect(nonServiceCaller({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+    await expect(nonServiceCaller({ customerId: null, phone: null, before: T0 })).resolves.toBe(false);
   });
 
   test('a probe failure falls back to generic instead of throwing', async () => {

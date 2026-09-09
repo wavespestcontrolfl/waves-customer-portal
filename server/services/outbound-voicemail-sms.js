@@ -21,7 +21,9 @@
  *      decides, exactly as before.
  *   3. Not while a technician is en route to / on site at the customer
  *      (the audit showed those calls are about access, right after the
- *      en-route + arrived texts).
+ *      en-route + arrived texts), and not when the call being returned was
+ *      a non-service contact (van complaint, solicitor, applicant, wrong
+ *      number — owner ruling 2026-09-09).
  *   4. One text per phone per 24h — an admin who redials the same number
  *      an hour later must not double-text (sms_log probe on message_type).
  *   5. The sendCustomerMessage policy pipeline: suppression (STOP),
@@ -47,7 +49,7 @@ const { isWithinSendWindowET } = require('./messaging/send-window');
 const { isRealProviderSend } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
-const { REASONS, visitInProgress } = require('./outbound-call-reason');
+const { REASONS, visitInProgress, nonServiceCaller } = require('./outbound-call-reason');
 
 // One message_type for the whole lane (dedupe + sms_log history), one
 // template per reason the resolver can honestly name. A deactivated reason
@@ -123,7 +125,7 @@ function callbackClause(callerId) {
  * Everything that can be decided WITHOUT sending. Returns { ok: true } or
  * { ok: false, skipped } — the webhook only hangs up the customer leg on ok.
  */
-async function precheck({ phone: rawPhone, customerId = null, now = new Date() } = {}) {
+async function precheck({ phone: rawPhone, customerId = null, relatedCallId = null, now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { ok: false, skipped: 'gate_off' };
   const phone = normalizePhoneE164(rawPhone);
   if (!phone) return { ok: false, skipped: 'missing_input' };
@@ -135,8 +137,11 @@ async function precheck({ phone: rawPhone, customerId = null, now = new Date() }
   // any "why we called" text would be wrong. Fail closed on a probe error.
   try {
     if (await visitInProgress({ customerId, phone, before: now })) return { ok: false, skipped: 'visit_in_progress' };
+    // The call being returned was not a service contact (a complaint about a
+    // van, a solicitor, a job applicant, a wrong number): no text at all.
+    if (await nonServiceCaller({ customerId, phone, relatedCallId, before: now })) return { ok: false, skipped: 'non_service_caller' };
   } catch (e) {
-    logger.warn(`[outbound-voicemail-sms] visit-in-progress probe failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
+    logger.warn(`[outbound-voicemail-sms] context probe failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
     return { ok: false, skipped: 'visit_probe_failed' };
   }
 
@@ -180,8 +185,8 @@ async function renderForReason(reason, vars, context) {
  * @param {string}  [p.callerId]   the number the customer saw ring
  * @param {string}  [p.reason]     a REASONS value from outbound-call-reason.js (default generic)
  */
-async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, firstName = '', callLogId = null, callSid = null, callerId = null, reason = REASONS.GENERIC } = {}) {
-  const pre = await precheck({ phone: rawPhone, customerId });
+async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, firstName = '', callLogId = null, callSid = null, callerId = null, reason = REASONS.GENERIC, relatedCallId = null } = {}) {
+  const pre = await precheck({ phone: rawPhone, customerId, relatedCallId });
   if (!pre.ok) {
     logger.info(`[outbound-voicemail-sms] Skipped (${pre.skipped}) for ${maskPhone(rawPhone)}`);
     return { sent: false, skipped: pre.skipped };

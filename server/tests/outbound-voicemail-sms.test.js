@@ -28,13 +28,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/outbound-call-reason', () => ({
   REASONS: { QUOTE_REQUEST: 'quote_request', RETURNING_CALL: 'returning_call', SAW_TEXT: 'saw_text', GENERIC: 'generic' },
   visitInProgress: jest.fn(async () => false),
+  nonServiceCaller: jest.fn(async () => false),
 }));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
-const { visitInProgress } = require('../services/outbound-call-reason');
+const { visitInProgress, nonServiceCaller } = require('../services/outbound-call-reason');
 const {
   MESSAGE_TYPE,
   GENERIC_TEMPLATE_KEY,
@@ -75,6 +76,7 @@ beforeEach(() => {
   jest.useFakeTimers({ now: IN_WINDOW, doNotFake: ['nextTick', 'setImmediate'] });
   isEnabled.mockImplementation(() => true);
   visitInProgress.mockImplementation(async () => false);
+  nonServiceCaller.mockImplementation(async () => false);
   installDb();
 });
 
@@ -130,6 +132,13 @@ describe('precheck — decided before the customer leg is hung up', () => {
     visitInProgress.mockResolvedValueOnce(true);
     await expect(precheck({ phone: PHONE, customerId: 'cust-1' })).resolves.toEqual({ ok: false, skipped: 'visit_in_progress' });
     expect(visitInProgress).toHaveBeenCalledWith({ customerId: 'cust-1', phone: PHONE, before: IN_WINDOW });
+    expect(smsLogFirst).not.toHaveBeenCalled();
+  });
+
+  test('returning a non-service call (van complaint, solicitor, applicant, wrong number) → no text', async () => {
+    nonServiceCaller.mockResolvedValueOnce(true);
+    await expect(precheck({ phone: PHONE, customerId: 'cust-1', relatedCallId: 'in-7' })).resolves.toEqual({ ok: false, skipped: 'non_service_caller' });
+    expect(nonServiceCaller).toHaveBeenCalledWith({ customerId: 'cust-1', phone: PHONE, relatedCallId: 'in-7', before: IN_WINDOW });
     expect(smsLogFirst).not.toHaveBeenCalled();
   });
 
