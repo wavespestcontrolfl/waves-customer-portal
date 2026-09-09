@@ -605,7 +605,9 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // resolves to a CAUSE_LABELS label), plus the GENERIC cause words (insect/pest/disease),
 // so a stale/LLM summary like "most consistent with caterpillar activity" is replaced
 // even though the public finding label is already downgraded to a symptom.
-const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|large[\s‐‑‒–—-]+patch(?:es)?|brown[\s‐‑‒–—-]+patch(?:es)?|gr[ae]y[\s‐‑‒–—-]+leaf|dollar[\s‐‑‒–—-]+spots?|rhizoctonia|take[\s‐‑‒–—-]?all|fungus|fungi|fungal|diseases?|leaf[\s‐‑‒–—-]+spots?|mold|mildew|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|drought|water[\s‐‑‒–—-]+stress|chlorosis|iron[\s‐‑‒–—-]+deficiency|nitrogen[\s‐‑‒–—-]+deficiency|magnesium[\s‐‑‒–—-]+deficiency)\b/i;
+// Separators inside a multi-word cause are optional ("gray leaf", "gray-leaf",
+// "grayleaf") so the gate accepts every spelling safeConditionLabel accepts.
+const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[\s‐‑‒–—-]?all|fungus|fungi|fungal|diseases?|leaf[\s‐‑‒–—-]*spots?|mold|mildew|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|drought|water[\s‐‑‒–—-]*stress|chlorosis|iron[\s‐‑‒–—-]*deficiency|nitrogen[\s‐‑‒–—-]*deficiency|magnesium[\s‐‑‒–—-]*deficiency)\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -679,7 +681,7 @@ function stripConfirmedLanguage(text) {
   return String(text).replace(/\s+/g, ' ')
     .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
-    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were)\\s+confirmed\\b`, 'gi'),
+    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|now|also|already|clearly|definitely|officially|fully|positively|visually))*\\s+confirmed\\b`, 'gi'),
       '$1 most consistent with the visible pattern')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }

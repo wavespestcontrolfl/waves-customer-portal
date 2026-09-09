@@ -51,12 +51,22 @@ describe('customer publication', () => {
     expect(copy.safeConfirmationStep(text)).toBe('');
   });
 
-  test.each(['Chinch  bugs', 'Chinch\n  bugs', 'Drought stress', 'Gray leaf spot'])('cannot publish a confirmed claim for %s', (cause) => {
+  test.each(['Chinch  bugs', 'Chinch\n  bugs', 'Drought stress', 'Gray leaf spot', 'Grayleaf spot'])('cannot publish a confirmed claim for %s', (cause) => {
     const text = `${cause} is confirmed along the edge.`;
     const evidence = { name: cause, label: 'general lawn stress', confidence: 'moderate' };
     expect(copy.customerObservations(text, [evidence])).not.toMatch(/confirmed/i);
     expect(copy.safeConfirmationStep(text, evidence)).not.toMatch(/confirmed/i);
   });
+
+  test.each(['has been confirmed', 'have been confirmed', 'is now confirmed', 'was clearly confirmed', 'has now been confirmed'])(
+    'cannot publish a compound passive claim that chinch bug activity %s', (claim) => {
+      const text = `Chinch bug activity ${claim} along the edge.`;
+      const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
+      expect(copy.customerObservations(text, [evidence])).not.toMatch(/confirmed/i);
+      expect(copy.customerObservations(text, [evidence])).toMatch(/most consistent with the visible pattern/);
+      expect(copy.safeConfirmationStep(text, evidence)).not.toMatch(/confirmed/i);
+    },
+  );
 
   test('requires the named cause at moderate confidence or better in a published finding', () => {
     const text = 'The browning along the driveway is consistent with chinch bug activity.';
@@ -99,8 +109,8 @@ describe('customer publication', () => {
     expect(copy.customerObservations('Chinch bug activity along the driveway.', [{ name: 'Fungal activity; no chinch bugs observed', label: 'chinch bug activity', confidence: 'moderate' }])).toBe(copy.NO_OBSERVATIONS);
   });
 
-  test.each(['Sod-webworm', 'Sod‑webworm', 'Large-patch', 'Leaf-spot', 'Gray-leaf-spot', 'Iron-deficiency'])(
-    'hyphenated %s prose requires matching evidence', (cause) => {
+  test.each(['Sod-webworm', 'Sod‑webworm', 'Large-patch', 'Leaf-spot', 'Gray-leaf-spot', 'Grayleaf spot', 'Greyleaf spot', 'Leafspot', 'Largepatch', 'Iron-deficiency'])(
+    'hyphenated or joined %s prose requires matching evidence', (cause) => {
       const text = `${cause} activity along the edge.`;
       const evidence = { name: cause.replace(/[-‑]/g, ' '), label: 'general lawn stress', confidence: 'moderate' };
       expect(copy.customerObservations(text, [])).toBe(copy.NO_OBSERVATIONS);
