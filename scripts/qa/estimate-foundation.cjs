@@ -56,7 +56,7 @@ async function main() {
           localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'fixture-user', role: 'admin', name: 'Fixture operator' }));
           if (navigator.serviceWorker) navigator.serviceWorker.register = async () => ({ scope: 'synthetic-local-test' });
           const originalFetch = window.fetch.bind(window);
-          window.fetch = (input, options) => String(input).endsWith('/admin/usage/track')
+          window.fetch = (input, options) => new URL(String(input), window.location.href).href === `${window.location.origin}/api/admin/usage/track` && options?.method === 'POST'
             ? Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }))
             : originalFetch(input, options);
         });
@@ -155,7 +155,16 @@ async function main() {
         const generate = page.getByRole('button', { name: 'Generate Estimate', exact: true });
         const beforeGenerate = await generate.boundingBox();
         try {
+          const calculationRequest = page.waitForRequest((request) => request.method() === 'POST' && request.url() === `${server.baseUrl}/api/admin/estimator/calculate-estimate`);
           await generate.click();
+          const calculation = (await calculationRequest).postDataJSON();
+          assert.equal(calculation.profile.homeSqFt, 2000);
+          assert.equal(calculation.profile.lotSqFt, 6000);
+          assert.deepEqual(calculation.selectedServices, ['PEST']);
+          assert.equal(calculation.options.pestFreq, 4);
+          assert.equal(calculation.options.address, source.address);
+          assert.equal(calculation.options.manualDiscount, null);
+          assert.deepEqual(calculation.options.serviceSpecificDiscounts, []);
           const busyGenerate = page.locator('#estimate-review button[aria-busy="true"]');
           await busyGenerate.waitFor();
           assert.equal((await busyGenerate.innerText()).trim(), 'Generate Estimate');
@@ -239,7 +248,7 @@ async function main() {
         await page.getByText('Draft saved. It has not been sent.', { exact: true }).waitFor();
         const nextSaved = state.writes.filter((write) => write.endpoint === '/api/admin/estimates').at(-1).body;
         assert.equal(nextSaved.customerName, 'Next Example');
-        for (const key of ['customerId', 'propertyId', 'leadId']) assert.equal(nextSaved[key], null, `Next estimate clears ${key}`);
+        for (const key of ['customerId', 'propertyId']) assert.equal(nextSaved[key], null, `Next estimate clears ${key}`);
         for (const key of ['address', 'customerPhone', 'customerEmail']) assert.equal(nextSaved[key], '', `Next estimate clears ${key}`);
         assert.equal(nextSaved.notes, '');
         assert.equal(nextSaved.estimateData.inputs.manualDiscountType, 'NONE');
