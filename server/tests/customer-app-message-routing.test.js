@@ -82,6 +82,18 @@ test.each(['invoice', 'payment_link', 'invoice_followup'])('explicit invoice cho
   }));
 });
 
+test.each(['payment_failed', 'autopay_charge_failed', 'autopay_retry_failed', 'autopay_retry_final_failed',
+  'ach_retry_notice', 'ach_card_fallback', 'ach_suspended', 'bank_verification_incomplete', 'bank_verification_failed'])('Payment problems App choice routes %s with text disabled', async (type) => {
+  prefs.payment_issue_channel = 'push';
+  prefs.sms_enabled = false;
+  expect(await sendCustomerMessage({ ...input, purpose: 'payment_failure',
+    metadata: { original_message_type: type, notificationEventKey: 'payment-problem:attempt:qa' },
+  })).toMatchObject({ sent: true, channel: 'push' });
+  expect(Twilio.sendSMS).toHaveBeenCalledWith(input.to, input.body, expect.objectContaining({
+    explicitPushOnly: true, notificationEventKey: 'payment-problem:attempt:qa',
+  }));
+});
+
 test('invoice App choice retains operator Text and consent-checked fallback', async () => {
   prefs.invoice_channel = 'push';
   const notice = { ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } };

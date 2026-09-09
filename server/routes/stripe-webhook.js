@@ -194,6 +194,10 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   if (!customer?.phone || !customer?.id) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
   }
+  const eventId = metadata.stripe_event_id || metadata.stripe_setup_intent_id
+    || metadata.stripe_payment_intent_id;
+  if (eventId && metadata.original_message_type !== 'ach_payment_processing') metadata = { ...metadata, notificationEventKey:
+    `payment-problem:stripe:${eventId}:${metadata.original_message_type}:${metadata.recent_failures || 0}` };
   const result = await sendCustomerMessage({
     to: customer.phone,
     body,
@@ -218,7 +222,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   // so callers log deferred, not lost; a failed enqueue falls through and
   // returns the block unchanged (loudly logged).
   if (!result.sent
-    && result.code === 'QUIET_HOURS_HOLD'
+    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'].includes(result.code)
     && result.deferred
     && result.nextAllowedAt) {
     try {
@@ -926,7 +930,7 @@ router.post(
           break;
 
         case 'payment_intent.requires_action':
-          await handlePaymentIntentRequiresAction(event.data.object);
+          await handlePaymentIntentRequiresAction(event.data.object, event.id);
           break;
 
         case 'payment_intent.canceled':
@@ -995,7 +999,7 @@ router.post(
           break;
 
         case 'setup_intent.setup_failed':
-          await handleSetupIntentFailed(event.data.object);
+          await handleSetupIntentFailed(event.data.object, event.id);
           break;
 
         case 'payout.paid':
@@ -6175,7 +6179,7 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
  * payment_intent.requires_action — Customer must complete a step (e.g. micro-
  * deposit verification for ACH). Notify customer to finish setup.
  */
-async function handlePaymentIntentRequiresAction(paymentIntent) {
+async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
   const piId = paymentIntent.id;
   const nextAction = paymentIntent.next_action?.type || 'unknown';
   logger.warn(`[stripe-webhook] PaymentIntent requires action: ${piId} (${nextAction})`);
@@ -6196,7 +6200,8 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
         const smsResult = await sendBillingSms(
           customer,
           body,
-          { original_message_type: 'bank_verification_incomplete', stripe_payment_intent_id: piId },
+          { original_message_type: 'bank_verification_incomplete', stripe_payment_intent_id: piId,
+            ...(eventId ? { stripe_event_id: eventId } : {}) },
           { customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent) }
         );
         if (!smsResult.sent) {
@@ -7980,7 +7985,7 @@ async function handleMandateUpdated(mandate) {
 /**
  * setup_intent.setup_failed — Bank verification failed (wrong micro-deposits, etc.)
  */
-async function handleSetupIntentFailed(setupIntent) {
+async function handleSetupIntentFailed(setupIntent, eventId) {
   const reason = setupIntent.last_setup_error?.message || 'Unknown';
   logger.warn(`[stripe-webhook] SetupIntent failed: ${setupIntent.id} — ${reason}`);
 
@@ -8025,6 +8030,7 @@ async function handleSetupIntentFailed(setupIntent) {
           {
             original_message_type: 'bank_verification_failed',
             stripe_setup_intent_id: setupIntent.id,
+            ...(eventId ? { stripe_event_id: eventId } : {}),
             // Customer linkage for the deferred-replay recheck: a night-
             // held copy of this notice must suppress at 8 AM if the
             // customer added/verified a replacement bank method overnight

@@ -65,10 +65,31 @@ it('includes both reminders in the App shortcut without enabling a muted categor
   await waitFor(() => expect(reminder24()).toHaveValue('push'));
   expect(api.updateNotificationPrefs).toHaveBeenCalledWith({
     appointmentConfirmationChannel: 'push', serviceReminder72hChannel: 'push', serviceReminder24hChannel: 'push',
-    enRouteChannel: 'push', techArrivedChannel: 'push', serviceCompleteChannel: 'push', paymentConfirmationChannel: 'push', invoiceChannel: 'push',
+    enRouteChannel: 'push', techArrivedChannel: 'push', serviceCompleteChannel: 'push', paymentConfirmationChannel: 'push', invoiceChannel: 'push', paymentIssueChannel: 'push',
   });
   expect(screen.getByRole('switch', { name: '72-Hour Appointment Reminder', exact: true })).toHaveAttribute('aria-checked', 'false');
   expect(prefs).toMatchObject({ serviceReminder72h: false, smsEnabled: false, emailEnabled: false });
+});
+
+it('saves Payment problems to App without enabling text or email', async () => {
+  render(<BillingTab customer={customer} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for payment problems' });
+  await waitFor(() => expect(within(select).getByRole('option', { name: 'App', exact: true })).toBeEnabled());
+  fireEvent.change(select, { target: { value: 'push' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await screen.findByRole('button', { name: 'Saved', exact: true });
+  expect(prefs).toMatchObject({ paymentIssueChannel: 'push', smsEnabled: false, emailEnabled: false });
+});
+
+it('opens the payment methods section after loading an App action destination', async () => {
+  const scroll = vi.fn();
+  const previous = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = scroll;
+  try {
+    render(<BillingTab customer={customer} focusPaymentMethods />);
+    await waitFor(() => expect(scroll).toHaveBeenCalledWith({ block: 'start' }));
+    expect(scroll.mock.instances[0].id).toBe('billing-payment-methods');
+  } finally { HTMLElement.prototype.scrollIntoView = previous; }
 });
 
 it('saves the invoice App choice without enabling text or email and shows save failures', async () => {
@@ -85,19 +106,19 @@ it('saves the invoice App choice without enabling text or email and shows save f
   expect(prefs).toMatchObject({ invoiceChannel: 'push', smsEnabled: false, emailEnabled: false });
 });
 
-it('does not resubmit an unchanged App invoice choice when the server gate is rolled back', async () => {
-  prefs.invoiceChannel = 'push';
+it.each([['invoiceChannel', 'invoices'], ['paymentIssueChannel', 'payment problems']])('does not resubmit an unchanged %s App choice after a gate rollback', async (field, label) => {
+  prefs[field] = 'push';
   render(<BillingTab customer={customer} />);
-  const select = await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
+  const select = await screen.findByRole('combobox', { name: `Delivery method for ${label}` });
   expect(select).toHaveValue('push');
   api.updateNotificationPrefs.mockImplementation(async (changes) => {
-    if (changes.invoiceChannel === 'push') throw new Error('App preferences unavailable');
+    if (changes[field] === 'push') throw new Error('App preferences unavailable');
     return { success: true };
   });
   fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
   await screen.findByRole('button', { name: 'Saved', exact: true });
   expect(api.updateNotificationPrefs).toHaveBeenCalledTimes(1);
-  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty('invoiceChannel');
+  expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty(field);
   expect(select).toHaveValue('push');
 });
 

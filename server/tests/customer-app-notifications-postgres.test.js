@@ -53,6 +53,14 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       await invoiceMigration.down(trx);
       await invoiceMigration.up(trx);
     });
+    const paymentMigration = require('../models/migrations/20260909000061_payment_issue_app_channel');
+    await mockPg.transaction(async (trx) => {
+      await paymentMigration.up(trx);
+      await paymentMigration.up(trx);
+      await paymentMigration.down(trx);
+      await paymentMigration.down(trx);
+      await paymentMigration.up(trx);
+    });
     await mockPg('customers').insert([
       { id: owner, account_id: owner, is_primary_profile: true },
       { id: property, account_id: owner, is_primary_profile: false },
@@ -192,6 +200,33 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await routing.attemptPushFirst({ ...notice, notificationEventKey: `qa:${invoiceId}:day7` })).toMatchObject({ delivered: true });
     expect(apns.send).toHaveBeenCalledTimes(2);
     expect((await mockPg('sms_log').where({ from_phone: 'push', status: 'sent' })).length).toBe(2);
+  });
+
+  test('payment problems preserves charged-profile ownership and legacy companion vetoes', async () => {
+    const routing = require('../services/messaging/push-channel-routing');
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ billing_channel: 'email' });
+    expect(await routing._test.pushEligibleRuntime(property, '+19415550101', 'autopay_charge_failed')).toBe(false);
+    expect((await put({ paymentIssueChannel: 'push' })).status).toBe(409);
+    await device();
+    expect((await put({ paymentIssueChannel: 'push', smsEnabled: false })).status).toBe(200);
+    expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).payment_issue_channel).toBeNull();
+    const notice = { customerId: property, to: '+19415550101', body: 'Please update your payment method.',
+      messageType: 'autopay_charge_failed', explicitPushOnly: true, notificationEventKey: 'qa:payment:attempt1' };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(apns.send).toHaveBeenCalledTimes(1);
+    expect(await mockPg('notifications').first()).toMatchObject({ link: '/?tab=billing&focus=payment-methods' });
+    expect(await routing.attemptPushFirst({ ...notice, notificationEventKey: 'qa:payment:attempt2' })).toMatchObject({ delivered: true });
+    expect(apns.send).toHaveBeenCalledTimes(2);
+    await put({ paymentIssueChannel: 'sms' }, '/api/notifications/preferences');
+    expect((await get()).body.paymentIssueChannel).toBe('push');
+    await put({ paymentIssueChannel: 'sms' });
+    expect(await routing._test.pushEligibleRuntime(property, '+19415550101', 'autopay_charge_failed')).toBe(false);
+    await put({ paymentIssueChannel: 'push' });
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
+    expect((await put({ paymentIssueChannel: 'push' })).status).toBe(400);
+    await put({ paymentIssueChannel: 'sms' });
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).payment_issue_channel).toBe('push');
   });
 
   test.each(['payer', 'wrong_customer', 'paid', 'void', 'processing'])('invoice App delivery excludes %s invoices', async (kind) => {
