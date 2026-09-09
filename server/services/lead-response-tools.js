@@ -455,8 +455,7 @@ async function executeLeadTool(toolName, input, context) {
       });
       if (queued.error) return queued;
       if (!queued.alertClaimToken) return { queued: true, activityId: queued.id, replayed: true, alertStatus: queued.alertStatus,
-        ...(queued.alertStatus === 'pending' ? { failed: true, retryable: true, nextAllowedAt: queued.nextAllowedAt,
-          error: 'Draft saved; owner alert delivery is still in progress' } : {}) };
+        ...(queued.alertStatus === 'pending' ? { retryable: true, nextAllowedAt: queued.nextAllowedAt } : {}) };
       const customer = queued.customer;
       let alertStatus = 'not_configured';
 

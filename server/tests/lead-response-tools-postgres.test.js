@@ -6,7 +6,16 @@ const mockSend = jest.fn();
 const mockMessage = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: mockSend }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: mockMessage }));
-jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, _res, next) => {
+    req.technician = { first_name: 'QA', last_name: 'Admin' };
+    req.techRole = 'admin';
+    next();
+  },
+  requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
 
 const SKIP = !process.env.DATABASE_URL;
 (SKIP ? describe.skip : describe)('lead tool integrity (PostgreSQL)', () => {
@@ -46,11 +55,13 @@ const SKIP = !process.env.DATABASE_URL;
       return { success: true, sid: 'SM_qa_integrity' };
     });
     await db('customer_interactions').whereIn('customer_id', [customerId, foreignCustomerId]).del();
+    await db('scheduled_services').where({ customer_id: customerId }).del();
+    await db('ad_service_attribution').where({ lead_id: leadId }).del();
     await db('estimates').where({ customer_id: customerId, source: 'lead_agent' }).del();
     await db('customers').whereIn('id', [customerId, foreignCustomerId]).update({ pipeline_stage: 'new_lead' });
     await db('lead_activities').where({ lead_id: leadId }).del();
     await db('lead_agent_responses').where({ lead_id: leadId }).del();
-    await db('leads').where({ id: leadId }).update({ customer_id: customerId, deleted_at: null });
+    await db('leads').where({ id: leadId }).update({ customer_id: customerId, deleted_at: null, converted_at: null, status: 'new' });
   });
 
   afterAll(async () => {
@@ -60,6 +71,8 @@ const SKIP = !process.env.DATABASE_URL;
     try {
       await db.transaction(async trx => {
         await trx('customer_interactions').whereIn('customer_id', [customerId, foreignCustomerId]).del();
+        await trx('scheduled_services').where({ customer_id: customerId }).del();
+        await trx('ad_service_attribution').where({ lead_id: leadId }).del();
         await trx('estimates').where({ customer_id: customerId, source: 'lead_agent' }).del();
         await trx('lead_agent_responses').where({ lead_id: leadId }).del();
         await trx('lead_activities').where({ lead_id: leadId }).del();
@@ -191,6 +204,54 @@ const SKIP = !process.env.DATABASE_URL;
       db.removeListener('query', started);
       if (!editor.isCompleted()) await editor.rollback();
       if (pending) await pending.catch(() => {});
+    }
+  }, 30000);
+
+  test('actual appointment conversion and agent mutation both commit under contention', async () => {
+    const express = require('express');
+    const app = express();
+    app.use(express.json());
+    app.use('/admin/leads', require('../routes/admin-leads'));
+    app.use((err, _req, res, _next) => res.status(err.statusCode || err.status || 500).json({ error: err.message }));
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise(resolve => server.once('listening', resolve));
+    const holder = await db.transaction();
+    let converting;
+    let updating;
+    const waitForLocks = async count => {
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const { rows } = await db.raw(`SELECT count(*)::int AS count FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+          AND query ~ ?`, ['^select.*"(leads|customers)".*for (no key )?update']);
+        if (rows[0].count >= count) return;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      throw new Error(`Expected ${count} PostgreSQL row-lock waiters`);
+    };
+    try {
+      // Force conversion to queue first at the lead. With the old order,
+      // the agent then holds customer while queued behind it: a real cycle.
+      await holder('leads').where({ id: leadId }).forUpdate().first();
+      const date = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+      converting = fetch(`http://127.0.0.1:${server.address().port}/admin/leads/${leadId}/schedule-appointment`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, time: '10:00', serviceType: 'Pest Control' }),
+      }).then(async res => ({ status: res.status, body: await res.json() }));
+      await waitForLocks(1);
+      updating = executeLeadTool('update_lead_pipeline', { stage: 'won', note: 'QA concurrent conversion' }, context);
+      await waitForLocks(2);
+      await holder.commit();
+      expect(await converting).toMatchObject({ status: 200, body: { customerId, createdCustomer: false } });
+      expect(await updating).toMatchObject({ updated: true });
+      expect(await db('scheduled_services').where({ customer_id: customerId })).toHaveLength(1);
+      expect((await db('leads').where({ id: leadId }).first()).converted_at).toBeTruthy();
+      expect((await db('customers').where({ id: customerId }).first()).pipeline_stage).toBe('won');
+      expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'pipeline_update' })).toHaveLength(1);
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+      await Promise.allSettled([converting, updating].filter(Boolean));
+      await new Promise(resolve => server.close(resolve));
     }
   }, 30000);
 
