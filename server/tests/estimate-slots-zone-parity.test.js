@@ -265,3 +265,23 @@ test('capacity post-filter preserves route-certified offers and rejects syntheti
     else process.env.GATE_SCHEDULING_CAPACITY = previous;
   }
 });
+
+
+test('capacity estimates keep late work within the shared shift and its last arrival window', async () => {
+  const previous = process.env.GATE_SCHEDULING_CAPACITY;
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  mockDb();
+  const certified = { date: '2027-05-20', windowStart: '16:00', windowEnd: '17:30', techId: 'tech-1', routeMode: 'arrival_windows' };
+  try {
+    await expect(filterCollidingSlots([
+      certified,
+      { ...certified, windowStart: '17:00', windowEnd: '17:30' },
+      { ...certified, windowEnd: '18:30' },
+    ], { dateFrom: certified.date, dateTo: certified.date })).resolves.toEqual([certified]);
+    process.env.GATE_SCHEDULING_CAPACITY = 'false';
+    expect(estimateSlotAvailability._internals.slotWindowFitsDay('16:00', '17:30')).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = previous;
+  }
+});

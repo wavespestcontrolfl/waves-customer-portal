@@ -31,7 +31,7 @@ const db = require('../models/db');
 const { applyAssignable } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
-const { capacityEnabled } = require('./scheduling/policy');
+const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -1060,6 +1060,7 @@ function addMinutesToHHMM(hhmm, minutes) {
 function slotWindowFitsDay(windowStart, windowEnd) {
   const startMin = timeToMinutes(windowStart);
   const endMin = timeToMinutes(windowEnd);
+  if (capacityEnabled()) return placementFitsShift(startMin, endMin);
   if (startMin == null || endMin == null) return true;
   return endMin > startMin && endMin <= SLOT_DAY_END_MINUTES;
 }
