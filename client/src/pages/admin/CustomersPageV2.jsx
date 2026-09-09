@@ -1,4 +1,3 @@
-import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 // client/src/pages/admin/CustomersPageV2.jsx
 // Monochrome V2 of CustomersPage. Strict 1:1 on data, endpoints, behavior:
 //   - GET  /admin/customers?search=&stage=&tier=&city=&page=&limit=100
@@ -1050,7 +1049,7 @@ export default function CustomersPageV2() {
   // Profile sheets on other surfaces keep their current presentation.
   const workspaceMode = searchParams.get("customer360") !== "overlay";
   const workspaceOpen = workspaceMode && !!selected360Id;
-  usePublishIntelligenceBarPageData({ customer_id: selected360Id });
+  // The customer profile publishes its own Intelligence Bar page data (overlay or workspace).
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);

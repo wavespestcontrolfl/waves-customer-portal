@@ -13,7 +13,7 @@ parity for other customer actions or complete the platform assignment.
 
 All three tools are discovered from other admin pages through the existing
 registry. They do not send messages, create appointments, or initiate payments.
-The following UI slice maps the four write/preview request sites to these tools;
+The coverage census maps the four write/preview request sites to these tools;
 other unmapped rows remain in the coverage denominator.
 
 ## Approval, persistence, and history
@@ -71,9 +71,36 @@ The property database regressions are divided by behavior:
 The suites share the isolated-database fixture and use synthetic records. The
 model is scripted; no live-provider or production rollout claim is made. The
 contract and write-gate suites verify approval effects and tool registration.
-Customer 360 controls and rendered coverage are the fourth replacement slice.
+Customer 360 controls and rendered coverage are the fourth replacement slice,
+with the capability ledger carried alongside the sites it verifies.
 
 Split validation: all 6 IB PostgreSQL scenarios, 87 authorization/write-gate/tool-
 definition tests and 12 scoped contract checks pass. Contract smoke invokes the
 unconfirmed preview, as required by the two-step tool registry; only the real
 confirmation route can persist the write. The domain scan is clean.
+
+## Customer 360 controls
+
+Customer 360 opens the shell's existing global bar by touch or keyboard. Record
+overlays publish their customer on Customers, Dispatch and Communications;
+closing restores only a still-mounted page scope. Confirmed property receipts
+refresh the matching record and property list, while a result for A leaves B
+alone. Escape closes the topmost bar without closing Customer 360.
+
+The primary impact dialog uses the shared Dialog above the record drawer. Rows
+show eligibility and reasons from the same server guard used by confirmation.
+Initial loads and refreshes share sequencing and customer guards, preventing
+older reads or saves from a departed record from replacing the current one.
+
+All 69 rendered tests pass for confirmation, target-scoped refresh, navigation
+races and overlay scope restoration. The production build, brand/domain checks
+and capability census pass, with zero newly unmapped sites.
+
+Desktop 1440 and mobile 390 browser fixtures exercise the actual Customer 360,
+global bar, property panel and primary dialog. They confirm native primary
+promotion, submit the overlay's customer, deliver a delayed receipt for A while
+B is open without refreshing B, close the bar with Escape while retaining the
+profile, and restore the underlying page scope when the profile closes. Fonts
+load and both widths have no JavaScript errors or horizontal overflow. Fetch
+responses are synthetic; these checks do not establish live-provider behavior
+or a real iOS keyboard result.
