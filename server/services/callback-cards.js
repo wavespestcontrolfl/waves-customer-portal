@@ -42,13 +42,14 @@ function staffedDeadline(from, calendar, minutes = 240) {
 
 async function prepareCallbackCards(conn, { callId = null } = {}) {
   if (!enabled()) return 0;
-  const { staleAiRowSql } = require('./call-commitments');
+  const { staleAiRowSql, callEndedAt } = require('./call-commitments');
   const rows = await conn('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' })
     .whereNull('cc.callback_due_at').whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .modify((q) => { if (callId) q.where('cc.call_log_id', callId); })
     .orderBy('cc.created_at', 'asc').limit(200)
-    .select('cc.id', 'cc.source', 'cc.created_at', 'cc.due_at', 'cc.assigned_to', 'cl.created_at as call_started_at');
+    .select('cc.id', 'cc.source', 'cc.created_at', 'cc.due_at', 'cc.assigned_to', 'cl.created_at as call_started_at',
+      'cl.bridged_at', 'cl.duration_seconds', 'cl.direction');
   if (!rows.length) return 0;
   const owner = await conn('technicians').where('employment_status', 'active')
     .whereIn('role', ['admin', 'technician']).orderBy('field_dispatchable', 'asc')
@@ -56,7 +57,7 @@ async function prepareCallbackCards(conn, { callId = null } = {}) {
   let prepared = 0;
   const calendars = new Map();
   for (const row of rows) {
-    const from = new Date(row.source === 'human' ? row.created_at : row.call_started_at);
+    const from = row.source === 'human' ? new Date(row.created_at) : callEndedAt({ ...row, created_at: row.call_started_at });
     let due;
     try {
       const day = etDateString(from);
@@ -129,7 +130,10 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     await trx('call_commitments').where({ id }).update(patch);
     await recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: `callback_${action}`,
       resource_type: 'call_commitment', resource_id: id, metadata: { snoozed_until: until?.toISOString() || null }, critical: true, trx });
-    await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'commitment_id' = ?", [id])
+    await trx('notifications').where({ recipient_type: 'admin' }).where(function containsCallback() {
+      this.whereRaw("metadata->>'commitment_id' = ?", [id])
+        .orWhereRaw("metadata->'overdue_commitment_ids' @> ?::jsonb", [JSON.stringify([id])]);
+    })
       .whereNull('read_at').update({ read_at: now });
     return require('./call-commitments').normalizeRow(await trx('call_commitments').where({ id }).first());
   });
@@ -154,7 +158,11 @@ async function notifyDueCallbacks(conn, { now = new Date() } = {}) {
     if (!result.failed) verifiedCalls.add(id);
   }
   const ids = candidates.filter((row) => verifiedCalls.has(row.call_log_id)).map((row) => row.id);
-  if (!ids.length) return { alerted: 0 };
+  if (!ids.length) {
+    if (!candidates.length) await conn('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+      .whereRaw("metadata->>'dedupeKey' LIKE 'callback-cards-overdue:%'").update({ read_at: now });
+    return { alerted: 0 };
+  }
   return conn.transaction(async (trx) => {
     const live = await trx('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
       .whereIn('cc.id', ids).where({ 'cc.status': 'open', 'cc.kind': 'callback', 'cc.party': 'waves' })
@@ -178,6 +186,8 @@ async function notifyDueCallbacks(conn, { now = new Date() } = {}) {
         });
       return { alerted: notice?.id && (!notice.deduped || notice.refreshed) ? 1 : 0, aggregate: true };
     }
+    await trx('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+      .whereRaw("metadata->>'dedupeKey' LIKE 'callback-cards-overdue:%'").update({ read_at: now });
     let alerted = 0;
     for (const row of overdue) {
       const notice = await notifications.notifyAdmin('alert', 'A promised callback is due',

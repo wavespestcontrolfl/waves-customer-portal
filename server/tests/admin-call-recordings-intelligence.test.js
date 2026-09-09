@@ -95,6 +95,23 @@ beforeEach(() => {
 });
 
 describe('GET /follow-through', () => {
+  test('bounds each refresh and rotates through every source on a full page', async () => {
+    const cards = require('../services/callback-cards');
+    cards.enabled.mockReturnValue(true);
+    cards.listCallbackCards.mockResolvedValue(Array.from({ length: 100 }, (_, i) => ({ id: `card-${i}`, call_log_id: `call-${i}` })));
+    commitments.refreshFulfillment.mockResolvedValue({ fulfilled: 0 });
+    await withServer(async (base) => {
+      for (let page = 0; page < 4; page += 1) {
+        const before = commitments.refreshFulfillment.mock.calls.length;
+        const response = await fetch(`${base}/admin/call-recordings/follow-through`);
+        expect(response.status).toBe(200);
+        expect((await response.json()).callbacks).toHaveLength(100);
+        expect(commitments.refreshFulfillment.mock.calls.length - before).toBe(25);
+      }
+    });
+    expect(new Set(commitments.refreshFulfillment.mock.calls.map((args) => args[1])).size).toBe(100);
+  });
+
   test('refreshes distinct source calls and returns the completed callback off the page before its deadline', async () => {
     const cards = require('../services/callback-cards');
     cards.enabled.mockReturnValue(true);
