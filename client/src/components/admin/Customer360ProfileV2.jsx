@@ -3172,16 +3172,17 @@ export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate,
       {" "}
       <CardBody className="p-4">
         {" "}
-        <div className="u-label text-ink-secondary mb-1">
+        <label htmlFor={`billing-mode-${customerId}`} className="block u-label text-ink-secondary mb-1">
           How this customer pays
-        </div>{" "}
+        </label>{" "}
         <div className="flex items-center gap-2 flex-wrap">
           {" "}
           <select
+            id={`billing-mode-${customerId}`}
             value={mode}
             disabled={!canEdit || saving}
             onChange={(e) => save(e.target.value)}
-            className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1.5 bg-white"
+            className="min-w-0 max-w-full text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1.5 bg-white"
           >
             {BILLING_LANE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>

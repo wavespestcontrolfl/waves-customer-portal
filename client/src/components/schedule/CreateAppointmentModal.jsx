@@ -429,6 +429,16 @@ export function quickAddConfirmFlags(conflict, { separateAccount = false } = {})
 // Multi-property booking helpers (pure — unit-tested).
 // The picker defaults to the customer's PRIMARY property (customers.address_*
 // mirrors it, so this is the address every other reader already assumes).
+// Customer-search dropdown chip: "N properties" for a customer with 2+
+// ACTIVE saved properties (the list endpoint's propertyCount), nothing for
+// 0/1 — a single property is the default and needs no callout. The chip is
+// a heads-up only; which property gets booked is still the picker below.
+export function customerPropertyCountLabel(propertyCount) {
+  const n = Number(propertyCount);
+  if (!Number.isFinite(n) || n < 2) return null;
+  return `${n} properties`;
+}
+
 export function defaultBookingPropertyId(properties = []) {
   const primary = properties.find((p) => p && p.is_primary) || properties[0];
   return primary ? String(primary.id) : '';
@@ -2365,7 +2375,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                             {c.address || c.phone || ''}
                           </div>
                         </div>
-                        {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal, flex: '0 0 auto' }}>{c.tier}</span>}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flex: '0 0 auto' }}>
+                          {customerPropertyCountLabel(c.propertyCount) && (
+                            <span style={{ fontSize: 14, lineHeight: '18px', padding: '1px 8px', borderRadius: 6, border: `1px solid ${D.border}`, color: D.muted, whiteSpace: 'nowrap' }}>
+                              {customerPropertyCountLabel(c.propertyCount)}
+                            </span>
+                          )}
+                          {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
+                        </div>
                       </button>
                     ))}
                     {!customerLoading && customerResults.length === 0 && (
