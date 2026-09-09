@@ -189,6 +189,7 @@ it('opens and focuses the exact older resolved request from a notification', asy
     category: 'general', status: 'resolved', createdAt: '2025-01-01' }] });
   render(<MyRequestsCard focusRequestId="request-1" />);
   expect(await screen.findByText('Resolved')).toBeInTheDocument();
+  expect(screen.getByText(/Dec 31, 2024/)).toBeInTheDocument();
   expect(api.getRequests).toHaveBeenCalledWith('request-1');
   expect(screen.getByRole('region', { name: 'My Requests' })).toHaveFocus();
 });

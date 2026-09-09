@@ -526,6 +526,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         })
         .catch(() => {});
     }
+    // Request lifecycle notices already have their bell history and email
+    // copies. They must not create a new SMS conversation.
+    if (PREF_CHANNEL_COLUMN[messageType] === 'request_channel') return { delivered: true, sid, notificationId };
+
     // Same unified-history writer the SMS path uses, threaded into the
     // customer's SMS conversation so staff surfaces show the message inline.
     require('../conversations')

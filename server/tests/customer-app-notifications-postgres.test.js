@@ -182,6 +182,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
     expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
     expect(apns.send).toHaveBeenCalledTimes(1);
+    expect(require('../services/conversations').recordTouchpoint).not.toHaveBeenCalled();
     const notice = await mockPg('notifications').where({ recipient_id: property }).first();
     expect(notice.link).toContain(`requestId=${id}`);
     const result = await get(`/api/requests?requestId=${id}`);

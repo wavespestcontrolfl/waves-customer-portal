@@ -14913,7 +14913,7 @@ function MyRequestsCard({ focusRequestId } = {}) {
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.35 }}>{r.subject}</div>
                   <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
-                    {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(focusRequestId ? { year: 'numeric' } : {}) })}
+                    {r.category?.replace(/_/g, ' ')} · {formatETDateTime(created, { month: 'short', day: 'numeric', ...(focusRequestId ? { year: 'numeric' } : {}) })}
                   </div>
                 </div>
                 <span style={{
