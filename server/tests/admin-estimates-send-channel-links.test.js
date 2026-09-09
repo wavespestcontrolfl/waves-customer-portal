@@ -215,6 +215,28 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('an ordinary group anchor stays viewable through the longest fixed sibling hold (GH codex P1 r2 on #4309)', async () => {
+    const anchor = estimateRow({ estimate_group_id: 'synthetic-fixed-group' });
+    const sibling = { id: 'synthetic-fixed-sibling', status: 'sent', pricing_authority: 'SERVER',
+      estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } } };
+    const updates = [];
+    db.mockImplementation(() => {
+      const b = makeBuilder(anchor);
+      let groupProbe = false; let fixedRead = false;
+      b.where = jest.fn(clause => { if (clause?.estimate_group_id && !clause.id) groupProbe = true; return b; });
+      b.whereNot = jest.fn(() => b);
+      b.whereRaw = jest.fn((sql) => { if (/validThrough/.test(String(sql))) fixedRead = true; return b; });
+      b.first = jest.fn(async () => groupProbe ? null : anchor);
+      b.select = jest.fn(async () => fixedRead ? [sibling] : []);
+      b.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
+      return b;
+    });
+    const result = await router.sendEstimateNow(anchor, 'both', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    const published = updates.find((patch) => patch.sent_at && patch.expires_at);
+    expect(new Date(published.expires_at).toISOString()).toBe('2099-12-22T04:59:59.999Z');
+  });
+
   test('a REAL group handoff appends each already-published sibling\'s frozen scope at the GROUP instant, pricing snapshot untouched (codex #3811 r34 P2)', async () => {
     // The triage sweep pairs a cited revision only with sibling revisions
     // of the same handoff instant; a sibling stamped only at its own

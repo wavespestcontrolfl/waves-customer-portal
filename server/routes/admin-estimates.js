@@ -398,6 +398,26 @@ function assertAutoSendPricingAuthority(row = {}) {
 // `forUpdate`: lock the sibling rows for the caller's transaction (the
 // schedule route), so a concurrent revision of a sibling serializes against
 // the scheduling write instead of slipping between this read and it.
+// The delivered entry link is the ANCHOR's token, and /data rejects an
+// expired token before it assembles the property group. An ordinary anchor
+// therefore has to stay viewable through the group's longest fixed hold, or
+// a customer who never retained a sibling URL loses the fixed bid before
+// its promised date (GH codex P1 r2 on #4309). Judged over every live
+// sibling; a read failure extends nothing (the standard window stands).
+const GROUP_FIXED_HOLD_STATUSES = ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'];
+async function longestGroupFixedValidity(database, estimate) {
+  if (!estimate?.estimate_group_id) return null;
+  const rows = await database('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .whereIn('status', GROUP_FIXED_HOLD_STATUSES)
+    .whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)
+    .select('estimate_data');
+  return (Array.isArray(rows) ? rows : []).map((row) => proposalExpiry(row)).filter(Boolean)
+    .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
+}
+
 async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false, sendAt = null } = {}) {
   if (!estimate?.estimate_group_id) return null;
   // Two sets are judged (never re-claimed): the PUBLISHABLE siblings this
@@ -416,11 +436,15 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     .where((q) => q
       .where((publishable) => publishable.whereIn('status', ['draft', 'scheduled', 'send_failed']).whereNull('price_locked_at'))
       .orWhere((visible) => applyLinkVisibleSiblingScope(visible))
-      .orWhere((fixed) => fixed.whereIn('status', ['sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
+      // 'sending' too: a fixed sibling whose delivery claim outlived its
+      // deadline (crashed or delayed) leaves the link-visible scope once
+      // expired, yet still decides whether a later group send can deliver
+      // (GH codex P2 r2 on #4309).
+      .orWhere((fixed) => fixed.whereIn('status', ['sending', 'sent', 'viewed', 'expired']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
-    if (sendAt && ['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
+    if (sendAt && ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
       assertBidSendDate(sibling, sendAt);
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
@@ -2458,7 +2482,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   assertBidSendDate(estimate, now());
-  const nextExpiresAt = estimateExpiresAt(now, estimate);
+  let nextExpiresAt = estimateExpiresAt(now, estimate);
+  if (estimate.estimate_group_id && !hasFixedBidValidity(estimate)) {
+    const groupHold = await longestGroupFixedValidity(db, estimate);
+    if (groupHold && groupHold > nextExpiresAt) nextExpiresAt = groupHold;
+  }
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   // One tracked short code PER CHANNEL LEG (same rule as estimate-follow-up
