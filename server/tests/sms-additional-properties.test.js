@@ -24,6 +24,16 @@ test('refuses shortened evidence, inferred address parts, and a fabricated label
   }
 });
 
+test('labels must belong to their own quoted address line', () => {
+  const rental = 'Rental: 84 Sample Avenue, Example City FL 34201';
+  expect(groundExtraction(parsed([{ ...address, label: 'Rental' }]), context(`${quote}\n${rental}`)))
+    .toMatchObject({ additional_properties: [], dropped: 1 });
+});
+
+test('a missing address array is an invalid extractor response', () => {
+  expect(() => groundExtraction({ obligations: [], facts: [] }, context())).toThrow('sms_operations_invalid_schema');
+});
+
 test('additional-property capture stays gated and inbound-only', () => {
   expect(groundExtraction(parsed(), context(quote, { captureAdditionalProperties: false })).additional_properties).toEqual([]);
   const outbound = context(); outbound.message.direction = 'outbound';
@@ -38,6 +48,12 @@ test('long address lists cannot widen the existing facts and obligations lane', 
   expect(result.additional_properties).toHaveLength(1);
   expect(result.obligations).toEqual([]);
   expect(result.facts).toEqual([]);
+  expect(result.dropped).toBeGreaterThan(0);
+});
+
+test('a long source still requires operational review when the model returns no ordinary instructions', () => {
+  const message = `${'Additional information. '.repeat(40)}\n${quote}`;
+  expect(groundExtraction(parsed(), context(message))).toMatchObject({ additional_properties: [address], dropped: 1 });
 });
 
 test('office review requires complete address fields and an explicit property role', () => {

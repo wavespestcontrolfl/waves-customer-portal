@@ -4,12 +4,12 @@ const db = require('../models/db');
 const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
 const { hashExtractionSource } = require('./data-hygiene/source-extraction-store');
 const { recordAuditEvent } = require('./audit-log');
-const { addressKey, ensurePrimaryProperty, recordCallProperty, OCCUPANCY_TYPES } = require('./customer-properties');
+const { addressKey, ensurePrimaryProperty, completePrimaryFromCall, recordCallProperty, OCCUPANCY_TYPES } = require('./customer-properties');
+const { phoneMatchDigits } = require('../utils/phone');
 const { scrubPans } = require('../utils/pan-scrub');
 
 const REASON = 'property_role_confirm';
 const OPEN = ['open', 'in_progress'];
-const tail = (value) => String(value || '').replace(/\D/g, '').slice(-10);
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')
   && gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY') && gateEnvValue('GATE_CUSTOMER_PROPERTIES');
 const fail = (code, status = 409) => { throw Object.assign(new Error(code), { status }); };
@@ -19,9 +19,10 @@ const sourceHash = (message) => hashExtractionSource(JSON.stringify([
 ]));
 
 async function primarySender(conn, message) {
-  if (message?.direction !== 'inbound' || tail(message.from_phone).length !== 10) return false;
+  const phones = phoneMatchDigits(message?.from_phone);
+  if (message?.direction !== 'inbound' || !phones.length) return false;
   const matches = await conn('customers').whereNull('deleted_at')
-    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tail(message.from_phone)])
+    .whereIn(conn.raw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')"), phones)
     .limit(2).select('id');
   return matches.length === 1 && matches[0].id === message.customer_id;
 }
@@ -32,16 +33,16 @@ async function stageAdditionalProperties({ trx, message, proposals, targetedRepl
   if (!enabled() || !proposals?.length) return { skipped: 'gate_off_or_empty' };
   const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
   if (!since || (!targetedReplay && new Date(message.created_at) < since)) return { skipped: 'outside_activation_window' };
-  if (!(await primarySender(trx, message))) return { skipped: 'sender_requires_review' };
   const existingCard = await trx('triage_items').where({ sms_log_id: message.id, reason_code: REASON }).first();
   if (existingCard) return { preserved: true, id: existingCard.id };
+  const senderRequiresReview = !(await primarySender(trx, message));
   const existing = await trx('customer_properties').where({ customer_id: message.customer_id }).select('*');
   const fresh = proposals.filter((proposal) => !existing.some((property) => addressKey(property) === addressKey(proposal)));
   if (!fresh.length) return { skipped: 'already_recorded' };
   const [card] = await trx('triage_items').insert({ sms_log_id: message.id, call_log_id: null,
     category: 'customer', severity: 'advisory', reason_code: REASON, status: 'open',
     summary: `${fresh.length} additional service ${fresh.length === 1 ? 'address' : 'addresses'} mentioned by text`,
-    payload: { customer_id: message.customer_id, additional_property_proposals: fresh,
+    payload: { customer_id: message.customer_id, additional_property_proposals: fresh, sender_requires_review: senderRequiresReview,
       source_hash: sourceHash(message), sms_text: scrubPans(message.message_body),
       sms_created_at: message.created_at, extractor_version: require('./sms-operational-extractor').VERSION },
   }).returning('id');
@@ -85,9 +86,16 @@ async function applyAdditionalProperties({ id, actorId, expectedUpdatedAt, sameR
     const reviewed = reviewedAddresses(card.payload.additional_property_proposals || [], addresses);
     // Preserve the customer's current primary and the existing creator's
     // canonical address dedupe. Family occupancy does not assert ownership.
-    await ensurePrimaryProperty(customer, { conn: trx });
+    const primaryResult = await ensurePrimaryProperty(customer, { conn: trx });
+    if (!primaryResult.propertyId) fail('Establish the primary address in the customer profile before adding another property');
+    const primary = await trx('customer_properties').where({ id: primaryResult.propertyId }).first();
     const results = [];
     for (const address of reviewed) {
+      // Complete only gaps in the same known premises, including the unit.
+      // A different city/unit cannot donate fields to the primary address.
+      const matchesPrimary = [customer, primary].every((row) => addressKey({ ...row,
+        city: row.city || address.city, zip: row.zip || address.zip }) === addressKey(address));
+      if (matchesPrimary) await completePrimaryFromCall(customerId, address, { conn: trx });
       results.push(await recordCallProperty({ ...address, customerId, source: 'sms', conn: trx }));
     }
     await trx('triage_items').where({ id }).update({ status: 'resolved', resolution_source: 'human',

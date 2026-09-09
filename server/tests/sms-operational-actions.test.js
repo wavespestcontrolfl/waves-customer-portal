@@ -28,7 +28,7 @@ const obligation = (quote, extra = {}) => ({
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
-const extracted = (obligations = [], facts = []) => ({ obligations, facts });
+const extracted = (obligations = [], facts = []) => ({ obligations, facts, additional_properties: [] });
 
 describe('SMS operational evidence and ownership', () => {
   test('keeps an inbound request before staff promises anything', () => {

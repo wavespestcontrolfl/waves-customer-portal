@@ -9,14 +9,14 @@ const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
-const VERSION = 'sms-ops-v16';
+const VERSION = 'sms-ops-v17';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
   'neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code',
 ]);
 const SCHEMA = {
-  type: 'object', additionalProperties: false, required: ['obligations', 'facts'],
+  type: 'object', additionalProperties: false, required: ['obligations', 'facts', 'additional_properties'],
   properties: {
     additional_properties: {
       type: 'array', maxItems: 8,
@@ -232,18 +232,21 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const obligationDropped = captureCommitments
     ? parsed.obligations.length - obligations.length + obligations.filter((item) => item.timing_unverified).length : 0;
   const lines = message.message_body.split(/\r?\n/).map((line) => line.trim());
-  const additional = captureAdditionalProperties && message.direction === 'inbound' ? parsed.additional_properties || [] : [];
+  const additional = captureAdditionalProperties && message.direction === 'inbound' ? parsed.additional_properties : [];
   const seen = new Set();
   const additional_properties = additional.filter((item) => {
     if (!lines.includes(item.quote.trim()) || !/^\d+[A-Za-z-]*\s+\S/.test(item.address_line1.trim())) return false;
     if (['address_line1', 'address_line2', 'city', 'state', 'zip'].some((key) => item[key] && !normalize(item.quote).includes(normalize(item[key])))) return false;
-    if (item.label && !body.includes(normalize(item.label))) return false;
+    if (item.label && !normalize(item.quote).includes(normalize(item.label))) return false;
     const key = require('./customer-properties').addressKey(item);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   }).map((item) => Object.fromEntries(['address_line1', 'address_line2', 'city', 'state', 'zip', 'quote', 'label'].map((key) => [key, item[key] || null])));
-  return { obligations, facts, additional_properties, dropped: factDropped + obligationDropped + additional.length - additional_properties.length };
+  const dropped = factDropped + obligationDropped + additional.length - additional_properties.length;
+  // Address capture may inspect a longer source, but its other instructions
+  // still need the existing operational-review exception even for empty arrays.
+  return { obligations, facts, additional_properties, dropped: message.message_body.length > 600 ? Math.max(1, dropped) : dropped };
 }
 
 async function extractSmsOperations(context) {
