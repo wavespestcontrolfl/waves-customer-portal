@@ -79,27 +79,6 @@ const DARK = {
   muted: '#94a3b8',
 };
 
-// Day-view stops come from GET /api/admin/schedule, whose payload is
-// camelCase and carries the arrival window as windowStart/windowEnd/
-// windowDisplay — there is no `time`/`scheduled_time` field, so the old
-// reads rendered 'Pending' (or nothing) for every booked stop. Prefer the
-// server's display string; fall back to a formatted windowStart.
-const fmtWindowClock = (v) => {
-  const m = String(v || '').match(/^(\d{1,2}):(\d{2})/);
-  if (!m) return null;
-  const h = parseInt(m[1], 10);
-  const h12 = h % 12 || 12;
-  return `${h12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
-};
-const serviceWindowLabel = (service) => {
-  if (!service) return null;
-  if (service.windowDisplay) return service.windowDisplay;
-  const start = fmtWindowClock(service.windowStart);
-  if (!start) return null;
-  const end = fmtWindowClock(service.windowEnd);
-  return end ? `${start}–${end}` : start;
-};
-
 const API = import.meta.env.VITE_API_URL || '';
 
 // Pest control services get the lightweight ServiceRecapModal instead of
@@ -190,7 +169,7 @@ function serviceTechnicianId(service) {
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
-import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 const ON_SITE_ELIGIBLE = new Set(['en_route']);
@@ -278,7 +257,9 @@ export default function TechHomePage() {
   // enforce owner-only server-side regardless.
   const currentRole = getAdminUser()?.role || null;
 
+  const scheduleSeq = useRef(0);
   const fetchSchedule = useCallback(async () => {
+    const seq = ++scheduleSeq.current;
     // Runs alongside the schedule read but never gates it: the route must
     // render even when the line lookup hangs on a poor connection (codex
     // #4072 r8 P2). The first render cannot show the personal-phone links
@@ -286,21 +267,23 @@ export default function TechHomePage() {
     // every contact link until the lookup succeeds (r4 / r5 P2s).
     fetchTechLine();
     try {
-      setScheduleError('');
       const token = getAdminAuthToken();
       const today = etDateString();
       const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json().catch(() => ({}));
+      if (seq !== scheduleSeq.current) return;
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
+      setScheduleError('');
       setSchedule(scheduleRowsFromResponse(data));
       setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
     } catch (err) {
+      if (seq !== scheduleSeq.current) return;
       console.error('Failed to fetch schedule:', err);
       setScheduleError(err.message || 'Your route could not be loaded.');
     } finally {
-      setLoading(false);
+      if (seq === scheduleSeq.current) setLoading(false);
     }
   }, [fetchTechLine]);
 
@@ -410,7 +393,7 @@ export default function TechHomePage() {
   // Services list all need filtering before they're consumed.
   const myServices = currentTechId
     ? schedule.filter((s) => String(serviceTechnicianId(s)) === String(currentTechId))
-    : schedule;
+    : [];
   const completed = myServices.filter((s) => s.status === 'completed').length;
   const total = myServices.length;
   // "Next Stop" = first non-terminal service in the day's route.
@@ -460,11 +443,14 @@ export default function TechHomePage() {
   // fetch per MEMBER service of the stop (grouped siblings keep their own
   // line-scoped history and possibly separate estimate provenance),
   // cached for the session under the stop's primary id. Partial success
-  // is fine (each section fails soft); only everything failing renders
-  // the Retry row. A 404 (ownership filter / older stop) reads as
+  // preserves each previously loaded section and exposes Retry. A 404
+  // (ownership filter / older stop) reads as
   // "nothing linked", not an error.
+  const stopDetailSeq = useRef(new Map());
   const loadStopDetail = useCallback(async (stop) => {
     const key = stop.primary.id;
+    const seq = (stopDetailSeq.current.get(key) || 0) + 1;
+    stopDetailSeq.current.set(key, seq);
     // A refresh keeps the previous data visible while it fetches — codes
     // and money must not flicker away on reopen.
     setStopDetail((d) => ({
@@ -487,10 +473,18 @@ export default function TechHomePage() {
       const [kind, id, value] = r.value;
       byService[id] = { ...byService[id], [kind]: value };
     }
-    setStopDetail((d) => ({
-      ...d,
-      [key]: { status: fulfilled === 0 ? 'error' : 'ready', byService },
-    }));
+    setStopDetail((d) => {
+      if (stopDetailSeq.current.get(key) !== seq) return d;
+      return {
+        ...d,
+        [key]: {
+          status: fulfilled === results.length ? 'ready' : 'error',
+          byService: Object.fromEntries(stop.services.map(({ id }) => [id, {
+            ...d[key]?.byService?.[id], ...byService[id],
+          }])),
+        },
+      };
+    });
   }, []);
   // Which stop's brief has an own-line text or bridge in flight. Tracked
   // at the list level, not per row: the accordion shows ONE stop, so a
