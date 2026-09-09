@@ -1157,6 +1157,13 @@ router.post('/confirm', async (req, res, next) => {
       const run = reviewedRun && visitReview.provided
         ? await visitAssessment.reviewRun({ run: currentRun, review: visitReview, technicianId: req.technicianId }, trx)
         : null;
+      // The customer-visible observation follows the review: a rejected or
+      // renamed finding withdraws the cause the prose named (Codex #4149 r9).
+      const observations = run ? visitAssessment.reviewedObservations({ assessment: row, run }) : null;
+      if (observations != null && observations !== row.observations) {
+        await trx('lawn_assessments').where({ id: assessmentId }).update({ observations, updated_at: new Date() });
+        row.observations = observations;
+      }
       if (protocolFieldChecksProvided) await persistProtocolFieldChecks({ assessment: row, checks: protocolFieldChecks, trx });
       return { updated: row, reviewedVisitRun: run };
     };
