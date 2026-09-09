@@ -312,7 +312,7 @@ export default function EquipmentMaintenancePage({
       {toast && <Card role="status" className="fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
           {toast}
         </Card>}
-      {fleetError && <ActionFeedback error onRetry={loadFleet} className="mb-4">
+      {tab === "fleet" && fleetError && <ActionFeedback error onRetry={loadFleet} className="mb-4">
           Could not load fleet: {fleetError}
         </ActionFeedback>}
       {analyticsError && tab === "analytics" && <ActionFeedback error onRetry={loadAnalytics} className="mb-4">
@@ -337,10 +337,10 @@ export default function EquipmentMaintenancePage({
       showToast,
       loadFleet
     }} />}
-      {tab === "analytics" && (loading || analyticsLoading) && <div className="min-h-60 py-6 text-zinc-500">
+      {tab === "analytics" && analyticsLoading && <div className="min-h-60 py-6 text-zinc-500">
           Loading equipment analytics…
         </div>}
-      {tab === "analytics" && !loading && !analyticsLoading && !fleetError && !analyticsError && <AnalyticsTab {...{
+      {tab === "analytics" && !analyticsLoading && !analyticsError && <AnalyticsTab {...{
       costs,
       reliability,
       mileageSummary,
