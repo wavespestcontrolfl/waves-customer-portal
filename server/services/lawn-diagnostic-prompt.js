@@ -701,6 +701,11 @@ async function runWriter(contract = {}, _context = {}) {
 
 module.exports = {
   PROMPT_VERSION,
+  // Shared rubric blocks — the single-call visit assessment
+  // (lawn-visit-assessment.js) composes its system prompt from the same
+  // safety rules (and CURATED_REFERENCE below) so the two lawn lanes cannot drift.
+  AUTO_RELEASE_RULE,
+  FALSE_PRECISION_RULE,
   // The RESOLVED pipeline model IDs (env override or default) — single source of truth
   // for both the pipeline and the pre-merge readiness check.
   LAWN_PIPELINE_MODELS: { vision: LAWN_VISION_MODEL, challenge: LAWN_CHALLENGE_MODEL, writer: LAWN_WRITER_MODEL },

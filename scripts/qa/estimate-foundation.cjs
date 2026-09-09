@@ -9,23 +9,10 @@ const { previewServer, launchBrowser, evidence, waitForFonts } = require('./brow
 const root = path.resolve(__dirname, '../..');
 const baseline = process.argv.includes('--baseline');
 const output = path.join(root, '.tmp/estimate-foundation', baseline ? 'baseline' : 'current');
-const result = {
-  recurring: { tier: 'Bronze', serviceCount: 1, monthlyTotal: 50, grandTotal: 50, annualAfterDiscount: 600,
-    services: [{ service: 'pest_control', name: 'Pest Control', mo: 50, annual: 600 }] },
-  oneTime: { total: 99, items: [{ service: 'pest_initial', name: 'Initial service', price: 99 }] },
-  results: {}, totals: { year2mo: 50, year1: 699, year2: 600 },
-};
-const source = {
-  id: 'estimate-example-a', status: 'draft', editable: true, editVersion: 'version-a',
-  customerId: 'customer-example-a', customerName: 'Avery Example', customerPhone: '+19415550100',
-  customerEmail: 'avery@example.invalid', address: '100 Example Court, Example City, FL 34201',
-  notes: 'Notes for Avery only.', propertyId: 'property-example-a',
-  inputs: { svcPest: true, homeSqFt: '2000', lotSqFt: '6000' },
-  engineRequest: { profile: { homeSqFt: 2000, lotSqFt: 6000 }, selectedServices: ['PEST'], options: { pestTier: 'quarterly' } },
-  result, token: 'synthetic-example-token', updatedAt: '2026-09-08T15:00:00Z',
-};
+const { source, createFixtures } = require('./estimate-foundation-fixtures.cjs');
 
 async function main() {
+  fs.rmSync(output, { recursive: true, force: true });
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), baseline, passed: false, scenarios: [], screenshots: [] };
   let server;
@@ -37,73 +24,41 @@ async function main() {
         const context = await browser.newContext({ viewport, hasTouch: device === 'mobile', timezoneId: 'America/New_York', serviceWorkers: 'block' });
         const page = await context.newPage();
         page.setDefaultTimeout(15000);
-        const state = { device, errors: [], consoleErrors: [], unmatched: [], writes: [], geometry: [], passed: false };
+        page.setDefaultNavigationTimeout(60000);
+        const state = { device, errors: [], consoleErrors: [], unmatched: [], reads: [], writes: [], geometry: [], passed: false };
         report.scenarios.push(state);
-        const records = new Map([[source.id, structuredClone(source)]]);
-        let failCreate = true;
         let releaseCreate;
         const pendingCreate = new Promise((resolve) => { releaseCreate = resolve; });
-        let conflictRevision = false;
+        let releaseCalculation;
+        const pendingCalculation = new Promise((resolve) => { releaseCalculation = resolve; });
+        const fixtures = createFixtures({ baseUrl: server.baseUrl, pendingCreate, pendingCalculation });
+        const { records } = fixtures;
         await page.addInitScript(() => {
           localStorage.setItem('waves_admin_token', 'synthetic-local-token');
           localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'fixture-user', role: 'admin', name: 'Fixture operator' }));
           if (navigator.serviceWorker) navigator.serviceWorker.register = async () => ({ scope: 'synthetic-local-test' });
           const originalFetch = window.fetch.bind(window);
-          window.fetch = (input, options) => String(input).endsWith('/admin/usage/track')
+          window.fetch = (input, options) => new URL(String(input), window.location.href).href === `${window.location.origin}/api/admin/usage/track` && options?.method === 'POST'
             ? Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }))
             : originalFetch(input, options);
         });
         page.on('pageerror', (error) => state.errors.push(error.message));
-        page.on('console', (message) => { if (message.type() === 'error') state.consoleErrors.push(message.text()); });
+        page.on('console', (message) => { if (message.type() === 'error') state.consoleErrors.push({ text: message.text(), url: message.location().url }); });
         await page.route('**/*', async (route) => {
           const request = route.request(), url = new URL(request.url());
           if (url.origin !== server.baseUrl || url.pathname.startsWith('/socket.io')) return route.abort();
           if (!url.pathname.startsWith('/api/')) return route.continue();
           const method = request.method(), endpoint = url.pathname;
           const body = method === 'GET' ? null : request.postDataJSON();
-          if (method !== 'GET') state.writes.push({ endpoint, method, body });
-          let response, status = 200;
-          if (endpoint === '/api/admin/auth/me') response = { id: 'fixture-user', role: 'admin', name: 'Fixture operator' };
-          else if (endpoint === '/api/admin/feature-flags') response = { flags: {} };
-          else if (endpoint.endsWith('/unread-count')) response = { count: 0, conversations: 0 };
-          else if (endpoint === '/api/admin/discounts') response = [];
-          else if (endpoint.startsWith('/api/admin/pricing-config/')) response = { data: null, featureAvailable: false, subFeaturesAvailable: {} };
-          else if (endpoint === '/api/admin/customers') response = { customers: [] };
-          else if (endpoint === '/api/admin/triage') response = { items: [] };
-          else if (endpoint.endsWith('/properties')) response = { properties: [] };
-          else if (endpoint.includes('/estimates/customer-spend/')) response = { services: [] };
-          else if (endpoint.endsWith('/group')) response = { estimates: [] };
-          else if (endpoint === '/api/admin/estimator/turf-preview') response = { turfSf: 4000 };
-          else if (endpoint === '/api/admin/estimator/calculate-estimate') response = structuredClone(result);
-          else if (endpoint.endsWith('/edit-source')) response = records.get(endpoint.split('/').at(-2));
-          else if (endpoint.endsWith('/send-preview')) {
-            const record = records.get(endpoint.split('/').at(-2));
-            response = { ...record, previewPath: '/preview-estimate.html?scenario=pest',
-              customerUrl: `${server.baseUrl}/preview-estimate.html?scenario=pest`, messageVersion: 'message-example-v1', groupVersions: [],
-              messages: { sms: 'A fictional estimate preview for the selected recipient.', email: { subject: 'Example estimate', text: 'A fictional estimate email preview.' } } };
-          } else if (endpoint === '/api/admin/estimates' && method === 'POST') {
-            if (failCreate) {
-              await pendingCreate;
-              failCreate = false; status = 503; response = { error: 'Example save failed. Please retry.' };
-            }
-            else {
-              const record = { ...body, id: 'estimate-example-created', status: 'draft', editable: true,
-                editVersion: 'created-v1', token: 'synthetic-created-token', updatedAt: source.updatedAt,
-                inputs: body.estimateData.inputs, result: body.estimateData.result, engineRequest: body.estimateData.engineRequest };
-              records.set(record.id, record); response = record;
-            }
-          } else if (endpoint.startsWith('/api/admin/estimates/') && method === 'PUT') {
-            if (conflictRevision) return route.fulfill({ status: 409, contentType: 'application/json',
-              body: JSON.stringify({ error: 'This example changed in another editor. Reopen the saved estimate.' }) });
-            const id = endpoint.split('/').at(-1), prior = records.get(id);
-            assert.equal(body.expectedEditVersion, prior.editVersion, 'The current revision must be sent');
-            const record = { ...prior, ...body, editVersion: `${prior.editVersion}-next`,
-              inputs: body.estimateData.inputs, result: body.estimateData.result, engineRequest: body.estimateData.engineRequest };
-            if (!body.dryRun) records.set(id, record);
-            response = record;
+          if (method === 'GET') state.reads.push({ endpoint, method });
+          else state.writes.push({ endpoint, method, body });
+          try {
+            const { body: response, status } = await fixtures.dispatch(method, endpoint, body);
+            return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(response) });
+          } catch (error) {
+            state.unmatched.push({ endpoint, method, error: error.message });
+            return route.abort();
           }
-          if (response === undefined) { state.unmatched.push({ endpoint, method }); response = {}; }
-          return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(response) });
         });
         async function screenshot(name, locator) {
           if (locator) await locator.scrollIntoViewIfNeeded();
@@ -141,7 +96,28 @@ async function main() {
         assert.equal(await page.getByRole('textbox', { name: 'Customer-visible notes', exact: true }).inputValue(), 'Retain this unsaved note.');
         await screenshot('services', page.locator('#estimate-services'));
         await screenshot('pricing', page.locator('#estimate-pricing'));
-        await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
+        const generate = page.getByRole('button', { name: 'Generate Estimate', exact: true });
+        const beforeGenerate = await generate.boundingBox();
+        try {
+          const calculationRequest = page.waitForRequest((request) => request.method() === 'POST' && request.url() === `${server.baseUrl}/api/admin/estimator/calculate-estimate`);
+          await generate.click();
+          const calculation = (await calculationRequest).postDataJSON();
+          assert.equal(calculation.profile.homeSqFt, 2000);
+          assert.equal(calculation.profile.lotSqFt, 6000);
+          assert.deepEqual(calculation.selectedServices, ['PEST']);
+          assert.equal(calculation.options.pestFreq, 4);
+          assert.equal(calculation.options.address, source.address);
+          assert.equal(calculation.options.manualDiscount, null);
+          assert.deepEqual(calculation.options.serviceSpecificDiscounts, []);
+          const busyGenerate = page.locator('#estimate-review button[aria-busy="true"]');
+          await busyGenerate.waitFor();
+          assert.equal((await busyGenerate.innerText()).trim(), 'Generate Estimate');
+          assert.equal(await busyGenerate.isDisabled(), true);
+          const pendingGenerate = await busyGenerate.boundingBox();
+          assert.equal(pendingGenerate.width, beforeGenerate.width, 'Generate width must remain stable while pending');
+          assert.equal(pendingGenerate.height, beforeGenerate.height, 'Generate height must remain stable while pending');
+          state.pendingGenerate = { label: 'Generate Estimate', width: pendingGenerate.width, height: pendingGenerate.height };
+        } finally { releaseCalculation(); }
         const save = page.getByRole('button', { name: 'Save draft', exact: true });
         await save.waitFor();
         await screenshot('review', page.locator('#estimate-review'));
@@ -187,7 +163,7 @@ async function main() {
         await page.keyboard.press('Escape');
         await dialog.waitFor({ state: 'detached' });
         assert.equal(await send.evaluate((node) => node === document.activeElement), true);
-        conflictRevision = true;
+        fixtures.state.conflictRevision = true;
         await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('Keep this unsaved revision');
         await save.click();
         await page.getByText('This example changed in another editor. Reopen the saved estimate.', { exact: true }).waitFor();
@@ -198,11 +174,32 @@ async function main() {
         await page.goto(`${server.baseUrl}/admin/estimates?editEstimateId=${source.id}`);
         await page.getByText(/Editing existing estimate for Avery Example/).waitFor();
         await screenshot('reopened');
+        assert.equal(await page.getByLabel('Type', { exact: true }).inputValue(), 'FIXED');
+        assert.equal(await page.getByLabel('Amount', { exact: true }).inputValue(), '25');
         assert.equal(await page.getByRole('textbox', { name: 'Customer-visible notes', exact: true }).inputValue(), source.notes);
         await page.getByRole('button', { name: 'Next estimate (keep services)', exact: true }).click();
         assert.equal(await page.getByRole('textbox', { name: 'Customer-visible notes', exact: true }).inputValue(), '');
         assert.equal(await page.getByRole('textbox', { name: 'Customer name', exact: true }).inputValue(), '');
         assert.equal(await page.getByRole('checkbox', { name: 'Pest Control', exact: true }).isChecked(), true);
+        assert.equal(await page.getByLabel('Type', { exact: true }).inputValue(), 'NONE');
+        for (const label of ['Amount', 'Label (shown on estimate)', 'Internal reason']) {
+          assert.equal(await page.getByLabel(label, { exact: true }).inputValue(), '');
+        }
+        await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('Next Example');
+        await page.getByRole('spinbutton', { name: 'Home Sq Ft', exact: true }).fill('2000');
+        await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
+        await save.click();
+        await page.getByText('Draft saved. It has not been sent.', { exact: true }).waitFor();
+        const nextSaved = state.writes.filter((write) => write.endpoint === '/api/admin/estimates').at(-1).body;
+        assert.equal(nextSaved.customerName, 'Next Example');
+        for (const key of ['customerId', 'propertyId']) assert.equal(nextSaved[key], null, `Next estimate clears ${key}`);
+        for (const key of ['address', 'customerPhone', 'customerEmail']) assert.equal(nextSaved[key], '', `Next estimate clears ${key}`);
+        assert.equal(nextSaved.notes, '');
+        assert.equal(nextSaved.estimateData.inputs.manualDiscountType, 'NONE');
+        for (const key of ['manualDiscountPreset', 'manualDiscountValue', 'manualDiscountLabel', 'manualDiscountInternalReason']) {
+          assert.equal(nextSaved.estimateData.inputs[key], '');
+        }
+        assert.deepEqual(nextSaved.estimateData.inputs.serviceSpecificDiscountKeys, []);
         await page.getByRole('checkbox', { name: 'Lawn Care', exact: true }).check();
         for (const [width, height] of [[390, 844], [700, 900], [820, 1180], [1024, 768], [1440, 1000], [844, 390]]) {
           await page.setViewportSize({ width, height });
@@ -210,7 +207,12 @@ async function main() {
             const visible = (node) => node.getBoundingClientRect().height > 0 && !node.closest('details:not([open])');
             const buttons = [...builder.querySelectorAll('button')].filter(visible);
             const controls = [...builder.querySelectorAll('input,select,textarea')].filter(visible);
-            const measurements = (node) => ({ name: node.getAttribute('aria-label') || node.labels?.[0]?.textContent.trim() || node.textContent.trim(), height: node.getBoundingClientRect().height, size: parseFloat(getComputedStyle(node).fontSize) });
+            const measurements = (node) => ({
+              name: (node.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => document.getElementById(id)?.textContent || '').join(' ').trim()
+                || node.getAttribute('aria-label')?.trim() || [...(node.labels || [])].map((label) => label.textContent.trim()).join(' ').trim()
+                || (node.tagName === 'BUTTON' ? node.textContent.trim() : ''),
+              height: node.getBoundingClientRect().height, size: parseFloat(getComputedStyle(node).fontSize),
+            });
             return {
               viewport: { width: innerWidth, height: innerHeight }, coarse: matchMedia('(any-pointer: coarse)').matches,
               overflow: document.documentElement.scrollWidth > innerWidth || builder.scrollWidth > builder.clientWidth,
@@ -222,14 +224,76 @@ async function main() {
             };
           });
           state.geometry.push(geometry);
+          assert.equal(geometry.coarse, device === 'mobile', `${device} ${width}px: expected pointer mode`);
           assert.equal(geometry.overflow, false, `${device} ${width}px: horizontal overflow`);
           for (const key of ['shortButtons', 'shortControls', 'smallFields', 'unlabelled', 'shortChoices']) assert.deepEqual(geometry[key], [], `${device} ${width}px: ${key}`);
         }
         await page.setViewportSize(viewport);
+        // Enter through the real lead-prefill route. Reopening a draft clears
+        // lead linkage intentionally and cannot seed this regression check.
+        fixtures.state.conflictRevision = false;
+        page.once('dialog', (dialog) => dialog.accept());
+        await page.goto(`${server.baseUrl}/admin/estimates?tab=new&leadId=lead-example-a&customerName=Lead%20Example`);
+        await page.getByRole('heading', { name: 'Create estimate', exact: true }).waitFor();
+        assert.equal(await page.getByRole('textbox', { name: 'Customer name', exact: true }).inputValue(), 'Lead Example');
+        await page.getByRole('spinbutton', { name: 'Home Sq Ft', exact: true }).fill('2000');
+        await page.getByRole('checkbox', { name: 'Pest Control', exact: true }).check();
+        await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
+        await save.click();
+        await page.getByText('Draft saved. It has not been sent.', { exact: true }).waitFor();
+        const leadSaved = state.writes.filter((write) => write.method === 'POST' && write.endpoint === '/api/admin/estimates').at(-1).body;
+        assert.equal(leadSaved.leadId, 'lead-example-a', 'Lead linkage must be seeded before testing reset');
+        assert.equal(leadSaved.estimateData.inputs.leadId, 'lead-example-a');
+        await page.getByRole('button', { name: 'Next estimate (keep services)', exact: true }).click();
+        assert.equal(new URL(page.url()).searchParams.has('leadId'), false);
+        await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('After Lead Example');
+        await page.getByRole('spinbutton', { name: 'Home Sq Ft', exact: true }).fill('2000');
+        assert.equal(await page.getByRole('checkbox', { name: 'Pest Control', exact: true }).isChecked(), true);
+        await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
+        await save.click();
+        await page.getByText('Draft saved. It has not been sent.', { exact: true }).waitFor();
+        const afterLead = state.writes.filter((write) => write.method === 'POST' && write.endpoint === '/api/admin/estimates').at(-1).body;
+        assert.equal(afterLead.customerName, 'After Lead Example');
+        assert.equal(afterLead.leadId, null, 'Next estimate must not relink the previous lead');
+        assert.equal(afterLead.estimateData.inputs.leadId, '');
+        assert.notEqual(afterLead.clientDraftId, leadSaved.clientDraftId);
+        state.leadReset = { seededLeadId: leadSaved.leadId, nextLeadId: afterLead.leadId, newDraft: true };
         assert.deepEqual(state.unmatched, []);
         assert.deepEqual(state.errors, []);
-        assert.deepEqual(state.consoleErrors.filter((error) => !/\b(503|409)\b/.test(error)), []);
-        assert.ok(state.writes.every((write) => !write.endpoint.endsWith('/send')));
+        assert.deepEqual(state.consoleErrors, [
+          { text: 'Failed to load resource: the server responded with a status of 503 (Service Unavailable)', url: `${server.baseUrl}/api/admin/estimates` },
+          { text: 'Failed to load resource: the server responded with a status of 409 (Conflict)', url: `${server.baseUrl}/api/admin/estimates/estimate-example-created` },
+        ]);
+        const allowedReads = new Set([
+          'GET /api/admin/auth/me',
+          'GET /api/admin/feature-flags',
+          'GET /api/admin/communications/unread-count',
+          'GET /api/admin/notifications/unread-count',
+          'GET /api/admin/discounts',
+          'GET /api/admin/triage',
+          'GET /api/admin/leads/lead-example-a',
+          'GET /api/admin/pricing-config/lawn_pricing_v2',
+          'GET /api/admin/pricing-config/onetime_flea',
+          'GET /api/admin/pricing-config/rodent_bait_brackets',
+          'GET /api/admin/pricing-config/rodent_setup_fee',
+          'GET /api/admin/pricing-config/rodent_waveguard',
+          'GET /api/admin/pricing-config/termite_rental',
+          `GET /api/admin/customers/${source.customerId}/properties`,
+          `GET /api/admin/estimates/customer-spend/${source.customerId}`,
+          `GET /api/admin/estimates/${source.id}/edit-source`,
+          `GET /api/admin/estimates/${source.id}/group`,
+          'GET /api/admin/estimates/estimate-example-created/edit-source',
+          'GET /api/admin/estimates/estimate-example-created/group',
+          'GET /api/admin/estimates/estimate-example-created/send-preview',
+        ]);
+        assert.deepEqual(state.reads.filter(({ method, endpoint }) => !allowedReads.has(`${method} ${endpoint}`)), []);
+        const allowedWrites = new Set([
+          'POST /api/admin/estimator/turf-preview',
+          'POST /api/admin/estimator/calculate-estimate',
+          'POST /api/admin/estimates',
+          'PUT /api/admin/estimates/estimate-example-created',
+        ]);
+        assert.deepEqual(state.writes.filter(({ method, endpoint }) => !allowedWrites.has(`${method} ${endpoint}`)), []);
         state.passed = true;
         console.log(`Estimate workflow complete: ${device}`);
       } finally { await browser.close(); }

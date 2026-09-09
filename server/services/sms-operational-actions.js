@@ -252,7 +252,7 @@ async function loadMessageContext(conn, message) {
       .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip'),
     conn('property_preferences').where({ customer_id: message.customer_id }).first(),
   ]);
-  return { message, history: history.reverse(), properties, preferences: preferences || {}, captureCommitments: smsCommitmentsEnabled() };
+  return { message, history: history.reverse(), properties, preferences: preferences || {}, captureCommitments: smsCommitmentsEnabled(), captureAdditionalProperties: require('./sms-additional-properties').enabled() };
 }
 
 async function appliedSmsProfileFields(conn, message) {
@@ -308,6 +308,9 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       properties, current, expectedCurrent: matchedContext.preferences, senderIsPrimary, messageBody: message.message_body,
       replayAppliedFields,
     });
+    const additional = !replay && matchedContext.captureAdditionalProperties
+      ? await require('./sms-additional-properties').stageAdditionalProperties({ trx, message: live, proposals: extracted.additional_properties })
+      : null;
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
       return {
@@ -337,7 +340,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         ? { action: 'preserve_notification', notification_id: notif.id }
         : { action: 'create_notification' };
     }
-    let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
+    let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, additional_properties: additional, dropped: extracted.dropped };
     if (replay) {
       // Bind the actual locked decisions, including private values, to the
       // operator's preview without exposing them. Fresh proposal UUIDs vary

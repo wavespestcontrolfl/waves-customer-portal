@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const {
   paramsHash,
+  stepKey,
   stableStringify,
   createPendingAction,
   claimForConfirm,
@@ -55,6 +56,51 @@ describe('pending-actions service', () => {
     expect(paramsHash('create_customer', { first_name: 'Jefe' })).not.toBe(h);
   });
 
+  test('stored JSON preserves hashes for Date versions and omitted values', () => {
+    const input = { version: new Date('2020-01-02T03:04:05Z'), ignored: undefined, values: [undefined, null] };
+    expect(paramsHash('update_customer', input)).toBe(paramsHash('update_customer', JSON.parse(JSON.stringify(input))));
+  });
+
+  test('semantic steps dedupe name/ID aliases, defaults, and changing execution pins', () => {
+    const one = { customer_id: 'a', customer_name: 'Synthetic Person', phone: '+1 (555) 010-1234', message: 'Synthetic message', _require_phone_match: true };
+    const two = { customerId: 'a', phone: '15550101234', message: 'Synthetic message', message_type: 'manual', _ib_task_context: { version: 'later' } };
+    expect(stepKey('send_sms', one)).toBe(stepKey('send_sms', two));
+    expect(stepKey('send_sms', one)).not.toBe(stepKey('send_sms', { ...two, message: 'Different message' }));
+  });
+
+  const uuid = 'aabbccdd-1111-4222-8333-aabbccddeeff';
+  test.each(['id', 'email_id', 'review_id', 'appointment_id', 'property_id', 'request_id', 'estimate_id',
+    'estimateId', 'estimate_identifier', 'product_id', 'customer_id', 'customerId', 'lead_id', 'technician_id'])
+  ('UUID selector %s has one semantic key across case', key => {
+    expect(stepKey('fixture', { [key]: uuid.toUpperCase() })).toBe(stepKey('fixture', { [key]: uuid }));
+  });
+
+  test.each(['customer_ids', 'lead_ids', 'service_ids'])('UUID collection %s normalizes before deduplication and ordering', key => {
+    const other = '11223344-1111-4222-8333-aabbccddeeff';
+    expect(stepKey('fixture', { [key]: [uuid.toUpperCase(), other, uuid] }))
+      .toBe(stepKey('fixture', { [key]: [other.toUpperCase(), uuid] }));
+  });
+
+  test('nested and preview product identity normalize without changing payloads, opaque IDs or ordered arrays', () => {
+    expect(stepKey('fixture', { inventoryReview: [{ productId: uuid.toUpperCase() }] }))
+      .toBe(stepKey('fixture', { inventoryReview: [{ productId: uuid }] }));
+    expect(stepKey('create_restock_request', { quantity: 2 }, { product: { id: uuid.toUpperCase() }, unit: 'bottle' }))
+      .toBe(stepKey('create_restock_request', { quantity: 2 }, { product: { id: uuid }, unit: 'bottle' }));
+    for (const key of ['message', 'body', 'notes', 'idempotency_key']) {
+      expect(stepKey('fixture', { [key]: uuid.toUpperCase() })).not.toBe(stepKey('fixture', { [key]: uuid }));
+    }
+    expect(stepKey('fixture', { email_id: 'OpaqueID' })).not.toBe(stepKey('fixture', { email_id: 'opaqueid' }));
+    expect(stepKey('fixture', { stops: [{ id: uuid }, { id: 'other' }] }))
+      .not.toBe(stepKey('fixture', { stops: [{ id: 'other' }, { id: uuid }] }));
+    const input = { at: new Date('2020-01-02T03:04:05Z'), inventoryReview: [{ productId: uuid.toUpperCase() }] };
+    const before = JSON.stringify(input);
+    expect(stepKey('fixture', input)).toBe(stepKey('fixture', JSON.parse(before)));
+    expect(stepKey('fixture', input)).not.toBe(stepKey('fixture', { ...input, at: new Date('2020-01-03T03:04:05Z') }));
+    expect(JSON.stringify(input)).toBe(before);
+    expect(stepKey('fixture', { product_id: uuid, quantity: 1 })).not.toBe(stepKey('fixture', { product_id: uuid, quantity: 2 }));
+    expect(stepKey('fixture', { product_id: uuid })).not.toBe(stepKey('other_action', { product_id: uuid }));
+  });
+
   test('createPendingAction stores hash, actor, and a future expiry', async () => {
     const inserted = insertBuilder({ id: 'pa-1', tool_name: 'send_sms' });
     db.mockImplementation(() => inserted);
@@ -73,6 +119,21 @@ describe('pending-actions service', () => {
     expect(stored.requested_by).toBe('admin-1');
     expect(stored.status).toBe('pending');
     expect(new Date(stored.expires_at).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  test('storage replaces full raw-recipient context with exact-action authorization proof', async () => {
+    const inserted = insertBuilder({ id: 'pa-redacted', tool_name: 'send_sms' });
+    db.mockImplementation(() => inserted);
+    await createPendingAction({ toolName: 'send_sms', requestedBy: 'admin-1', params: {
+      phone: '+15550101234', message: 'Approved synthetic message',
+      _ib_task_context: { targets: [], explicitPhones: ['5550101234'], requestPhrase: 'Private full prompt',
+        candidates: [{ label: 'Private candidate', address: 'Private address' }], page: { records: { private: 'Private page data' } } },
+    } });
+    const stored = inserted.insert.mock.calls[0][0];
+    const params = JSON.parse(stored.params);
+    expect(JSON.stringify(params._ib_task_context)).not.toMatch(/Private|5550101234/);
+    expect(params._ib_task_context.actionBinding).toMatch(/^[a-f0-9]{64}$/);
+    expect(stored.params_hash).toBe(paramsHash('send_sms', params));
   });
 
   test('claim succeeds when the atomic update wins and the hash matches', async () => {

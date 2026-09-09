@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { etDateString, etDatetimeLocalToISO, formatETDate, formatETTime } from "../../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // Match LawnAssessmentPanel's V2 token pass for visual consistency.
@@ -70,9 +71,6 @@ export function computeCarrierRate(testAreaSqft, capturedGallons) {
   return Math.round((g / (a / 1000)) * 1000) / 1000;
 }
 
-function todayInputValue() {
-  return new Date().toISOString().slice(0, 10);
-}
 
 function calibrationStatusLabel(status) {
   if (status === "field_verified") return "Field verified";
@@ -97,7 +95,7 @@ export default function EquipmentCalibrationPanel() {
   const [verifyOpen, setVerifyOpen] = useState(false);
   const [verifyTestAreaSqft, setVerifyTestAreaSqft] = useState("");
   const [verifyCapturedGallons, setVerifyCapturedGallons] = useState("");
-  const [verifyDate, setVerifyDate] = useState(todayInputValue());
+  const [verifyDate, setVerifyDate] = useState(etDateString);
   const [verifyNotes, setVerifyNotes] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [reconciliation, setReconciliation] = useState(null);
@@ -234,7 +232,7 @@ export default function EquipmentCalibrationPanel() {
           body: JSON.stringify({
             verified_test_area_sqft: Number(verifyTestAreaSqft),
             verified_captured_gallons: Number(verifyCapturedGallons),
-            verified_at: `${verifyDate}T12:00:00`,
+            verified_at: etDatetimeLocalToISO(`${verifyDate}T12:00`),
             verification_notes: verifyNotes || null,
           }),
         },
@@ -243,7 +241,7 @@ export default function EquipmentCalibrationPanel() {
       setVerifyOpen(false);
       setVerifyTestAreaSqft("");
       setVerifyCapturedGallons("");
-      setVerifyDate(todayInputValue());
+      setVerifyDate(etDateString());
       setVerifyNotes("");
       loadReconciliation();
     } catch (e) {
@@ -255,8 +253,7 @@ export default function EquipmentCalibrationPanel() {
 
   const fmtExpiry = (iso) => {
     if (!iso) return "—";
-    const d = new Date(iso);
-    return d.toLocaleDateString();
+    return formatETDate(iso);
   };
 
   return (
@@ -373,7 +370,7 @@ export default function EquipmentCalibrationPanel() {
               </div>{" "}
               {activeCalibration.verified_at && (
                 <div style={{ marginTop: 6, color: D.muted }}>
-                  Verified {new Date(activeCalibration.verified_at).toLocaleDateString()}
+                  Verified {formatETDate(activeCalibration.verified_at)}
                   {activeCalibration.verified_test_area_sqft
                     ? ` over ${activeCalibration.verified_test_area_sqft} sqft`
                     : ""}
@@ -654,7 +651,7 @@ export default function EquipmentCalibrationPanel() {
               textAlign: "center",
             }}
           >
-            Calibration saved at {savedAt.toLocaleTimeString()}
+            Calibration saved at {formatETTime(savedAt, { second: "2-digit" })}
           </div>
         )}
       </div>{" "}

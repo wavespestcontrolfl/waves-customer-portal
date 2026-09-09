@@ -80,6 +80,11 @@ jobs:
         env:
           RECEIPT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/receipt-sms-delivery-postgres.test.js
+      - name: Request App receipt transaction tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/request-app-receipts-postgres.test.js
       - name: Grouped closeout transaction tests
         working-directory: server
         env:
@@ -94,6 +99,11 @@ jobs:
         # above still runs every server test; this step adds the coverage gate.
         working-directory: server
         run: npm run test:customer-coverage
+      - name: Customer App preference and delivery transaction tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/customer-app-notifications-postgres.test.js
       - name: DB-gated suites (serial, against the migrated database)
         working-directory: server
         env:
@@ -142,7 +152,12 @@ jobs:
         working-directory: server
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js tests/intelligence-bar-target-validation-db.test.js tests/intelligence-bar-target-context-db.test.js
+      - name: Intelligence Bar task recovery transaction tests
+        working-directory: server
+        env:
+          IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js
       - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
         # Blocks on critical only (schema drift, missing tables/columns);
         # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
@@ -151,6 +166,10 @@ jobs:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         working-directory: .
         run: npm run test:contracts
+      - name: Intelligence Bar real-database outcome regressions (scripted model)
+        env:
+          IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js
 
   client:
     runs-on: ubuntu-latest
