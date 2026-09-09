@@ -122,18 +122,27 @@ async function deferSummarySms({ visit, customer, recipient, body, claim, nextAl
   });
 }
 
-// A frozen bearer-link recipient must still be authorized when the queue runs.
-async function recheckDeferredSummarySms(meta, database = db, { customer: heldCustomer = null } = {}) {
+// A frozen bearer-link recipient must still be authorized when the queue
+// runs: the visit and its link are live and the recipient still resolves to
+// the frozen number. The locked handoff passes the customer it holds (with
+// its held account primary); the worker's earlier recheck resolves it fresh.
+async function deferredSummaryRecipient(meta, database = db, { customer: heldCustomer = null } = {}) {
   const visit = await database('service_visits').where({ id: meta.visit_id, customer_id: meta.customer_id,
     summary_token_hash: meta.summary_token_hash }).whereNull('summary_token_revoked_at')
     .whereIn('status', ['closing', 'closed']).first('id');
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
-  // The locked handoff passes the customer it holds (with its held account
-  // primary); the worker's earlier recheck resolves it fresh.
   const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
     { db: database });
   const recipient = getServiceContactSmsRecipient(customer);
   if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
+  return { eligible: true, visit };
+}
+
+// The recipient check plus the claim state the replay needs to dispatch.
+async function recheckDeferredSummarySms(meta, database = db, options = {}) {
+  const current = await deferredSummaryRecipient(meta, database, options);
+  if (!current.eligible) return current;
+  const { visit } = current;
   const effect = await database('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
     claim_token: meta.visit_summary_claim_token }).first();
   // Only a late provider-boundary quiet-hours block proves no send occurred:
@@ -157,15 +166,19 @@ async function recheckDeferredSummarySms(meta, database = db, { customer: heldCu
 // handoff to commit instead of handing the bearer link to the former
 // destination. `authorized` re-resolves the recipient from the locked rows;
 // `dispatch(trx)` is the sender's locked handoff and returns its verdict.
-// The dispatch mark commits on its own connection while those rows stay
-// held, so it is durable before the provider request (a process that dies
-// mid-request leaves an uncertain effect, never a reclaimable one). A
-// refusal by the sender's own rechecks before the request returns the mark
-// to its pre-dispatch state; a throw from the handoff is the provider
-// request failing and propagates with the mark in place.
+// Two transactions on one connection each, never nested (a small pool must
+// not be pinned by a send waiting on a second slot). The first holds the
+// rows, authorizes the recipient and commits the dispatch mark, so the mark
+// is durable before any provider request: a process that dies mid-request
+// leaves an uncertain effect, never a reclaimable one. The second holds the
+// same rows again, re-authorizes the recipient on them and runs the provider
+// request while they stay held. A refusal by the sender's own rechecks
+// before the request returns the mark to its pre-dispatch state; a throw
+// from the handoff is the provider request failing and propagates with the
+// mark in place.
 async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, authorized, dispatch }) {
   const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
-  return db.transaction(async (trx) => {
+  const holdAndAuthorize = async (trx, phase) => {
     await trx('customers').where({ id: customerId }).forShare().first('id');
     // FOR SHARE cannot lock an absent row. The canonical seed serializes
     // missing-row creation without inventing marketing consent or replacing
@@ -177,17 +190,19 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     // claim read, not a silently different recipient.
     const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(),
       { db: trx, forShare: true, rethrow: true });
-    if (!(await authorized(customer, prefs, trx))) return lost;
-    if (!(await VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: db }))) return lost;
-    const verdict = await dispatch(trx);
-    if (verdict?.ok === true) return verdict;
-    // Nothing reached the provider. If this write fails the effect stays
-    // uncertain and reaches office review, which is the safe side.
-    await db('visit_effects').where({ visit_id: visitId, effect_type: kind, claim_token: token, status: 'unknown_delivery' })
-      .update({ status: scheduled ? 'pending' : 'claimed', claimed_at: new Date(), updated_at: db.fn.now() })
-      .catch(() => {});
-    return verdict || lost;
-  });
+    return authorized(customer, prefs, trx, phase);
+  };
+  const marked = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'claim'))
+    ? VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: trx }) : false));
+  if (!marked) return lost;
+  const verdict = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'dispatch')) ? dispatch(trx) : lost));
+  if (verdict?.ok === true) return verdict;
+  // Nothing reached the provider. If this write fails the effect stays
+  // uncertain and reaches office review, which is the safe side.
+  await db('visit_effects').where({ visit_id: visitId, effect_type: kind, claim_token: token, status: 'unknown_delivery' })
+    .update({ status: scheduled ? 'pending' : 'claimed', claimed_at: new Date(), updated_at: db.fn.now() })
+    .catch(() => {});
+  return verdict || lost;
 }
 
 // The deferred replay's recheck (visit, recipient, claim state), its dispatch
@@ -195,12 +210,13 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
 async function beginDeferredSummarySms(meta, dispatch) {
   return claimDispatchThroughHandoff({ visitId: meta.visit_id, customerId: meta.customer_id, kind: 'completion_sms',
     token: meta.visit_summary_claim_token, scheduled: true, dispatch,
-    authorized: async (customer, prefs) => {
+    authorized: async (customer, prefs, trx, phase) => {
       if (prefs.sms_enabled === false || prefs.service_completed === false) return false;
-      // The recheck may return a proven-unsent effect to pending; that write
-      // commits on the same connection the durable dispatch mark uses. The
-      // recipient is judged on the held customer row.
-      return (await recheckDeferredSummarySms(meta, db, { customer })).eligible;
+      // The claim phase may return a proven-unsent effect to pending; that
+      // write commits with the dispatch mark. The dispatch phase re-judges
+      // the visit, the link and the recipient on the freshly held rows.
+      if (phase === 'claim') return (await recheckDeferredSummarySms(meta, trx, { customer })).eligible;
+      return (await deferredSummaryRecipient(meta, trx, { customer })).eligible;
     } });
 }
 
