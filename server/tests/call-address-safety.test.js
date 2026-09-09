@@ -1,5 +1,6 @@
 const { canAutoRoute, statesNewAddress, dispatchesToOnFileAddress } = require('../services/call-triage-flags');
 const { buildAddressLines, validateAddress } = require('../services/address-validation');
+const { recoverStreetAddress } = require('../services/address-validation/recovery');
 
 const ANI = '+19415550100';
 const v2 = (over = {}) => ({
@@ -41,7 +42,11 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(lines).toEqual(['100 Example Street', 'Greenville SC']);
     const av = await validateAddress({ addressLines: lines, administrativeArea: 'FL' });
     expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('SC');
-    expect(av.status).toBe('confirm_needed');
+    expect(av.status).toBe('out_of_service_area');
+    const deps = { autocomplete: jest.fn().mockResolvedValue([]), phonetic: jest.fn().mockResolvedValue([]), validate: jest.fn() };
+    const recovery = await recoverStreetAddress({ avStatus: av.status, extracted: { address_line1: '100 Example Street', city: 'Parrish', state: null }, deps });
+    expect(recovery.attempted).toBe(false);
+    expect(deps.autocomplete).not.toHaveBeenCalled();
     expect(canAutoRoute(v2({ property: { service_address: sa }, triage_flags: ['out_of_service_area'] }), { contactPhone: ANI, addressValidation: av }).allowed).toBe(false);
   });
   test('a fragment with no contrary state keeps the Florida hint', async () => {
@@ -59,6 +64,33 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(statesNewAddress(ex, knownCustomer)).toBe(true);
     expect(canAutoRoute(ex, { failOpen: true, callerAni: ANI, contactPhone: ANI, knownCustomer,
       addressValidation: { status: 'confirm_needed', inServiceArea: null } }).allowed).toBe(false);
+  });
+});
+
+describe('every stated address component preserves the saved property identity', () => {
+  const saved = { hasAddress: true, addressLine1: '500 Sample Tower Blvd', addressCity: 'Sarasota', addressZip: '34240' };
+  test.each([
+    [{ unit: 'Apt 45' }, { addressLine2: 'Bldg 4 Apt 5' }],
+    ...['Bldg 9', 'Building 9', 'Floor 2', 'Lot 7', 'Space 3'].map(unit => [{ raw_text: `500 Sample Tower Blvd ${unit}` }, {}]),
+    [{ street_line_1: '123 Palm Drive' }, { addressLine1: '123 Palm Street Drive' }],
+    [{ street_line_1: '123 Palm Street Drive' }, { addressLine1: '123 Palm Drive' }],
+    [{ street_line_1: '500 Sample Tower Avenue' }, {}],
+    [{ raw_text: '500 Sample Tower Avenue' }, {}],
+    [{ raw_text: '5 Main St, Sarasota', city: 'Sarasota' }, { addressLine1: '7 Main St' }],
+    [{ street_line_1: '7 Main St', raw_text: '5 Main St' }, { addressLine1: '7 Main St' }],
+    ...[{ city: 'Sarasota' }, { postal_code: '34240' }, { street_line_1: '500 Sample Tower Blvd' }].map(part => [{ ...part, subdivision_or_community: 'Lakewood Ranch' }, {}]),
+    ...['Bayview Loop', 'Oak Grove', 'Harbor Cove', 'Lake Ridge'].map(street => [{ raw_text: street, city: 'Sarasota' }, {}]),
+  ])('a conflicting or uncomparable component stays in review: %j', (service_address, extra) => {
+    const knownCustomer = { ...saved, ...extra };
+    const ex = v2({ property: { service_address } });
+    expect(statesNewAddress(ex, knownCustomer)).toBe(true);
+    expect(canAutoRoute(ex, { failOpen: true, callerAni: ANI, contactPhone: ANI, knownCustomer,
+      addressValidation: { status: 'missing_component', inServiceArea: true } }).allowed).toBe(false);
+  });
+  test('canonical structural aliases keep their components', () => {
+    const known = { ...saved, addressLine2: 'Bldg 4 Apt 5' };
+    expect(statesNewAddress(v2({ property: { service_address: { street_line_1: saved.addressLine1, unit: 'Building 4 Suite 5' } } }), known)).toBe(false);
+    expect(statesNewAddress(v2({ property: { service_address: { raw_text: 'Building 4 Suite 5, 500 Sample Tower Blvd, Sarasota, FL 34240' } } }), known)).toBe(false);
   });
 });
 
