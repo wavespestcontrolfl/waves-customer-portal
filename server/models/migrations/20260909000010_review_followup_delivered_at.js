@@ -3,13 +3,11 @@
 exports.up = async function up(knex) {
   await knex.schema.alterTable('review_requests', table => {
     table.timestamp('followup_delivered_at', { useTz: true }).nullable();
-    table.timestamp('followup_reserved_at', { useTz: true }).nullable();
   });
 };
 
 exports.down = async function down(knex) {
   await knex.schema.alterTable('review_requests', table => {
     table.dropColumn('followup_delivered_at');
-    table.dropColumn('followup_reserved_at');
   });
 };
