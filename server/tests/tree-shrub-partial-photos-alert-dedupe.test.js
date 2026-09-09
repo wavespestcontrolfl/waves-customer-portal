@@ -49,7 +49,11 @@ postgres('20260909000114 on PostgreSQL', () => {
       await db.transaction(async (trx) => {
         const schema = `tsalert_${randomUUID().replaceAll('-', '')}`;
         await trx.raw('CREATE SCHEMA ??', [schema]);
-        await trx.raw('CREATE TABLE ??.dispatch_alerts (LIKE public.dispatch_alerts INCLUDING ALL)', [schema]);
+        // Pre-migration fixture: INCLUDING ALL would copy the target index once
+        // the migration has run on this database, and the duplicate seed below
+        // would fail before migration.up executes. Copy columns, defaults and
+        // check constraints only; the migration installs the index under test.
+        await trx.raw('CREATE TABLE ??.dispatch_alerts (LIKE public.dispatch_alerts INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING IDENTITY)', [schema]);
         await trx.raw('SET LOCAL search_path TO ??, public', [schema]);
         await work(trx);
         throw rollback;
