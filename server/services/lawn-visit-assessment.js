@@ -51,7 +51,7 @@ const { findBannedCustomerCopy } = require('./service-report/activity-indicators
 const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
 const { CURATED_REFERENCE, AUTO_RELEASE_RULE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
 const { FUNGUS_DISPLAY, THATCH_DISPLAY, lockCustomerBaseline } = require('./lawn-assessment');
-const { normalizeGrassType } = require('./lawn-grass-context');
+const { normalizeGrassType, GRASS_TYPE_LABELS } = require('./lawn-grass-context');
 
 const GATE = 'GATE_LAWN_VISIT_ASSESSMENT';
 const LANE_ID = 'lawn_visit_assessment';
@@ -559,7 +559,52 @@ async function analyzeVisit({ photos = [], photoZones = [], visionContext = {}, 
     ...base, status: 'complete', reason: null,
     provider: outcome.provider, model: outcome.model, fallbackUsed: !!outcome.fallbackUsed,
     usage: outcome.usage || null, raw: outcome.json,
-    ...normalizeAssessment(outcome.json, photos.length, photoZones),
+    ...withoutTechnicianEchoes(normalizeAssessment(outcome.json, photos.length, photoZones), visionContext.technicianNotes),
+  };
+}
+
+// The deterministic boundary between the technician's notes and customer
+// copy: the prompt asks the model not to echo the notes, but a schema-valid
+// answer can still repeat a customer's name or a private phrase into the
+// observations or a confirmation step, and no scrubber knows those words.
+// Prose that reproduces the notes — a name-like token (capitalised
+// mid-sentence, not a grass or place word) or any five-word run of them —
+// is withheld at the source, before the run row or any column stores it
+// (the raw answer stays in raw_response for the technician), so nothing
+// derived downstream can bring it back (Codex #4149 r10).
+const ECHO_ALLOWLIST = new Set([
+  ...Object.values(GRASS_TYPE_LABELS).flatMap((label) => label.toLowerCase().split(/[^\p{L}]+/u)),
+  'florida', 'southwest', 'lawn', 'turf', 'grass', 'front', 'back', 'side', 'yard', 'photo', 'photos',
+].filter(Boolean));
+const ECHO_RUN_WORDS = 5;
+const echoWords = (text) => String(text || '').toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean);
+function echoesTechnicianNotes(text, notes) {
+  if (!text || !notes) return false;
+  const words = echoWords(text);
+  const joined = ` ${words.join(' ')} `;
+  const noteWords = echoWords(notes);
+  for (let i = 0; i + ECHO_RUN_WORDS <= noteWords.length; i += 1) {
+    if (joined.includes(` ${noteWords.slice(i, i + ECHO_RUN_WORDS).join(' ')} `)) return true;
+  }
+  const raw = String(notes).split(/\s+/);
+  for (let i = 0; i < raw.length; i += 1) {
+    const token = raw[i].replace(/^[^\p{L}]+|[^\p{L}']+$/gu, '');
+    if (!/^\p{Lu}/u.test(token) || token.length < 3) continue;
+    // A sentence-initial capital is not a name — but the word after an
+    // honorific ("Mrs. Kowalski") is.
+    if (i === 0 || (/[.!?:;]$/.test(raw[i - 1]) && !/^(?:mr|mrs|ms|miss|mx|dr)\.?$/i.test(raw[i - 1]))) continue;
+    const lower = token.toLowerCase();
+    if (ECHO_ALLOWLIST.has(lower) || ECHO_ALLOWLIST.has(lower.replace(/'s$/, ''))) continue;
+    if (words.includes(lower) || words.includes(`${lower}'s`) || words.includes(lower.replace(/'s$/, ''))) return true;
+  }
+  return false;
+}
+function withoutTechnicianEchoes(analysis, notes) {
+  if (!notes) return analysis;
+  return {
+    ...analysis,
+    observations: echoesTechnicianNotes(analysis.observations, notes) ? '' : analysis.observations,
+    findings: (analysis.findings || []).map((finding) => (echoesTechnicianNotes(finding.confirmation_step, notes) ? { ...finding, confirmation_step: '' } : finding)),
   };
 }
 
@@ -611,18 +656,26 @@ function deriveLegacyScores(analysis) {
 function customerObservations(text, findings = []) {
   const scrubbed = scrubCustomerText(text || '').slice(0, 600).trim();
   if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return NO_OBSERVATIONS;
-  if (namesUnpublishedCause(scrubbed, (findings || []).map((finding) => finding?.label))) return NO_OBSERVATIONS;
+  if (namesUnpublishedCause(scrubbed, findings)) return NO_OBSERVATIONS;
   return scrubbed;
 }
 
 // True when the text names a governed cause (the report lane's
-// SUMMARY_CAUSE_RE, kept in lockstep with the cause-mapped labels) that none
-// of the published labels carries. Each term is resolved through the same
-// allowlist the labels came from, so "chinch pressure" is published by a
-// "chinch bug activity" label and by nothing else; a term the allowlist does
-// not map (insects, pests, disease as a class) is never published by prose.
-function namesUnpublishedCause(text, publishedLabels) {
-  const published = new Set((publishedLabels || []).filter(Boolean));
+// SUMMARY_CAUSE_RE, kept in lockstep with the cause-mapped labels) that no
+// finding publishes AT MODERATE OR BETTER. Each term is resolved through the
+// same allowlist the labels came from, so "chinch pressure" is published by
+// a "chinch bug activity" label and by nothing else; a term the allowlist
+// does not map (insects, pests, disease as a class) is never published by
+// prose. The confidence travels with the label: a weed species collapses to
+// the generic "weed pressure" label the gate lets a low finding keep, so the
+// label alone would authorise "nutsedge" at low confidence — the prompt's
+// rule is no species below moderate, and that is applied here (Codex #4149
+// r10).
+const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
+function namesUnpublishedCause(text, findings) {
+  const published = new Set((findings || [])
+    .filter((finding) => finding && finding.label && (CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0) >= CONFIDENCE_RANK.moderate)
+    .map((finding) => finding.label));
   const re = new RegExp(SUMMARY_CAUSE_RE.source, 'gi');
   let match;
   while ((match = re.exec(text)) !== null) {
@@ -963,7 +1016,16 @@ function mergedReviewInputs(run, review = {}) {
     appliedProducts: parseJsonObject(run?.reconciliation)?.products || [],
   };
   const pick = (field) => (sent[field] || review[field]?.length ? review[field] || [] : stored[field]);
-  return { reviewedFindings: pick('reviewedFindings'), addedDetails: pick('addedDetails'), appliedProducts: pick('appliedProducts') };
+  // Finding decisions merge BY ID: a follow-up that edits one finding keeps
+  // the stored decision on every other (a rejected F1 stays rejected when
+  // only F2 is sent) — the lists (details, products) are still replaced
+  // whole, since each is the technician's complete statement of that field
+  // (Codex #4149 r10).
+  const sentFindings = sent.reviewedFindings || review.reviewedFindings?.length ? review.reviewedFindings || [] : null;
+  const reviewedFindings = sentFindings
+    ? [...stored.reviewedFindings.map((row) => sentFindings.find((entry) => entry.finding_id === row.finding_id) || row), ...sentFindings.filter((entry) => !stored.reviewedFindings.some((row) => row.finding_id === entry.finding_id))]
+    : stored.reviewedFindings;
+  return { reviewedFindings, addedDetails: pick('addedDetails'), appliedProducts: pick('appliedProducts') };
 }
 
 // Technician-added findings keep their ids across follow-up reviews: a detail
@@ -984,18 +1046,26 @@ function storedTechnicianHighWater(reconciliation) {
   const addressed = (reconciliation?.products || []).flatMap((product) => (Array.isArray(product?.addresses_findings) ? product.addresses_findings : []).map(technicianNumber));
   return Math.max(stored, 0, ...addressed);
 }
+// Stored ids are claimed by text AND zone first, then by text alone for
+// whatever is still unclaimed, each stored id at most once: two identical
+// details in different zones keep their own ids, a detail re-sent without
+// its zone still finds its id, and a duplicate never aliases (Codex #4149
+// r10: a text-only map held one id per text, so the second of two
+// identical stored details lost its id — and the product mapped to it).
 function technicianFindingIds(details, stored, highWater = 0) {
   const normalized = (text) => String(text || '').trim().toLowerCase();
-  const byText = new Map(stored.filter((row) => /^T\d+$/.test(row.finding_id || '')).map((row) => [normalized(row.name), row.finding_id]));
-  let next = Math.max(highWater, 0, ...[...byText.values()].map(technicianNumber));
+  const storedRows = stored.filter((row) => /^T\d+$/.test(row.finding_id || ''));
+  let next = Math.max(highWater, 0, ...storedRows.map((row) => technicianNumber(row.finding_id)));
   const taken = new Set();
-  const ids = details.map((detail) => {
-    const kept = byText.get(normalized(detail.text));
-    if (kept && !taken.has(kept)) { taken.add(kept); return kept; }
-    next += 1;
-    return `T${next}`;
-  });
-  return { ids, highWater: next };
+  const claim = (matches) => {
+    const row = storedRows.find((candidate) => !taken.has(candidate.finding_id) && matches(candidate));
+    if (row) taken.add(row.finding_id);
+    return row?.finding_id || null;
+  };
+  const ids = details.map((detail) => claim((row) => normalized(row.name) === normalized(detail.text) && (row.zone ?? null) === (detail.zone ?? null)));
+  details.forEach((detail, index) => { if (!ids[index]) ids[index] = claim((row) => normalized(row.name) === normalized(detail.text)); });
+  const assigned = ids.map((id) => { if (id) return id; next += 1; return `T${next}`; });
+  return { ids: assigned, highWater: next };
 }
 
 // A technician-added detail becomes a finding of its own: moderate at most
@@ -1075,7 +1145,7 @@ function buildReview(run, rawReview = {}) {
   // a product treats — it stays in the review, out of the reconciliation.
   const reconcilable = [...reviewed.filter((finding) => finding.keep), ...added]
     .filter((finding) => finding.label !== NO_STRESS_LABEL)
-    .map((finding) => ({ ...finding, name: finding.label, confirmation_step: safeConfirmationStep(finding.confirmation_step, finding.label) }));
+    .map((finding) => ({ ...finding, name: finding.label, confirmation_step: safeConfirmationStep(finding.confirmation_step, finding) }));
   const products = normalizeProducts(review.appliedProducts);
   const treatmentRationale = buildTreatmentRationale({ products, findings: reconcilable });
   const flags = buildReconciliationFlags({ findings: reconcilable, products, treatmentRationale });
@@ -1102,10 +1172,10 @@ function buildReview(run, rawReview = {}) {
 // published label: a step that names a cause the label withheld ("confirm
 // suspected chinch pressure" under "general lawn stress") is dropped the
 // same way (Codex #4149 r8).
-function safeConfirmationStep(text, publishedLabel = null) {
+function safeConfirmationStep(text, finding = null) {
   const scrubbed = scrubCustomerText(text || '').slice(0, 200).trim();
   if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return '';
-  return namesUnpublishedCause(scrubbed, [publishedLabel]) ? '' : scrubbed;
+  return namesUnpublishedCause(scrubbed, [finding]) ? '' : scrubbed;
 }
 
 // The stored observation, re-gated against the review: the column was
@@ -1121,7 +1191,7 @@ function reviewedObservations({ assessment, run }) {
   const current = assessment?.observations;
   if (current != null && current !== modelDerived && current !== NO_OBSERVATIONS) return null;
   const kept = [...parseJsonArray(run?.reviewed_findings).filter((finding) => finding.keep !== false), ...parseJsonArray(run?.added_details)];
-  return customerObservations(run?.observations, kept);
+  return customerObservations(run?.observations, kept); // each carries label + confidence (a rename or added detail is moderate)
 }
 
 async function reviewRun({ run, review, technicianId }, knex) {
@@ -1298,6 +1368,8 @@ module.exports = {
   customerObservations,
   unpublishableCustomerCopy,
   namesUnpublishedCause,
+  echoesTechnicianNotes,
+  withoutTechnicianEchoes,
   runAiScores,
   billedUsage,
   safeConfirmationStep,
