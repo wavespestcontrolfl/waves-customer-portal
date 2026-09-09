@@ -513,7 +513,8 @@ async function getSmsStats(days) {
 // Communications → Owed tab and the overdue watchdog use, so the answer
 // here is exactly what the office sees there.
 async function getOpenCommitments(input) {
-  const { listOpenCommitments, selectOverdue, implicitDueAt, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../call-commitments');
+  const { listOpenCommitments, selectOverdue, overdueAt, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../call-commitments');
+  const etMoment = (value) => (value ? etDateString(new Date(value)) + ' ' + new Date(value).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET' : null);
   const { isEnabled } = require('../../config/feature-gates');
   const party = input.party === 'customer' ? 'customer' : input.party === 'all' ? null : 'waves';
   let customerId = input.customer_id || null;
@@ -550,13 +551,12 @@ async function getOpenCommitments(input) {
       party: r.party,
       kind: r.kind,
       description: r.description,
-      due_at: r.due_at ? etDateString(new Date(r.due_at)) + ' ' + new Date(r.due_at).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET' : null,
+      due_at: etMoment(r.due_at),
       // The deadline the queue actually judges: the stated time, else the
-      // kind's implicit one (null for kinds that wait for the office).
-      effective_due_at: (() => {
-        const eff = r.due_at ? new Date(r.due_at) : implicitDueAt(r);
-        return eff ? etDateString(eff) + ' ' + eff.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET' : null;
-      })(),
+      // kind's implicit one (null for kinds that wait for the office), pushed
+      // out to the end of an active callback snooze.
+      effective_due_at: etMoment(overdueAt(r)),
+      snoozed_until: etMoment(r.snoozed_until),
       overdue: !!r.overdue,
       call_at: r.call_started_at ? new Date(r.call_started_at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET' : null,
       customer: [r.customer_first_name, r.customer_last_name].filter(Boolean).join(' ') || null,
