@@ -58,7 +58,7 @@ run('callback review regressions on PostgreSQL', () => {
   }
   async function bell(row, patch = {}) {
     const [notice] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Fixture callback',
-      metadata: { dedupeKey: `callback-card:${row.id}:fixture`, commitment_id: row.id }, ...patch }).returning('*');
+      metadata: { dedupeKey: `callback-card:${row.id}:${new Date(row.due_at || row.callback_due_at).toISOString()}:fixture`, commitment_id: row.id }, ...patch }).returning('*');
     return notice;
   }
 
@@ -76,6 +76,22 @@ run('callback review regressions on PostgreSQL', () => {
     await trx('notifications').where({ id: doneBell.id }).update({ read_at: null });
     await cards.notifyDueCallbacks(trx, { now });
     expect((await trx('notifications').where({ id: doneBell.id }).first()).read_at).not.toBeNull();
+  });
+
+  test.each(['due_at', 'callback_due_at'])('automatic %s changes retire obsolete bells before and after the new deadline', async (field) => {
+    const row = await seed();
+    const obsolete = await bell(row);
+    await trx('call_commitments').where({ id: row.id }).update({ [field]: future });
+    await cards.notifyDueCallbacks(trx, { now });
+    expect((await trx('notifications').where({ id: obsolete.id }).first()).read_at).not.toBeNull();
+
+    // Also cover a sweep that first observes the change after it is overdue.
+    await trx('notifications').where({ id: obsolete.id }).update({ read_at: null });
+    const current = await trx('call_commitments').where({ id: row.id }).first();
+    const currentBell = await bell(current);
+    await cards.notifyDueCallbacks(trx, { now: new Date(future.getTime() + 3600000) });
+    expect((await trx('notifications').where({ id: obsolete.id }).first()).read_at).not.toBeNull();
+    expect((await trx('notifications').where({ id: currentBell.id }).first()).read_at).toBeNull();
   });
 
   test('EOD counts due cards and expired snoozes, excluding future, snoozed and undated work', async () => {

@@ -169,7 +169,12 @@ async function notifyDueCallbacks(conn, { now = new Date() } = {}) {
   await conn('notifications as n').where({ recipient_type: 'admin' }).whereNull('read_at')
     .whereRaw("metadata->>'dedupeKey' LIKE 'callback-card:%'")
     .whereNotExists(conn('call_commitments as cc').whereRaw("cc.id::text = n.metadata->>'commitment_id'")
-      .where('cc.status', 'open').whereRaw(`NOT ${staleAiRowSql('cc')}`))
+      .where('cc.status', 'open').whereRaw(`NOT ${staleAiRowSql('cc')}`)
+      .whereRaw('COALESCE(cc.due_at, cc.callback_due_at) <= ?', [now])
+      // Re-extraction can change either deadline without closing the promise.
+      // Match the ISO deadline in the persisted key, including older bells.
+      .whereRaw(`n.metadata->>'dedupeKey' LIKE ('callback-card:' || cc.id::text || ':' ||
+        to_char(COALESCE(cc.due_at, cc.callback_due_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') || ':%')`))
     .update({ read_at: now });
   const ids = candidates.filter((row) => verifiedCalls.has(row.call_log_id)).map((row) => row.id);
   if (!ids.length) {
