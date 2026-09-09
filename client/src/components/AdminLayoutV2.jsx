@@ -39,6 +39,8 @@ import NotificationBell from "./NotificationBell";
 import useUnreadConversations from "../hooks/useUnreadConversations";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
 import { clearEmailDrafts } from "../lib/emailDrafts";
+import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
+import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -103,6 +105,7 @@ export default function AdminLayoutV2() {
   // focus returns to the "Open menu" button (F0014).
   const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
+  const navigationEnabled = useFeatureFlag("admin-navigation", false);
   const paletteRef = useRef(null);
   // Global Messages badge: conversations with an unread inbound text. Polled
   // only once staff access is verified (same cadence as the bell). The icon's
@@ -177,7 +180,7 @@ export default function AdminLayoutV2() {
   // Auto-close sidebar on route change (mobile) + when viewport grows to desktop.
   useEffect(() => {
     if (isMobile) setSidebarOpen(false);
-  }, [location.pathname, isMobile]);
+  }, [location.pathname, location.search, location.hash, isMobile]);
 
   // .admin-main is the scroll container (the window never scrolls in this
   // shell), so the browser's scroll restoration can't reach it. Snap to the
@@ -216,6 +219,7 @@ export default function AdminLayoutV2() {
 
   return (
     <IntelligenceBarPageDataProvider>
+    <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && authStatus === 'ready'} agentEstimateEnabled={agentEstimateEnabled}>
     <div
       className="admin-shell-v2"
       style={{
@@ -275,7 +279,7 @@ export default function AdminLayoutV2() {
           <button
             type="button"
             onClick={openPalette}
-            aria-label="Open Intelligence Bar"
+            aria-label={navigationEnabled ? "Ask Waves" : "Open Intelligence Bar"}
             style={{
               background: "none",
               border: "none",
@@ -315,12 +319,15 @@ export default function AdminLayoutV2() {
       <aside
         id="admin-sidebar"
         ref={drawerRef}
+        role={isMobile && sidebarOpen ? "dialog" : undefined}
+        aria-modal={isMobile && sidebarOpen ? true : undefined}
+        aria-label={isMobile && sidebarOpen ? "Admin menu" : undefined}
         // When mobile + closed the sidebar is translated offscreen but still
         // rendered; `inert` pulls it (and its links) out of the tab order and
         // AT tree so a keyboard user can't Tab into the invisible menu.
         {...(!sidebarVisible ? { inert: "" } : {})}
         style={{
-          width: 220,
+          width: navigationEnabled ? 240 : 220,
           background: "var(--surface-primary)",
           borderRight: "1px solid var(--border-default)",
           display: "flex",
@@ -336,13 +343,14 @@ export default function AdminLayoutV2() {
             ? "env(safe-area-inset-bottom, 0px)"
             : undefined,
           zIndex: 100,
-          overflowY: "auto",
+          overflowY: navigationEnabled ? "hidden" : "auto",
           transform: sidebarVisible ? "translateX(0)" : "translateX(-100%)",
           transition: "transform 0.2s ease",
           boxShadow:
             isMobile && sidebarOpen ? "2px 0 16px rgba(0,0,0,0.12)" : "none",
         }}
       >
+        {navigationEnabled ? <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onLogout={handleLogout} unreadCount={unreadConversations} /> : <>
         {/* Logo + title + notification bell */}
         <div
           style={{
@@ -626,6 +634,7 @@ export default function AdminLayoutV2() {
             <LogOut size={15} strokeWidth={1.75} aria-hidden />
           </button>
         </div>
+        </>}
       </aside>
 
       {/* Main content */}
@@ -634,7 +643,7 @@ export default function AdminLayoutV2() {
           flex: 1,
           minWidth: 0,
           maxWidth: "100%",
-          marginLeft: isMobile ? 0 : 220,
+          marginLeft: isMobile ? 0 : navigationEnabled ? 240 : 220,
           paddingTop: isMobile
             ? "calc(52px + env(safe-area-inset-top) + 16px)"
             : 24,
@@ -726,13 +735,13 @@ export default function AdminLayoutV2() {
                     {item.id === "communications" ? (
                       <UnreadBadge
                         count={unreadConversations}
-                        style={{ position: "absolute", top: -6, right: -12 }}
+                        style={{ ...(navigationEnabled ? { fontSize: 14, minWidth: 22, height: 22, borderRadius: 11 } : {}), position: "absolute", top: -6, right: -12 }}
                       />
                     ) : null}
                   </span>
                   <span
                     style={{
-                      fontSize: 12,
+                      fontSize: navigationEnabled ? 14 : 12,
                       lineHeight: 1.1,
                       letterSpacing: "0.02em",
                       fontWeight: 500,
@@ -751,6 +760,7 @@ export default function AdminLayoutV2() {
       {/* Global ⌘K palette */}
       <GlobalCommandPalette ref={paletteRef} user={user} />
     </div>
+    </AdminNavigationProvider>
     </IntelligenceBarPageDataProvider>
   );
 }

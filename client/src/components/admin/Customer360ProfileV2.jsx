@@ -83,11 +83,16 @@ import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
 import { formatAddress } from "../../utils/format-address";
-import {
+import { Textarea,
   Card,
   CardBody,
   Badge,
   Button,
+  buttonStyles,
+  UiSurface,
+  useUiDensity,
+  inputStyles,
+  ActionFeedback,
   Input,
   Select,
   Switch,
@@ -620,7 +625,7 @@ function StageBadgeV2({ stage }) {
 // ─── Section title ───────────────────────────────────────────────
 function SectionTitle({ children, className }) {
   return (
-    <div className={cn("u-label text-ink-secondary mb-2", className)}>
+    <div className={cn("c360-section-heading ui-label text-ink-secondary mb-2", className)}>
       {children}
     </div>
   );
@@ -631,7 +636,7 @@ function StatCardV2({ label, value, alert }) {
   return (
     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 text-center">
       {" "}
-      <div className="u-label text-ink-secondary mb-1">{label}</div>{" "}
+      <div className="ui-label text-ink-secondary mb-1">{label}</div>{" "}
       <div
         className={cn(
           "u-nums text-16 font-medium tracking-tight",
@@ -698,8 +703,8 @@ function ContractMeta({ label, value }) {
   return (
     <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
       {" "}
-      <div className="u-label text-ink-tertiary mb-1">{label}</div>{" "}
-      <div className="text-13 text-zinc-900 break-words">
+      <div className="ui-label text-ink-tertiary mb-1">{label}</div>{" "}
+      <div className="text-ui-body text-zinc-900 break-words">
         {value || "—"}
       </div>{" "}
     </div>
@@ -1193,7 +1198,7 @@ function ElectronicAuthorizationContractV2({
                           <span
                             key={step.key}
                             className={cn(
-                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-ui-caption ui-label",
                               step.done
                                 ? "bg-zinc-50 border-zinc-200 text-zinc-900"
                                 : "bg-zinc-50 border-zinc-200 text-ink-secondary",
@@ -1298,7 +1303,7 @@ function ElectronicAuthorizationContractV2({
             </div>{" "}
           </div>
         ) : (
-          <div className="mb-5 text-13 text-ink-secondary">
+          <div className="mb-5 text-ui-body text-ink-secondary">
             No contract records created yet.
           </div>
         )}
@@ -1309,7 +1314,7 @@ function ElectronicAuthorizationContractV2({
                 <SectionTitle>
                   Delivery Audit
                 </SectionTitle>
-                <div className="text-12 text-ink-secondary">
+                <div className="text-ui-label text-ink-secondary">
                   {auditContract?.title || "Contract"} · {auditLoading ? "Loading events" : `${auditEvents.length} event${auditEvents.length === 1 ? "" : "s"}`}
                 </div>
               </div>
@@ -1327,7 +1332,7 @@ function ElectronicAuthorizationContractV2({
               </Button>
             </div>
             {auditErr && (
-              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
+              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-ui-label text-red-900">
                 {auditErr}
               </div>
             )}
@@ -1336,7 +1341,7 @@ function ElectronicAuthorizationContractV2({
                 <span
                   key={step.key}
                   className={cn(
-                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-ui-caption ui-label",
                     step.done
                       ? "bg-zinc-900 border-zinc-900 text-white"
                       : "bg-zinc-50 border-zinc-200 text-ink-secondary",
@@ -1349,28 +1354,28 @@ function ElectronicAuthorizationContractV2({
             </div>
             <div className="divide-y divide-zinc-100 rounded-sm border-hairline border-zinc-200">
               {auditEvents.map((event) => (
-                <div key={event.id} className="grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
-                  <div className="text-12 font-medium text-zinc-900">
+                <div key={event.id} className="c360-contract-grid grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
+                  <div className="text-ui-label font-medium text-zinc-900">
                     {contractEventLabel(event.eventType)}
                   </div>
-                  <div className="min-w-0 text-12 text-ink-secondary">
+                  <div className="min-w-0 text-ui-label text-ink-secondary">
                     {event.actorType || "system"}
                     {event.ip ? ` · ${event.ip}` : ""}
                     {event.metadata?.templateKey ? ` · ${event.metadata.templateKey}` : ""}
                     {event.metadata?.reason ? ` · ${event.metadata.reason}` : ""}
                   </div>
-                  <div className="u-nums text-11 text-ink-secondary md:text-right">
+                  <div className="u-nums text-ui-caption text-ink-secondary md:text-right">
                     {fmtDate(event.createdAt)}
                   </div>
                 </div>
               ))}
               {!auditLoading && auditEvents.length === 0 && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
+                <div className="px-3 py-4 text-ui-label text-ink-secondary">
                   No audit events recorded for this contract.
                 </div>
               )}
               {auditLoading && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
+                <div className="px-3 py-4 text-ui-label text-ink-secondary">
                   Loading audit events...
                 </div>
               )}
@@ -1380,21 +1385,21 @@ function ElectronicAuthorizationContractV2({
       </div>
       </ContractSection>
       <ContractSection title={"Auto Pay authorization"} description="Payment authorization and signing links.">
-      <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
+      <div className="c360-contract-form mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
         {" "}
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+        <div className="c360-contract-form-header flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
           {" "}
-          <div>
+          <div className="c360-contract-form-duplicate-title">
             {" "}
             <div className="text-16 font-medium text-zinc-900">
               AutoPay Authorization
             </div>{" "}
-            <div className="text-12 text-ink-secondary mt-1">
+            <div className="text-ui-label text-ink-secondary mt-1">
               Create, share, sign, and audit saved-payment authorization
               contracts.
             </div>{" "}
           </div>{" "}
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="c360-contract-form-actions flex flex-wrap items-center justify-end gap-2">
             {" "}
             <Button
               size="sm"
@@ -1442,7 +1447,7 @@ function ElectronicAuthorizationContractV2({
         {setupLinkResult ? (
           <div
             className={cn(
-              "px-4 py-2 text-12 border-b border-hairline border-zinc-200",
+              "px-4 py-2 text-ui-label border-b border-hairline border-zinc-200",
               describeAutopaySetupLinkResult(setupLinkResult).tone === "bad"
                 ? "text-alert-fg"
                 : "text-ink-secondary",
@@ -1454,7 +1459,7 @@ function ElectronicAuthorizationContractV2({
             ) : null}
           </div>
         ) : null}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
+        <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
           {" "}
           <ContractMeta label="Recipient" value={signerName} />{" "}
           <ContractMeta label="Contract name" value="AutoPay Authorization" />{" "}
@@ -1471,13 +1476,13 @@ function ElectronicAuthorizationContractV2({
             value={paymentMethodLabel(selectedPaymentMethod)}
           />{" "}
         </div>{" "}
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_0.8fr] gap-3 px-4 pb-4">
+        <div className="c360-contract-grid grid grid-cols-1 md:grid-cols-[1fr_0.8fr] gap-3 px-4 pb-4">
           {" "}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
             {" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Payment method
               </div>{" "}
               <Select
@@ -1485,7 +1490,7 @@ function ElectronicAuthorizationContractV2({
                 onChange={(e) =>
                   updateContractForm("paymentMethodId", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               >
                 {cards.length === 0 && (
                   <option value="">No saved payment method</option>
@@ -1499,53 +1504,53 @@ function ElectronicAuthorizationContractV2({
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service name
               </div>{" "}
-              <input
+              <Input
                 value={contractForm.serviceName}
                 onChange={(e) =>
                   updateContractForm("serviceName", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Renewal date
               </div>{" "}
-              <input
+              <Input
                 type="date"
                 value={contractForm.renewalDate}
                 onChange={(e) =>
                   updateContractForm("renewalDate", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
             <label className="block">
               {" "}
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Cancellation deadline
               </div>{" "}
-              <input
+              <Input
                 type="date"
                 value={contractForm.cancellationDeadline}
                 onChange={(e) =>
                   updateContractForm("cancellationDeadline", e.target.value)
                 }
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />{" "}
             </label>{" "}
           </div>{" "}
           <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
             {" "}
-            <div className="u-label text-ink-secondary mb-2">Signing Link</div>
+            <div className="ui-label text-ink-secondary mb-2">Signing Link</div>
             {signingUrl ? (
               <div className="space-y-2">
                 {" "}
-                <div className="break-all text-12 text-zinc-900 leading-5">
+                <div className="break-all text-ui-label text-zinc-900 leading-5">
                   {signingUrl}
                 </div>{" "}
                 <Button size="sm" variant="secondary" onClick={copySigningUrl}>
@@ -1555,39 +1560,39 @@ function ElectronicAuthorizationContractV2({
                 </Button>{" "}
               </div>
             ) : (
-              <div className="text-12 text-ink-secondary leading-5">
+              <div className="text-ui-label text-ink-secondary leading-5">
                 Create a link to send manually. SMS templates are seeded but
                 inactive, so this will not send automatically.
               </div>
             )}
             {!canCreateContract && (
-              <div className="mt-2 text-11 text-alert-fg">
+              <div className="mt-2 text-ui-caption text-alert-fg">
                 Add a saved payment method before creating an authorization
                 contract.
               </div>
             )}
             {contractAction && (
-              <div className="mt-2 text-11 text-zinc-900">{contractAction}</div>
+              <div className="mt-2 text-ui-caption text-zinc-900">{contractAction}</div>
             )}
             {contractErr && (
-              <div className="mt-2 text-11 text-alert-fg">{contractErr}</div>
+              <div className="mt-2 text-ui-caption text-alert-fg">{contractErr}</div>
             )}
           </div>{" "}
         </div>{" "}
       </div>{" "}
       </ContractSection>
       <ContractSection title={"Create a document"} description="Service agreements, notices, and reusable templates.">
-      <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
-          <div>
+      <div className="c360-contract-form mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
+        <div className="c360-contract-form-header flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
+          <div className="c360-contract-form-duplicate-title">
             <div className="text-16 font-medium text-zinc-900">
               Reusable documents
             </div>
-            <div className="text-12 text-ink-secondary mt-1">
+            <div className="text-ui-label text-ink-secondary mt-1">
               Send service agreements, notices, prep forms, and WDO acknowledgements through the e-sign workflow.
             </div>
           </div>
-          <Button
+          <Button className="c360-contract-form-actions"
             size="sm"
             onClick={createDocumentLink}
             disabled={!canCreateDocument || documentTemplatesLoading}
@@ -1596,16 +1601,16 @@ function ElectronicAuthorizationContractV2({
             {creatingDocument ? "Creating..." : "Create Link"}
           </Button>
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-3 p-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="c360-contract-grid grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-3 p-4">
+          <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Template
               </div>
               <Select
                 value={selectedDocumentTemplateKey}
                 onChange={(e) => setSelectedDocumentTemplateKey(e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
                 disabled={documentTemplatesLoading}
               >
                 {documentTemplates.length === 0 && (
@@ -1619,52 +1624,52 @@ function ElectronicAuthorizationContractV2({
               </Select>
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service name
               </div>
-              <input
+              <Input
                 value={documentValues.serviceName}
                 onChange={(e) => updateDocumentValue("serviceName", e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Agreement start
               </div>
-              <input
+              <Input
                 type="date"
                 value={documentValues.agreementStartDate}
                 onChange={(e) => updateDocumentValue("agreementStartDate", e.target.value)}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Service / inspection date
               </div>
-              <input
+              <Input
                 type="date"
                 value={documentValues.serviceDate || documentValues.inspectionDate}
                 onChange={(e) => {
                   updateDocumentValue("serviceDate", e.target.value);
                   updateDocumentValue("inspectionDate", e.target.value);
                 }}
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
             <label className="block sm:col-span-2">
-              <div className="u-label text-ink-secondary mb-1">
+              <div className="ui-label text-ink-secondary mb-1">
                 Property address (optional)
               </div>
-              <input
+              <Input
                 value={documentPropertyAddress}
                 onChange={(e) => setDocumentPropertyAddress(e.target.value)}
                 placeholder="Overrides the customer's primary address on the document"
-                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-ui-body text-zinc-900"
               />
             </label>
-            <label className="sm:col-span-2 inline-flex min-h-8 items-center gap-2 text-12 font-medium text-zinc-900">
+            <label className="sm:col-span-2 inline-flex min-h-8 items-center gap-2 text-ui-label font-medium text-zinc-900">
               <input
                 type="checkbox"
                 checked={documentAllowUnresolved}
@@ -1675,15 +1680,15 @@ function ElectronicAuthorizationContractV2({
             </label>
           </div>
           <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3">
-            <div className="u-label text-ink-secondary mb-2">Document link</div>
-            <div className="text-12 text-ink-secondary leading-5">
+            <div className="ui-label text-ink-secondary mb-2">Document link</div>
+            <div className="text-ui-label text-ink-secondary leading-5">
               {selectedDocumentTemplate
                 ? `${selectedDocumentTemplate.name} will be rendered with this customer's name, address, and the values entered here.`
                 : "Select an active template to create a document link."}
             </div>
             {documentSigningUrl && (
               <div className="mt-3 space-y-2">
-                <div className="break-all text-12 text-zinc-900 leading-5">
+                <div className="break-all text-ui-label text-zinc-900 leading-5">
                   {documentSigningUrl}
                 </div>
                 <Button size="sm" variant="secondary" onClick={copyDocumentSigningUrl}>
@@ -1693,17 +1698,17 @@ function ElectronicAuthorizationContractV2({
               </div>
             )}
             {documentAction && (
-              <div className="mt-2 text-11 text-zinc-900">{documentAction}</div>
+              <div className="mt-2 text-ui-caption text-zinc-900">{documentAction}</div>
             )}
             {documentErr && (
-              <div className="mt-2 text-11 text-alert-fg">{documentErr}</div>
+              <div className="mt-2 text-ui-caption text-alert-fg">{documentErr}</div>
             )}
           </div>
         </div>
       </div>
       </ContractSection>
       <ContractSection title={"Authorization preview & signature"} description="Full terms, selected clauses, and signing evidence.">
-      <div className="grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
+      <div className="c360-contract-grid grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
         {" "}
         <Card>
           {" "}
@@ -1722,7 +1727,7 @@ function ElectronicAuthorizationContractV2({
                   <div className="text-18 font-medium tracking-tight text-zinc-900">
                     Electronic Payment Authorization
                   </div>{" "}
-                  <div className="text-12 text-ink-secondary mt-1">
+                  <div className="text-ui-label text-ink-secondary mt-1">
                     Waves Pest Control, LLC
                   </div>{" "}
                 </div>{" "}
@@ -1752,17 +1757,17 @@ function ElectronicAuthorizationContractV2({
                   {" "}
                   <div>
                     {" "}
-                    <div className="text-13 font-medium text-zinc-900">
+                    <div className="text-ui-body font-medium text-zinc-900">
                       AutoPay Authorization - Initials required
                     </div>{" "}
-                    <div className="text-12 leading-5 text-ink-secondary mt-2">
+                    <div className="text-ui-label leading-5 text-ink-secondary mt-2">
                       {displayedText}
                     </div>{" "}
                   </div>{" "}
                   <Badge tone="neutral">Clause</Badge>{" "}
                 </div>{" "}
               </div>{" "}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+              <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
                 {" "}
                 <ContractMeta label="Customer" value={signerName} />{" "}
                 <ContractMeta
@@ -1785,7 +1790,7 @@ function ElectronicAuthorizationContractV2({
                     <div className="text-15 font-medium text-zinc-900">
                       Waves Pest Control
                     </div>{" "}
-                    <div className="text-12 text-ink-secondary mt-1">
+                    <div className="text-ui-label text-ink-secondary mt-1">
                       Signature requested on {requestedLabel}
                     </div>{" "}
                   </div>{" "}
@@ -1810,11 +1815,11 @@ function ElectronicAuthorizationContractV2({
                   <div className="text-18 font-medium text-zinc-900 mb-3">
                     AutoPay Authorization
                   </div>{" "}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-12">
+                  <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3 text-ui-label">
                     {" "}
                     <div>
                       {" "}
-                      <div className="u-label text-ink-secondary mb-1">
+                      <div className="ui-label text-ink-secondary mb-1">
                         Business
                       </div>{" "}
                       <div className="text-zinc-900">Waves Pest Control</div>{" "}
@@ -1827,7 +1832,7 @@ function ElectronicAuthorizationContractV2({
                     </div>{" "}
                     <div>
                       {" "}
-                      <div className="u-label text-ink-secondary mb-1">
+                      <div className="ui-label text-ink-secondary mb-1">
                         Recipient
                       </div>{" "}
                       <div className="text-zinc-900">{signerName}</div>{" "}
@@ -1839,25 +1844,25 @@ function ElectronicAuthorizationContractV2({
                       </div>{" "}
                     </div>{" "}
                   </div>{" "}
-                  <div className="mt-4 text-12 leading-5 text-zinc-900">
+                  <div className="mt-4 text-ui-label leading-5 text-zinc-900">
                     This contract is between Waves Pest Control (the Business)
                     and {signerName} (the Client) dated {contractDate}.
                   </div>{" "}
                 </div>{" "}
                 <div className="py-4 border-b border-hairline border-zinc-200">
                   {" "}
-                  <div className="u-label text-ink-secondary mb-2">
+                  <div className="ui-label text-ink-secondary mb-2">
                     Terms
                   </div>{" "}
-                  <div className="text-13 font-medium text-zinc-900 mb-2">
+                  <div className="text-ui-body font-medium text-zinc-900 mb-2">
                     AutoPay Authorization
                   </div>{" "}
-                  <p className="text-13 leading-6 text-zinc-900 m-0 whitespace-pre-line">
+                  <p className="text-ui-body leading-6 text-zinc-900 m-0 whitespace-pre-line">
                     {displayedContractText}
                   </p>{" "}
                   <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
                     {" "}
-                    <div className="u-label text-ink-secondary mb-1">
+                    <div className="ui-label text-ink-secondary mb-1">
                       Recipient Initial
                     </div>{" "}
                     <div className="h-7 rounded-sm border-hairline border-zinc-300 bg-white" />{" "}
@@ -1865,15 +1870,15 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
                 <div className="pt-4">
                   {" "}
-                  <div className="u-label text-ink-secondary mb-2">
+                  <div className="ui-label text-ink-secondary mb-2">
                     Signatures
                   </div>{" "}
-                  <div className="text-12 text-ink-secondary leading-5 mb-4">
+                  <div className="text-ui-label text-ink-secondary leading-5 mb-4">
                     Electronic signatures count as original for all purposes. By
                     typing their names as signatures below, both parties agree
                     to the terms and provisions of this agreement.
                   </div>{" "}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     <ContractMeta
                       label="Business signature"
@@ -1897,7 +1902,7 @@ function ElectronicAuthorizationContractV2({
                   </div>{" "}
                 </div>{" "}
               </div>{" "}
-              <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-ink-secondary leading-5">
+              <div className="mt-4 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-label text-ink-secondary leading-5">
                 This authorization covers saved-payment use only. Service scope,
                 visit frequency, renewal terms, and cancellation policy remain
                 controlled by the customer&apos;s service agreement and account
@@ -1906,31 +1911,31 @@ function ElectronicAuthorizationContractV2({
               <div className="mt-5">
                 {" "}
                 <SectionTitle>Florida Compliance Reference</SectionTitle>{" "}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="c360-contract-grid grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {FLORIDA_COMPLIANCE_ITEMS.map((item) => (
                     <div
                       key={item.title}
                       className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3"
                     >
                       {" "}
-                      <div className="text-12 font-medium text-zinc-900">
+                      <div className="text-ui-label font-medium text-zinc-900">
                         {item.title}
                       </div>{" "}
-                      <div className="text-12 text-ink-secondary leading-5 mt-1">
+                      <div className="text-ui-label text-ink-secondary leading-5 mt-1">
                         {item.body}
                       </div>{" "}
                       <a
                         href={item.href}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex mt-2 text-11 u-label text-zinc-900 hover:underline"
+                        className="inline-flex mt-2 text-ui-caption ui-label text-zinc-900 hover:underline"
                       >
                         {item.citation}
                       </a>{" "}
                     </div>
                   ))}
                 </div>{" "}
-                <div className="mt-2 text-11 text-ink-tertiary leading-5">
+                <div className="mt-2 text-ui-caption text-ink-tertiary leading-5">
                   Internal compliance reference only. Final customer-facing
                   contract language should be reviewed by counsel before use.
                 </div>{" "}
@@ -1950,7 +1955,7 @@ function ElectronicAuthorizationContractV2({
               </div>{" "}
             </div>
             {latestContract?.signedAt ? (
-              <div className="space-y-2 text-12">
+              <div className="space-y-2 text-ui-label">
                 {" "}
                 <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
                   {" "}
@@ -1996,7 +2001,7 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
               </div>
             ) : latest ? (
-              <div className="space-y-2 text-12">
+              <div className="space-y-2 text-ui-label">
                 {" "}
                 <div className="flex justify-between gap-3 border-b border-hairline border-zinc-200 pb-2">
                   {" "}
@@ -2035,7 +2040,7 @@ function ElectronicAuthorizationContractV2({
                 </div>{" "}
               </div>
             ) : (
-              <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-ink-secondary leading-5">
+              <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-label text-ink-secondary leading-5">
                 No signed saved-payment authorization is recorded for this
                 customer yet.
               </div>
@@ -2049,10 +2054,10 @@ function ElectronicAuthorizationContractV2({
               />{" "}
               <div>
                 {" "}
-                <div className="text-12 font-medium text-zinc-900">
+                <div className="text-ui-label font-medium text-zinc-900">
                   {paymentMethodLabel(methodForSummary)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary mt-0.5">
+                <div className="text-ui-caption text-ink-secondary mt-0.5">
                   {latest?.isDefault || defaultCard?.is_default
                     ? "Default payment method"
                     : "Saved payment method"}
@@ -2073,36 +2078,36 @@ function ElectronicAuthorizationContractV2({
           <div className="overflow-x-auto">
             {" "}
             <Table>
-              {" "}
+
               <THead>
-                {" "}
+
                 <TR>
-                  {" "}
+
                   <TH>Accepted</TH>
                   <TH>Source</TH>
                   <TH>Method</TH>
-                  <TH>Version</TH>{" "}
-                </TR>{" "}
-              </THead>{" "}
+                  <TH>Version</TH>
+                </TR>
+              </THead>
               <TBody>
                 {consents.map((consent) => (
                   <TR key={consent.id}>
-                    {" "}
+
                     <TD className="u-nums">
                       {fmtDate(consent.createdAt)}
-                    </TD>{" "}
-                    <TD>{sourceLabel(consent.source)}</TD>{" "}
-                    <TD>{paymentMethodLabel(consent)}</TD>{" "}
+                    </TD>
+                    <TD>{sourceLabel(consent.source)}</TD>
+                    <TD>{paymentMethodLabel(consent)}</TD>
                     <TD className="u-nums">
                       {consent.consentTextVersion || "—"}
-                    </TD>{" "}
+                    </TD>
                   </TR>
                 ))}
-              </TBody>{" "}
+              </TBody>
             </Table>{" "}
           </div>
         ) : (
-          <div className="text-13 text-ink-secondary">
+          <div className="text-ui-body text-ink-secondary">
             No saved-payment authorizations recorded.
           </div>
         )}
@@ -2136,10 +2141,10 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
   return (
     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm overflow-hidden mb-1.5">
       {" "}
-      <button
+      <button data-ui-text-action
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex justify-between items-center px-3.5 py-2.5 text-13 u-focus-ring hover:bg-zinc-100 transition-colors"
+        className="w-full flex justify-between items-center px-3.5 py-2.5 text-ui-body u-focus-ring hover:bg-zinc-100 transition-colors"
       >
         {" "}
         <span className="font-medium text-zinc-900 text-left">
@@ -2154,7 +2159,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
           )}
           <span className="text-ink-secondary">{fmtDateOnly(s.service_date)}</span>{" "}
           <span
-            className="text-ink-secondary text-12 transition-transform"
+            className="text-ink-secondary text-ui-label transition-transform"
             style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
           >
             ▾
@@ -2162,7 +2167,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
         </span>{" "}
       </button>
       {expanded && (
-        <div className="px-3.5 py-2.5 border-t border-hairline border-zinc-200 text-12 space-y-1">
+        <div className="px-3.5 py-2.5 border-t border-hairline border-zinc-200 text-ui-label space-y-1">
           {isProjectCompletion && (
             <div className="mb-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5">
               {" "}
@@ -2736,11 +2741,11 @@ function PropertyZonesPanel({ customerId }) {
       {open && (
         <div className="mt-3">
           {loading && (
-            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+            <div className="text-ui-body text-ink-secondary">Loading the satellite view…</div>
           )}
           {!loading && map && !map.available && (
             <div className="flex items-center gap-3">
-              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+              <span className={cn("text-ui-body", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
                 {map.reason === "load_failed"
                   ? err || "Failed to load the property map"
                   : `Satellite view unavailable (${map.reason || "unknown"}).`}
@@ -2761,7 +2766,7 @@ function PropertyZonesPanel({ customerId }) {
             </div>
           )}
           {!loading && map?.available && !zones.length && (
-            <div className="text-13 text-ink-secondary">
+            <div className="text-ui-body text-ink-secondary">
               No zones yet — zones are created when a visit is completed with
               treated areas.
             </div>
@@ -2770,14 +2775,14 @@ function PropertyZonesPanel({ customerId }) {
             <div>
               {lineOptions.length > 1 && (
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-12 text-ink-secondary">Service line</span>
+                  <span className="text-ui-label text-ink-secondary">Service line</span>
                   {lineOptions.map((opt) => (
-                    <button
+                    <button data-ui-text-action
                       key={opt}
                       type="button"
                       onClick={() => setLine(opt)}
                       className={cn(
-                        "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                        "text-ui-label px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
                         opt === line
                           ? "border-zinc-900 bg-zinc-900 text-white"
                           : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
@@ -2789,7 +2794,7 @@ function PropertyZonesPanel({ customerId }) {
                 </div>
               )}
               {areas.some((label) => staleKeys.has(normalizeZoneKey(label))) && (
-                <div className="text-12 text-zinc-700 mb-2">
+                <div className="text-ui-label text-zinc-700 mb-2">
                   Some zones have marks that no longer match the current
                   satellite image (the property was re-geocoded) — they show
                   as unmarked below. Redraw them, or clear everything to
@@ -2817,13 +2822,13 @@ function PropertyZonesPanel({ customerId }) {
                       : "Save zone marks"}
                 </Button>
                 {!saveable && dirtyCount > 0 && (
-                  <span className="text-12 text-ink-secondary">
+                  <span className="text-ui-label text-ink-secondary">
                     Mark every zone on this line (or clear them all) to save.
                   </span>
                 )}
-                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {msg && <span className="text-ui-label text-zinc-700">{msg}</span>}
                 {err && map && (
-                  <span className="text-12 text-alert-fg">{err}</span>
+                  <span className="text-ui-label text-alert-fg">{err}</span>
                 )}
               </div>
             </div>
@@ -3065,11 +3070,11 @@ function TermiteStationsPanel({ customerId }) {
       {open && (
         <div className="mt-3">
           {loading && (
-            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+            <div className="text-ui-body text-ink-secondary">Loading the satellite view…</div>
           )}
           {!loading && map && !map.available && (
             <div className="flex items-center gap-3">
-              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+              <span className={cn("text-ui-body", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
                 {map.reason === "load_failed"
                   ? err || "Failed to load the property map"
                   : `Satellite view unavailable (${map.reason || "unknown"}).`}
@@ -3092,16 +3097,16 @@ function TermiteStationsPanel({ customerId }) {
           {!loading && map?.available && (
             <div>
               <div className="flex items-center gap-2 mb-2">
-                <span className="text-12 text-ink-secondary">Program</span>
+                <span className="text-ui-label text-ink-secondary">Program</span>
                 {["termite", "rodent", "trapping"].map((opt) => (
-                  <button
+                  <button data-ui-text-action
                     key={opt}
                     type="button"
                     disabled={saving || (dirtyCount > 0 && opt !== program)}
                     title={dirtyCount > 0 && opt !== program ? "Save or discard this program's edits first" : undefined}
                     onClick={() => switchProgram(opt)}
                     className={cn(
-                      "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                      "text-ui-label px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
                       opt === program
                         ? "border-zinc-900 bg-zinc-900 text-white"
                         : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
@@ -3129,9 +3134,9 @@ function TermiteStationsPanel({ customerId }) {
                 <Button size="sm" onClick={save} disabled={!dirtyCount || saving}>
                   {saving ? "Saving…" : "Save stations"}
                 </Button>
-                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {msg && <span className="text-ui-label text-zinc-700">{msg}</span>}
                 {err && map && (
-                  <span className="text-12 text-alert-fg">{err}</span>
+                  <span className="text-ui-label text-alert-fg">{err}</span>
                 )}
               </div>
             </div>
@@ -3196,46 +3201,46 @@ export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate,
       {" "}
       <CardBody className="p-4">
         {" "}
-        <label htmlFor={`billing-mode-${customerId}`} className="block u-label text-ink-secondary mb-1">
+        <label htmlFor={`billing-mode-${customerId}`} className="block ui-label text-ink-secondary mb-1">
           How this customer pays
         </label>{" "}
         <div className="flex items-center gap-2 flex-wrap">
           {" "}
-          <select
+          <Select
             id={`billing-mode-${customerId}`}
             value={mode}
             disabled={!canEdit || saving}
             onChange={(e) => save(e.target.value)}
-            className="min-w-0 max-w-full text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1.5 bg-white"
+            className="min-w-0 max-w-full"
           >
             {BILLING_LANE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
             ))}
-          </select>{" "}
-          {saving && <span className="text-12 text-ink-secondary">Saving…</span>}{" "}
+          </Select>{" "}
+          {saving && <span className="text-ui-label text-ink-secondary">Saving…</span>}{" "}
         </div>
         {!mode && (
-          <div className="text-12 text-ink-secondary mt-1.5">
+          <div className="text-ui-label text-ink-secondary mt-1.5">
             Unset — currently behaves as{" "}
             <span className="text-zinc-900">{inferred}</span> (inferred from
             tier + monthly rate).
           </div>
         )}
         {mode === "monthly_membership" && (
-          <div className="text-12 text-ink-secondary mt-1.5">
+          <div className="text-ui-label text-ink-secondary mt-1.5">
             Dues on the 1st cover recurring plan visits — completions never
             invoice them.
           </div>
         )}
         {msg && (
-          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">
+          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-ui-label">
             {msg}
           </div>
         )}
         {err && (
-          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {err}
           </div>
         )}
@@ -3319,7 +3324,7 @@ function AdminAutopayPanelV2({
           {" "}
           <div>
             {" "}
-            <div className="u-label text-ink-secondary mb-1">Auto-pay</div>{" "}
+            <div className="ui-label text-ink-secondary mb-1">Auto-pay</div>{" "}
             <div className="flex items-center gap-2">
               {" "}
               <span
@@ -3337,7 +3342,7 @@ function AdminAutopayPanelV2({
               </span>{" "}
             </div>
             {state && (
-              <div className="text-12 text-ink-secondary mt-1.5 leading-relaxed">
+              <div className="text-ui-label text-ink-secondary mt-1.5 leading-relaxed">
                 Next charge:{" "}
                 <span className="u-nums text-zinc-900">
                   {state.next_charge_date || "—"}
@@ -3375,13 +3380,13 @@ function AdminAutopayPanelV2({
         {state?.recent_events?.length > 0 && (
           <div className="mt-3 border-t border-hairline border-zinc-200 pt-2.5">
             {" "}
-            <div className="u-label text-ink-secondary mb-1.5">
+            <div className="ui-label text-ink-secondary mb-1.5">
               Recent events
             </div>
             {state.recent_events.slice(0, 5).map((ev) => (
               <div
                 key={ev.id}
-                className="text-11 text-ink-secondary py-0.5 flex justify-between gap-2"
+                className="text-ui-caption text-ink-secondary py-0.5 flex justify-between gap-2"
               >
                 {" "}
                 <span className="u-nums text-zinc-900">
@@ -3504,18 +3509,18 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   };
 
   const inputClass =
-    "block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900";
+    "block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900";
 
   return (
     <Card className="mb-5">
       <CardBody className="p-4">
         <div className="flex justify-between items-start gap-3 flex-wrap mb-3">
           <div>
-            <div className="u-label text-ink-secondary mb-1">Account credit</div>
+            <div className="ui-label text-ink-secondary mb-1">Account credit</div>
             <div className="text-22 text-zinc-900 u-nums leading-none">
               {loaded ? fmtCurrency(balance) : loadError ? "—" : "…"}
             </div>
-            <div className="text-12 text-ink-tertiary mt-1">
+            <div className="text-ui-label text-ink-tertiary mt-1">
               {loadError && !loaded
                 ? "Balance unavailable"
                 : "Available to apply to invoices"}
@@ -3534,9 +3539,9 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
         </div>
 
         {loadError && !loaded && (
-          <div className="text-12 text-alert-fg mb-3 flex items-center gap-2">
+          <div className="text-ui-label text-alert-fg mb-3 flex items-center gap-2">
             <span>Couldn't load the credit balance.</span>
-            <button
+            <button data-ui-text-action
               type="button"
               className="underline"
               onClick={load}
@@ -3550,19 +3555,19 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
           <div className="border-hairline border-zinc-200 rounded-sm p-3 mb-3 bg-zinc-50">
             <div className="grid grid-cols-2 gap-2 mb-2">
               <label className="block">
-                <span className="u-label text-ink-tertiary block mb-1">Direction</span>
-                <select
+                <span className="ui-label text-ink-tertiary block mb-1">Direction</span>
+                <Select
                   value={direction}
                   onChange={(e) => setDirection(e.target.value)}
                   className={inputClass}
                 >
                   <option value="add">Add credit</option>
                   <option value="deduct">Deduct credit</option>
-                </select>
+                </Select>
               </label>
               <label className="block">
-                <span className="u-label text-ink-tertiary block mb-1">Amount</span>
-                <input
+                <span className="ui-label text-ink-tertiary block mb-1">Amount</span>
+                <Input
                   type="number"
                   min="0"
                   step="0.01"
@@ -3576,20 +3581,20 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
             {direction === "add" ? (
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <label className="block">
-                  <span className="u-label text-ink-tertiary block mb-1">Funding</span>
-                  <select
+                  <span className="ui-label text-ink-tertiary block mb-1">Funding</span>
+                  <Select
                     value={fundKind}
                     onChange={(e) => setFundKind(e.target.value)}
                     className={inputClass}
                   >
                     <option value="prepayment">Prepayment (money received)</option>
                     <option value="goodwill">Goodwill / courtesy (no money)</option>
-                  </select>
+                  </Select>
                 </label>
                 {fundKind === "prepayment" && (
                   <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">Method</span>
-                    <select
+                    <span className="ui-label text-ink-tertiary block mb-1">Method</span>
+                    <Select
                       value={method}
                       onChange={(e) => setMethod(e.target.value)}
                       className={inputClass}
@@ -3600,30 +3605,30 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
                       <option value="venmo">Venmo</option>
                       <option value="paypal">PayPal</option>
                       <option value="other">Other</option>
-                    </select>
+                    </Select>
                   </label>
                 )}
               </div>
             ) : (
-              <div className="text-12 text-ink-tertiary mb-2">
+              <div className="text-ui-label text-ink-tertiary mb-2">
                 Recorded as an adjustment / correction (no payment booked).
               </div>
             )}
-            <div className="text-11 text-ink-tertiary mb-2 leading-snug">
+            <div className="text-ui-caption text-ink-tertiary mb-2 leading-snug">
               {direction === "add" && fundKind === "prepayment"
                 ? "Books a payment now (counts as collected revenue at receipt)."
                 : "No payment booked — does not count as revenue."}
             </div>
             <label className="block mb-2">
-              <span className="u-label text-ink-tertiary block mb-1">Note (optional)</span>
-              <input
+              <span className="ui-label text-ink-tertiary block mb-1">Note (optional)</span>
+              <Input
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 placeholder="e.g. Q3 quarterly prepay collected by check"
                 className={inputClass}
               />
             </label>
-            {err && <div className="text-12 text-alert-fg mb-2">{err}</div>}
+            {err && <div className="text-ui-label text-alert-fg mb-2">{err}</div>}
             <Button size="sm" variant="primary" disabled={saving || !loaded} onClick={submit}>
               {saving
                 ? "Saving…"
@@ -3641,7 +3646,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
               return (
                 <div
                   key={row.id}
-                  className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
+                  className="py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
                 >
                   <span className={cn("u-nums", delta < 0 ? "text-ink-secondary" : "text-zinc-900")}>
                     {delta >= 0 ? "+" : "−"}
@@ -3660,7 +3665,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
             })}
           </div>
         ) : loaded ? (
-          <div className="text-12 text-ink-tertiary">No credit history yet</div>
+          <div className="text-ui-label text-ink-tertiary">No credit history yet</div>
         ) : null}
       </CardBody>
     </Card>
@@ -3673,23 +3678,23 @@ function AnnualPrepayPanelV2({ activeTerm, onOpen, onSendInvoice }) {
       <CardBody className="p-4">
         <div className="flex justify-between items-start gap-3 flex-wrap">
           <div>
-            <div className="u-label text-ink-secondary mb-1">Annual prepay</div>
+            <div className="ui-label text-ink-secondary mb-1">Annual prepay</div>
             {activeTerm ? (
               <>
                 <div className="text-14 font-medium text-zinc-900">
                   {activeTerm.planLabel || "Annual Prepay"}
                 </div>
-                <div className="text-12 text-ink-secondary mt-1">
+                <div className="text-ui-label text-ink-secondary mt-1">
                   {fmtDate(activeTerm.termStart)} to {fmtDate(activeTerm.termEnd)} · {String(activeTerm.status || "").replace(/_/g, " ")}
                 </div>
                 {activeTerm.coverageServiceType && (
-                  <div className="text-11 text-ink-secondary mt-1">
+                  <div className="text-ui-caption text-ink-secondary mt-1">
                     Covers {activeTerm.coverageVisitCount || 4} {activeTerm.coverageServiceType} visit{Number(activeTerm.coverageVisitCount || 4) === 1 ? "" : "s"}
                   </div>
                 )}
               </>
             ) : (
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 No annual prepay term on this account.
               </div>
             )}
@@ -3703,7 +3708,7 @@ function AnnualPrepayPanelV2({ activeTerm, onOpen, onSendInvoice }) {
             </Button>
           </div>
         </div>
-        <div className="text-11 text-ink-secondary mt-2">
+        <div className="text-ui-caption text-ink-secondary mt-2">
           Send an invoice to request payment, or record a payment already collected.
         </div>
       </CardBody>
@@ -3766,19 +3771,19 @@ function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
 
   return <>
     <label className="block sm:col-span-2">
-      <div className="u-label text-ink-secondary mb-1">Service plan</div>
-      <select
+      <div className="ui-label text-ink-secondary mb-1">Service plan</div>
+      <Select
         value={selected?.value || "__custom__"}
         onChange={(e) => onChange(e.target.value === "__custom__" ? "" : e.target.value)}
         className="w-full h-9 px-2.5 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
       >
         {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         <option value="__custom__">Custom label</option>
-      </select>
+      </Select>
     </label>
     <label className="block sm:col-span-2">
-      <div className="u-label text-ink-secondary mb-1">Service covered</div>
-      <input
+      <div className="ui-label text-ink-secondary mb-1">Service covered</div>
+      <Input
         value={serviceType}
         onChange={(e) => onChange(e.target.value)}
         list={listId}
@@ -3797,6 +3802,7 @@ function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
 }
 
 export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], estimateSuggestion = null, onClose, onSaved }) {
+  const density = useUiDensity();
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   // For a brand-new customer (no options, no term, no prepaid plans) the
@@ -4054,7 +4060,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4072,9 +4078,9 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-15 font-medium text-zinc-900">Record collected annual prepay</div>
-            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+            <div className="text-ui-caption text-ink-secondary mt-0.5">{customerName}</div>
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !saving && onClose?.()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4084,7 +4090,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
         </div>
         <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           {activeTermEnd && (
-            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
@@ -4094,50 +4100,50 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
             onChange={handleServiceTypeChange}
           />
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Cadence</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Cadence</div>
+            <Select
               value={coverageCadence}
               onChange={(e) => handleCadenceChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Applications covered</div>
+            <Input
               type="number"
               min="1"
               max="24"
               step="1"
               value={visitCount}
               onChange={(e) => handleVisitCountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">
+            <div className="ui-label text-ink-secondary mb-1">
               {isCommercialCustomer ? "Pre-tax service amount collected" : "Amount collected"}
             </div>
-            <input
+            <Input
               type="number"
               min="0"
               step="0.01"
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
             {perVisit > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
               </div>
             )}
             {estimateSuggestionMatchesService(estimateSuggestion, serviceType, coverageCadence, visitCount) && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 From estimate #{estimateSuggestion.shortRef} — quoted prepay
                 year {fmtCurrency(Number(estimateSuggestion.amount))}
                 {Number(estimateSuggestion.discount) > 0
@@ -4146,69 +4152,69 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
               </div>
             )}
             {estimateSuggestion?.blocked && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Estimate #{estimateSuggestion.shortRef}: {estimateSuggestion.blockReason} —
                 enter the amount collected.
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Commercial: ~7% county sales tax is added at invoicing — total
                 recorded as paid ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Payment already collected by</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Payment already collected by</div>
+            <Select
               value={method}
               onChange={(e) => setMethod(e.target.value)}
-              className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {methodOptions.map(([value, label]) => (
                 <option key={value} value={value}>{label}</option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term starts</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term starts</div>
+            <Input
               type="date"
               value={termStart}
               onChange={(e) => handleStartChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term ends</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term ends</div>
+            <Input
               type="date"
               value={termEnd}
               onChange={(e) => setTermEnd(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Reference</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Reference</div>
+            <Input
               value={reference}
               onChange={(e) => setReference(e.target.value)}
               placeholder="Receipt, check, Zelle, or Stripe reference"
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Note</div>
-            <textarea
+            <div className="ui-label text-ink-secondary mb-1">Note</div>
+            <Textarea
               rows={3}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
         </div>
         {error && (
-          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {error}
           </div>
         )}
@@ -4231,6 +4237,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
 // amount inference) instead of maintaining a parallel modal. See
 // schedule/AnnualPrepayLauncher.
 export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved, allowChargeInPerson = false, onChargeInPerson }) {
+  const density = useUiDensity();
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
@@ -4490,7 +4497,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4508,9 +4515,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
             <div className="text-15 font-medium text-zinc-900">Send annual prepay invoice</div>
-            <div className="text-11 text-ink-secondary mt-0.5">{customerName}</div>
+            <div className="text-ui-caption text-ink-secondary mt-0.5">{customerName}</div>
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !saving && onClose?.()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4520,12 +4527,12 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         </div>
         <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           {activeTermEnd && (
-            <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
           {depositCredit && depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
               {depositCredit.estimateSlug ? ` (estimate ${depositCredit.estimateSlug})` : ""} — NOT
               applied here: this customer's invoices bill to a third party, and the homeowner's
@@ -4533,7 +4540,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             </div>
           )}
           {depositCredit && !depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               <label className="flex items-start gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -4558,85 +4565,85 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             onChange={handleServiceTypeChange}
           />
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Cadence</div>
-            <select
+            <div className="ui-label text-ink-secondary mb-1">Cadence</div>
+            <Select
               value={coverageCadence}
               onChange={(e) => handleCadenceChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             >
               {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Applications covered</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Applications covered</div>
+            <Input
               type="number"
               min="1"
               max="24"
               step="1"
               value={visitCount}
               onChange={(e) => handleVisitCountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">
+            <div className="ui-label text-ink-secondary mb-1">
               {isCommercialCustomer ? "Pre-tax service amount" : "Invoice amount"}
             </div>
-            <input
+            <Input
               type="number"
               min="0"
               step="0.01"
               value={amount}
               onChange={(e) => handleAmountChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
             {perVisit > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
-              <div className="text-11 text-ink-secondary mt-1">
+              <div className="text-ui-caption text-ink-secondary mt-1">
                 Commercial: ~7% county sales tax is added — customer is invoiced
                 ≈ {fmtCurrency(estTaxInclusiveTotal)}.
               </div>
             )}
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term starts</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term starts</div>
+            <Input
               type="date"
               value={termStart}
               onChange={(e) => handleStartChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Term ends</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Term ends</div>
+            <Input
               type="date"
               value={termEnd}
               onChange={(e) => setTermEnd(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">Invoice due</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">Invoice due</div>
+            <Input
               type="date"
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">First visit (optional)</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">First visit (optional)</div>
+            <Input
               type="date"
               value={firstVisitDate}
               onChange={(e) => {
@@ -4648,38 +4655,38 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               }}
               min={termStart || undefined}
               max={termEnd || undefined}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
-            <div className="text-11 text-ink-secondary mt-1">
+            <div className="text-ui-caption text-ink-secondary mt-1">
               {firstVisitDateError || "Date you already promised the customer. Blank starts coverage at the term start."}
             </div>
           </label>
           <label className="block">
-            <div className="u-label text-ink-secondary mb-1">First visit time</div>
-            <input
+            <div className="ui-label text-ink-secondary mb-1">First visit time</div>
+            <Input
               type="time"
               step={3600}
               value={firstVisitWindowStart}
               onChange={(e) => setFirstVisitWindowStart(e.target.value)}
               disabled={!firstVisitDate}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
+              className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
             />
-            <div className="text-11 text-ink-secondary mt-1">
+            <div className="text-ui-caption text-ink-secondary mt-1">
               {firstVisitTimeError || "Arrival time for visit 1, on the hour. Needs a first-visit date."}
             </div>
           </label>
           <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Invoice note</div>
-            <textarea
+            <div className="ui-label text-ink-secondary mb-1">Invoice note</div>
+            <Textarea
               rows={3}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              className="w-full px-2.5 py-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+              className="w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
           </label>
         </div>
         {error && (
-          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+          <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
             {error}
           </div>
         )}
@@ -4710,6 +4717,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
 // blocked. The server re-checks eligibility on confirm.
 // ============================================================================
 export function CancelSignupModal({ customer, onClose, onDone }) {
+  const density = useUiDensity();
   const [preview, setPreview] = useState(null);
   const [loadErr, setLoadErr] = useState("");
   const [running, setRunning] = useState(false);
@@ -4751,7 +4759,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !running && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -4770,7 +4778,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
           <div className="text-15 font-medium text-zinc-900">
             Cancel signup &amp; refund deposit
           </div>
-          <button
+          <button data-ui-text-action
             onClick={() => !running && onClose()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -4778,12 +4786,12 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
             ×
           </button>
         </div>
-        <div className="p-4 text-13 text-zinc-900">
+        <div className="p-4 text-ui-body text-zinc-900">
           {!preview && !loadErr && (
             <div className="text-ink-secondary">Checking eligibility…</div>
           )}
           {loadErr && (
-            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{loadErr}</div>
+            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{loadErr}</div>
           )}
           {preview && !preview.eligible && !result && (
             <div>
@@ -4798,7 +4806,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
               {/* First-run lesson (2026-07-15): the preview reads "done"
                   enough that the owner closed it here thinking the run had
                   fired. State the not-yet-ness explicitly. */}
-              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-13 text-zinc-900">
+              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-ui-body text-zinc-900">
                 <span className="font-medium">Preview only — nothing has happened yet.</span>{" "}
                 <span className="text-ink-secondary">
                   No refund is issued and nothing is cancelled until you press the red button below.
@@ -4824,7 +4832,7 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
                 <li>Refund the <span className="font-medium u-nums">{fmtCurrency(preview.refundTotal)}</span> deposit to the original payment method</li>
                 <li>Email the customer a cancellation + refund confirmation</li>
               </ul>
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 The refund is issued through Stripe and typically lands in 5–10 business days.
               </div>
             </div>
@@ -4847,29 +4855,29 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
                 </li>
               </ul>
               {result.refundSkipped && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.refundSkipped}
                 </div>
               )}
               {result.refundIncomplete && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.refundIncomplete}
                 </div>
               )}
               {result.visitFailures?.length > 0 && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {result.visitFailures.length} visit(s) could not be cancelled — handle them on the Schedule page.
                 </div>
               )}
               {result.unresolvedInvoices?.length > 0 && (
-                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   Open visit invoice(s) could not be voided: {result.unresolvedInvoices.join(", ")} — resolve on the Invoices page.
                 </div>
               )}
             </div>
           )}
           {runErr && (
-            <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{runErr}</div>
+            <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{runErr}</div>
           )}
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
@@ -4916,6 +4924,7 @@ function paymentRefundState(p) {
 }
 
 export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
+  const density = useUiDensity();
   const { refundedCents, remainingCents } = paymentRefundState(payment);
   // The entered amount is BASE dollars: the server adds the prorated share
   // of the recorded card surcharge on top and caps the gross at the
@@ -5025,7 +5034,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
   // never bubble through the React tree to the profile overlay's onClose.
   const dialogRef = useModalFocus(true, () => !running && onClose?.());
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         e.stopPropagation();
@@ -5042,7 +5051,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
           <div className="text-15 font-medium text-zinc-900">Refund payment</div>
-          <button
+          <button data-ui-text-action
             onClick={() => !running && onClose()}
             aria-label="Close"
             className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -5050,7 +5059,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
             ×
           </button>
         </div>
-        <div className="p-4 text-13 text-zinc-900">
+        <div className="p-4 text-ui-body text-zinc-900">
           {done ? (
             <div>
               <div className="mb-2 font-medium">
@@ -5061,11 +5070,11 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
                   : ""}
                 .
               </div>
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 Issued through Stripe — it typically lands in 5–10 business days.
               </div>
               {done.refreshErr && (
-                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {done.refreshErr}
                 </div>
               )}
@@ -5094,7 +5103,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
               </div>
               <label
                 htmlFor="refund-amount"
-                className="block text-12 text-ink-secondary mb-1"
+                className="block text-ui-label text-ink-secondary mb-1"
               >
                 Refund amount
               </label>
@@ -5110,24 +5119,24 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
                 onChange={(e) => setAmountStr(e.target.value)}
               />
               {amountStr !== "" && !amountValid && (
-                <div className="mt-1.5 text-12 text-alert-fg">
+                <div className="mt-1.5 text-ui-label text-alert-fg">
                   Enter an amount between $0.01 and{" "}
                   {fmtCurrency(maxEntryCents / 100)}.
                 </div>
               )}
               {remainingSurchargeCents > 0 && (
-                <div className="mt-2 text-12 text-ink-secondary">
+                <div className="mt-2 text-ui-label text-ink-secondary">
                   The {fmtCurrency(remainingSurchargeCents / 100)} card-surcharge
                   share is returned automatically on top — in full with a full
                   refund, prorated with a partial amount.
                 </div>
               )}
-              <div className="mt-2 text-12 text-ink-secondary">
+              <div className="mt-2 text-ui-label text-ink-secondary">
                 Issued through Stripe — refunds typically land in 5–10 business
                 days.
               </div>
               {err && (
-                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                   {err}
                 </div>
               )}
@@ -5206,7 +5215,7 @@ function CustomerWorkspaceHeader({
       <div className="c360-workspace-identity">
         <div className="c360-workspace-name">
           <div className="c360-workspace-name-row">
-            <h1>{name}</h1>
+            <h1 className="ui-record-title">{name}</h1>
             <StageBadgeV2 stage={c.pipelineStage} />
           </div>
           <div className="c360-workspace-meta">
@@ -5236,9 +5245,12 @@ function CustomerWorkspaceHeader({
           </div>
         </div>
       </div>
-      <div className="c360-workspace-actions">
+      <div className="c360-workspace-actions ui-record-actions">
         {c.phone && (
-          <Button className="c360-message-action" onClick={onMessage}>
+          <Button className="c360-message-action" aria-haspopup="dialog" onClick={(event) => {
+            event.currentTarget.focus({ preventScroll: true });
+            onMessage();
+          }}>
             <MessageSquare size={16} />
             Message
             {unreadConversations > 0 && (
@@ -5253,7 +5265,7 @@ function CustomerWorkspaceHeader({
         )}
         {isAdmin && (
           <a
-            className="u-focus-ring"
+            className={buttonStyles({ variant: "secondary", density: "comfortable" })}
             href={customerEstimateHref({ ...c, address })}
           >
             <FileText size={16} />
@@ -5273,7 +5285,7 @@ function CustomerWorkspaceHeader({
         >
           <Button
             variant="ghost"
-            className="c360-icon-button"
+            className="ui-icon-action"
             aria-label="More customer actions"
             aria-expanded={menuOpen}
             aria-controls={menuId}
@@ -5285,21 +5297,22 @@ function CustomerWorkspaceHeader({
             <MoreHorizontal size={20} />
           </Button>
           {menuOpen && (
-            <div id={menuId} className="c360-workspace-action-menu">
+            <div id={menuId} className="ui-action-menu">
               {actions.map((action) =>
                 action.href ? (
                   <a
                     key={action.label}
-                    className="u-focus-ring"
+                    className={buttonStyles({ variant: "ghost", density: "comfortable", className: "ui-menu-action" })}
                     href={action.href}
                   >
                     {action.label}
                   </a>
                 ) : (
-                  <button
+                  <Button
                     key={action.label}
                     type="button"
-                    className="u-focus-ring"
+                    variant="ghost"
+                    className="ui-menu-action"
                     onClick={() => {
                       menuRef.current?.querySelector("button")?.focus();
                       setMenuOpen(false);
@@ -5307,7 +5320,7 @@ function CustomerWorkspaceHeader({
                     }}
                   >
                     {action.label}
-                  </button>
+                  </Button>
                 ),
               )}
             </div>
@@ -5319,6 +5332,7 @@ function CustomerWorkspaceHeader({
           <div>
             <Button
               variant="secondary"
+              className="c360-contact-action"
               onClick={() => callViaBridge(c.phone, name)}
             >
               <Phone size={16} />
@@ -5330,7 +5344,7 @@ function CustomerWorkspaceHeader({
         {c.email && (
           <div>
             <a
-              className="c360-outline-link u-focus-ring"
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "c360-contact-action" })}
               href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`}
               target="_blank"
               rel="noopener noreferrer"
@@ -5344,7 +5358,7 @@ function CustomerWorkspaceHeader({
         {address && (
           <div>
             <a
-              className="c360-outline-link u-focus-ring"
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "c360-contact-action" })}
               href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`}
               target="_blank"
               rel="noopener noreferrer"
@@ -5448,7 +5462,7 @@ function CustomerAddressLink({ address, mobile = false }) {
       rel="noopener noreferrer"
       className={
         mobile
-          ? "block text-13 text-ink-secondary no-underline hover:text-zinc-900 mb-2 truncate"
+          ? "block text-ui-body text-ink-secondary no-underline hover:text-zinc-900 mb-2 truncate"
           : "text-zinc-900 hover:underline"
       }
     >
@@ -5460,7 +5474,7 @@ function CustomerMessageTime({ message, inverted = false }) {
   return (
     <div
       className={cn(
-        "text-10 mt-1 text-right",
+        "text-ui-caption mt-1 text-right",
         inverted ? "text-zinc-300" : "text-ink-secondary",
       )}
     >
@@ -5473,7 +5487,7 @@ function CustomerSmsMessage({ message: m, embedded }) {
   return (
     <div
       className={cn(
-        "max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline",
+        "max-w-[75%] px-3 py-2 text-ui-body leading-relaxed border-hairline",
         inbound
           ? "self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs"
           : "self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs",
@@ -5511,18 +5525,18 @@ function CustomerCallMessage({ message: m }) {
       {" "}
       <div className="flex items-center gap-2 mb-1">
         {" "}
-        <span className="text-10 font-medium tracking-label uppercase text-ink-secondary">
+        <span className="text-ui-caption font-medium tracking-label uppercase text-ink-secondary">
           {inbound ? "Call in" : "Call out"}
         </span>
         {duration && (
-          <span className="text-11 u-nums text-zinc-900">{duration}</span>
+          <span className="text-ui-caption u-nums text-zinc-900">{duration}</span>
         )}
         {m.answeredBy && (
-          <span className="text-10 text-ink-secondary">· {m.answeredBy}</span>
+          <span className="text-ui-caption text-ink-secondary">· {m.answeredBy}</span>
         )}
       </div>
       {summary && (
-        <div className="text-12 text-zinc-900 leading-relaxed">{summary}</div>
+        <div className="text-ui-label text-zinc-900 leading-relaxed">{summary}</div>
       )}
       {recordingId && (
         <AuthenticatedCallAudio
@@ -5572,7 +5586,7 @@ function CustomerOverlayHeader({
               <HealthCircle score={score} /> <TierBadgeV2 tier={c.tier} />{" "}
               <StageBadgeV2 stage={c.pipelineStage} />{" "}
             </div>{" "}
-            <button
+            <button data-ui-text-action
               onClick={onClose}
               aria-label="Close"
               className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -5581,7 +5595,7 @@ function CustomerOverlayHeader({
             </button>{" "}
           </div>
           {(c.phone || c.email) && (
-            <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-1.5">
+            <div className="flex gap-4 items-center flex-wrap text-ui-label text-ink-secondary mb-1.5">
               <CustomerContactLinks
                 phone={c.phone}
                 email={c.email}
@@ -5616,7 +5630,7 @@ function CustomerOverlayHeader({
           ]
             .filter((slot) => slot.phone || slot.email)
             .map((slot) => (
-              <div key={slot.key} className="text-12 text-ink-secondary mb-1.5">
+              <div key={slot.key} className="text-ui-label text-ink-secondary mb-1.5">
                 {" "}
                 <span className="text-ink-tertiary mr-1">{slot.label}</span>
                 {slot.name && (
@@ -5631,7 +5645,7 @@ function CustomerOverlayHeader({
                 />
               </div>
             ))}
-          <div className="flex gap-4 items-center flex-wrap text-12 text-ink-secondary mb-2.5">
+          <div className="flex gap-4 items-center flex-wrap text-ui-label text-ink-secondary mb-2.5">
             <CustomerAddressLink address={c.address} />
             <span className="u-nums text-zinc-900">
               {fmtCurrency(c.monthlyRate)}/mo
@@ -5645,11 +5659,11 @@ function CustomerOverlayHeader({
                 {" "}
                 <a
                   href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Text
                 </a>{" "}
-                <button
+                <button data-ui-text-action
                   type="button"
                   onClick={() =>
                     callViaBridge(
@@ -5657,7 +5671,7 @@ function CustomerOverlayHeader({
                       `${c.firstName || ""} ${c.lastName || ""}`.trim(),
                     )
                   }
-                  className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                  className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Call
                 </button>{" "}
@@ -5665,35 +5679,35 @@ function CustomerOverlayHeader({
             )}
             <a
               href={`/admin/schedule?customer=${customerId}`}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
             >
               Book Appt
             </a>{" "}
             <a
               href={`/admin/invoices?customer=${customerId}`}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
             >
               Invoice
             </a>
             {isAdmin && (
-              <button
+              <button data-ui-text-action
                 type="button"
                 onClick={() => setAnnualPrepayInvoiceOpen(true)}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
               >
                 Prepay Invoice
               </button>
             )}
-            <button
+            <button data-ui-text-action
               onClick={() => setActiveTab("comms")}
-              className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+              className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
             >
               Add Note
             </button>
             {isAdmin && (
-              <button
+              <button data-ui-text-action
                 onClick={openEditModal}
-                className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
+                className="inline-flex items-center h-8 px-3.5 text-ui-caption ui-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
               >
                 Edit
               </button>
@@ -5719,7 +5733,7 @@ function CustomerOverlayHeader({
           <CustomerAddressLink address={c.address} mobile />
           {/* Contact — listed on mobile (desktop shows these in its header) */}
           {(c.phone || c.email) && (
-            <div className="flex flex-col gap-1 mb-3 text-13">
+            <div className="flex flex-col gap-1 mb-3 text-ui-body">
               <CustomerContactLinks
                 phone={c.phone}
                 email={c.email}
@@ -5739,21 +5753,21 @@ function CustomerOverlayHeader({
             {" "}
             <div className="flex-1">
               {" "}
-              <div className="u-label text-ink-tertiary">Monthly</div>{" "}
+              <div className="ui-label text-ink-tertiary">Monthly</div>{" "}
               <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">
                 {fmtCurrency(c.monthlyRate)}
               </div>{" "}
             </div>{" "}
             <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
               {" "}
-              <div className="u-label text-ink-tertiary">Annual</div>{" "}
+              <div className="ui-label text-ink-tertiary">Annual</div>{" "}
               <div className="u-nums text-15 font-medium text-zinc-900 mt-0.5">
                 {fmtCurrency(c.annualValue)}
               </div>{" "}
             </div>{" "}
             <div className="flex-1 border-l border-hairline border-zinc-200 pl-3">
               {" "}
-              <div className="u-label text-ink-tertiary">Health</div>{" "}
+              <div className="ui-label text-ink-tertiary">Health</div>{" "}
               <div
                 className={cn(
                   "u-nums text-15 font-medium mt-0.5",
@@ -5780,14 +5794,14 @@ function CustomerProfileAlerts({ alerts }) {
           <div
             key={i}
             className={cn(
-              "inline-flex items-center gap-1.5 h-6 px-2 text-11 font-medium rounded-xs border-hairline",
+              "inline-flex items-center gap-1.5 h-6 px-2 text-ui-caption font-medium rounded-xs border-hairline",
               a.alert
                 ? "bg-alert-bg border-alert-fg text-alert-fg"
                 : "bg-white border-zinc-200 text-zinc-700",
             )}
           >
             {" "}
-            <span className="uppercase tracking-label text-10">
+            <span className="ui-label text-ui-caption">
               {a.label}
             </span>{" "}
             <span className="normal-case">{a.text}</span>{" "}
@@ -5836,13 +5850,13 @@ function CustomerOverlayNavigation({
         {CUSTOMER_360_SECTIONS.filter(
           (section) => section.key !== "estimates",
         ).map((t) => (
-          <button
+          <button data-ui-text-action
             key={t.key}
             ref={activeTab === t.key ? activeTabButtonRef : null}
             aria-pressed={activeTab === t.key}
             onClick={() => setActiveTab(t.key)}
             className={cn(
-              "h-11 px-4 text-12 uppercase tracking-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
+              "h-11 px-4 text-ui-label ui-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
               activeTab === t.key
                 ? "text-zinc-900 border-zinc-900"
                 : "text-ink-secondary border-transparent hover:text-zinc-900",
@@ -5931,13 +5945,13 @@ function CustomerProfileOverview({
               const content = (
                 <>
                   {" "}
-                  <div className="text-13 font-medium text-zinc-900">
+                  <div className="text-ui-body font-medium text-zinc-900">
                     {p.profileLabel || "Service property"}
                   </div>{" "}
-                  <div className="text-12 text-ink-secondary truncate">
+                  <div className="text-ui-label text-ink-secondary truncate">
                     {addr || "No address on file"}
                   </div>{" "}
-                  <div className="text-11 text-ink-tertiary mt-1">
+                  <div className="text-ui-caption text-ink-tertiary mt-1">
                     {fmtCurrency(p.monthlyRate || 0)}/mo
                   </div>{" "}
                 </>
@@ -5954,7 +5968,7 @@ function CustomerProfileOverview({
                 );
               }
               return (
-                <button
+                <button data-ui-text-action
                   key={p.id}
                   type="button"
                   onClick={() => onSelectCustomer?.(p.id)}
@@ -5995,7 +6009,7 @@ function CustomerProfileOverview({
                       .filter(Boolean)
                       .join(" · ") || "No contact on file"}
                   </div>{" "}
-                  <div className="text-12 text-ink-tertiary mt-1 truncate">
+                  <div className="text-ui-label text-ink-tertiary mt-1 truncate">
                     {addr || "Address on file"}
                     {n.matchedVia === "property" ? " · secondary property" : ""}
                   </div>{" "}
@@ -6013,7 +6027,7 @@ function CustomerProfileOverview({
                 );
               }
               return (
-                <button
+                <button data-ui-text-action
                   key={n.id}
                   type="button"
                   onClick={() => onSelectCustomer?.(n.id)}
@@ -6030,15 +6044,15 @@ function CustomerProfileOverview({
         {" "}
         <div>
           {" "}
-          <div className="text-13 font-medium text-zinc-900">
+          <div className="text-ui-body font-medium text-zinc-900">
             Already left a Google review
           </div>{" "}
-          <div className="text-11 text-ink-secondary">
+          <div className="text-ui-caption text-ink-secondary">
             When on, this customer is excluded from review-request and 48h
             followup SMS.
           </div>
           {c.reviewMarkedAt && c.hasLeftGoogleReview && (
-            <div className="text-10 text-ink-tertiary mt-0.5 u-nums">
+            <div className="text-ui-caption text-ink-tertiary mt-0.5 u-nums">
               Marked {fmtDate(c.reviewMarkedAt)}
             </div>
           )}
@@ -6103,16 +6117,16 @@ function CustomerProfileOverview({
                     className="c360-upcoming-appointment bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
                   >
                     {" "}
-                    <div className="text-13 font-medium text-zinc-900">
+                    <div className="text-ui-body font-medium text-zinc-900">
                       {s.service_type}
                     </div>{" "}
-                    <div className="text-12 text-ink-secondary">
+                    <div className="text-ui-label text-ink-secondary">
                       {fmtDateOnly(s.scheduled_date)} · {s.status}
                     </div>{" "}
                   </div>
                 ))
               ) : (
-                <div className="text-12 text-ink-secondary mb-3">
+                <div className="text-ui-label text-ink-secondary mb-3">
                   No upcoming appointments
                 </div>
               )}
@@ -6122,7 +6136,7 @@ function CustomerProfileOverview({
                 return (
                   <div
                     key={i}
-                    className="c360-recent-service py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
+                    className="c360-recent-service py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
                   >
                     {" "}
                     <span className="text-zinc-900 flex items-center gap-1.5">
@@ -6138,7 +6152,7 @@ function CustomerProfileOverview({
                 );
               })}
               {services.length === 0 && (
-                <div className="text-12 text-ink-secondary">
+                <div className="text-ui-label text-ink-secondary">
                   No services recorded
                 </div>
               )}
@@ -6151,16 +6165,16 @@ function CustomerProfileOverview({
                 <div className="mt-4">
                   {" "}
                   <SectionTitle>Referral Stats</SectionTitle>{" "}
-                  <div className="text-12 text-zinc-900">
+                  <div className="text-ui-label text-zinc-900">
                     Code: <span className="u-nums">{c.referralCode}</span>{" "}
                   </div>
                   {referral.total_referrals != null && (
-                    <div className="text-12 text-ink-secondary">
+                    <div className="text-ui-label text-ink-secondary">
                       Referrals: {referral.total_referrals}
                     </div>
                   )}
                   {referral.total_earned != null && (
-                    <div className="text-12 text-zinc-900">
+                    <div className="text-ui-label text-zinc-900">
                       Earned:{" "}
                       <span className="u-nums">
                         {fmtCurrency(referral.total_earned)}
@@ -6174,7 +6188,7 @@ function CustomerProfileOverview({
                   {" "}
                   <SectionTitle>Active Discounts</SectionTitle>
                   {discounts.map((d, i) => (
-                    <div key={i} className="text-12 text-zinc-900 py-0.5">
+                    <div key={i} className="text-ui-label text-zinc-900 py-0.5">
                       {d.discount_name || "Discount"}:{" "}
                       <span className="u-nums">
                         {d.discount_type === "percentage"
@@ -6252,7 +6266,7 @@ function CustomerProfileBilling({
         <>
           <div className="c360-billing-actions">
             <a
-              className="c360-outline-link u-focus-ring"
+              className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })}
               href={`/admin/invoices?customer=${c.id}`}
             >
               Manage invoices
@@ -6296,7 +6310,7 @@ function CustomerProfileBilling({
         <div className="c360-invoices-heading">
           <SectionTitle>Recent invoices ({invoices.length})</SectionTitle>
           <a
-            className="c360-outline-link u-focus-ring"
+            className={buttonStyles({ variant: "secondary", density: "comfortable", className: "" })}
             href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}`}
           >
             All invoices
@@ -6307,18 +6321,18 @@ function CustomerProfileBilling({
       )}
       {invoices.length > 0 ? (
         <Table className="mb-5">
-          {" "}
+
           <THead>
-            {" "}
+
             <TR>
-              {" "}
+
               {embedded && <TH>Invoice</TH>}
               <TH>Date</TH>
               <TH align="right">Amount</TH>
               <TH align="right">Paid</TH>
-              <TH>Status</TH>{" "}
-            </TR>{" "}
-          </THead>{" "}
+              <TH>Status</TH>
+            </TR>
+          </THead>
           <TBody>
             {invoices.map((inv, i) => (
               <TR key={i}>
@@ -6331,26 +6345,26 @@ function CustomerProfileBilling({
                       #{inv.invoice_number || inv.id.slice(0, 8)}
                     </a>
                   </TD>
-                )}{" "}
-                <TD>{fmtDate(inv.created_at || inv.invoice_date)}</TD>{" "}
+                )}
+                <TD>{fmtDate(inv.created_at || inv.invoice_date)}</TD>
                 <TD align="right" className="u-nums">
                   {fmtCurrency(inv.amount_due)}
-                </TD>{" "}
+                </TD>
                 <TD align="right" className="u-nums">
                   {fmtCurrency(inv.amount_paid)}
-                </TD>{" "}
+                </TD>
                 <TD>
                   {" "}
                   <Badge tone={invoiceStatusTone(inv)}>
                     {inv.status}
                   </Badge>{" "}
-                </TD>{" "}
+                </TD>
               </TR>
             ))}
-          </TBody>{" "}
+          </TBody>
         </Table>
       ) : (
-        <div className="text-13 text-ink-secondary mb-5">No invoices</div>
+        <div className="text-ui-body text-ink-secondary mb-5">No invoices</div>
       )}
       <SectionTitle>Payment History ({payments.length})</SectionTitle>
       {payments.slice(0, 10).map((p, i) => {
@@ -6359,7 +6373,7 @@ function CustomerProfileBilling({
         return (
           <div
             key={i}
-            className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
+            className="py-1.5 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-3"
           >
             {" "}
             <span
@@ -6412,7 +6426,7 @@ function CustomerProfileBilling({
           {cards.map((cd, i) => (
             <div
               key={i}
-              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-13 flex justify-between items-center"
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-ui-body flex justify-between items-center"
             >
               {" "}
               <span className="text-zinc-900">
@@ -6438,7 +6452,7 @@ function CustomerProfileBilling({
       {isAdmin && (
         <div className="mt-5 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
           {" "}
-          <div className="text-12 text-ink-secondary">
+          <div className="text-ui-label text-ink-secondary">
             Customer cancelling at the deposit stage? This voids the signup
             invoice, cancels visits, and refunds the deposit.
           </div>{" "}
@@ -6454,7 +6468,7 @@ function CustomerProfileBilling({
       {isAdmin && data.cancelPlanEnabled && (
         <div className="mt-3 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
           {" "}
-          <div className="text-12 text-ink-secondary">
+          <div className="text-ui-label text-ink-secondary">
             Cancelling an active plan? Same engine the customer portal uses:
             pulls visits, stops billing, records the case, and confirms to the
             customer.
@@ -6484,7 +6498,7 @@ function CustomerProfileServices({
       <summary>Service records, reports & photos</summary>{" "}
       <SectionTitle>Service History ({services.length})</SectionTitle>
       {services.length === 0 ? (
-        <div className="text-13 text-ink-secondary">No service records</div>
+        <div className="text-ui-body text-ink-secondary">No service records</div>
       ) : (
         <div className="flex flex-col">
           {services.map((s, i) => (
@@ -6509,7 +6523,7 @@ function CustomerProfileServices({
           {upcomingScheduled.map((s, i) => (
             <div
               key={i}
-              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-13"
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-ui-body"
             >
               {" "}
               <span className="font-medium text-zinc-900">
@@ -6520,7 +6534,7 @@ function CustomerProfileServices({
               </span>{" "}
               <span
                 className={cn(
-                  "text-11 uppercase tracking-label font-medium",
+                  "text-ui-caption ui-label font-medium",
                   s.status === "confirmed"
                     ? "text-zinc-900"
                     : "text-ink-secondary",
@@ -6613,7 +6627,7 @@ function CustomerProfileProperty({
               href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(formatAddress(c.address))}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="block p-5 bg-zinc-50 text-center text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+              className="block p-5 bg-zinc-50 text-center text-ui-body text-zinc-900 hover:bg-zinc-100 u-focus-ring"
             >
               View on Google Maps
             </a>
@@ -6648,7 +6662,7 @@ function CustomerProfileProperty({
               val && (
                 <div
                   key={label}
-                  className="flex justify-between py-1 text-12 border-b border-hairline border-zinc-200/60"
+                  className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60"
                 >
                   {" "}
                   <span className="text-ink-secondary">{label}</span>{" "}
@@ -6675,7 +6689,7 @@ function CustomerProfileProperty({
               val && (
                 <div
                   key={label}
-                  className="flex justify-between py-1 text-12 border-b border-hairline border-zinc-200/60 gap-2"
+                  className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60 gap-2"
                 >
                   {" "}
                   <span className="text-ink-secondary flex-shrink-0">
@@ -6712,13 +6726,13 @@ function CustomerProfileCompliance({
               {" "}
               <CardBody className="p-4">
                 {" "}
-                <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
                   Nitrogen
                 </div>{" "}
                 <div className="u-nums text-22 font-medium text-zinc-900">
                   {fmtNumber(nutrientSummary.nApplied)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary">
+                <div className="text-ui-caption text-ink-secondary">
                   lb N / 1k sqft
                 </div>{" "}
               </CardBody>{" "}
@@ -6727,13 +6741,13 @@ function CustomerProfileCompliance({
               {" "}
               <CardBody className="p-4">
                 {" "}
-                <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
                   Phosphorus
                 </div>{" "}
                 <div className="u-nums text-22 font-medium text-zinc-900">
                   {fmtNumber(nutrientSummary.pApplied)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary">
+                <div className="text-ui-caption text-ink-secondary">
                   lb P / 1k sqft
                 </div>{" "}
               </CardBody>{" "}
@@ -6742,13 +6756,13 @@ function CustomerProfileCompliance({
               {" "}
               <CardBody className="p-4">
                 {" "}
-                <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
                   Potassium
                 </div>{" "}
                 <div className="u-nums text-22 font-medium text-zinc-900">
                   {fmtNumber(nutrientSummary.kApplied)}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary">
+                <div className="text-ui-caption text-ink-secondary">
                   lb K / 1k sqft
                 </div>{" "}
               </CardBody>{" "}
@@ -6757,13 +6771,13 @@ function CustomerProfileCompliance({
               {" "}
               <CardBody className="p-4">
                 {" "}
-                <div className="text-10 uppercase tracking-label text-ink-secondary mb-1">
+                <div className="text-ui-caption ui-label text-ink-secondary mb-1">
                   Entries
                 </div>{" "}
                 <div className="u-nums text-22 font-medium text-zinc-900">
                   {nutrientSummary.entries || 0}
                 </div>{" "}
-                <div className="text-11 text-ink-secondary">
+                <div className="text-ui-caption text-ink-secondary">
                   {nutrientLedger.year || new Date().getFullYear()}
                 </div>{" "}
               </CardBody>{" "}
@@ -6771,34 +6785,34 @@ function CustomerProfileCompliance({
           </div>
           {nutrientRows.length > 0 && (
             <Table className="mb-5">
-              {" "}
+
               <THead>
-                {" "}
+
                 <TR>
-                  {" "}
+
                   <TH>Date</TH>
                   <TH>Product</TH>
                   <TH>Analysis</TH>
                   <TH>N/P/K per 1k</TH>
-                  <TH>Blackout</TH>{" "}
-                </TR>{" "}
-              </THead>{" "}
+                  <TH>Blackout</TH>
+                </TR>
+              </THead>
               <TBody>
                 {nutrientRows.map((r) => (
                   <TR key={r.id}>
-                    {" "}
-                    <TD>{fmtDate(r.application_date)}</TD>{" "}
-                    <TD className="text-zinc-900">{r.product_name}</TD>{" "}
-                    <TD className="u-nums">{r.analysis || "—"}</TD>{" "}
+
+                    <TD>{fmtDate(r.application_date)}</TD>
+                    <TD className="text-zinc-900">{r.product_name}</TD>
+                    <TD className="u-nums">{r.analysis || "—"}</TD>
                     <TD className="u-nums">
                       {fmtNumber(r.n_applied_per_1000)} /{" "}
                       {fmtNumber(r.p_applied_per_1000)} /{" "}
                       {fmtNumber(r.k_applied_per_1000)}
-                    </TD>{" "}
-                    <TD>{r.blackout_status || "—"}</TD>{" "}
+                    </TD>
+                    <TD>{r.blackout_status || "—"}</TD>
                   </TR>
                 ))}
-              </TBody>{" "}
+              </TBody>
             </Table>
           )}
         </>
@@ -6806,39 +6820,39 @@ function CustomerProfileCompliance({
       <SectionTitle>Application History ({compliance.length})</SectionTitle>
       {compliance.length > 0 ? (
         <Table className="mb-5">
-          {" "}
+
           <THead>
-            {" "}
+
             <TR>
-              {" "}
+
               <TH>Date</TH>
               <TH>Product</TH>
               <TH>Rate</TH>
               <TH>Area</TH>
-              <TH>Technician</TH>{" "}
-            </TR>{" "}
-          </THead>{" "}
+              <TH>Technician</TH>
+            </TR>
+          </THead>
           <TBody>
             {compliance.map((r, i) => (
               <TR key={i}>
-                {" "}
-                <TD>{fmtDate(r.applied_at)}</TD>{" "}
+
+                <TD>{fmtDate(r.applied_at)}</TD>
                 <TD className="text-zinc-900">
                   {r.product_name || r.product_id}
-                </TD>{" "}
+                </TD>
                 <TD className="u-nums">
                   {r.rate_per_1000_sqft
                     ? `${r.rate_per_1000_sqft}/1k sqft`
                     : "—"}
-                </TD>{" "}
-                <TD>{r.area_treated || "—"}</TD>{" "}
-                <TD>{r.technician_name || "—"}</TD>{" "}
+                </TD>
+                <TD>{r.area_treated || "—"}</TD>
+                <TD>{r.technician_name || "—"}</TD>
               </TR>
             ))}
-          </TBody>{" "}
+          </TBody>
         </Table>
       ) : (
-        <div className="text-13 text-ink-secondary">No application records</div>
+        <div className="text-ui-body text-ink-secondary">No application records</div>
       )}
       {showLawnData && (
         <Card className="mt-5">
@@ -6846,7 +6860,7 @@ function CustomerProfileCompliance({
           <CardBody className="p-4">
             {" "}
             <SectionTitle>Product usage</SectionTitle>{" "}
-            <div className="text-12 text-ink-secondary space-y-1">
+            <div className="text-ui-label text-ink-secondary space-y-1">
               {" "}
               <div>
                 Celsius entries in the history shown:{" "}
@@ -6918,12 +6932,12 @@ function CustomerProfileTimeline({
                 label: "Notes",
               },
             ].map((f) => (
-              <button
+              <button data-ui-text-action
                 key={f.key}
                 onClick={() => setTimelineFilter(f.key)}
                 disabled={timelineError}
                 className={cn(
-                  "h-6 px-2.5 text-10 uppercase tracking-label font-medium rounded-xs border-hairline u-focus-ring transition-colors",
+                  "h-6 px-2.5 text-ui-caption ui-label font-medium rounded-xs border-hairline u-focus-ring transition-colors",
                   timelineFilter === f.key
                     ? "bg-zinc-900 text-white border-zinc-900"
                     : "bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-100",
@@ -6951,7 +6965,7 @@ function CustomerProfileTimeline({
             return (
               <div
                 key={i}
-                className="flex gap-2.5 py-1.5 border-b border-hairline border-zinc-200/60 text-12 items-center"
+                className="flex gap-2.5 py-1.5 border-b border-hairline border-zinc-200/60 text-ui-label items-center"
               >
                 {" "}
                 <Badge tone="neutral">
@@ -6968,7 +6982,7 @@ function CustomerProfileTimeline({
                     </span>
                   )}
                 </div>{" "}
-                <span className="text-ink-secondary text-10 u-nums flex-shrink-0">
+                <span className="text-ink-secondary text-ui-caption u-nums flex-shrink-0">
                   {timeAgo(item.date)}
                 </span>{" "}
               </div>
@@ -6990,7 +7004,7 @@ function CustomerProfileTimeline({
             </div>
           )}
           {!timelineError && filteredTimeline.length === 0 && (
-            <div className="text-ink-secondary text-12 text-center py-4">
+            <div className="text-ink-secondary text-ui-label text-center py-4">
               No timeline events
             </div>
           )}
@@ -7040,7 +7054,7 @@ function CustomerProfileMobileActions({
         }}
       >
         {" "}
-        <button
+        <button data-ui-text-action
           onClick={onClose}
           aria-label="Back"
           className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
@@ -7052,7 +7066,7 @@ function CustomerProfileMobileActions({
           {c.phone && (
             <a
               href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Text
             </a>
@@ -7062,22 +7076,22 @@ function CustomerProfileMobileActions({
               phone={c.phone}
               customerName={`${c.firstName || ""} ${c.lastName || ""}`.trim()}
               styledButton
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 no-underline u-focus-ring"
             >
               Call
             </CallBridgeLink>
           )}
           {isAdmin && (
-            <button
+            <button data-ui-text-action
               onClick={openEditModal}
-              className="inline-flex items-center h-11 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+              className="inline-flex items-center h-11 px-3.5 text-ui-caption ui-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
             >
               Edit
             </button>
           )}
           <div ref={menuRef} className="relative">
             {" "}
-            <button
+            <button data-ui-text-action
               ref={menuButtonRef}
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="More"
@@ -7093,51 +7107,51 @@ function CustomerProfileMobileActions({
                 className="absolute right-0 top-[calc(100%+4px)] z-20 min-w-[180px] rounded-sm border-hairline border-zinc-300 bg-white shadow-md py-1"
               >
                 {isAdmin && (
-                  <button
+                  <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
                       menuButtonRef.current?.focus();
                       openEditModal();
                       setMenuOpen(false);
                     }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                   >
                     Edit customer
                   </button>
                 )}
                 {isAdmin && (
-                  <button
+                  <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
                       menuButtonRef.current?.focus();
                       setAnnualPrepayInvoiceOpen(true);
                       setMenuOpen(false);
                     }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                   >
                     Send prepay invoice
                   </button>
                 )}
                 {isAdmin && (
-                  <button
+                  <button data-ui-text-action
                     role="menuitem"
                     onClick={() => {
                       menuButtonRef.current?.focus();
                       setAnnualPrepayOpen(true);
                       setMenuOpen(false);
                     }}
-                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                    className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                   >
                     Record collected prepay
                   </button>
                 )}
-                <button
+                <button data-ui-text-action
                   role="menuitem"
                   onClick={() => {
                     setActiveTab("comms");
                     setMenuOpen(false);
                   }}
-                  className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  className="w-full text-left px-3 py-2 text-ui-body text-zinc-900 hover:bg-zinc-50 u-focus-ring"
                 >
                   Add note
                 </button>{" "}
@@ -7189,6 +7203,7 @@ function CustomerProfileEditor({
   initialEditForm,
   reloadCustomer,
 }) {
+  const density = useUiDensity();
   return (
     editOpen && (
       <div
@@ -7213,7 +7228,7 @@ function CustomerProfileEditor({
             <div className="text-15 font-medium text-zinc-900">
               Edit customer
             </div>{" "}
-            <button
+            <button data-ui-text-action
               onClick={() => !savingEdit && setEditOpen(false)}
               aria-label="Close"
               className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
@@ -7237,7 +7252,7 @@ function CustomerProfileEditor({
             ].map((f) => (
               <div key={f.key} className={f.full ? "sm:col-span-2" : ""}>
                 {" "}
-                <label className="u-label text-ink-secondary block mb-1">
+                <label htmlFor={`customer-edit-${f.key}`} className="ui-label text-ink-secondary block mb-1">
                   {f.label}
                 </label>{" "}
                 {f.key === "addressLine1" ? (
@@ -7279,10 +7294,10 @@ function CustomerProfileEditor({
                         .getElementById("customer-edit-addressLine2")
                         ?.focus();
                     }}
-                    className="w-full h-10 px-2.5 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                    className={inputStyles({ density, className: "w-full h-10 px-2.5 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring" })}
                   />
                 ) : (
-                  <input
+                  <Input
                     id={`customer-edit-${f.key}`}
                     aria-label={f.label}
                     type={f.type || "text"}
@@ -7290,22 +7305,22 @@ function CustomerProfileEditor({
                     onChange={(e) =>
                       setEditForm((p) => ({ ...p, [f.key]: e.target.value }))
                     }
-                    className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                    className="w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
                   />
                 )}{" "}
               </div>
             ))}
             <div>
               {" "}
-              <label className="u-label text-ink-secondary block mb-1">
+              <label htmlFor="c360-edit-tier" className="ui-label text-ink-secondary block mb-1">
                 Tier
               </label>{" "}
-              <select
+              <Select id="c360-edit-tier"
                 value={editForm.tier || ""}
                 onChange={(e) =>
                   setEditForm((p) => ({ ...p, tier: e.target.value }))
                 }
-                className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
               >
                 {" "}
                 <option value="">No Plan</option>{" "}
@@ -7314,37 +7329,37 @@ function CustomerProfileEditor({
                 <option value="Silver">Silver</option>{" "}
                 <option value="Bronze">Bronze</option>{" "}
                 <option value="One-Time">One-Time</option>{" "}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
             <div>
               {" "}
               <label
-                className="u-label text-ink-secondary block mb-1"
+                className="ui-label text-ink-secondary block mb-1"
                 htmlFor="c360-edit-contact-role"
               >
                 Contact role
               </label>{" "}
-              <select
+              <Select
                 id="c360-edit-contact-role"
                 value={editForm.contactRole || ""}
                 onChange={(e) =>
                   setEditForm((p) => ({ ...p, contactRole: e.target.value }))
                 }
-                className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
               >
                 {CONTACT_ROLE_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
                     {o.label}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
             <div>
               {" "}
-              <label className="u-label text-ink-secondary block mb-1">
+              <label htmlFor="c360-edit-stage" className="ui-label text-ink-secondary block mb-1">
                 Stage
               </label>{" "}
-              <select
+              <Select id="c360-edit-stage"
                 value={editForm.pipelineStage || ""}
                 onChange={(e) =>
                   setEditForm((p) => ({
@@ -7352,24 +7367,24 @@ function CustomerProfileEditor({
                     pipelineStage: e.target.value,
                   }))
                 }
-                className="w-full h-9 px-2 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                className="w-full h-9 px-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
               >
                 {Object.entries(STAGE_LABELS).map(([k, label]) => (
                   <option key={k} value={k}>
                     {label}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
           </div>
           {editErr && (
-            <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+            <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
               {editErr}
             </div>
           )}
           <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
             {" "}
-            <button
+            <button data-ui-text-action
               type="button"
               onClick={async () => {
                 if (deletingCustomer || savingEdit) return;
@@ -7490,14 +7505,14 @@ function CustomerBillingPause({
       {" "}
       {c.servicePausedAt && (
         <div role="alert" className="mb-3 rounded border border-hairline p-2.5">
-          <div className="text-12 font-medium text-alert-fg">
+          <div className="text-ui-label font-medium text-alert-fg">
             {/* servicePausedOn is the ET calendar date; the raw
                             servicePausedAt timestamp would render in the
                             browser's timezone and land on the wrong day. */}
             Billing paused since{" "}
             {fmtDate(c.servicePausedOn || c.servicePausedAt)}
           </div>
-          <div className="text-12 text-ink-secondary mt-0.5">
+          <div className="text-ui-label text-ink-secondary mt-0.5">
             Monthly dues are not being collected
             {copy.reason}. Visits are unaffected. {copy.policy} it removes this
             block only — other billing guards (autopay state, plan type, prepaid
@@ -7515,7 +7530,7 @@ function CustomerBillingPause({
             </Button>
           )}
           {resumeBillingErr && (
-            <div className="text-12 text-alert-fg mt-1">{resumeBillingErr}</div>
+            <div className="text-ui-label text-alert-fg mt-1">{resumeBillingErr}</div>
           )}
         </div>
       )}
@@ -7525,7 +7540,7 @@ function CustomerBillingPause({
       {resumeBillingNote && (
         <div
           role="status"
-          className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
+          className="mb-3 rounded border border-hairline p-2.5 text-ui-label text-ink-secondary"
         >
           {resumeBillingNote}
         </div>
@@ -7578,7 +7593,7 @@ function CustomerBillingSummary({
               value={fmtCurrency(c.lifetimeRevenue)}
             />{" "}
           </div>
-          <div className="text-12 text-ink-secondary mb-1.5">
+          <div className="text-ui-label text-ink-secondary mb-1.5">
             {cards.length > 0
               ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
               : "No card on file"}
@@ -7600,7 +7615,7 @@ function CustomerBillingSummary({
                 return (
                   <div
                     key={i}
-                    className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
+                    className="py-1 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
                   >
                     {" "}
                     <span
@@ -7614,7 +7629,7 @@ function CustomerBillingSummary({
                       {fmtCurrency(p.amount)}
                     </span>{" "}
                     {(rowRefund.partial || (!isCollected && !isRefund)) && (
-                      <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
+                      <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-ui-caption text-ink-secondary uppercase">
                         {rowRefund.partial
                           ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
                           : p.status}
@@ -7632,7 +7647,7 @@ function CustomerBillingSummary({
                 );
               })
             ) : (
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-label text-ink-secondary">
                 No transactions yet
               </div>
             )}
@@ -7641,10 +7656,10 @@ function CustomerBillingSummary({
       )}
       {displayedAnnualPrepayTerm && (
         <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-          <div className="text-12 font-medium text-zinc-900">
+          <div className="text-ui-label font-medium text-zinc-900">
             {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
           </div>
-          <div className="text-11 text-ink-secondary mt-0.5">
+          <div className="text-ui-caption text-ink-secondary mt-0.5">
             Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
             {" · "}
             {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
@@ -7653,7 +7668,7 @@ function CustomerBillingSummary({
               : ""}
           </div>
           {displayedAnnualPrepayTerm.renewalDecision && (
-            <div className="text-11 text-ink-secondary mt-0.5">
+            <div className="text-ui-caption text-ink-secondary mt-0.5">
               Decision:{" "}
               {displayedAnnualPrepayTerm.renewalDecision.replace("_", " ")}
             </div>
@@ -7680,7 +7695,7 @@ function CustomerBillingSummary({
                 className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-12 font-medium text-zinc-900 truncate">
+                  <div className="text-ui-label font-medium text-zinc-900 truncate">
                     {plan.serviceType}
                     {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
                   </div>
@@ -7688,12 +7703,12 @@ function CustomerBillingSummary({
                     {active ? "Active" : "Used"}
                   </Badge>
                 </div>
-                <div className="text-11 text-ink-secondary mt-1">
+                <div className="text-ui-caption text-ink-secondary mt-1">
                   {plan.usedVisits} of {plan.paidVisits} used
                   {active ? ` · ${plan.remainingVisits} remaining` : ""}
                   {" · "}${plan.perVisitAmount.toFixed(2)}/visit
                 </div>
-                <div className="text-11 text-ink-secondary mt-0.5">
+                <div className="text-ui-caption text-ink-secondary mt-0.5">
                   Total ${plan.seriesTotal.toFixed(2)}
                   {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
                   {plan.nextVisitDate
@@ -7711,7 +7726,7 @@ function CustomerBillingSummary({
           {invoices.slice(0, 3).map((inv, i) => (
             <div
               key={i}
-              className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between"
+              className="py-1 text-ui-label border-b border-hairline border-zinc-200/60 flex justify-between"
             >
               {" "}
               <span className="u-nums text-zinc-900">
@@ -7719,7 +7734,7 @@ function CustomerBillingSummary({
               </span>{" "}
               <span
                 className={cn(
-                  "font-medium uppercase tracking-label text-10",
+                  "font-medium ui-label text-ui-caption",
                   INVOICE_STATUS_TEXT[invoiceStatusTone(inv)],
                 )}
               >
@@ -7753,7 +7768,7 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
   } = payer;
   return (
     <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-      <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
+      <div className="text-ui-caption ui-label text-ink-tertiary mb-1">
         Default Bill-To (third-party payer)
       </div>
       <div className="flex items-center gap-2 flex-wrap">
@@ -7762,7 +7777,7 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
           value={c.payerId ? String(c.payerId) : ""}
           disabled={payerSaving || !isAdmin}
           onChange={(e) => handlePayerSelect(e.target.value)}
-          className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
+          className="h-9 px-3 text-ui-body bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
         >
           <option value="">Customer pays (self)</option>
           {payers.map((p) => (
@@ -7776,12 +7791,12 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
           {isAdmin && <option value="__new__">＋ New payer…</option>}
         </Select>
         {payerSaving && (
-          <span className="text-12 text-ink-tertiary">Saving…</span>
+          <span className="text-ui-label text-ink-tertiary">Saving…</span>
         )}
       </div>
       {showNewPayer && isAdmin && (
         <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
-          <div className="text-12 font-medium text-zinc-900 mb-2">
+          <div className="text-ui-label font-medium text-zinc-900 mb-2">
             New payer
           </div>
           {[
@@ -7806,21 +7821,21 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
                   field.key === "apEmail" ? "block mb-1" : "block mb-2"
                 }
               >
-                <span className="u-label text-ink-tertiary block mb-1">
+                <span className="ui-label text-ink-tertiary block mb-1">
                   {field.label}
                 </span>
-                <input
+                <Input
                   type={field.type}
                   value={newPayer[field.key]}
                   onChange={(e) =>
                     setNewPayer((p) => ({ ...p, [field.key]: e.target.value }))
                   }
                   placeholder={field.placeholder}
-                  className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                  className="w-full h-9 px-3 text-ui-body bg-white border-hairline border-zinc-300 rounded-sm"
                 />
               </label>
               {field.key === "apEmail" && (
-                <div className="text-12 text-ink-secondary mb-2">
+                <div className="text-ui-label text-ink-secondary mb-2">
                   Without an email, invoices to this payer can’t be delivered
                   until one is added in Finance → Payers.
                 </div>
@@ -7828,24 +7843,24 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
             </div>
           ))}
           {newPayerError && (
-            <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
+            <div className="text-ui-label text-alert-fg mb-2">{newPayerError}</div>
           )}
           <div className="flex items-center gap-2">
-            <button
+            <button data-ui-text-action
               type="button"
               onClick={saveNewPayer}
               disabled={newPayerSaving || !newPayer.displayName.trim()}
-              className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
+              className="h-9 px-3 text-ui-body font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
             >
               {newPayerSaving ? "Saving…" : "Create & select"}
             </button>
-            <button
+            <button data-ui-text-action
               type="button"
               onClick={() => {
                 setShowNewPayer(false);
                 setNewPayerError("");
               }}
-              className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
+              className="h-9 px-3 text-ui-body text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
             >
               Cancel
             </button>
@@ -7853,11 +7868,11 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
         </div>
       )}
       {newPayerNotice && (
-        <div className="text-12 text-ink-secondary mt-1.5">
+        <div className="text-ui-label text-ink-secondary mt-1.5">
           {newPayerNotice}
         </div>
       )}
-      <div className="text-12 text-ink-secondary mt-1.5">
+      <div className="text-ui-label text-ink-secondary mt-1.5">
         Routes every invoice for this account to a builder / property manager
         instead of the customer. A single job can override this on the
         appointment. Manage payers in Finance → Payers.
@@ -7928,13 +7943,13 @@ function CustomerRecipientDetails({
               key={label}
               className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm"
             >
-              <div className="text-10 uppercase tracking-label text-ink-tertiary">
+              <div className="text-ui-caption ui-label text-ink-tertiary">
                 {label}
               </div>
-              <div className="text-12 font-medium text-zinc-900 mt-1">
+              <div className="text-ui-label font-medium text-zinc-900 mt-1">
                 {names.find(Boolean)}
               </div>
-              <div className="text-12 text-ink-secondary break-all">
+              <div className="text-ui-label text-ink-secondary break-all">
                 {contacts.find(Boolean)}
               </div>
             </div>
@@ -7942,10 +7957,10 @@ function CustomerRecipientDetails({
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
           <label className="block">
-            <span className="u-label text-ink-tertiary block mb-1">
+            <span className="ui-label text-ink-tertiary block mb-1">
               Billing contact name
             </span>
-            <input
+            <Input
               id="c360-billing-contact-name"
               name="billingContactName"
               value={recipientPrefsDraft.billingContactName}
@@ -7957,14 +7972,14 @@ function CustomerRecipientDetails({
                 }))
               }
               placeholder="Landlord, AP contact, property manager"
-              className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+              className="block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
             />
           </label>
           <label className="block">
-            <span className="u-label text-ink-tertiary block mb-1">
+            <span className="ui-label text-ink-tertiary block mb-1">
               Billing recipient email
             </span>
-            <input
+            <Input
               id="c360-billing-recipient-email"
               name="billingEmail"
               value={recipientPrefsDraft.billingEmail}
@@ -7977,12 +7992,12 @@ function CustomerRecipientDetails({
               }
               type="email"
               placeholder={c.email || "billing@example.com"}
-              className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+              className="block w-full bg-white text-ui-body text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
             />
           </label>
         </div>
         <div className="flex items-center justify-between gap-3 mb-3">
-          <div className="text-12 text-ink-secondary">
+          <div className="text-ui-label text-ink-secondary">
             Invoices and receipts use the billing email when set. Appointment
             reminders and service reports use the on-location contact when
             present.
@@ -8000,7 +8015,7 @@ function CustomerRecipientDetails({
           </Button>
         </div>
         {recipientPrefsErr && (
-          <div className="mb-3 text-12 text-alert-fg">{recipientPrefsErr}</div>
+          <div className="mb-3 text-ui-label text-alert-fg">{recipientPrefsErr}</div>
         )}
         {!embedded &&
           [
@@ -8085,10 +8100,10 @@ function CustomerRecipientDetails({
                 }
               />
               <div>
-                <div className="text-12 font-medium text-zinc-900">
+                <div className="text-ui-label font-medium text-zinc-900">
                   {field.title}
                 </div>
-                <div className="text-12 text-ink-secondary">
+                <div className="text-ui-label text-ink-secondary">
                   {field.description}
                 </div>
               </div>
@@ -8135,12 +8150,12 @@ function CustomerConversation({
       <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
       <div className="flex flex-col gap-1.5 mb-3">
         {commsLoading && (
-          <div className="text-ink-secondary text-13 text-center py-5">
+          <div className="text-ink-secondary text-ui-body text-center py-5">
             Loading messages…
           </div>
         )}
         {commsErr && (
-          <div className="text-alert-fg text-13 text-center py-5">
+          <div className="text-alert-fg text-ui-body text-center py-5">
             {commsErr}
           </div>
         )}
@@ -8158,7 +8173,7 @@ function CustomerConversation({
           );
         })}
         {!commsLoading && !commsErr && commsLoaded && comms.length === 0 && (
-          <div className="text-ink-secondary text-13 text-center py-5">
+          <div className="text-ink-secondary text-ui-body text-center py-5">
             No messages
           </div>
         )}
@@ -8193,7 +8208,7 @@ function CustomerConversation({
           {" "}
           <div className="flex gap-2">
             {" "}
-            <input
+            <Input
               id="c360-sms-reply"
               name="smsReply"
               value={smsReply}
@@ -8208,14 +8223,14 @@ function CustomerConversation({
                   sendSms();
                 }
               }}
-              className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
+              className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-ui-body text-zinc-900 u-focus-ring"
             />{" "}
             <Button onClick={sendSms} disabled={sendingSms || !smsReply.trim()}>
               {sendingSms ? "…" : "Send"}
             </Button>{" "}
           </div>
           {smsErr && (
-            <div className="mt-1.5 text-12 text-alert-fg">{smsErr}</div>
+            <div className="mt-1.5 text-ui-label text-alert-fg">{smsErr}</div>
           )}
         </div>
       )}
@@ -8229,7 +8244,7 @@ function CustomerConversation({
           {interactions.slice(0, 10).map((n, i) => (
             <div
               key={i}
-              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-12"
+              className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-ui-label"
             >
               {" "}
               <div className="flex justify-between mb-1">
@@ -8237,7 +8252,7 @@ function CustomerConversation({
                 <span className="font-medium text-zinc-900">
                   {n.interaction_type}: {n.subject}
                 </span>{" "}
-                <span className="text-ink-secondary text-10">
+                <span className="text-ink-secondary text-ui-caption">
                   {timeAgo(n.created_at)}
                 </span>{" "}
               </div>
@@ -8276,12 +8291,12 @@ function CustomerProfileStyles() {
 function CustomerProfileActionError({ error }) {
   return (
     error && (
-      <div
-        role="alert"
+      <ActionFeedback
+        error
         className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm"
       >
         {error}
-      </div>
+      </ActionFeedback>
     )
   );
 }
@@ -8319,7 +8334,7 @@ function CustomerWorkspacePresentation({
     customerId,
   } = headerProps;
   return (
-    <div className="c360-embedded">
+    <UiSurface density="comfortable" className="c360-embedded">
       <div
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
@@ -8409,7 +8424,7 @@ function CustomerWorkspacePresentation({
         </div>
       </div>
       {dialogs}
-    </div>
+    </UiSurface>
   );
 }
 
@@ -8425,9 +8440,10 @@ function CustomerOverlayPresentation({
   actions,
   dialogs,
 }) {
+  const density = useUiDensity();
   const { onClose, setActiveTab } = headerProps;
   return createPortal(
-    <div
+    <div data-ui-density={density}
       className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
       onClick={onClose}
     >
@@ -9512,7 +9528,7 @@ function CustomerProfilePending({
         onClick={(e) => e.stopPropagation()}
       >
         {loading ? (
-          <div className="text-ink-secondary text-center py-16 text-13">
+          <div className="text-ink-secondary text-center py-16 text-ui-body">
             Loading customer profile…
           </div>
         ) : (

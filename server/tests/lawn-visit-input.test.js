@@ -1,5 +1,6 @@
 const visit = require('../services/lawn-visit-input');
-const photo = (data, zone) => ({ data, mimeType: 'image/jpeg', ...(zone ? { zone } : {}) });
+const Ajv = require('ajv');
+const photo = (data, zone) => ({ data: Buffer.from(data).toString('base64'), mimeType: 'image/jpeg', ...(zone ? { zone } : {}) });
 
 function walkSchema(node, path, problems) {
   if (!node || typeof node !== 'object') return;
@@ -19,6 +20,16 @@ describe('response schema', () => {
     walkSchema(visit.RESPONSE_SCHEMA, 'root', problems);
     expect(problems).toEqual([]);
     expect(visit.RESPONSE_SCHEMA.properties.scores.properties.turf_density.properties.determinable).toEqual({ type: 'boolean' });
+  });
+
+  test.each([
+    ['turf_density', 0, 100, -1, 101],
+    ['weed_coverage', 0, 100, -1, 101],
+    ['color_health', 1, 10, 0, 11],
+  ])('%s rejects values outside its assessment units', (key, minimum, maximum, below, above) => {
+    const validate = new Ajv().compile(visit.RESPONSE_SCHEMA.properties.scores.properties[key]);
+    for (const value of [minimum, maximum]) expect(validate({ determinable: true, value })).toBe(true);
+    for (const value of [below, above, 1.5, '5', null]) expect(validate({ determinable: true, value })).toBe(false);
   });
 });
 
@@ -42,6 +53,11 @@ describe('prompt composition', () => {
     for (const phrase of ['NAMING GATE', 'HARD CAP', 'FALSE-PRECISION', 'photo_refs', 'determinable false', 'never guess "none"', 'Photo 1']) {
       expect(visit.SYSTEM_PROMPT).toContain(phrase);
     }
+    expect(visit.SYSTEM_PROMPT).not.toContain(require('../services/lawn-diagnostic-prompt').AUTO_RELEASE_RULE);
+    expect(visit.SYSTEM_PROMPT).toContain('This field\nstays internal to the assessment run.');
+    expect(visit.SYSTEM_PROMPT).toContain('customer prose is derived server-side only after technician review');
+    expect(visit.SYSTEM_PROMPT).toContain('Confirmation and customer delivery wait for every required score.');
+    expect(visit.SYSTEM_PROMPT).toContain('the references and photo labels preserve each location.');
   });
 });
 
@@ -59,6 +75,19 @@ describe('photo contract', () => {
     expect(visit.photoTypeForZone(null)).toBe('general');
     expect(visit.photoLabel(0, 'front')).toBe('Photo 1 (front)');
     expect(visit.photoLabel(1, null)).toBe('Photo 2');
+  });
+
+  test('rejects malformed base64, nested data URLs, unsupported MIME types and oversized photos', () => {
+    for (const data of [' ', 'YWJj\n', 'YW?j', 'A=AA', 'data:image/jpeg;base64,YWJj']) {
+      expect(visit.validateVisitPhotos([{ data }]).error).toMatch(/base64/i);
+    }
+    for (const mimeType of ['text/html', 'image/svg+xml', 'image/heic', '']) {
+      expect(visit.validateVisitPhotos([{ ...photo('a'), mimeType }]).error).toMatch(/JPEG, PNG, or WebP/);
+    }
+    const maxBytes = require('../utils/request-photo-validation').MAX_PHOTO_BYTES;
+    expect(visit.validateVisitPhotos([photo(Buffer.alloc(maxBytes + 1))]).error).toMatch(/5 MB/);
+    expect(visit.validateVisitPhotos([photo(Buffer.alloc(maxBytes))]).error).toBeNull();
+    expect(visit.validateVisitPhotos([{ data: photo('a').data }]).error).toBeNull();
   });
 });
 
@@ -84,5 +113,13 @@ describe('prompt input digest', () => {
     expect(visit.contextHash({ photos: [{ ...photo('a'), mimeType: 'image/png' }, photo('b')], photoZones: [null, null], visionContext: { season: 'peak' } })).not.toBe(base);
     expect(visit.contextHash({ photos, photoZones: [null, null], visionContext: { season: 'dormant' } })).not.toBe(base);
   });
-});
 
+  test('re-encoding the same image bytes does not change their identity', () => {
+    const original = { photos: [photo('image bytes')], photoZones: ['front'] };
+    const expected = visit.contextHash(original);
+    const unpadded = original.photos[0].data.replace(/=+$/, '');
+    expect(visit.contextHash({ ...original, photos: [{ ...original.photos[0], data: unpadded }] })).toBe(expected);
+    expect(visit.contextHash({ ...original, photos: [{ ...original.photos[0], data: `${unpadded}\n` }] })).toBe(expected);
+    expect(visit.contextHash({ ...original, photos: [photo('different bytes')] })).not.toBe(expected);
+  });
+});
