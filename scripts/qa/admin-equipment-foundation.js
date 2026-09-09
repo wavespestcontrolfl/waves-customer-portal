@@ -1172,6 +1172,289 @@ async function writes(page, server, state, report, device) {
   await verifyCalibration.waitFor({ state: "hidden" });
   await page.getByText("Field verified", { exact: true }).waitFor();
 }
+async function analyticsIndependence(page, server, state) {
+  for (const key of [
+    "GET /api/admin/equipment-maintenance/alerts",
+    "GET /api/admin/equipment-maintenance",
+    "GET /api/admin/equipment-maintenance/analytics/overview",
+  ]) {
+    for (const mode of ["failure", "pending"]) {
+      const matches = (request) =>
+        `${request.method()} ${new URL(request.url()).pathname}` === key;
+      let response;
+      if (mode === "failure") {
+        state.failures.add(key);
+        response = page.waitForResponse((r) => matches(r.request()) && r.status() === 503);
+      } else {
+        state.hold = { key };
+        state.hold.promise = new Promise((resolve) => { state.hold.release = resolve; });
+        response = page.waitForRequest(matches);
+      }
+      try {
+        await page.goto(server.baseUrl + "/admin/equipment?tab=analytics");
+        await response;
+        await page.getByText("Cost of Ownership", { exact: true }).waitFor();
+        await page.getByRole("row").filter({ hasText: equipment.name }).first().waitFor();
+        assert.equal(await page.getByText("Loading equipment analytics…", { exact: true }).isVisible(), false);
+        assert.equal(await page.getByRole("alert").filter({ hasText: "Could not load fleet:" }).count(), 0);
+        assert.equal(await page.getByRole("alert").filter({ hasText: "Could not load analytics:" }).count(), 0);
+        state.checks.push(`Analytics stays available during ${key} ${mode}`);
+      } finally {
+        state.failures.delete(key);
+        if (state.hold) {
+          const released = page.waitForResponse((r) => matches(r.request()));
+          state.hold.release();
+          state.hold = null;
+          await released;
+        }
+      }
+    }
+  }
+}
+async function readsAndNavigation(page, server, state, report, device) {
+  await analyticsIndependence(page, server, state);
+  for (const [tab, key, message, ready] of [
+    [
+      "assets",
+      "GET /api/admin/equipment/equipment",
+      "Could not load equipment:",
+      equipment.name,
+    ],
+    [
+      "maintenance",
+      "GET /api/admin/equipment-maintenance",
+      "Could not load fleet:",
+      equipment.name,
+    ],
+    [
+      "calibrations",
+      "GET /api/admin/equipment-systems",
+      "Could not load equipment systems:",
+      "Equipment Calibration",
+    ],
+    [
+      "calibrations",
+      "GET /api/admin/equipment-systems/reconciliation",
+      "Could not load equipment reconciliation:",
+      "Equipment Calibration",
+    ],
+    [
+      "tank-mixes",
+      "GET /api/admin/equipment/tank-mixes",
+      "Could not load tank mixes.",
+      "Synthetic tank mix",
+    ],
+    [
+      "job-costs",
+      "GET /api/admin/equipment/job-costs/summary",
+      "Could not load job costs:",
+      "Avg Margin",
+    ],
+    [
+      "analytics",
+      "GET /api/admin/equipment-maintenance/analytics/costs",
+      "Could not load analytics:",
+      "Cost of Ownership",
+    ],
+  ]) {
+    state.failures.add(key);
+    await page.goto(
+      server.baseUrl + `/admin/equipment?tab=${tab}&source=synthetic`,
+    );
+    const alert = page.getByRole("alert").filter({ hasText: message });
+    await alert.waitFor();
+    await geometry(page, state, tab + "-read-error");
+    if (tab === "assets") await shot(page, report, device + "-read-error");
+    const before = state.requests.filter((r) => r.key === key).length;
+    state.failures.delete(key);
+    await alert.getByRole("button", { name: /Try again|Retry/ }).click();
+    await alert.waitFor({ state: "hidden" });
+    await page.getByText(ready, { exact: true }).first().waitFor();
+    assert.ok(
+      state.requests.filter((r) => r.key === key).length > before,
+      key + " retries",
+    );
+    state.checks.push(key + " failure and read retry");
+  }
+  state.empty = true;
+  for (const [tab, text] of [
+    ["assets", "No equipment recorded."],
+    ["maintenance", "No equipment found"],
+    ["tank-mixes", "No tank mixes configured"],
+    ["calibrations", "No equipment systems are available for calibration."],
+  ]) {
+    await page.goto(server.baseUrl + `/admin/equipment?tab=${tab}`);
+    await page.getByText(text, { exact: false }).waitFor();
+    assert.equal(
+      await page.locator("main").getByRole("alert").count(),
+      0,
+      tab + " true empty",
+    );
+    state.checks.push(tab + " empty");
+  }
+  state.empty = false;
+  for (const [alias, group] of [
+    ["equipment", "Assets"],
+    ["fleet", "Maintenance"],
+    ["vehicles", "Maintenance"],
+    ["mileage", "Maintenance"],
+    ["invalid", "Assets"],
+  ]) {
+    await page.goto(
+      server.baseUrl + `/admin/equipment?tab=${alias}&source=synthetic`,
+    );
+    await page.getByText(equipment.name, { exact: true }).waitFor();
+    assert.equal(
+      await page
+        .getByRole("navigation", { name: "Equipment section", exact: true })
+        .getByRole("button", { name: group, exact: true })
+        .getAttribute("aria-current"),
+      "page",
+    );
+  }
+  await section(page, "Maintenance");
+  const historyLength = await page.evaluate(() => history.length);
+  const maintenanceTab = page.getByRole("tab", {
+    name: "Maintenance",
+    exact: true,
+  });
+  await maintenanceTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.getByLabel("Equipment system", { exact: true }).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("tab"), "calibrations");
+  assert.equal(new URL(page.url()).searchParams.get("source"), "synthetic");
+  assert.equal(
+    await page.evaluate(() => history.length),
+    historyLength,
+    "Leaf selection replaces history",
+  );
+  await page.keyboard.press("Home");
+  await page.getByText(equipment.name, { exact: true }).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("tab"), "maintenance");
+  await page.reload();
+  await page.getByText(equipment.name, { exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByRole("tab", { name: "Maintenance", exact: true })
+      .getAttribute("aria-selected"),
+    "true",
+  );
+  await page.goto(server.baseUrl + "/admin/equipment?tab=analytics");
+  await page.getByText("Cost of Ownership", { exact: true }).waitFor();
+  await page.goBack();
+  await page.getByText(equipment.name, { exact: true }).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("tab"), "maintenance");
+  await page.goForward();
+  await page.getByText("Cost of Ownership", { exact: true }).waitFor();
+  state.checks.push(
+    "Aliases, keyboard tabs, unrelated query preservation, refresh and history",
+  );
+  for (const role of ["technician", "csr"]) {
+    state.role = role;
+    const before = state.requests.length;
+    await page.goto(server.baseUrl + "/admin/equipment?tab=analytics");
+    await page.getByText(equipment.name, { exact: true }).waitFor();
+    assert.equal(
+      await page
+        .getByRole("navigation", { name: "Equipment section", exact: true })
+        .getByRole("button", { name: "Costs", exact: true })
+        .count(),
+      0,
+    );
+    assert.equal(
+      state.requests
+        .slice(before)
+        .some((r) =>
+          /\/job-costs|\/analytics\/(costs|reliability)/.test(r.key),
+        ),
+      false,
+      role + " does not fetch owner-only panels",
+    );
+    await section(page, "Maintenance", "Calibrations");
+    await page.getByLabel("Equipment system", { exact: true }).waitFor();
+    state.checks.push(
+      role + " uses verified role despite cached admin identity",
+    );
+  }
+  state.role = "admin";
+  for (const [tab, key, open, message, ready] of [
+    [
+      "maintenance",
+      `GET /api/admin/equipment-maintenance/${id}`,
+      () =>
+        page
+          .getByRole("button", { name: "Open " + equipment.name, exact: true })
+          .click(),
+      "Could not load equipment details:",
+      () =>
+        page.getByRole("button", { name: "Record Maintenance", exact: true }),
+    ],
+    [
+      "calibrations",
+      `GET /api/admin/equipment-systems/${systemId}`,
+      () =>
+        page
+          .getByLabel("Equipment system", { exact: true })
+          .selectOption(systemId),
+      "Could not load current calibration:",
+      () => page.getByText("Current active calibration", { exact: true }),
+    ],
+  ]) {
+    state.failures.add(key);
+    await page.goto(server.baseUrl + `/admin/equipment?tab=${tab}`);
+    await open();
+    const alert = page.getByRole("alert").filter({ hasText: message });
+    await alert.waitFor();
+    await geometry(page, state, tab + "-detail-error");
+    state.failures.delete(key);
+    await alert.getByRole("button", { name: "Try again", exact: true }).click();
+    await ready().waitFor();
+    await alert.waitFor({ state: "hidden" });
+    state.checks.push(tab + " detail failure and retry");
+  }
+  state.jobSummary = {
+    totalJobs: 1,
+    avgRevenue: 0,
+    avgCost: null,
+    avgMargin: null,
+  };
+  await page.goto(server.baseUrl + "/admin/equipment?tab=job-costs");
+  await page.getByText("Avg Revenue/Job", { exact: true }).waitFor();
+  assert.match(
+    await page
+      .getByText("Avg Revenue/Job", { exact: true })
+      .locator("..")
+      .innerText(),
+    /\$0\.00/,
+  );
+  assert.match(
+    await page
+      .getByText("Avg Cost/Job", { exact: true })
+      .locator("..")
+      .innerText(),
+    /—/,
+  );
+  assert.match(
+    await page
+      .getByText("Avg Margin", { exact: true })
+      .locator("..")
+      .innerText(),
+    /—/,
+  );
+  state.checks.push("Missing job metrics remain distinct from zero");
+  state.jobSummary = null;
+  state.assetName =
+    "Synthetic asset with a long equipment name and identifier " +
+    "QA0123456789".repeat(5);
+  await page.goto(server.baseUrl + "/admin/equipment");
+  await page.getByText(state.assetName, { exact: true }).waitFor();
+  await widths(page, state, "long-asset-name");
+  await shot(page, report, device + "-long-asset-name");
+  state.assetName = null;
+  state.checks.push(
+    "Long asset name preserves visible controls and page bounds",
+  );
+}
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const sourceFiles = [
@@ -1231,6 +1514,7 @@ async function main() {
         await install(page, server, state);
         await views(page, server, state, report, device);
         await writes(page, server, state, report, device);
+        await readsAndNavigation(page, server, state, report, device);
         assert.deepEqual(state.pageErrors, [], "Page errors");
         assert.deepEqual(state.unmatched, [], "Unmatched API");
         assert.deepEqual(
