@@ -60,6 +60,19 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   } catch {
     return leaveOpen('packet_owned');
   }
+  // A project-backed visit (completion profile requiresProject /
+  // projectBacked: special projects, rodent exclusion, …) completes ONLY
+  // through its project's close route (completeProjectBackedService) — the
+  // canonical completion refuses it outright (project_required_completion)
+  // before the issued posture is even derived, and the project report's
+  // send-with-invoice delivery is not the project's close. Excluded here
+  // explicitly, with its own audited reason, rather than sending it into a
+  // refusal it can never pass (GitHub r5 P2 #4127); the visit stays open
+  // for the project close. A profile lookup failure surfaces as an error
+  // outcome (audited by the caller), never as a closeout.
+  const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+  const profile = await resolveCompletionProfileForScheduledService(svc, conn);
+  if (profile?.requiresProject || profile?.projectBacked) return leaveOpen('project_backed');
   return { svc, reason: null, visit: svc };
 }
 
@@ -86,34 +99,41 @@ async function resumableIssuedCloseoutAttempt(conn, { serviceId, idempotencyKey 
 async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, conn = db, today = etDateString() } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
+  // One audit row per linked-visit outcome — completed, refused with the
+  // reason, or FAILED (a thrown resumability lookup / completion, including
+  // the supported post-commit failure whose visit may already be completed
+  // and back-linked) — so rollout diagnostics tell an intentional no-op from
+  // a failure (GitHub r5 P2 #4127). The operator behind the send / payment
+  // is the actor; an automated trigger (scheduled sends, collections, the
+  // Zelle reconciler) is the system — never the visit's technician.
+  // Declared outside the try so the catch still knows which linked visit
+  // the failure belongs to.
+  let invoice = null;
+  let linkedVisitId = null;
+  let resuming = false;
+  const audit = async ({ closed, visitId, resumed = false, status = null, code = null, error = null }) => {
+    try {
+      const { recordAuditEvent } = require('./audit-log');
+      await recordAuditEvent({
+        actor_type: actorTechnicianId ? 'admin' : 'system',
+        actor_id: actorTechnicianId || null,
+        action: closed ? 'visit.completed_on_invoice_issued' : 'visit.completion_on_invoice_issued_refused',
+        resource_type: 'scheduled_services',
+        resource_id: visitId,
+        metadata: { invoiceId: invoice?.id || invoiceId, trigger, resumed, status, code, ...(error ? { error } : {}) },
+      });
+    } catch (auditErr) {
+      logger.warn(`[invoice-issued-closeout] audit write failed for visit ${visitId}: ${auditErr.message}`);
+    }
+  };
   try {
-    const invoice = await conn('invoices').where({ id: invoiceId }).first();
+    invoice = await conn('invoices').where({ id: invoiceId }).first();
     if (!invoice || String(invoice.status) === 'void') return { closed: false, reason: 'no_invoice' };
     const label = `invoice ${invoice.invoice_number || invoice.id} ${trigger}`;
     const idempotencyKey = `invoice-issued:${invoice.id}`;
-    // One audit row per linked-visit outcome — completed, or refused with
-    // the reason — so rollout diagnostics tell an intentional no-op from a
-    // failure. The operator behind the send / payment is the actor; an
-    // automated trigger (scheduled sends, collections, the Zelle
-    // reconciler) is the system — never the visit's technician.
-    const audit = async ({ closed, visitId, resumed = false, status = null, code = null }) => {
-      try {
-        const { recordAuditEvent } = require('./audit-log');
-        await recordAuditEvent({
-          actor_type: actorTechnicianId ? 'admin' : 'system',
-          actor_id: actorTechnicianId || null,
-          action: closed ? 'visit.completed_on_invoice_issued' : 'visit.completion_on_invoice_issued_refused',
-          resource_type: 'scheduled_services',
-          resource_id: visitId,
-          metadata: { invoiceId: invoice.id, trigger, resumed, status, code },
-        });
-      } catch (auditErr) {
-        logger.warn(`[invoice-issued-closeout] audit write failed for visit ${visitId}: ${auditErr.message}`);
-      }
-    };
     const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today });
+    linkedVisitId = resolved.visit?.id || null;
     let svc = resolved.svc;
-    let resuming = false;
     if (!svc) {
       const own = resolved.reason === 'visit_completed'
         && await resumableIssuedCloseoutAttempt(conn, { serviceId: resolved.visit.id, idempotencyKey });
@@ -158,8 +178,15 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
     await audit({ closed, visitId: svc.id, resumed: resuming, status: result?.status || null, code: result?.body?.code || null });
     return { closed, reason: closed ? null : (result?.body?.code || `status_${result?.status}`), visitId: svc.id, resumed: resuming };
   } catch (err) {
-    logger.error(`[invoice-issued-closeout] failed for invoice ${invoiceId}: ${err.message}`);
-    return { closed: false, reason: 'error', error: err.message };
+    logger.error(`[invoice-issued-closeout] failed for invoice ${invoiceId}${linkedVisitId ? ` (visit ${linkedVisitId})` : ''}: ${err.message}`);
+    // A linked visit had resolved: its outcome is a failure, recorded like
+    // any other — the completion may have committed and back-linked before
+    // throwing (its attempt stays resumable; the next send / payment of
+    // this invoice, or the resend-receipt route, retries it).
+    if (linkedVisitId) {
+      await audit({ closed: false, visitId: linkedVisitId, resumed: resuming, code: 'error', error: String(err.message || err).slice(0, 500) });
+    }
+    return { closed: false, reason: 'error', error: err.message, visitId: linkedVisitId };
   }
 }
 

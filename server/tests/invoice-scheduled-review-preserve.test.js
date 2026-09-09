@@ -209,13 +209,18 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
 //
 // db() call sequence inside markDeliverySent:
 //   1. invoice read   2. finalize update→returning   3. activity_log insert
-function mockMarkDeliverySequence(invoice, { finalized = true } = {}) {
+//   4. (review block, AFTER the invoice-issued closeout) invoice linkage re-read
+// Every `invoices` read from call 3 on answers with the post-closeout row
+// (`postCloseoutRead` overrides its linkage); other tables get a permissive chain.
+function mockMarkDeliverySequence(invoice, { finalized = true, postCloseoutRead = {} } = {}) {
   db
     .mockReturnValueOnce(chain({ first: invoice }))
     .mockReturnValueOnce(
       chain({ returning: finalized ? [{ ...invoice, status: 'sent', scheduled_request_review: false }] : [] }),
     )
-    .mockReturnValue(chain());
+    .mockImplementation((table) => (table === 'invoices'
+      ? chain({ first: { service_record_id: invoice.service_record_id, status: 'sent', ...postCloseoutRead } })
+      : chain()));
 }
 
 describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
@@ -308,6 +313,22 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
 
     expect(result.status).toBe('sent');
     expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'sent', actorTechnicianId: 'staff-1' });
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+  });
+
+  // GitHub r5 P1 #4127: the closeout can commit the record and this
+  // invoice's back-link and then throw in post-commit work — it reports
+  // closed: false and the attempt stays resumable. The review decision must
+  // read the DURABLE linkage after the closeout, never the pre-closeout row
+  // (which still says standalone).
+  test('a closeout that committed the back-link but reported closed: false still defers — the linkage is re-read after it', async () => {
+    closeOutVisitForIssuedInvoice.mockResolvedValueOnce({ closed: false, reason: 'error', visitId: 'svc-1' });
+    mockMarkDeliverySequence(scheduledInvoice({ service_record_id: null }), { postCloseoutRead: { service_record_id: 'sr-new', status: 'sent' } });
+
+    const result = await InvoiceService.markDeliverySent('inv-1', { sms: true, source: 'scheduled_send' });
+
+    expect(result.status).toBe('sent');
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(1);
     expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 

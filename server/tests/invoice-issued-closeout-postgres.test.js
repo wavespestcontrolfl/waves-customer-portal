@@ -198,6 +198,48 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(mockCompleteScheduledService).not.toHaveBeenCalled();
   });
 
+  test('a project-backed visit is excluded with its own audited reason — it completes only through the project close (GitHub r5 P2)', async () => {
+    const catalogId = randomUUID();
+    const key = `fixture_${catalogId.slice(0, 8)}`;
+    await trx('services').insert({ id: catalogId, name: 'Fixture Rodent Exclusion Project', service_key: key, category: 'rodent', is_active: true });
+    await trx('service_completion_profiles').insert({ service_key: key, completion_mode: 'project_required', project_type: 'rodent_exclusion', creates_service_record: true });
+    const projectVisit = await visit({ service_id: catalogId, serviceType: 'Fixture Rodent Exclusion Project' });
+    const inv = await invoice({ scheduled_service_id: projectVisit.id, serviceType: 'Fixture Rodent Exclusion Project' });
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY })).toMatchObject({ svc: null, reason: 'project_backed', visit: expect.objectContaining({ id: projectVisit.id }) });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', actorTechnicianId: 'admin-1', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'project_backed', visitId: projectVisit.id });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledTimes(1);
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'visit.completion_on_invoice_issued_refused', resource_id: projectVisit.id, actor_type: 'admin', actor_id: 'admin-1',
+      metadata: expect.objectContaining({ invoiceId: inv.id, trigger: 'sent', code: 'project_backed' }),
+    }));
+    expect((await trx('scheduled_services').where({ id: projectVisit.id }).first()).status).toBe('confirmed');
+  });
+
+  test('a completion that THROWS after the visit resolved is audited as a failed outcome for that visit, never silently (GitHub r5 P2)', async () => {
+    mockCompleteScheduledService.mockRejectedValueOnce(new Error('post-commit side effect exploded'));
+    const open = await visit();
+    const inv = await invoice({ scheduled_service_id: open.id });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', actorTechnicianId: 'admin-1', conn: trx, today: TODAY }))
+      .toMatchObject({ closed: false, reason: 'error', error: 'post-commit side effect exploded', visitId: open.id });
+    expect(recordAuditEvent).toHaveBeenCalledTimes(1);
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: open.id, actor_type: 'admin', actor_id: 'admin-1',
+      metadata: expect.objectContaining({ invoiceId: inv.id, trigger: 'paid', resumed: false, code: 'error', error: 'post-commit side effect exploded' }),
+    }));
+    // The resume of our own parked attempt throwing is the same failed outcome, flagged resumed.
+    recordAuditEvent.mockClear();
+    const done = await visit({ status: 'completed', date: '2040-03-01' });
+    const resumedInv = await invoice({ scheduled_service_id: done.id, date: '2040-03-01' });
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: done.id, idempotency_key: `invoice-issued:${resumedInv.id}`, status: 'side_effects_pending', request_hash: 'x' });
+    mockCompleteScheduledService.mockRejectedValueOnce(new Error('resume exploded'));
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: resumedInv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'error', visitId: done.id });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: done.id, metadata: expect.objectContaining({ code: 'error', resumed: true, error: 'resume exploded' }) }));
+    // An invoice with no visit link that throws has nothing to audit against.
+    recordAuditEvent.mockClear();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
   test('a refused completion is reported, audited as refused, and never thrown', async () => {
     mockCompleteScheduledService.mockResolvedValueOnce({ status: 409, body: { code: 'already_completed' } });
     const open = await visit();
