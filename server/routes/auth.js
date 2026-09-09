@@ -16,6 +16,7 @@ const {
   revokeRefreshSession,
   rotateRefreshSession,
 } = require('../middleware/auth');
+const { accountSavedProperties, appPropertyScopeEnabled, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 const logger = require('../services/logger');
 
 // =========================================================================
@@ -362,7 +363,7 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
       return res.status(401).json({ error: 'Invalid refresh token', code });
     }
 
-    const newToken = generateToken(rotated.customer.id, rotated.accountId, rotated.familyId);
+    const newToken = generateToken(rotated.customer.id, rotated.accountId, rotated.familyId, { propertyId: rotated.propertyId || null });
     res.json({ token: newToken, refreshToken: rotated.refreshToken });
   } catch (err) {
     // Every invalid-token case returns an explicit 401 above — anything
@@ -473,6 +474,16 @@ router.get('/me', authenticate, async (req, res, next) => {
       smsEnabled: prefs.sms_enabled,
       emailEnabled: prefs.email_enabled,
     } : null,
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the selection the
+    // middleware HONORED for this session — null when the token's claim was
+    // ignored (retired / foreign property, gate off, cancelled session).
+    // The selection the server RESOLVED for this session — the claim when
+    // honored, else the fallback it chose (a lone secondary after the primary
+    // was retired), else `closed` (every property retired) — never the raw
+    // claim alone (uncapped codex r1w P1): the client trusts this when the
+    // property list cannot be read, so it must name the same house every
+    // scoped read is about to use.
+    propertyScope: resolvedScopePayload(await resolveSessionScope(req)),
   });
   } catch (err) { next(err); }
 });
@@ -497,8 +508,22 @@ router.put('/credit-preference', authenticate, async (req, res, next) => {
 // =========================================================================
 // GET /api/auth/properties — List service properties for this login account
 // =========================================================================
+// Default: the sibling-PROFILE list (one entry per customers row on the
+// account) — what every shipped client keys on (entry.id === customer.id).
+// `?scope=saved` under GATE_APP_PROPERTY_SCOPE: the SAVED-PROPERTY list —
+// every active customer_properties row of every profile on the account, each
+// entry naming its profile AND property, plus the session's current
+// selection. Gate off ignores the parameter, so a client that asks early
+// simply gets the profile list it already understands.
 router.get('/properties', authenticate, async (req, res, next) => {
   try {
+    // A C4 cancelled read-only session is UNSCOPED end to end (its reads are
+    // customer-wide, /auth/me reports the scope disabled) — it keeps the
+    // profile list so no saved-property label dresses customer-wide visits.
+    if (req.query?.scope === 'saved' && appPropertyScopeEnabled() && req.customerInactive !== true) {
+      const { properties, selected } = await accountSavedProperties(req);
+      return res.json({ scope: 'saved', properties, selected });
+    }
     res.json({ properties: await accountPropertiesForCustomer(req.customer) });
   } catch (err) {
     next(err);
@@ -512,9 +537,12 @@ router.post('/select-property', authenticate, async (req, res, next) => {
   try {
     const schema = Joi.object({
       customerId: Joi.string().uuid().required(),
+      // Saved property on the target profile (GATE_APP_PROPERTY_SCOPE). Null
+      // or absent = that profile's primary. Ignored while the gate is off.
+      propertyId: Joi.string().uuid().allow(null),
       refreshToken: Joi.string().max(4096).required(),
     });
-    const { customerId, refreshToken: currentRefreshToken } = await schema.validateAsync(req.body);
+    const { customerId, propertyId, refreshToken: currentRefreshToken } = await schema.validateAsync(req.body);
 
     const target = await db('customers')
       .where({ id: customerId, active: true })
@@ -529,24 +557,41 @@ router.post('/select-property', authenticate, async (req, res, next) => {
       return res.status(403).json({ error: 'Property is not available for this account' });
     }
 
+    // The saved property must be the TARGET profile's and active — the same
+    // check the access-token middleware repeats on every request.
+    const scopeEnabled = appPropertyScopeEnabled();
+    let targetProperty = null;
+    if (scopeEnabled && propertyId) {
+      targetProperty = await db('customer_properties')
+        .where({ id: propertyId, customer_id: target.id, active: true })
+        .first();
+      if (!targetProperty) return res.status(404).json({ error: 'Property not found' });
+    }
+
     const refreshSession = await reissueRefreshSessionForProperty(
       currentRefreshToken,
       target.id,
       currentAccountId,
       req.customerId,
       req.authSessionId,
+      { propertyId: targetProperty ? targetProperty.id : null },
     );
     if (refreshSession.ok === false) {
       return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
     }
-    const token = generateToken(target.id, currentAccountId, refreshSession.familyId);
+    const token = generateToken(target.id, currentAccountId, refreshSession.familyId, {
+      propertyId: targetProperty ? targetProperty.id : null,
+    });
     const refreshToken = refreshSession.refreshToken;
 
     res.json({
       token,
       refreshToken,
       customer: authCustomerPayload(target),
+      // Profile list for shipped clients; the saved-property client re-reads
+      // GET /properties?scope=saved after adopting the tokens.
       properties: await accountPropertiesForCustomer(target),
+      ...(scopeEnabled ? { selected: { customerId: target.id, propertyId: targetProperty ? targetProperty.id : null } } : {}),
     });
   } catch (err) {
     next(err);

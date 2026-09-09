@@ -8,8 +8,9 @@ for new data**.
 ## Phase 1 (this PR) — additive, gated, no rewiring
 
 - **`customer_properties` table** (migration `20260629000001`): one customer →
-  many properties, each with `occupancy_type` (owner_occupied / rental_investment
-  / commercial / seasonal / vacant / unknown), `is_primary` (partial-unique: one
+  many properties, each with `occupancy_type` (owner_occupied / family_occupied
+  / rental_investment / commercial / seasonal / vacant / unknown — `family_occupied`
+  is office-set only, the call extractor's enum does not include it), `is_primary` (partial-unique: one
   per customer), address + lat/lng, and mirrored property attributes. Backfills a
   PRIMARY property per existing customer from their address (defaults
   `owner_occupied`; the schema-drift-safe backfill only mirrors columns that
@@ -25,6 +26,12 @@ for new data**.
 - **Admin API** (`admin-customers.js`): `GET/POST/PATCH /:id/properties`
   (read lazily backfills a primary; POST adds a non-primary; PATCH edits
   occupancy/label). Read is open; writes require admin.
+- **Booking anchor** (`soleActivePropertyId`): a booking with no explicit
+  property resolves the customer's sole active property. A customer with NO
+  row yet (created since the migration through a quote / lead / webhook path
+  that never read the properties) gets the primary backfilled here too, so
+  the visit-group stamp has an anchor instead of NULL. An inactive-only
+  primary stays untouched. Historical gap: `ops/agents/primary-property-backfill.js`.
 
 Service: `server/services/customer-properties.js` (pure helpers `normStreet` /
 `normalizeOccupancy` / `isNewStreet` are unit-tested in
@@ -96,3 +103,144 @@ default.
 - Still deferred: per-property on-site contact / access notes, per-property
   pricing attributes (Phase 3), and the multi-property estimate group UI
   (reuses the existing multi-home discount — owner 2026-09-06).
+
+## 2026-09-08 — App property scope (PR 1 of 4: session claim + saved-property list)
+
+The customer app scoped everything by sibling PROFILE (#3971): the session
+points at one `customers` row and every read filters on `customer_id`. That
+misses every customer whose second house is a `customer_properties` row on the
+same profile (prod 2026-09-08: 23 such customers vs 6 profile-based accounts).
+
+Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
+
+- **Session claim.** Customer access and refresh tokens carry `propertyId`
+  (the selected `customer_properties.id`). `middleware/auth` honors it only
+  when the row is the signed-in customer's and active — anything else is "no
+  selection" (`req.propertyId = null`), never a 401. A same-profile refresh
+  forwards the claim; a profile switch drops it unless the switch names one.
+- **Unified list.** `GET /auth/properties?scope=saved` returns every active
+  saved property of every profile on the account (`services/account-properties`
+  `accountSavedProperties`): entry = `{ key, customerId, propertyId, label,
+  relationship, occupancyType, address, isPrimaryProfile, isPrimaryProperty }`
+  plus `selected`. The profile list stays the default, so shipped clients see
+  no change. `POST /auth/select-property` accepts the pair
+  `{ customerId, propertyId }`; a same-profile switch re-issues the tokens
+  with the new claim.
+- **Visit rule.** `resolveSessionScope(req)` + `scopeVisitsToProperty(qb, scope)`
+  (PR 2 wires them into the schedule routes): a property's visits are the
+  customer's visits stamped with it, plus unstamped visits when it is the
+  primary. Customers with 0–1 active properties get no property predicate.
+
+### PR 2 of 4 — visits by saved property (client + schedule/tracking routes)
+
+- **Schedule routes** (`routes/schedule.js`): `GET /` and `GET /next` resolve
+  the session scope (`resolveSessionScope`) and apply the property half of the
+  visit rule (`applyPropertyPredicate`) on top of today's customer predicate;
+  the confirm and reschedule lookups do the same, so a visit at another of the
+  customer's properties is a 404 exactly like a foreign id. New
+  `GET /schedule/properties-next` (gate on only, 404 dark): one row per unified
+  entry — `{ key, customerId, propertyId, next }` — with visits assigned by
+  `assignVisitsToEntries` (unstamped → the profile's primary entry; stamped →
+  that entry; a stamp on a property no longer listed → nobody, matching what
+  the list route would show). `/account-next` is unchanged for shipped
+  clients.
+- **Tracking** (`routes/tracking.js`): the canonical tracker query takes the
+  scope (`opts.scope`) so `/tracking/active` and `/tracking/today` follow the
+  house being viewed; the pin/ETA already prefer the visit's stamped geocode.
+- **Client**: `useAuth` asks `GET /auth/properties?scope=saved`, maps saved
+  entries onto the client property shape (`id` = entry key; label = office
+  label → "Home" for the primary → street for a secondary), exposes
+  `propertyScope` + `selectedProperty`, and `switchProperty` takes a string
+  (profile id, legacy) or `{ customerId, propertyId }`. The page compares every
+  switcher against `activePropertyId` (the selection's key, else the profile),
+  keys the read cache on it, and the Visits tab reads `/schedule/properties-next`
+  under the saved scope. Preview harness: `?properties=saved[&selected=<key>]`.
+- Gate off: the server answers the profile list, the client stays in profile
+  mode, every query is byte-identical to today's.
+
+### PR 3 of 4 — appointment texts by saved property (migration + card + sender seams + shadow log)
+
+- **Schema** (`20260909000030_property_notification_prefs`): `property_notification_prefs`
+  — one row per `customer_properties` row, the five appointment toggles
+  (`appointment_confirmation`, `service_reminder_72h`, `service_reminder_24h`,
+  `tech_en_route`, `tech_arrived`) plus `appointment_notify_primary`, every
+  column NULLABLE (NULL = not chosen). No backfill: an absent row IS the
+  default, and the PRIMARY property never gets a row — it keeps reading the
+  customer's `notification_prefs` row byte-for-byte. `property_text_decisions`
+  is the ruling-R5 shadow log (below).
+- **Ruling R1 default** (`services/property-notification-prefs.js`
+  `defaultPropertyToggles`): `own_home`, `family_home` and unrecorded
+  relationships inherit the customer row; `rental_owned` and
+  `managed_for_client` start OFF for the five toggles (the 2026-09-06
+  "rentals default off" ruling); "send these to me too" always inherits.
+- **Two gates, read at call time.** `GATE_APP_PROPERTY_SCOPE` off: the new
+  table is never read and every resolver answers the customer row.
+  `GATE_APP_PROPERTY_TEXTS` off (ruling R5, shadow mode): each sender seam
+  resolves the visit's NON-primary saved property, records what the property
+  rule WOULD decide next to what the customer row DID decide, and sends on
+  the customer row. On: the property decision is enforced. A property lookup
+  that FAILS answers the customer row in shadow mode (logged) and THROWS under
+  enforcement — the seams read that as prefs-unavailable / held / retry,
+  never as the customer row's answer.
+- **Sender seams** (`resolveAppointmentPrefs` / `prefsForVisit`): reminders
+  `getReminderPrefs(customerId, { scheduledServiceId })` (every call site
+  passes its visit; the channel re-check does not need it); twilio
+  `sendServiceReminder`, `sendTechEnRoute` (new `scheduledServiceId` option,
+  threaded from track-transitions), `sendTechArrived`; appointment-email
+  `resolveRecipients(customer, { scheduledServiceId })` via `sendTemplate`
+  (notify-primary → "send these to me too"); notification-service
+  `customerPreferenceEnabled(customerId, key, { scheduledServiceId })` from
+  the bell's `appointmentId`; the consent validator's per-purpose toggle via
+  `input.appointmentId`. Delivery channels, App-first choices and quiet hours
+  stay on the customer row (#4057).
+- **Card + route.** While `GATE_APP_PROPERTY_TEXTS` is off (shadow mode) the
+  card keeps today's per-profile shape — it shows and edits the row that
+  actually sends. Once enforced, `GET /notifications/property-preferences`
+  answers one entry per SAVED property (`id` = the `/auth/properties` entry
+  key; `chosen` marks toggles the property picked vs inherited;
+  `quietByDefault`; `contactsShared: true`). `PUT
+  /notifications/property-preferences/:customerId` takes `propertyId`: a
+  non-primary property upserts its own row (contacts in the same body are
+  refused — ruling R2 pending, contacts stay per profile); the primary
+  property or no `propertyId` = today's profile write. The Visits tab's
+  Appointment-texts card follows the page's selected house.
+- **Shadow-log hygiene.** One row per (property, visit, seam) — the resolver
+  writes `ON CONFLICT … DO UPDATE` (latest decision wins, `created_at` refreshed so the review query and the prune see the newest observation) on the unique index from
+  `20260909000031`, on the ROOT db handle (never a caller's transaction),
+  only in shadow mode, and only where the two rules CAN disagree (a chosen
+  toggle, or a rental / managed house); an inheriting house with no chosen
+  toggle agrees by construction and is not logged. The 3:30 AM ET retention
+  sweep (next to stripe_webhook_events) prunes rows older than 90 days.
+- **Replays.** The scheduled-SMS executor forwards a deferred notice's
+  `scheduled_service_id` as `appointmentId`, and the deferred-replay
+  recipient recheck reads the visit-aware row, so a queued notice for a quiet
+  rental is re-judged by the property, not the profile. The call-booking
+  confirmation email resolves the property toggle before its email-only
+  slots.
+- **Shadow-log review (read-only, prod)** before flipping
+  `GATE_APP_PROPERTY_TEXTS` — one week, expect `agreed = true` for every
+  inheriting house and `false` only where a rental/managed house would go
+  quiet:
+  `SELECT source, relationship, agreed, count(*) FROM property_text_decisions
+  WHERE created_at > now() - interval '7 days' GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;`
+  Disagreements to eyeball:
+  `SELECT created_at, source, relationship, customer_decisions, property_decisions
+  FROM property_text_decisions WHERE NOT agreed ORDER BY created_at DESC LIMIT 50;`
+- **Failure posture, one rule.** An unreadable preferences row — the
+  customer row's read, or a saved property's under enforcement — is a
+  RETRYABLE hold everywhere: `safeSendAppointment` sends nothing and stamps
+  `sendOutcome.retryable` (the cancellation / series / admin-reschedule
+  callers keep their claims retryable; the admin sees "could not be read —
+  send again"; a no-show bells the office because it has no retry rail);
+  `sendTemplate` answers `held` without writing an attempt row; the
+  call-booking confirmation throws into its existing fan-out catch; en-route
+  / arrived bell the office before rethrowing (an ungrouped visit has no
+  scheduler retry lane). The scheduled-SMS replay treats a MOVE_HOLD answer
+  (now reachable because the replay names its visit) as a deferral, never a
+  terminal block.
+- **Row hygiene.** The primary never has a row: a primary flip
+  (`applyPropertyRoleProposals`) drops the promoted house's row; a profile
+  merge (`repointCustomerProperties`) re-points a moved row's `customer_id`.
+- **Deferred** — ruling R2 (on-location contacts per property) is its own
+  PR; per-house Property-tab details remain Phase C.
+

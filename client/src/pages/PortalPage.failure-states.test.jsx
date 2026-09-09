@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
@@ -19,10 +19,12 @@ vi.mock('../utils/api', () => ({
     getTermiteBond: vi.fn(),
     getLawnHealth: vi.fn(),
     getRequests: vi.fn(),
+    updateAccountCreditPreference: vi.fn(),
   },
 }));
 
 import api from '../utils/api';
+import CustomerDialogHost from '../components/brand/CustomerDialogHost';
 import { BillingTab, MyPlanTab, MyRequestsCard, ScheduleTab } from './PortalPage';
 
 const customer = {
@@ -46,6 +48,41 @@ afterEach(() => {
 });
 
 describe('authenticated portal partial failures', () => {
+  it.each([false, true])('restores credit preference %s after a failed save and permits a confirmed retry', async (initial) => {
+    api.getPayments.mockResolvedValue({ payments: [] });
+    api.getBalance.mockResolvedValue({ currentBalance: 0 });
+    api.getCards.mockResolvedValue({ cards: [] });
+    api.getNotificationPrefs.mockResolvedValue({});
+    api.updateAccountCreditPreference.mockReset()
+      .mockRejectedValueOnce(new Error('preference unavailable'))
+      .mockResolvedValueOnce({ success: true });
+    let finishRefresh;
+    const refreshCustomer = vi.fn(() => new Promise(resolve => { finishRefresh = resolve; }));
+
+    render(<>
+      <CustomerDialogHost />
+      <BillingTab customer={{ ...customer, accountCredit: 25, autoApplyAccountCredit: initial }} refreshCustomer={refreshCustomer} />
+    </>);
+
+    const toggle = await screen.findByRole('switch', { name: 'Apply my account credit to invoices automatically' });
+    fireEvent.click(toggle);
+    expect(await screen.findByText('Could not save your credit preference. Please try again.')).toBeInTheDocument();
+    expect(toggle).toHaveAttribute('aria-checked', String(initial));
+    expect(toggle).toBeEnabled();
+    expect(refreshCustomer).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'OK', exact: true }));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
+    expect(toggle).toBeDisabled();
+    fireEvent.click(toggle);
+    expect(api.updateAccountCreditPreference.mock.calls).toEqual([[!initial], [!initial]]);
+    await act(async () => finishRefresh());
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveAttribute('aria-checked', String(!initial));
+    expect(screen.queryByText('Could not save your credit preference. Please try again.')).not.toBeInTheDocument();
+  });
+
   it('keeps billing available when only notification preferences fail', async () => {
     api.getPayments.mockResolvedValue({ payments: [] });
     api.getBalance.mockResolvedValue({ currentBalance: 0 });
@@ -94,21 +131,24 @@ describe('authenticated portal partial failures', () => {
     expect(screen.getByText(/no upcoming services scheduled/i)).toBeInTheDocument();
   });
 
-  it('describes reminder delivery using the customer saved channels', async () => {
+  it.each([
+    ['email', 'both', 'email', 'text + email'],
+    ['push', 'push', 'app', 'app'],
+  ])('describes saved %s/%s reminder channels', async (channel72, channel24, label72, label24) => {
     const futureDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     api.getSchedule.mockResolvedValue({
       upcoming: [{ id: 'svc-1', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', windowStart: '09:00' }],
     });
     api.getNotificationPrefs.mockResolvedValue({
-      serviceReminder72hChannel: 'email',
-      serviceReminder24hChannel: 'both',
+      serviceReminder72hChannel: channel72,
+      serviceReminder24hChannel: channel24,
     });
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [] });
 
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
-    expect(await screen.findByText('72-hour email reminder')).toBeInTheDocument();
-    expect(screen.getByText('24-hour text + email reminder')).toBeInTheDocument();
+    expect(await screen.findByText(`72-hour ${label72} reminder`)).toBeInTheDocument();
+    expect(screen.getByText(`24-hour ${label24} reminder`)).toBeInTheDocument();
     expect(screen.queryByText('72-hour SMS reminder')).not.toBeInTheDocument();
   });
 
@@ -141,4 +181,21 @@ describe('authenticated portal partial failures', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(api.getRequests).toHaveBeenCalledTimes(2));
   });
+});
+
+
+it('opens and focuses the exact older resolved request from a notification', async () => {
+  api.getRequests.mockResolvedValue({ requests: [{ id: 'request-1', subject: 'Old service request',
+    category: 'general', status: 'resolved', createdAt: '2025-01-01' }] });
+  render(<MyRequestsCard focusRequestId="request-1" />);
+  expect(await screen.findByText('Resolved')).toBeInTheDocument();
+  expect(screen.getByText(/Dec 31, 2024/)).toBeInTheDocument();
+  expect(api.getRequests).toHaveBeenCalledWith('request-1');
+  expect(screen.getByRole('region', { name: 'My Requests' })).toHaveFocus();
+});
+
+it('does not substitute another request for an unavailable notification destination', async () => {
+  api.getRequests.mockResolvedValue({ requests: [] });
+  render(<MyRequestsCard focusRequestId="request-1" />);
+  expect(await screen.findByText(/request isn’t available/)).toBeInTheDocument();
 });

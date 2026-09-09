@@ -1410,6 +1410,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
   const isCompletedVisit =
     String(service.status || "").toLowerCase() === "completed";
+  // Terminal rows (completed / cancelled / skipped / no_show) are records,
+  // not live stops: no cancel action, and no scheduling hint that could
+  // retarget them onto a live day (Codex #4120 r4 P2 + r5 P2).
+  const isTerminalVisit = [
+    "completed",
+    "cancelled",
+    "skipped",
+    "no_show",
+  ].includes(String(service.status || "").toLowerCase());
   // Re-entry windows for a COMPLETED visit (interior/exterior dry-down
   // minutes on the customer report). Same posture as the time-on-site
   // correction: OUTSIDE `form`, saved through the dedicated admin-only
@@ -1533,16 +1542,39 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     durationMinutes: slotCheckDuration,
     excludeServiceIds: [service.id],
   });
+  // The Service address picker's state lives ahead of the hint hook: a
+  // pending selection is a hint input (declared here, rendered below).
+  const [addressOptions, setAddressOptions] = useState([]);
+  const [addressState, setAddressState] = useState("loading");
+  const [selectedPropertyId, setSelectedPropertyId] = useState("");
   // Advisory drive-detour suggestions for the same fixed day — picking a
-  // chip only fills the window fields (never saves).
-  const { bestTimes } = useBestTimes({
+  // chip only fills the window fields (never saves). A terminal visit's
+  // date/window edit is a record correction: there is no route to price,
+  // and the range chip would move the finished (or cancelled / skipped /
+  // no-show) visit onto a live day (update-details allows the edit) — no
+  // hint at all (Codex #4120 r4 P2, r5 P2).
+  const { bestTimes, picked, bestInRange } = useBestTimes({
+    enabled: !isTerminalVisit,
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
     durationMinutes: slotCheckDuration,
+    // update-details writes this duration, so the arrival simulation may
+    // adopt it; the move surfaces leave the stored estimate in place.
+    durationEdit: true,
     technicianId: form.technicianId || undefined,
     excludeServiceIds: [service.id],
+    // The picked verdict prices ONE technician's route; with the visit set
+    // to Unassigned the gap-mode fallback would name and quote whichever
+    // technician's gap matches, and saving keeps the visit unassigned. Chips
+    // stay (picking one adopts its technician); no verdict (Codex #4120 r6 P2).
+    pickedStart: form.technicianId ? form.windowStart : undefined,
+    pickedEnd: form.windowEnd,
+    rangeFrom: etDateString(),
+    // A re-picked Service address is where the save sends the visit —
+    // score there, and re-score when the selection changes (Codex r7 P2).
+    propertyId: selectedPropertyId || undefined,
   });
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
@@ -1665,9 +1697,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
-  const [addressOptions, setAddressOptions] = useState([]);
-  const [addressState, setAddressState] = useState("loading");
-  const [selectedPropertyId, setSelectedPropertyId] = useState("");
   const selectedProperty = addressOptions.find((property) => property.id === selectedPropertyId);
   useEffect(() => {
     let cancelled = false;
@@ -2478,12 +2507,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   // no_show is terminal on the server too (the status route 409s a
   // no_show → cancelled transition) — don't offer a cancel that must fail.
-  const canCancelAppointment = ![
-    "completed",
-    "cancelled",
-    "skipped",
-    "no_show",
-  ].includes(String(service.status || "").toLowerCase());
+  const canCancelAppointment = !isTerminalVisit;
 
   const handleCancelAppointment = async () => {
     if (cancelling) return;
@@ -3898,8 +3922,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               />{" "}
               <BestTimeHint
                 bestTimes={bestTimes}
+                picked={picked}
+                bestInRange={bestInRange}
                 currentStart={form.windowStart}
+                currentDate={form.scheduledDate}
                 currentTechnicianId={form.technicianId}
+                onPickDate={(slot) =>
+                  setForm((f) => ({
+                    ...f,
+                    scheduledDate: slot.date,
+                    windowStart: slot.start,
+                    windowEnd: slot.end,
+                    technicianId: !f.technicianId && slot.technicianId
+                      ? slot.technicianId
+                      : f.technicianId,
+                  }))
+                }
                 onPick={(slot) =>
                   // An unassigned visit searched all techs, so the detour
                   // is slot.technicianId's — adopt that tech with the
@@ -5555,10 +5593,11 @@ export function ProtocolPanel({ service, onClose }) {
       {jobCardEnabled && (
         <div style={{ padding: "12px 16px 0" }}>
           <IntelligenceBarShell
+            key={service.id}
             context="dispatch"
             buildPageData={() => ({
-              scheduledServiceId: service.id,
-              customerId: service.customerId,
+              appointment_id: service.id,
+              customer_id: service.customerId,
               serviceType: panelServiceType,
               date: service.scheduledDate || service.date || null,
             })}
@@ -6983,7 +7022,12 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   });
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start select, never submits the reschedule.
-  const { bestTimes: manualBestTimes } = useBestTimes({
+  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange } = useBestTimes({
+    // Same route check as the manual save and the edit form: under
+    // GATE_ADMIN_ARRIVAL_WINDOWS the verdict and the chips must not endorse
+    // an hour the save would refuse for another customer's window
+    // (Codex #4120 r5 P1).
+    arrivalWindows: true,
     date: manualDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
@@ -6993,6 +7037,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     // The reschedule submit can't change assignment, so an unassigned
     // visit's all-tech detours would be unactionable — no tech, no hint.
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
+    pickedStart: manualTime,
+    rangeFrom: etDateString(),
   });
 
   // One POST path for the suggested and custom pickers. A 409
@@ -7460,14 +7506,20 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 </div>{" "}
                 {/* Appointment windows ALWAYS start on the hour (owner
                     directive) — an hour select instead of a free time input
-                    so an off-hour start can't be submitted. */}
+                    so an off-hour start can't be submitted. From 06:00 up to
+                    the last hour whose window still ends by 20:00, the admin
+                    day end (window-rules) — the save rejects a later end, and
+                    the arrival-window hints never recommend one, so every
+                    option is savable and every recommendation is an option
+                    (Codex #4120 r6 P1). */}
                 <select
                   value={manualTime}
                   onChange={(e) => setManualTime(e.target.value)}
                   style={inputSt}
                 >
-                  {Array.from({ length: 13 }, (_, i) => {
-                    const h = i + 6;
+                  {Array.from({ length: 14 }, (_, i) => i + 6)
+                    .filter((h) => h * 60 + durationMinutes <= 20 * 60)
+                    .map((h) => {
                     const value = `${String(h).padStart(2, "0")}:00`;
                     const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
                     return (
@@ -7510,9 +7562,13 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           {showManual && (
             <BestTimeHint
               bestTimes={manualBestTimes}
+              picked={manualPicked}
+              bestInRange={manualBestInRange}
               currentStart={manualTime}
+              currentDate={manualDate}
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={(slot) => setManualTime(slot.start)}
+              onPickDate={(slot) => { setManualDate(slot.date); setManualTime(slot.start); }}
               style={{ marginTop: 10 }}
             />
           )}

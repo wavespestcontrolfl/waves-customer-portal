@@ -7,11 +7,14 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// These reports feed the owner-only Costs workspace. The shared fleet
+// overview, equipment details, and operational record writers remain staff tools.
+router.use(['/analytics/costs', '/analytics/reliability', '/mileage/summary'], requireAdmin);
 
 // Last-resort table bootstrap for local/dev environments where migrations have
 // not run yet. Keep this schema aligned with 20260401000097_equipment_maintenance.

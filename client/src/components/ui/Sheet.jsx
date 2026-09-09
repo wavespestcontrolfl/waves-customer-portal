@@ -2,11 +2,13 @@ import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import useModalFocus from '../../hooks/useModalFocus';
 import { cn } from './cn';
+import { useUiDensity } from './UiSurface';
 
-// Right-side slide-in panel. Customer Detail in spec §5.6 lives here.
+// Right-side panel for focused tasks, including customer messaging.
 // Same focus-trap strategy as Dialog — swap root for Radix if needed.
 export function Sheet({ open, onClose, children, width = 'md', className, ariaLabel = 'Details', layer = 120, keepMounted = false }) {
   const panelRef = useModalFocus(open, onClose);
+  const density = useUiDensity();
 
   useEffect(() => {
     if (!open) return undefined;
@@ -31,8 +33,12 @@ export function Sheet({ open, onClose, children, width = 'md', className, ariaLa
       style={{ zIndex: layer }}
       hidden={!open}
       role="dialog"
+      data-ui-density={density}
       aria-modal="true"
       aria-label={ariaLabel}
+      // Portal events follow the React tree. Like Dialog, a Sheet owns
+      // its clicks, including its backdrop, without activating its opener.
+      onClick={(event) => event.stopPropagation()}
     >
       <div className="absolute inset-0 bg-zinc-900/30" onClick={onClose} />
       <div

@@ -1428,7 +1428,7 @@ export default function CallLogTabV2() {
                       </span>{" "}
                       <div className="flex-1 min-w-0">
                         {" "}
-                        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-15 font-medium text-ink-primary md:text-13">
+                        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-16 font-medium text-ink-primary md:text-13">
                           <span className="min-w-0 break-words [overflow-wrap:anywhere]">
                             {getCallDisplayName(c)}
                           </span>
@@ -1449,7 +1449,7 @@ export default function CallLogTabV2() {
                         {isDeadAirVm(c) && (
                           <Badge tone="neutral">Dead air</Badge>
                         )}
-                        <span className="text-12 md:text-10 text-ink-tertiary">
+                        <span className="text-12 md:text-11 text-ink-tertiary">
                           {timeAgo(c.created_at)}
                         </span>{" "}
                       </div>{" "}

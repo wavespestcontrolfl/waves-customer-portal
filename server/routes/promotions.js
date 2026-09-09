@@ -328,13 +328,21 @@ router.post('/:id/interest', async (req, res, next) => {
     const customer = req.customer;
 
     // Create service request
-    await db('service_requests').insert({
+    const [request] = await db('service_requests').insert({
       customer_id: req.customerId,
       category: 'add_service',
       subject: `Interested in adding ${serviceName || serviceType}`,
       description: `Customer expressed interest via promotion card: ${promoId}`,
       status: 'new',
-    });
+    }).returning('*');
+
+    // The insert has committed before dispatch. App delivery is independent
+    // of the existing office alert and customer confirmation text.
+    try {
+      await require('../services/request-app-notifications').send({ customerId: req.customerId, request, received: true });
+    } catch (appErr) {
+      logger.error(`Failed to send App receipt for promotion request ${request.id}: ${appErr.message}`);
+    }
 
     // Count current services for tier info
     const serviceRecords = await db('service_records')
