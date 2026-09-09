@@ -95,6 +95,17 @@ it('sends the viewed record and isolates a late A response after query-only navi
   expect(await screen.findByText('Current Customer B result')).toBeInTheDocument();
 });
 
+it('keeps the visible reply when a persisted thread survives navigation', async () => {
+  await mount();
+  submit('Summarize this customer');
+  await waitFor(() => expect(queryResolvers).toHaveLength(1));
+  await act(async () => queryResolvers[0](ok({ response: 'Retained thread reply', threadId: 'thread-1',
+    conversationHistory: [{ role: 'user', content: 'Summarize this customer' }, { role: 'assistant', content: 'Retained thread reply' }] })));
+  expect(await screen.findByText('Retained thread reply')).toBeInTheDocument();
+  act(() => navigate('/admin/customers?customerId=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'));
+  expect(screen.getByText('Retained thread reply')).toBeInTheDocument();
+});
+
 it('close/reopen retains the in-flight request, and double Enter starts only one query', async () => {
   const ref = await mount();
   submit('Read this customer');

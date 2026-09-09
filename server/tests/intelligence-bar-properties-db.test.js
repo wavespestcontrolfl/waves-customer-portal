@@ -355,8 +355,12 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
       { id: emptyCustomer, first_name: 'Synthetic', last_name: 'Firstproperty', phone: `+15552${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}` },
     ]);
     await db('customer_properties').insert({ id: propertyId, customer_id: customerId, ...address(800), active: true, is_primary: false, address_key: service.addressKey(address(800)) });
-    await db('scheduled_services').insert({ id: visitId, customer_id: customerId,
-      scheduled_date: require('../utils/datetime-et').etDateString(new Date()), service_type: 'General Pest Control', status: 'pending' });
+    const completedId = crypto.randomUUID();
+    await db('scheduled_services').insert([
+      { id: visitId, customer_id: customerId, scheduled_date: require('../utils/datetime-et').etDateString(new Date()), service_type: 'General Pest Control', status: 'pending' },
+      // A settled, non-recurring visit with no saved service address: its report renders from the account address.
+      { id: completedId, customer_id: customerId, scheduled_date: '2026-08-01', service_type: 'General Pest Control', status: 'completed' },
+    ]);
     const preview = await service.previewManualPropertyChange(customerId, 'primary', {}, propertyId);
     expect(preview.previous_primary).toMatchObject({ id: null, address: '700 Example Grove, Sarasota, FL, 34201' });
     expect(await db('customer_properties').where({ customer_id: customerId }).count('* as count').first()).toEqual({ count: '1' });
@@ -364,11 +368,48 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     const visit = await db('scheduled_services').where({ id: visitId }).first();
     expect(visit.service_address_line1).toBe('700 Example Grove');
     expect(visit.property_id).not.toBe(propertyId);
+    const completed = await db('scheduled_services').where({ id: completedId }).first();
+    expect(completed).toMatchObject({ service_address_line1: '700 Example Grove', service_address_city: 'Sarasota', service_address_zip: '34201', property_id: visit.property_id });
     const firstPreview = await service.previewManualPropertyChange(emptyCustomer, 'add', address(900));
     expect(firstPreview.changes.label).toBe('Primary');
     const first = await service.addManualProperty(emptyCustomer, address(900), { actorId: actor, expectedVersion: firstPreview._version });
     expect(first.verification).toMatchObject({ persisted: true, fields_match: true });
     expect(await db('customers').where({ id: emptyCustomer }).first('address_line1')).toEqual({ address_line1: '900 Example Grove' });
+  }, 30000);
+
+  test('a rental or client-managed relationship is ineligible for primary even while occupancy is unknown', async () => {
+    const service = require('../services/customer-properties');
+    const customerId = crypto.randomUUID(), rentalId = crypto.randomUUID(), managedId = crypto.randomUUID();
+    await db('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Relationshipfixture', phone: `+15553${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`, address_line1: '1000 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' });
+    await db('customer_properties').insert([
+      { id: rentalId, customer_id: customerId, ...address(1100), relationship: 'rental_owned', active: true, is_primary: false, address_key: service.addressKey(address(1100)) },
+      { id: managedId, customer_id: customerId, ...address(1200), relationship: 'managed_for_client', active: true, is_primary: false, address_key: service.addressKey(address(1200)) },
+    ]);
+    for (const id of [rentalId, managedId]) {
+      await expect(service.previewManualPropertyChange(customerId, 'primary', {}, id)).rejects.toMatchObject({ code: 'primary_role_unavailable' });
+    }
+    for (const row of await service.listProperties(customerId)) expect(row).toMatchObject({ primary_change_eligible: false, primary_change_unavailable: expect.stringContaining('relationship') });
+    expect(await db('customers').where({ id: customerId }).first('address_line1')).toEqual({ address_line1: '1000 Example Grove' });
+    // Correcting the relationship restores eligibility.
+    await db('customer_properties').where({ id: rentalId }).update({ relationship: 'own_home' });
+    expect((await service.previewManualPropertyChange(customerId, 'primary', {}, rentalId)).primary_property.id).toBe(rentalId);
+  }, 30000);
+
+  test('a legacy account address already saved as a non-primary row is reused as the old primary', async () => {
+    const service = require('../services/customer-properties');
+    const customerId = crypto.randomUUID(), savedAccountRow = crypto.randomUUID(), targetId = crypto.randomUUID();
+    await db('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Legacyrowfixture', phone: `+15554${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`, address_line1: '1300 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' });
+    await db('customer_properties').insert([
+      { id: savedAccountRow, customer_id: customerId, ...address(1300, 'Home'), active: true, is_primary: false, address_key: service.addressKey(address(1300)) },
+      { id: targetId, customer_id: customerId, ...address(1400), active: true, is_primary: false, address_key: service.addressKey(address(1400)) },
+    ]);
+    const preview = await service.previewManualPropertyChange(customerId, 'primary', {}, targetId);
+    const changed = await service.changePrimaryProperty(customerId, targetId, { actorId: actor, expectedVersion: preview._version });
+    expect(changed.verification).toMatchObject({ persisted: true, fields_match: true });
+    expect(await db('customers').where({ id: customerId }).first('address_line1')).toEqual({ address_line1: '1400 Example Grove' });
+    expect(await db('customer_properties').where({ customer_id: customerId }).count('* as count').first()).toEqual({ count: '2' });
+    expect(await db('customer_properties').where({ id: savedAccountRow }).first('is_primary', 'label')).toEqual({ is_primary: false, label: 'Home' });
+    expect(await db('customer_properties').where({ id: targetId }).first('is_primary')).toEqual({ is_primary: true });
   }, 30000);
 
   test('a same-street partial primary is a duplicate at preview time in the portal and the bar', async () => {
