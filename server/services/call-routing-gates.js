@@ -82,8 +82,10 @@ function checkTcpaConsent(extraction, opts = {}) {
 // a force-reprocess would keep the stale auto_route recommendation while the
 // fresh run holds the call — corrupting the promotion metrics and any
 // feedback tied to that decision row.
-const V2_DECISION_VERSION = 'v2-1.3.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0'];
+// v2-1.4.0 recognizes matching saved-address components and preserves stated
+// geography through service-area validation. Reprocessing gets a fresh decision.
+const V2_DECISION_VERSION = 'v2-1.4.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0'];
 
 function buildRouteDecision({
   callLogId,

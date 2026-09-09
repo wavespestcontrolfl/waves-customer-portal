@@ -26,6 +26,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
+const { normalizeState, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
 // same way a failed one does (validation skipped, raw address kept) instead
@@ -140,8 +141,14 @@ function deriveStatus(result, county) {
   return { status: STATUSES.VALIDATED_ACCEPT, ...base };
 }
 
-async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
+// Service-call fragments may use this hint. A stated state takes precedence;
+// other consumers, including moving-address validation, supply no default hint.
+const SERVICE_STATE = 'FL';
+
+async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null } = {}) {
   const lines = (addressLines || []).filter(Boolean);
+  const statedState = parseRawAddress(lines.join(' ').replace(/,/g, ' ')).state;
+  const regionHint = statedState || administrativeArea;
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
   }
@@ -156,7 +163,7 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
       method: 'POST',
       signal: AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address: { regionCode, addressLines: lines } }),
+      body: JSON.stringify({ address: { regionCode, ...(regionHint ? { administrativeArea: regionHint } : {}), addressLines: lines } }),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -166,6 +173,13 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
     const data = await res.json();
     const county = await reverseGeocodeCounty(data.result?.geocode?.location, key);
     const out = deriveStatus(data.result, county);
+    // An in-area correction cannot authorize dispatch after changing the
+    // caller's explicit state. Keep that disagreement for human review.
+    if (statedState && [STATUSES.VALIDATED_ACCEPT, STATUSES.CORRECTED].includes(out.status)
+      && normalizeState(out.normalized?.state) !== statedState) {
+      out.status = STATUSES.CONFIRM_NEEDED;
+      out.inServiceArea = null;
+    }
     out.providerResponseId = data.responseId || null;
     return out;
   } catch (err) {
@@ -177,12 +191,22 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
 // Build Google AV `addressLines` from the extraction's nested service_address.
 // Two lines (street, then "city ST zip") so AV parses locality/postal cleanly.
 // Returns [] when there's no street AND no city — nothing worth validating.
+// A street line that is only a house number names no street: Google matched
+// one to a random premise in another state (2026-09-06 audit), so it is
+// dropped and the call validates on the locality alone, if any. The test is
+// on street_line_1 ITSELF (codex r2 P2): a unit designator in line 2 ("Apt
+// 4") carries letters but still names no street.
 function buildAddressLines(serviceAddress) {
   const sa = serviceAddress || {};
-  const line1 = [sa.street_line_1, sa.street_line_2].filter(Boolean).join(' ').trim();
-  const line2 = [sa.city, sa.state, sa.postal_code].filter(Boolean).join(' ').trim();
+  // The extraction schema stores non-Florida states as null; raw_text still
+  // carries the stated geography and must survive request construction.
+  const rawState = parseRawAddress(sa.raw_text).state;
+  const state = rawState && rawState !== SERVICE_STATE ? rawState : (sa.state || rawState);
+  const street1 = String(sa.street_line_1 || '').trim();
+  const line1 = /[a-z]/i.test(street1) ? [street1, sa.street_line_2].filter(Boolean).join(' ').trim() : '';
+  const line2 = [sa.city, state, sa.postal_code].filter(Boolean).join(' ').trim();
   if (!line1 && !sa.city) return [];
   return [line1, line2].filter(Boolean);
 }
 
-module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION };
+module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE };

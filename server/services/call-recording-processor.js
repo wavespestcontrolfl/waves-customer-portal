@@ -111,7 +111,7 @@ const { classifyCall, recordVerdict } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
-const { validateAddress, buildAddressLines } = require('./address-validation');
+const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1155,6 +1155,20 @@ function summarizeKnownCaller(customer) {
   };
 }
 
+// The fail-open routing input for a known caller: null unless they are a
+// customer we actively serve, else the on-file address components so the
+// gate can tell a RESTATED on-file address from a new one (statesNewAddress).
+function failOpenKnownCustomer(knownCaller) {
+  if (!knownCaller || !knownCaller.isExistingCustomer) return null;
+  return {
+    hasAddress: knownCaller.hasAddress,
+    addressLine1: knownCaller.addressLine1 || null,
+    addressLine2: knownCaller.addressLine2 || null,
+    addressCity: knownCaller.addressCity || null,
+    addressZip: knownCaller.addressZip || null,
+  };
+}
+
 // Fail-open V1 address-conflict demotion, shared by the ENFORCE path and the
 // shadow/AUDIT recompute — the saved shadow decision must hold exactly where
 // enforce would hold, or rollout metrics overstate safe fail-open bookings.
@@ -1193,9 +1207,7 @@ function buildFailOpenRoutingContext({
       // a customer volunteering their identity by calling the office.
       failOpen: !!failOpenEnabled && !isOutboundCall(call),
       callerAni: contactPhone,
-      knownCustomer: (knownCaller && knownCaller.isExistingCustomer)
-        ? { hasAddress: knownCaller.hasAddress }
-        : null,
+      knownCustomer: failOpenKnownCustomer(knownCaller),
     },
   };
 }
@@ -7510,6 +7522,9 @@ const CallRecordingProcessor = {
           try {
             v2AddressValidation = await validateAddress({
               addressLines: buildAddressLines(v2Result.extraction.property?.service_address),
+              // The validator preserves an explicit state over this hint.
+              // Contrary model geography also disables the fallback hint.
+              administrativeArea: v2Result.extraction.triage_flags?.includes('out_of_service_area') ? null : SERVICE_STATE,
             });
           } catch (avErr) {
             logger.warn(`[call-proc-v2] address validation error for ${callSid}: ${avErr.message}`);
@@ -8187,8 +8202,7 @@ const CallRecordingProcessor = {
           // caller_phone_missing, an existing customer's on-file address clears
           // address flags, a garbled email (name_email_mismatch) is advisory.
           const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
-          const knownCustomerForFailOpen = (knownCaller && knownCaller.isExistingCustomer)
-            ? { hasAddress: knownCaller.hasAddress } : null;
+          const knownCustomerForFailOpen = failOpenKnownCustomer(knownCaller);
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
@@ -15759,7 +15773,7 @@ const CallRecordingProcessor = {
           // Keep the audit/shadow decision consistent with the enforce path.
           failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
           callerAni: contactPhone,
-          knownCustomer: (knownCaller && knownCaller.isExistingCustomer) ? { hasAddress: knownCaller.hasAddress } : null,
+          knownCustomer: failOpenKnownCustomer(knownCaller),
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),

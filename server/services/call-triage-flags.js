@@ -1,5 +1,6 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
+const { parseRawAddress, splitStreetLineUnit, normalizeStreetLine, normalizeState } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
 
@@ -1035,7 +1036,7 @@ function canAutoRoute(extraction, opts = {}) {
   // would dispatch to the customer's on-file (already Google-verified) address
   // rather than one stated on this call.
   const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
-  const newAddressGiven = statesNewAddress(extraction);
+  const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -1285,6 +1286,8 @@ function canAutoRoute(extraction, opts = {}) {
 // second-address check, so "123 Main St" and "123 Main Street" compare equal
 // (otherwise a benign expansion opens a false second_service_address review).
 const streetHouseNum = (s) => (String(s || '').trim().match(/^\d+/) || [''])[0];
+const STREET_PHRASE_STOPWORDS = new Set(['same', 'the', 'this', 'that', 'my', 'our', 'your', 'a', 'an', 'one', 'any', 'other', 'right', 'no', 'in', 'on', 'by', 'of']);
+const STREET_SUFFIX_WORDS = new Set(['st', 'street', 'ave', 'avenue', 'rd', 'road', 'dr', 'drive', 'ln', 'lane', 'ct', 'court', 'blvd', 'boulevard', 'cir', 'circle', 'pl', 'place', 'ter', 'terrace', 'way', 'trl', 'trail', 'pkwy', 'parkway', 'hwy', 'highway']);
 const streetNameOnly = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
   .replace(/^\s*\d+\s*/, '')
   .replace(/\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|blvd|boulevard|cir|circle|pl|place|ter|terrace|way|trl|trail|pkwy|parkway|hwy|highway)\b/g, '')
@@ -1521,10 +1524,103 @@ const NEW_ADDRESS_FIELDS = [
   'subdivision_or_community', 'raw_text',
 ];
 
-/** Did the caller state a service address on this call at all? */
-function statesNewAddress(extraction) {
+/**
+ * Did the caller state a NEW service address on this call? A known
+ * customer's on-file address (opts.knownCustomer.addressLine1/addressCity/
+ * addressZip) may be passed so that RESTATING it — "1234 Sample Palm", "I'm
+ * in Parrish", "same zip" — is not mistaken for a second property. Live
+ * misses (2026-09-05): a matched customer who said only "I'm in Parrish"
+ * had the city-only fragment sent to Google, returned missing_component,
+ * and lost the on-file trust that would have booked the confirmed estimate.
+ * A restatement must AGREE with the file on every component it names; any
+ * conflicting street, city or ZIP is a new address and holds for review.
+ */
+function statesNewAddress(extraction, knownCustomer = null) {
   const sa = extraction?.property?.service_address || {};
-  return NEW_ADDRESS_FIELDS.some((k) => String(sa[k] || '').trim());
+  const state = normalizeState(sa.state);
+  const stated = (state && state !== 'FL') || NEW_ADDRESS_FIELDS.some((k) => String(sa[k] || '').trim());
+  if (!stated) return false;
+  return !restatesOnFileAddress(sa, knownCustomer);
+}
+
+const zip5Of = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+// Unit designators KEEP their digits (codex r1 P1): cityKey strips them, so
+// "Apt 4B" and "Apt 5B" compared equal and a caller who moved one door down
+// would have booked against the old unit. Designator words and punctuation
+// are noise ("Apt 4B" / "#4B" / "Unit 4-B" are one unit); the alphanumerics
+// are the identity.
+const unitKey = (v) => String(v || '').toLowerCase()
+  .replace(/\b(apt|apartment|unit|ste|suite|bldg|building|no|number)\b/g, ' ')
+  .replace(/[^a-z0-9]/g, '');
+
+function restatesOnFileAddress(sa, knownCustomer) {
+  const onFileStreet = String(knownCustomer?.addressLine1 || '').trim();
+  if (!onFileStreet) return false;
+  const onFileCity = cityKey(knownCustomer.addressCity);
+  const onFileZip = zip5Of(knownCustomer.addressZip);
+  const onFileKey = streetCompareKey(onFileStreet);
+  const onFileHouse = streetHouseNum(onFileStreet);
+  const onFileUnit = String(knownCustomer.addressLine2 || '').trim();
+
+  const street = [sa.street_line_1, sa.line1, sa.street].map((v) => String(v || '').trim()).find(Boolean) || '';
+  const unit = [sa.street_line_2, sa.line2, sa.unit, sa.apt].map((v) => String(v || '').trim()).find(Boolean) || '';
+  const city = cityKey([sa.city, sa.locality].map((v) => String(v || '').trim()).find(Boolean));
+  const zip = zip5Of([sa.postal_code, sa.zip, sa.zip_code].map((v) => String(v || '').trim()).find(Boolean));
+  const raw = String(sa.raw_text || '').trim();
+  const community = String(sa.subdivision_or_community || '').trim();
+
+  // A contrary state cannot restate a Florida service address, even when
+  // the extractor copied the customer's saved street or city.
+  if ([normalizeState(sa.state), parseRawAddress(raw).state].some(state => state && state !== 'FL')) return false;
+  // Every stated locality component must agree with the file.
+  if (city && (!onFileCity || city !== onFileCity)) return false;
+  if (zip && (!onFileZip || zip !== onFileZip)) return false;
+  // A unit spoken inside the raw text is compared the same way, BEFORE the
+  // structured street can answer (codex r2 P1, r3 P1): the extractor often
+  // fills street_line_1 and leaves "... Apt 5B" only in raw_text, and that
+  // is a new door against an on-file Apt 4B. A unit the file cannot compare
+  // is new information.
+  const rawUnit = (String(raw).toLowerCase().match(/(?:\b(?:apt|apartment|unit|ste|suite)\.?|#)\s*([a-z0-9]+(?:-[a-z0-9]+)?)/) || [])[1] || '';
+  if ([unit, rawUnit].filter(Boolean).some(value => !onFileUnit || unitKey(value) !== unitKey(onFileUnit))) return false;
+
+  // Raw street evidence must agree before a structured restatement can
+  // authorize the on-file address. Compare the complete ordered name:
+  // "Sample Palm Grove" must not match "Sample Palm" by token inclusion.
+  if (raw) {
+    const rawList = String(raw).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    const namesAStreet = /\d/.test(raw)
+      || rawList.some((t, i) => i > 0 && STREET_SUFFIX_WORDS.has(t) && !STREET_PHRASE_STOPWORDS.has(rawList[i - 1]));
+    if (namesAStreet) {
+      // A trailing restatement aside is prose, not a locality component.
+      const parsed = parseRawAddress(raw.replace(/,\s*same (?:as (?:before|always)|place|address)\.?$/i, ''));
+      const rawCity = cityKey(parsed.city);
+      const cityIsUnit = rawUnit && unitKey(parsed.city) === unitKey(onFileUnit);
+      if (parsed.zip && zip5Of(parsed.zip) !== onFileZip) return false;
+      // An unrecognized tail may be part of the street ("Drive North"),
+      // so keep it in the comparison instead of discarding it as a city.
+      const rawStreet = rawCity && rawCity !== onFileCity && !cityIsUnit
+        ? raw : splitStreetLineUnit(parsed.line1).street;
+      const [rawName, onFileName] = [rawStreet, onFileStreet].map(line => {
+        const tokens = String(line).toLowerCase().replace(/^\d+\s*/, '').split(/\s+/);
+        // Only a terminal suffix is optional; suffix-shaped words inside
+        // the name still distinguish "Palm Street Drive" from "Palm Drive".
+        if (STREET_SUFFIX_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
+        return normalizeStreetLine(tokens.join(' ')).toLowerCase();
+      });
+      const nameAgrees = !!onFileName && rawName === onFileName;
+      const houseAgrees = !/\d{2,}/.test(raw) || (!!onFileHouse && streetHouseNum(rawStreet) === onFileHouse);
+      if (!nameAgrees || !houseAgrees) return false;
+      // A numbered raw address that agrees on both is the on-file street,
+      // whatever the parser managed to split out of it.
+      if (/\d{2,}/.test(raw) && !street) return true;
+    }
+  }
+  if (street) return streetCompareKey(street) === onFileKey;
+  // A bare community name locates nothing we can compare.
+  if (community && !city && !zip) return false;
+  // City and/or ZIP only, and both agreed above.
+  return !!(city || zip);
 }
 
 /**
@@ -1544,7 +1640,7 @@ function statesNewAddress(extraction) {
 function dispatchesToOnFileAddress(extraction, opts = {}) {
   return !!(opts.failOpen
     && opts.knownCustomer && opts.knownCustomer.hasAddress
-    && !statesNewAddress(extraction));
+    && !statesNewAddress(extraction, opts.knownCustomer));
 }
 
 module.exports = {
