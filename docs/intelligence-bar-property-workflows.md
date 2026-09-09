@@ -14,7 +14,7 @@ parity for other customer actions or complete the platform assignment.
 All three tools are discovered from other admin pages through the existing
 registry. They do not send messages, create appointments, or initiate payments.
 The coverage census maps the four write/preview request sites to these tools;
-other unmapped rows remain in the denominator.
+other unmapped rows remain in the coverage denominator.
 
 ## Approval, persistence, and history
 
@@ -56,139 +56,56 @@ Database verification also exposed a pre-existing invoice detail query selecting
 the nonexistent `customers.card_on_file` column. It now uses the default
 `payment_methods` projection already used by the invoice list.
 
-## UI behavior
+## Verification
 
-Customer 360 has a touch/keyboard opener for the shell's existing bar. Record
-overlays publish their customer on Customers, Dispatch, and Communications;
-closing an overlay restores only a still-mounted page scope. Confirmed property
-receipts refresh the matching open record and property list. A result for A
-does not refresh B. Escape closes the topmost bar without closing Customer 360.
-The primary impact dialog uses the shared Dialog and sits above the record drawer.
-The server returns primary eligibility from the same guard used by the preview;
-ineligible rows show a disabled control with a reason, refreshed after occupancy edits.
-That guard also checks the account's tenant role. Restoring an unclassified
-legacy account row runs the normal promotion writer, including owner occupancy
-and the disclosed profile effects. Settled visits preserve a legacy estimate's
-contradicting street or unit even when its property linkage is missing.
-Initial loads and refreshes share request sequencing and customer guards, so
-an older read or an A save finishing after navigation cannot replace B's profile.
+The property database regressions are divided by behavior:
 
-## Evidence and limits
+- `invoice-property-history-db.test.js`: triage contention and concurrent invoice
+  creation, including receipt and PDF history.
+- `customer-properties-db.test.js`: native primary eligibility, tenant refusal,
+  legacy-row restoration, duplicate addresses, visit history and lock order.
+- `intelligence-bar-properties-db.test.js`: scripted natural-language discovery,
+  real authentication and confirmation, persisted receipts, A while viewing B,
+  native/IB parity, stale tenant approval, replay and duplicate refusal.
 
-`server/tests/intelligence-bar-properties-db.test.js` exercises natural-language
-task input through a **scripted model**, real bearer authentication, the actual
-route/confirmation store, shared services, and isolated Railway development
-Postgres. Independent row reads cover:
+The suites share the isolated-database fixture and use synthetic records. The
+model is scripted; no live-provider or production rollout claim is made. The
+contract and write-gate suites verify approval effects and tool registration.
+Customer 360 controls and rendered coverage are the fourth replacement slice,
+with the capability ledger carried alongside the sites it verifies.
 
-- Two new properties, relabeling and primary selection for A while viewing B;
-  B remains untouched and service/invoice/receipt locations remain correct.
-- Equivalent portal/IB add/edit outcomes and audit attribution, foreign-property
-  rejection, stale approvals, replay and duplicate creation.
-- Two-connection invoice-lock contention with a clean refusal, followed by a
-  successful retry after the billing transaction releases its locks.
-- An unregistered old account address and the first property on an addressless
-  account, including mutation-free previews and stored-field verification.
+Split validation: all 6 IB PostgreSQL scenarios, 88 authorization/write-gate/tool-
+definition tests and 12 scoped contract checks pass. Contract smoke invokes the
+unconfirmed preview, as required by the two-step tool registry; only the real
+confirmation route can persist the write. The domain scan is clean.
 
-`invoice-address.test.js` generates actual invoice and receipt PDFs and verifies
-the text sent to PDFKit uses the stored address even when the caller supplies
-the current customer. Contract tests exercise mutation-free previews, explicit
-label clearing, strict registration, and approval classification.
+The add-property definition retains its length constraints without provider
+strict mode, whose grammar rejects them. A regression checks the actual tool
+projection and preserves the 200-character server address bound. Reference:
+[Anthropic schema limitations](https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations).
 
-Rendered tests cover confirmation, navigation races, target-scoped refresh and
-overlay scope restoration, including overlapping same-customer refreshes and a
-late save from a departed customer. Chrome/Playwright checks use 1440×1050 and 390×844
-viewports against the actual client/API and synthetic Postgres fixtures, with a
-controlled model and no live customer communications. They exercise IB add,
-portal primary selection, IB relabel, touch opening, Escape, and refresh without
-navigation. Screenshots/evidence are private under `.local/ib-properties-*`.
-Ancillary payers/requests are not mounted in that harness; disabled thread reads
-return 404. No live-model or real iOS keyboard claim is made.
+## Customer 360 controls
 
-Validation: 150 server unit tests across seven suites and four real-Postgres
-acceptance tests passed. The five rendered client suites pass 61 tests. The
-production build, portal-brand check and capability coverage check pass.
-Independent review findings on label-clearing disclosure, invoice-lock
-contention and profile-refresh races were fixed and covered by regression tests.
+Customer 360 opens the shell's existing global bar by touch or keyboard. Record
+overlays publish their customer on Customers, Dispatch and Communications;
+closing restores only a still-mounted page scope. Confirmed property receipts
+refresh the matching record and property list, while a result for A leaves B
+alone. Escape closes the topmost bar without closing Customer 360.
 
-After integrating the reviewed foundation and PR #4015, the combined foundation
-and property Postgres suites pass all 19 tests. The two legacy route/invoice
-suites pass 56 tests after updating their mocks to the shared service contract;
-13 bar tests and 24 profile-state tests also pass. Both browser viewports were
-rerun successfully. The current census retains 1,734 sites after integrating
-foundation read-scope and current-main email changes: four verified
-property operations, ten transport exceptions, and 1,720 unsupported/unverified
-domain sites.
+The primary impact dialog uses the shared Dialog above the record drawer. Rows
+show eligibility and reasons from the same server guard used by confirmation.
+Initial loads and refreshes share sequencing and customer guards, preventing
+older reads or saves from a departed record from replacing the current one.
 
-Review remediation adds four further real-Postgres cases (eight property tests
-passing): triage invoice preservation and atomic billing-contention rollback,
-manual/IB busy outcome classification through the production error handler,
-the preferences-before-customer lock order, and primary eligibility for rental,
-commercial, seasonal, vacant and incomplete properties. The affected five server
-unit suites pass 74 tests; the property panel passes 14 rendered tests. The build,
-brand check and census pass. Desktop/mobile browser runs also exercise an
-ineligible property becoming eligible after an occupancy edit.
+All 69 rendered tests pass for confirmation, target-scoped refresh, navigation
+races and overlay scope restoration. The production build, brand/domain checks
+and capability census pass, with zero newly unmapped sites.
 
-A ninth Postgres case pauses the real invoice factory after its customer read,
-commits a primary flip, then finishes the invoice insert with the platform gate
-off. Persisted data, both invoice loaders and the actual PDF retain the original
-address; an invoice created after the flip uses the new address. All nine cases
-pass across the full-suite and corrected targeted fixture runs. Five invoice
-unit suites also pass 82 tests, including pricing preview, tier and deposit
-agreement. Static review found one production invoice insert, in the shared
-factory. The existing additive migration must precede this code; no additional
-migration or gate activation is required.
-
-The local preview is `http://127.0.0.1:5292/admin/customers` while the isolated
-harness runs. Vite must run from `client/`, with its explicit proxy pointing to
-the isolated API; starting it from the repository root omits Tailwind classes.
-The earlier unstyled screenshots are superseded by the property browser run.
-
-`20260906000062_invoice_customer_address_snapshot.js` was checked up/down/up in a
-rolled-back transaction and applied only to the isolated development database.
-`GATE_IB_PLATFORM` remains off by default. Production migration, gate activation,
-merge and deployment are not authorized by this implementation assignment.
-
-The split foundation integration preserves the new upstream property relationship
-field separately from occupancy, using the existing relationship vocabulary and
-normalizer in both portal and IB writes. Confirmation effects show relationship
-changes and clearing. First-property previews mirror the existing manager
-default without inferring ownership from occupancy. The upstream relationship
-migrations were dry-run and applied only in the dedicated QA database.
-
-Current integration evidence: 137 server unit tests and 57 client tests passed;
-two further approval-effect regressions passed. The ten property Postgres cases
-passed across the full run and focused fixture/assertion reruns. Desktop/mobile
-Chrome exercised the relationship disclosure, persisted relationship, IB creation
-and relabel, portal occupancy/primary changes, touch opening and scoped refresh.
-The current census retains 1,748 sites: four verified property operations, seven
-IB transport exceptions and 1,737 unsupported/unverified sites. No historical
-site was removed from the denominator.
-
-Final foundation integration passes all ten property PostgreSQL scenarios in
-one run (72.60 seconds), 142 server unit/contract tests and 61 client tests.
-The production build and coverage/domain/portal-brand checks pass. Desktop
-1440 and mobile 390 Chrome verify relationship disclosure, creation, primary
-eligibility/selection, relabeling, focus and saved-state refresh. Screenshots
-were inspected with vision. The harness's auxiliary payer/request/unread/thread
-routes remain unavailable; there are no IB or property failures, JavaScript
-exceptions or horizontal overflow. The model is scripted and physical iOS
-keyboard/notch behavior remains unverified. Final GitHub Codex review is
-pending its shared usage-limit reset; this remains a development-only draft.
-
-The latest review corrections also cover a legacy account selecting its own
-saved, non-primary address row, and completed visits already linked to the old
-primary but missing their service-address stamp. Existing stamps and visits at
-other properties remain untouched. The primary confirmation uses the Dialog's
-layer prop so it stays above the Customer 360 overlay. Verification passes all
-15 isolated PostgreSQL cases, 28 property unit tests and 16 panel tests. Chrome
-at 1440 and 390 pixels confirms the dialog is visible and clickable over the
-profile, with loaded fonts, no JavaScript exceptions and no horizontal overflow.
-
-The latest local corrections pass all 16 PostgreSQL property scenarios and 73
-property/role/route unit tests. They cover tenant list/preview/confirmation
-refusal (including a role change after approval), complete occupancy on both
-legacy primary choices, and settled visits with missing estimate linkage and
-matching, conflicting or absent address evidence. Domain and coverage gates
-pass; lint has no errors. The published head remains `30e6687302`; these
-corrections are held for the review split in
-`docs/intelligence-bar-property-split-proposal.md`.
+Desktop 1440 and mobile 390 browser fixtures exercise the actual Customer 360,
+global bar, property panel and primary dialog. They confirm native primary
+promotion, submit the overlay's customer, deliver a delayed receipt for A while
+B is open without refreshing B, close the bar with Escape while retaining the
+profile, and restore the underlying page scope when the profile closes. Fonts
+load and both widths have no JavaScript errors or horizontal overflow. Fetch
+responses are synthetic; these checks do not establish live-provider behavior
+or a real iOS keyboard result.
