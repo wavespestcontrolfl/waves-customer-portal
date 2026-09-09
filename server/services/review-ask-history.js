@@ -66,7 +66,9 @@ async function lastManualAskAt(customerId, { since } = {}) {
     .where('created_at', '>=', new Date(sinceAt.getTime() - 90000))
     .where(q => q.whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
       // Finalize-only replay already delivered, even while bookkeeping retries.
-      .orWhereRaw("metadata->>'finalize_only' = 'true'"))
+      .orWhereRaw("metadata->>'finalize_only' = 'true'")
+      // Stale-claim recovery can requeue/fail a possibly accepted attempt.
+      .orWhereRaw("metadata->>'review_ask_reservation' = 'true'"))
     .orderBy('created_at', 'desc')
     .select('message_body', 'created_at', 'status', 'metadata');
   const metadata = row => {

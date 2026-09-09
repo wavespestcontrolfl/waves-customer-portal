@@ -204,10 +204,16 @@ test('an unpersisted completion rewrite never dispatches a stale bundled ask', a
 test.each(['gate-blocked', 'template-disabled', 'owner-silence'])('suppressed queued asks do not record review delivery: %s', async providerMessageId => {
   const result = await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, providerMessageId }));
   expect(result).toMatchObject({ sent: false, blocked: true, code: 'REVIEW_SEND_SUPPRESSED' });
-  expect(row.status).toBe('canceled');
+  expect(row.status).toBe('sending');
   expect(row.metadata.review_ask_reservation).toBeUndefined();
   expect(updates.at(-1).held).toBe(true);
   expect(updates.at(-1).patch.metadata.sql).not.toContain('review_ask_delivered_at');
+  // The scheduler's guarded terminal flip must still win so a failed
+  // completion-restoration hook remains eligible for the blocked-row sweep.
+  expect(await db('sms_log').where({ id: row.id, status: 'sending' }).update({
+    status: 'blocked', metadata: db.raw("jsonb_build_object('terminal_pending', true)"),
+  })).toBe(1);
+  expect(row.status).toBe('blocked');
 });
 
 test.each([false, true])('a definite unsent retry does not trip its own reservation with real history (audit throw: %s)', async auditThrows => {

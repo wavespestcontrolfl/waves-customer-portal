@@ -73,6 +73,17 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(at);
   });
 
+  test.each(['scheduled', 'failed', 'blocked', 'canceled', 'cancelled', 'undelivered'])('a %s recovery row retains review spacing until its reservation is cleared', async status => {
+    const [row] = await trx('sms_log').insert({ customer_id: customerId, direction: 'outbound',
+      from_phone: '+12025550101', to_phone: '+12025550102', status,
+      created_at: at, message_body: 'Please leave a Google review.',
+      metadata: { review_ask_reservation: true } }).returning('id');
+    expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(at);
+    expect(await history.lastManualAskAt(customerId, { since: new Date(at.getTime() + 1) })).toBeNull();
+    await trx('sms_log').where({ id: row.id }).update({ metadata: {} });
+    expect(await history.lastManualAskAt(customerId, { since: at })).toBeNull();
+  });
+
   test('an unresolved follow-up reservation holds spacing without claiming delivery', async () => {
     const row = await request({ sms_sent_at: at });
     const reservedAt = new Date(at.getTime() + 80 * 3600000);

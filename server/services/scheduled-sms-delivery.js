@@ -59,10 +59,9 @@ async function dispatchScheduledSms(msg, meta, send, purpose) {
       }
       result = await send();
       if (reviewAsk && result.sent && !require('./sms-auto-send').isRealProviderSend(result)) {
-        await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-          status: 'canceled', updated_at: new Date(),
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation'"),
-        });
+        // The scheduler owns the sending -> blocked transition and stamps
+        // its durable terminal-hook obligation in that same update.
+        await clearUnsentReservation();
         return { ...result, sent: false, blocked: true, code: 'REVIEW_SEND_SUPPRESSED' };
       }
       if (result.sent === false) await clearUnsentReservation();
