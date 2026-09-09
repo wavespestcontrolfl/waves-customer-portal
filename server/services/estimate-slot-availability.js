@@ -1383,9 +1383,8 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
   }
   if (capacityEnabled()) {
-    // The shared complete-route predicate already checked every existing
-    // promise and hold. Reapplying fixed stored work blocks here would erase
-    // the very arrival flexibility it proved. Synthetic capacity is excluded.
+    // The complete route already includes its technician's work and unassigned
+    // blockers. A global fixed-window pass would erase certified flexibility.
     return slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
       && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd));
   }

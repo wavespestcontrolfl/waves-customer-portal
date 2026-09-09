@@ -249,3 +249,19 @@ test('capacity mode never manufactures ASAP offers outside the complete-route ev
     else process.env.GATE_SCHEDULING_CAPACITY = previous;
   }
 });
+
+
+test('capacity post-filter preserves route-certified offers and rejects synthetic candidates', async () => {
+  const previous = process.env.GATE_SCHEDULING_CAPACITY;
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const slot = { date: '2027-05-20', windowStart: '10:00', windowEnd: '11:00', techId: 'tech-1' };
+  mockDb({ scheduledRows: [{ scheduled_date: slot.date, window_start: '10:00', window_end: '11:00', technician_id: 'tech-2' }] });
+  try {
+    const certified = { ...slot, routeMode: 'arrival_windows' };
+    await expect(filterCollidingSlots([certified, slot], { dateFrom: slot.date, dateTo: slot.date }))
+      .resolves.toEqual([certified]);
+  } finally {
+    if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = previous;
+  }
+});

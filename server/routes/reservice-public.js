@@ -164,7 +164,7 @@ async function loadLaneCatalog() {
 // Route-aware availability around the CUSTOMER's property — the coords
 // resolution mirrors reschedule-public's buildAvailabilityForService (stored
 // coords first, geocode of the address text as fallback).
-async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay }) {
+async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability } = booking._internals;
 
@@ -183,6 +183,7 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     lat,
     lng,
     duration,
+    serviceKey: lanes.map(lane => ({ pest: 'pest_control', lawn: 'lawn_care' })[lane]).join('+'),
     rangeFrom,
     rangeTo,
     config,
@@ -247,7 +248,7 @@ router.get('/:token', async (req, res, next) => {
 
     let availability = null;
     try {
-      availability = await buildAvailabilityForCustomer(customer, { ...range, config, duration: browseDuration });
+      availability = await buildAvailabilityForCustomer(customer, { ...range, config, duration: browseDuration, lanes: bookableLanes });
     } catch (err) {
       logger.error(`[reservice-public] availability failed for customer ${customer.id}: ${err.message}`);
     }
@@ -305,6 +306,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
         rangeTo: when.dateTo,
         config,
         duration: browseDuration,
+        lanes: bookableLanes,
         timeOfDay: when.timeOfDay,
       });
     } catch (err) {
@@ -393,6 +395,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       rangeTo: date,
       config,
       duration: catalog.durationMinutes,
+      lanes: [lane],
     });
     const day = dayAvailability?.days?.find((d) => d.date === date);
     const slot = day?.slots?.find((s) => s.start_time === startTime);
@@ -400,7 +403,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       let refreshed = null;
       try {
         refreshed = await buildAvailabilityForCustomer(customer, {
-          ...range, config, duration: catalog.durationMinutes,
+          ...range, config, duration: catalog.durationMinutes, lanes: [lane],
         });
       } catch (err) {
         logger.warn(`[reservice-public] refresh availability failed for customer ${customer.id}: ${err.message}`);
@@ -460,7 +463,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         let refreshed = null;
         try {
           refreshed = await buildAvailabilityForCustomer(customer, {
-            ...range, config, duration: catalog.durationMinutes,
+            ...range, config, duration: catalog.durationMinutes, lanes: [lane],
           });
         } catch { /* answer without the refresh */ }
         return res.status(409).json({
@@ -511,6 +514,7 @@ router._test = {
   searchParseOpts,
   loadLaneCatalog,
   resolveLaneState,
+  buildAvailabilityForCustomer,
 };
 
 module.exports = router;

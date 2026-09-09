@@ -9,7 +9,7 @@ const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { capacityEnabled } = require('../services/scheduling/policy');
+const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes } = require('../services/scheduling/travel-gap');
 const { fallbackCenterZoneName } = require('../services/scheduling/zone-day-funnel');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
@@ -659,6 +659,7 @@ async function loadBookingConfig() {
 // commits them), so a forged /confirm payload can never book a slot the
 // builder would not have offered.
 function bookingSlotWindow(config = {}) {
+  config = applySchedulingPolicy(config);
   return {
     slotGridMinutes: 60,
     dayStartMin: timeToMin(config.day_start || '08:00'),
@@ -826,7 +827,8 @@ function validateBookingSlotGeometry({ startMin, duration, config }) {
   if (startMin % slotGridMinutes !== 0) {
     return 'That start time isn\'t one of our bookable slots — please pick another.';
   }
-  if (startMin < dayStartMin || endMin > dayEndMin) {
+  if (startMin < dayStartMin || endMin > dayEndMin
+    || (capacityEnabled() && !placementFitsShift(startMin, endMin))) {
     return 'That time is outside our working hours — please pick another slot.';
   }
   // Lunch windows are reserved for route health and are never self-bookable.
@@ -885,6 +887,7 @@ function roundPublicCoord(value) {
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
 async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '' }) {
+  config = applySchedulingPolicy(config);
   // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
   // daily outlook so it overlaps the slot computation; stamped onto days/slots
   // just before the return. Bounded + cached + fail-open in the service (null
@@ -1053,7 +1056,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // without clashing). Also covers cleanBookingStart snaps that would land
     // a candidate on a window find-time validated around.
     if (occupiedByDate) {
-      const dayOccupied = occupiedByDate.get(slot.date);
+      const dayOccupied = (occupiedByDate.get(slot.date) || []).filter(row => !capacityEnabled()
+        || row.technician_id == null || row.technician_id === slot.technician.id);
       if (dayOccupied && dayOccupied.some((b) => startMin < b.endMin && endMin > b.startMin)) return;
       // Travel-gap mirror (GATE_SLOT_TRAVEL_GAP): the commit gate's
       // findConflictingVisits `travel` probe rejects a window that merely

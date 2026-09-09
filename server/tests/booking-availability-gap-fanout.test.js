@@ -102,6 +102,36 @@ describe('buildBookingAvailability — gap fan-out', () => {
     }
   });
 
+  test('capacity public slots ignore another technician while retaining own and unassigned blockers', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    findAvailableSlots.mockResolvedValue({ slots: [gapSlot('10:00', { latest_start_min: 600 })], total_feasible: 1 });
+    try {
+      for (const technician_id of ['tech-2', 'tech-1', null]) {
+        listOccupiedWindows.mockResolvedValue([{ date: D, startMin: 600, endMin: 660, technician_id }]);
+        expect(startTimes(await build())).toEqual(technician_id === 'tech-2' ? ['10:00'] : []);
+      }
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
+  test('capacity offers and commit geometry retain a 16:00 ninety-minute service', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      findAvailableSlots.mockResolvedValue({ slots: [gapSlot('16:00', { latest_start_min: 960 })], total_feasible: 1 });
+      expect(startTimes(await build('termite', { duration: 90 }))).toEqual(['16:00']);
+      const { validateBookingSlotGeometry } = require('../routes/booking')._internals;
+      expect(validateBookingSlotGeometry({ startMin: 960, duration: 90, config: CONFIG })).toBeNull();
+      expect(validateBookingSlotGeometry({ startMin: 1020, duration: 30, config: CONFIG })).not.toBeNull();
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
   test('passes every selected service category to the capacity finder', async () => {
     findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
     await build('pest_control+tree_shrub');
