@@ -382,10 +382,21 @@ describe("Email draft and navigation preservation", () => {
     window.history.replaceState({}, "", `/admin/communications?id=${a.id}#tab=email`);
     mount();
     await screen.findByText(a.body_text);
-    fireEvent.click(screen.getByText("☆", { exact: true }));
-    expect(await screen.findByText("⭐", { exact: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: `Star ${a.subject}` }));
+    expect(await screen.findByRole("button", { name: `Unstar ${a.subject}` })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Reclassify/ }));
     expect(await screen.findByText("AI classification:")).toBeInTheDocument();
+  });
+
+  it("exposes the selected row as expanded and links it to its conversation", async () => {
+    mount();
+    expect(await screen.findByText(a.subject)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { expanded: true })).not.toBeInTheDocument();
+    const reply = await open(a);
+    const row = screen.getByRole("button", { expanded: true });
+    expect(row).toHaveTextContent(a.subject);
+    expect(row).toHaveAttribute("aria-controls", `email-conversation-${a.id}`);
+    expect(document.getElementById(`email-conversation-${a.id}`)).toContainElement(reply);
   });
 
   it.each(["Archive", "Trash"].flatMap((action) => [a.id, b.id].map((id) => [action, id])))("a late %s keeps the current SMS route and message context (%s)", async (action, id) => {
