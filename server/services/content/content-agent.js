@@ -20,6 +20,7 @@ const { executeContentTool } = require('./content-agent-tools');
 const { CONTENT_AGENT_CONFIG } = require('./content-agent-config');
 const { recordSessionUsage } = require('../llm-dispatch-metrics');
 const { isSessionTerminal, isSessionError } = require('../agent-control/session-events');
+const { readSessionFrames } = require('../agent-control/session-stream');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CONTENT_AGENT_ID = process.env.CONTENT_AGENT_ID;
@@ -60,30 +61,10 @@ async function* streamSessionEvents(sessionId) {
     throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-
-    let currentEvent = null;
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim();
-      } else if (line.startsWith('data: ') && currentEvent) {
-        try {
-          const data = JSON.parse(line.slice(6));
-          yield { event: currentEvent, data };
-        } catch { /* skip malformed */ }
-        currentEvent = null;
-      }
-    }
+  for await (const { event, data } of readSessionFrames(res.body)) {
+    let parsed;
+    try { parsed = JSON.parse(data); } catch { continue; }
+    yield { event, data: parsed };
   }
 }
 

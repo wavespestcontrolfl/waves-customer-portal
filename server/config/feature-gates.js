@@ -23,6 +23,10 @@
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
+ *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
+ *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
+ *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the
+ *     same day, before any send. Leave dark; do not re-enable without a new owner ruling.
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
@@ -98,11 +102,23 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Admin-only fixed test pair for one explicitly configured customer; opt-in everywhere.
+  customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
+  // Customer iOS icon count; opt-in everywhere, with request-time route checks.
+  customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
   // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
   composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
   // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
   // logGateStatus only; consumers use gateEnvValue at CALL time.
   lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
+  // GATE_APP_PROPERTY_SCOPE: the customer app scopes visits and appointment
+  // texts by SAVED PROPERTY (customer_properties) instead of by sibling
+  // profile (docs/multi-property-model.md, "App property scope"). Off: the
+  // session's propertyId claim is ignored (req.propertyId null),
+  // GET /auth/properties answers the profile list, and select-property
+  // ignores propertyId — tonight's behavior exactly. Registered for
+  // logGateStatus; consumers read it at CALL time (gateEnvValue).
+  appPropertyScope: gateEnvValue('GATE_APP_PROPERTY_SCOPE'),
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.

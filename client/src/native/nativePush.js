@@ -130,11 +130,17 @@ async function bindPushListeners(PushNotifications) {
       const url = action?.notification?.data?.url;
       if (url && typeof window !== 'undefined') navigateToCustomerUrl(url);
     });
+    await PushNotifications.addListener('pushNotificationReceived', () => {
+      window.dispatchEvent(new Event('waves:native-notification'));
+    });
     const { App } = await import('@capacitor/app');
     await App.addListener('appStateChange', ({ isActive }) => {
       // Permission may change in OS Settings without restarting this app.
       // Reconcile the token on every return, including outside Settings.
-      if (isActive) void initNativePush();
+      if (isActive) {
+        void initNativePush();
+        window.dispatchEvent(new Event('waves:native-notification'));
+      }
     });
   } catch (error) {
     // A partial bind must be retryable after an app/plugin recovery.

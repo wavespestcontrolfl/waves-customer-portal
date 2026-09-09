@@ -135,7 +135,7 @@ function Variables({ variables }) {
       {rows.map((v) => (
         <span
           key={v}
-          className="text-10 px-1.5 py-0.5 rounded-xs bg-zinc-50 text-ink-tertiary border-hairline font-mono"
+          className="text-11 px-1.5 py-0.5 rounded-xs bg-zinc-50 text-ink-tertiary border-hairline font-mono"
         >
           {`{${v}}`}
         </span>

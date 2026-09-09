@@ -3764,6 +3764,9 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
         logger.info(`[call-proc] Lead ${leadId} kept open (${keepOpenReason}) despite phone booking for ${callSid}`);
         return false;
       }
+      // Customer 360 and lead mutations lock customer before lead. Acquire
+      // the promotion's write lock before the lead UPDATE in this savepoint.
+      if (customerId) await inner('customers').where({ id: customerId }).forNoKeyUpdate().first('id');
       // Ownership guard: leadId can come from the phone-only existing-lead
       // lookup, and a caller phone can be shared across leads. Only a lead
       // that is unclaimed (customer_id NULL) or already belongs to the
