@@ -3028,6 +3028,7 @@ const ReviewService = {
       .whereNotNull("sms_sent_at")
       .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [new Date(Date.now() - ASK_SPACING_MS)])
       .where({ followup_sent: false })
+      .whereRaw("(followup_next_attempt_at IS NULL OR followup_next_attempt_at <= ?)", [new Date()])
       .whereNull("rated_at")
       // Draft score taps are durable but not final. Do not send the
       // straight-to-Google reminder when the draft score already tells us the
@@ -3176,7 +3177,13 @@ const ReviewService = {
           sentThisRun.add(request.customer_id);
           sent++;
         });
-        if (held?.blocked) logger.info(`[review] Follow-up held (requestId=${candidate.id} code=${held.code})`);
+        if (held?.blocked) {
+          // Keep held customers out of the limited batch until their retry is due.
+          await db("review_requests").where({ id: candidate.id, followup_sent: false }).update({
+            followup_next_attempt_at: held.nextAllowedAt ? new Date(held.nextAllowedAt) : new Date(Date.now() + 15 * 60000),
+          });
+          logger.info(`[review] Follow-up held (requestId=${candidate.id} code=${held.code})`);
+        }
       } catch (err) {
         logger.error(`[review] Follow-up dispatch failed: ${err.message}`);
       }
