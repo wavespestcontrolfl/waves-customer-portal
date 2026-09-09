@@ -60,12 +60,20 @@ describe('GET /api/admin/reviews/send-time-preview — staff-scoped', () => {
     // The hold copy is conditional on the gate the server actually consults.
     expect(handler).toContain("smsSendWindowEnabled: isEnabled('smsSendWindow')");
     // Bundling is the server's verdict (legacy path AND no report-v1 delivery); unknown never claims a bundle.
-    expect(handler).toContain('bundlesImmediateAsk: !reviewSequencesEnabled && serviceReportV1Delivery === false');
+    // "Legacy path" is the RAW cadence gate, the same predicate completion's
+    // shouldBundleReview reads — not the cron-ANDed effective state, which
+    // would claim a bundle completion refuses when cadences are on and the
+    // cron is dark (codex #4140 r17 P2).
+    expect(handler).toContain("const reviewCadenceGate = isEnabled('reviewSequences');");
+    expect(handler).toContain('bundlesImmediateAsk: !reviewCadenceGate && serviceReportV1Delivery === false');
+    const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(completion).toContain("const reviewCadenceEnabled = require('../config/feature-gates').isEnabled('reviewSequences');");
+    expect(completion).toMatch(/const shouldBundleReview =[\s\S]*?!reviewCadenceEnabled;/);
     // The panel rounds a custom time to the worker tick the server names (r5 P2).
     expect(handler).toContain('cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES');
     // Cadence mode is the EFFECTIVE worker state — both gates (codex #4140 r15 P1).
     expect(handler).toContain("const schedulerEnabled = isEnabled('cronJobs');");
-    expect(handler).toContain("const reviewSequencesEnabled = isEnabled('reviewSequences') && schedulerEnabled;");
+    expect(handler).toContain('const reviewSequencesEnabled = reviewCadenceGate && schedulerEnabled;');
     expect(handler).toContain('schedulerEnabled,');
   });
 });

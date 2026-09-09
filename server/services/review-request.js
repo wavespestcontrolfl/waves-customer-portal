@@ -640,6 +640,12 @@ function calculateReviewSendTime(completedAt, serviceType, opts) {
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
 // page shows that tick, not the eligibility instant (codex #4140 r4 P2).
 const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
+// The legacy (cadences-off) path: processScheduled runs on the scheduler's
+// `*/15` cron (kept in step by review-sequences.test.js), and a legacy row's
+// scheduled_for is rebuilt from a later Date.now() after the target became a
+// whole-minute delay, so "tomorrow 8:00" is eligible just after 8:00 and
+// texts at 8:15. The panel shows that tick too (codex #4140 r18 P2).
+const LEGACY_REVIEW_TICK_MINUTES = [0, 15, 30, 45];
 // The tick the Reviews page shows for a step: an SMS step's tick must also
 // clear the 8 AM–8 PM send window while GATE_SMS_SEND_WINDOW is on — a
 // 7:50 PM row's 8:14 PM tick is refused by checkSendWindow and held to the
@@ -4177,20 +4183,29 @@ const ReviewService = {
    * for the link" capture is never lost (codex #4140 r4 P2, r9 P2). Only
    * customer_requested is written: the schedule is not moved (a second ask
    * inside the window is what the 3-day rule spaces) and updated_at is the
-   * runner's claim stamp (claimIsStale) and must not be refreshed. A race
-   * that left NO active row (the winner already completed) records nothing.
+   * runner's claim stamp (claimIsStale) and must not be refreshed. If the
+   * winner settled before capture, retry enrollment with all gates intact.
    */
-  async _alreadyActive(active, customerRequested) {
+  async _alreadyActive(active, customerRequested, retryEnrollment) {
+    if (!active) return retryEnrollment();
     let requestRecorded = false;
-    if (customerRequested && active?.id) {
-      await db("review_sequences").where({ id: active.id }).update({ customer_requested: JSON.stringify(customerRequested) });
+    if (customerRequested) {
+      const captured = await db("review_sequences").where({ id: active.id, status: "active" }).update({ customer_requested: JSON.stringify(customerRequested) });
+      if (!captured) return retryEnrollment();
       requestRecorded = true;
     }
     return { started: false, reason: "already_active", sequence: active, requestRecorded };
   },
 
 
-  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null }) {
+  async startReviewSequence(options, captureRetries = 1) {
+    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null } = options;
+    const retryEnrollment = () => {
+      // Re-run caps and visit dedupe too: the settled winner may have sent.
+      // Persistent contention must fail visibly, never claim a lost capture.
+      if (captureRetries <= 0) throw new Error("Active review cadence changed during request capture");
+      return this.startReviewSequence(options, captureRetries - 1);
+    };
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     if (customer.deleted_at) throw new Error("Customer is archived");
@@ -4272,7 +4287,7 @@ const ReviewService = {
         // second ask inside the window is what the 3-day rule (PR 3) spaces.
         // Only customer_requested is written: updated_at is the runner's
         // claim stamp (claimIsStale) and must not be refreshed here.
-        return this._alreadyActive(active, customerRequested);
+        return this._alreadyActive(active, customerRequested, retryEnrollment);
       }
     }
 
@@ -4458,20 +4473,20 @@ const ReviewService = {
           await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested, decision });
           return { started: false, reason: "deferred_inflight", deferred: true };
         }
-        if (existing) return this._alreadyActive(existing, customerRequested);
+        if (existing) return this._alreadyActive(existing, customerRequested, retryEnrollment);
         supersedeOpenerId = null;
         try {
           [sequence] = await insertReplacement();
         } catch (retryErr) {
           if (retryErr?.code === "23505") {
             const raced = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-            return this._alreadyActive(raced, customerRequested);
+            return this._alreadyActive(raced, customerRequested, retryEnrollment);
           }
           throw retryErr;
         }
       } else if (err?.code === "23505") {
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-        return this._alreadyActive(existing, customerRequested);
+        return this._alreadyActive(existing, customerRequested, retryEnrollment);
       } else {
         throw err;
       }
@@ -5004,8 +5019,16 @@ const ReviewService = {
   },
 
   async stopReviewSequence(sequenceId, reason = "manual") {
+    // A parked series final ('deferred', _parkDeferredFinal) is a durable
+    // enrollment too: it blocks a new cadence for the customer and only the
+    // redemption sweep ever touches it, so the stop path must reach it or
+    // the owner has no way to clear it (codex #4140 r18 P2). A 'redeeming'
+    // row is the sweep's 15-minute lease mid-flight — every lease
+    // transition is status-guarded, so it is left to settle (deferred,
+    // active, or gone) and the caller retries; stopped: false says so.
     const updated = await db("review_sequences")
-      .where({ id: sequenceId, status: "active" })
+      .where({ id: sequenceId })
+      .whereIn("status", ["active", "deferred"])
       .update({
         status: "stopped",
         stop_reason: reason,
@@ -5734,6 +5757,7 @@ ReviewService.__private = {
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
+  LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,
   nextTouchRunAt,
   shiftToWeekdayMorning,
