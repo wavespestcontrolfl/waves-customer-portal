@@ -344,8 +344,12 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awai
   // The master cron gate is dark: nothing automated sends at all — not the
   // cadence ticks, not the legacy 15-minute scheduler (codex #4140 r15 P1).
   // Only a link bundled into the completion text itself still goes.
-  if (preview?.schedulerEnabled === false && !(reviewTiming === "customer_requested" && bundled)) {
-    return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
+  // An UNKNOWN gate state (preview still loading, or failed) is not a
+  // promise either: fail closed and say so until the preview succeeds
+  // (codex #4140 r18 P1) — the same rule the Reviews page applies.
+  if (!(reviewTiming === "customer_requested" && bundled)) {
+    if (preview?.schedulerEnabled === false) return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
+    if (preview?.schedulerEnabled !== true) return "Whether automated review texts can send is not known yet (the send-time preview has not loaded). If the scheduler is off nothing sends; the choice is recorded on this visit.";
   }
   if (awaitsPayment && reviewTiming === "auto") return "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment.";
   if (awaitsPayment && reviewTiming === "customer_requested") return "Review text waits for the invoice to be paid, then goes out at the next cadence tick the send window allows. The request is recorded.";
@@ -358,8 +362,11 @@ function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     // In cadence mode `at` is a jitter-free eligibility time: enrollment
     // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
     // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
-    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, preview.cadenceTickMinutesOfHour) : null;
-    const hi = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.latestAt || preview.at, preview.cadenceTickMinutesOfHour, { after: true }) : null;
+    // The legacy path has no jitter but its own worker ticks (the */15
+    // scheduler): the row is eligible just after `at` and texts at the next
+    // tick, so name that tick too (codex #4140 r18 P2).
+    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
+    const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
     if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
     return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
   }
@@ -375,8 +382,11 @@ function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
   if (reviewTiming === "tomorrow_8") {
     // In cadence mode 8:00 is the eligibility time; the worker's first tick
     // after it is 8:14 (codex #4140 r6).
+    // The legacy path likewise: the target becomes a whole-minute delay and
+    // the eligibility instant is rebuilt from a later Date.now(), so the row
+    // is eligible just after 8:00 and the */15 scheduler sends at 8:15 (r18 P2).
     const tick = windowOpenTickISO(addETDays(new Date(), 1), preview, { after: true });
-    return tick ? `Review text goes out separately tomorrow at the first cadence tick after 8:00 AM — about ${fmtReviewTime(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
+    return tick ? `Review text goes out separately tomorrow at the first ${tickNoun(preview)} after 8:00 AM — about ${fmtReviewTime(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
   }
   if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
   return "";
@@ -388,8 +398,17 @@ const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60000;
 // date); null with cadences off or when the server did not name the ticks.
 function windowOpenTickISO(day, preview, opts) {
   const openISO = etDatetimeLocalToISO(`${etDateString(day)}T08:00`);
-  return preview?.reviewSequencesEnabled && openISO ? nextCadenceTickISO(openISO, preview.cadenceTickMinutesOfHour, opts) : null;
+  return openISO ? nextCadenceTickISO(openISO, workerTickMinutes(preview), opts) : null;
 }
+// The minutes of the hour the worker that will pick the row up runs on: the
+// cadence ticks (:14/:44) in cadence mode, the legacy scheduler's */15
+// otherwise — both named by the server (codex #4140 r18 P2). Null when it
+// did not name them, so no tick is promised.
+function workerTickMinutes(preview) {
+  if (!preview) return null;
+  return (preview.reviewSequencesEnabled ? preview.cadenceTickMinutesOfHour : preview.legacyTickMinutesOfHour) || null;
+}
+const tickNoun = (preview) => (preview?.reviewSequencesEnabled ? "cadence tick" : "scheduler tick");
 // The custom-time mode: the one whose hint parses operator input and has to
 // reconcile it with the send window and the worker's ticks.
 function customReviewTimingHint(reviewCustomAt, preview) {
@@ -416,7 +435,8 @@ function customReviewTimingHint(reviewCustomAt, preview) {
   // and rebuilds the eligibility instant from a later Date.now(), so the row
   // becomes eligible just AFTER the chosen minute — a time typed exactly on
   // :14 goes out at :44 (codex #4140 r6).
-  const tick = preview?.reviewSequencesEnabled ? nextCadenceTickISO(iso, preview.cadenceTickMinutesOfHour, { after: true }) : null;
+  // The legacy */15 scheduler has the same shape (r18 P2).
+  const tick = nextCadenceTickISO(iso, workerTickMinutes(preview), { after: true });
   // The window is checked on the TICK when there is one: 7:50 PM is inside
   // the window but its 8:14 PM tick is not, and the validator holds that
   // send to the next morning (codex #4140 r8). 8:00 PM is exclusive.
@@ -426,10 +446,10 @@ function customReviewTimingHint(reviewCustomAt, preview) {
     // after that is 8:14 (codex #4140 r7).
     const openTick = windowOpenTickISO(addETDays(new Date(iso), sendHour >= 20 ? 1 : 0), preview);
     return openTick
-      ? `Review text is held for the 8 AM–8 PM window — it goes out at the first cadence tick after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
+      ? `Review text is held for the 8 AM–8 PM window — it goes out at the first ${tickNoun(preview)} after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
       : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmtReviewTime(iso)}.`;
   }
-  if (tick && tick !== iso) return `Review text goes out separately at the next cadence tick after ${fmtReviewTime(iso)} — about ${fmtReviewTime(tick)}.`;
+  if (tick && tick !== iso) return `Review text goes out separately at the next ${tickNoun(preview)} after ${fmtReviewTime(iso)} — about ${fmtReviewTime(tick)}.`;
   return `Review text goes out separately ${fmtReviewTime(iso)}.`;
 }
 
@@ -12046,6 +12066,8 @@ export function CompletionPanel({
   };
   const reviewSendPreviewRef = useRef(null);
   reviewSendPreviewRef.current = reviewSendPreview;
+  // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
+  const previewFailureNoticedRef = useRef(false);
   const fetchReviewSendPreview = useCallback(() => {
     const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
     return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
@@ -12057,7 +12079,11 @@ export function CompletionPanel({
   useEffect(() => {
     if (!willReview || oneTimeRecapOnly) return undefined;
     let cancelled = false;
-    const load = () => fetchReviewSendPreview().then((data) => { if (!cancelled && data) setReviewSendPreview(data); });
+    const load = () => fetchReviewSendPreview().then((data) => {
+      if (cancelled || !data) return;
+      setReviewSendPreview(data);
+      previewFailureNoticedRef.current = false;
+    });
     load();
     // The smart window is bucketed by time of day, so a panel left open
     // across a boundary (2:59 → 3:00 PM) must not keep showing the old
@@ -14789,7 +14815,12 @@ export function CompletionPanel({
     // at submit so the operator never submits against a preview that a
     // boundary (2:59 → 3:00 PM) just invalidated (codex #4140 r3). Skipped
     // for a committed chain retry (immutable body).
-    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && reviewTiming === "auto") {
+    // Every other timing is re-checked only while the scheduler's state is
+    // still unknown (preview not loaded, or failed): the hint promised
+    // nothing in that state, and a submit must not silently accept an ask
+    // that GATE_CRON_JOBS may never send (codex #4140 r18 P1).
+    const schedulerStateKnown = typeof reviewSendPreviewRef.current?.schedulerEnabled === "boolean";
+    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && (reviewTiming === "auto" || !schedulerStateKnown)) {
       if (previewRecheckRef.current) return;
       previewRecheckRef.current = true;
       let fresh;
@@ -14810,19 +14841,23 @@ export function CompletionPanel({
       // still carry a later tick range after a tick boundary (codex #4140
       // r15 P2); only a bucket change needs the operator's confirmation.
       if (fresh) setReviewSendPreview(fresh);
-      if (fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
+      if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
         alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
         return;
       }
-      // The re-check itself failed while a time was on screen (codex #4140
-      // r13 P2): the promise can no longer be vouched for, so drop it — the
-      // hint falls back to "at the smart send window" — and stop once. A
-      // second submit proceeds with no shown time to compare against; the
-      // server computes the window itself. Completion is never blocked by
-      // the preview endpoint for more than one click.
-      if (!fresh && shown) {
-        setReviewSendPreview(null);
-        alert("The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue.");
+      // The re-check itself failed (codex #4140 r13 P2, r18 P1): a shown
+      // Automatic time can no longer be vouched for, so drop it, and the
+      // scheduler's state is still unknown, so nothing is promised — stop
+      // ONCE and say so. The next submit proceeds: the server computes the
+      // window itself, and the ask is recorded either way. Completion is
+      // never blocked by the preview endpoint for more than one click; a
+      // later successful load re-arms the notice.
+      if (!fresh && !previewFailureNoticedRef.current) {
+        previewFailureNoticedRef.current = true;
+        if (shown) setReviewSendPreview(null);
+        alert(reviewTiming === "auto" && shown
+          ? "The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue."
+          : "Whether automated review texts can send could not be checked. If the scheduler is off nothing sends; the choice is still recorded on this visit. Submit again to continue.");
         return;
       }
     }

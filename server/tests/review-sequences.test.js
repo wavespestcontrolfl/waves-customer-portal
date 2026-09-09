@@ -219,6 +219,26 @@ describe('review sequences — cadence engine', () => {
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('capped');
   });
 
+  test('stopReviewSequence reaches a parked (deferred) series final, leaves a redeeming lease alone (codex #4140 r18 P2)', async () => {
+    const mock = makeMock({
+      review_sequences: [
+        { id: 'seqParked', customer_id: 'p1', status: 'deferred', next_run_at: new Date(Date.now() + 30 * 60000), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+        { id: 'seqLease', customer_id: 'p2', status: 'redeeming', next_run_at: null, plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+        { id: 'seqActive', customer_id: 'p3', status: 'active', next_run_at: new Date(), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    expect(await ReviewService.stopReviewSequence('seqParked')).toEqual({ stopped: true });
+    expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'stopped', stop_reason: 'manual', next_run_at: null });
+    expect(await ReviewService.stopReviewSequence('seqLease')).toEqual({ stopped: false });
+    expect(mock.__state.rows.review_sequences[1].status).toBe('redeeming');
+    expect(await ReviewService.stopReviewSequence('seqActive')).toEqual({ stopped: true });
+    // A stopped parked row no longer reads as an enrollment on the Reviews page.
+    expect(await ReviewService.getActiveSequencesForCustomers(['p1', 'p2', 'p3'])).toEqual(expect.objectContaining({ p2: expect.anything() }));
+    expect(Object.keys(await ReviewService.getActiveSequencesForCustomers(['p1', 'p2', 'p3']))).toEqual(['p2']);
+  });
+
   test('a cadence stops on a non-promoter draft score tap (no submit)', async () => {
     const mock = makeMock({
       customers: [{ id: 'lo1', first_name: 'Lo', last_name: 'W', phone: '+19410000031', nearest_location_id: 'parrish' }],
@@ -892,6 +912,19 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const path = require('path');
       const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
       expect(scheduler).toContain(`cron.schedule('${REVIEW_CADENCE_TICK_MINUTES.join(',')} * * * *'`);
+    });
+
+    test('the legacy scheduler cron (processScheduled, */15) and the legacy tick table name the same minutes (codex #4140 r18 P2)', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const { LEGACY_REVIEW_TICK_MINUTES } = ReviewService.__private;
+      const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+      const legacy = scheduler.slice(scheduler.indexOf("cron.schedule('*/15 * * * *'"), scheduler.indexOf('ReviewService.processScheduled()'));
+      expect(legacy).toContain("cron.schedule('*/15 * * * *'");
+      expect(LEGACY_REVIEW_TICK_MINUTES).toEqual([0, 15, 30, 45]);
+      // The preview route hands the panel both tick tables.
+      const route = fs.readFileSync(path.join(__dirname, '../routes/admin-reviews.js'), 'utf8');
+      expect(route).toContain('legacyTickMinutesOfHour: ReviewService.__private.LEGACY_REVIEW_TICK_MINUTES');
     });
 
     test.each([

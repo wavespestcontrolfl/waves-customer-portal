@@ -153,6 +153,10 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // the panel uses them to say when a custom time actually goes out
       // (codex #4140 r5 P2).
       cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
+      // The legacy path's worker (processScheduled, the */15 cron) has ticks
+      // of its own; with cadences off the panel names those, not the
+      // requested eligibility minute (codex #4140 r18 P2).
+      legacyTickMinutesOfHour: ReviewService.__private.LEGACY_REVIEW_TICK_MINUTES,
     });
   } catch (err) {
     next(err);
@@ -1047,7 +1051,7 @@ router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/reviews/outreach/stop-sequence — stop an active cadence.
+// POST /api/admin/reviews/outreach/stop-sequence — stop an active or parked cadence.
 router.post('/outreach/stop-sequence', requireAdmin, async (req, res, next) => {
   try {
     const { sequenceId } = req.body || {};
