@@ -827,11 +827,15 @@ async function priorAssessmentCount(customerId, knex) {
 // locked for the confirm's transaction and claimed only while it is still
 // unconfirmed, so a retried or concurrent confirm of a completed row neither
 // rewrites it nor runs the customer pipeline (duplicate notification, report
-// and calibration rows) a second time (Codex #4150 r8). True when this
-// transaction may confirm the row; false when it already is confirmed.
+// and calibration rows) a second time (Codex #4150 r8). Returns the locked
+// row when this transaction may confirm it — the confirm derives its update
+// from THAT row, not from the snapshot it read before the lock, so a partial
+// confirm that raced another merges into what that one saved (Codex #4153
+// r6) — and null when the row is already confirmed or does not exist.
+// Callers take the customer's baseline advisory lock first (lock order).
 async function claimConfirm(assessmentId, trx) {
-  const row = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first('confirmed_by_tech');
-  return !!row && !row.confirmed_by_tech;
+  const row = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+  return row && !row.confirmed_by_tech ? row : null;
 }
 
 const parseJsonArray = (value) => {

@@ -1064,6 +1064,13 @@ router.post('/confirm', async (req, res, next) => {
     // and review but stays pending (no baseline, no calibration, no
     // customer-facing step) until the gaps are filled and it confirms again.
     // Legacy rows compute and confirm exactly as before.
+    // The derivation is a function of the row and its run because a
+    // run-backed confirm runs it AGAIN inside the write transaction, from the
+    // row as it is under its lock: two partial confirms that raced each read
+    // the same pending snapshot, and the one that waited on the lock must
+    // merge its field into what the other saved, not overwrite it with the
+    // stale snapshot (Codex #4153 r6).
+    const deriveConfirmUpdate = (assessmentRow, runRow) => {
     let finalScores;
     let overallScore;
     let confirmed = true;
@@ -1071,14 +1078,14 @@ router.post('/confirm', async (req, res, next) => {
     let calibrationEligible = true;
     let runAiScores = null;
     if (reviewedRun) {
-      ({ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible, aiScores: runAiScores } = visitAssessment.confirmScores(assessment, visitRun, adjustedScores, { scoreValue, calculateOverallScore }));
+      ({ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible, aiScores: runAiScores } = visitAssessment.confirmScores(assessmentRow, runRow, adjustedScores, { scoreValue, calculateOverallScore }));
     } else {
       finalScores = {
-        turf_density: scoreValue(adjustedScores?.turf_density, assessment.turf_density),
-        weed_suppression: scoreValue(adjustedScores?.weed_suppression, assessment.weed_suppression),
-        color_health: scoreValue(adjustedScores?.color_health, assessment.color_health),
-        fungus_control: scoreValue(adjustedScores?.fungus_control, assessment.fungus_control),
-        thatch_level: scoreValue(adjustedScores?.thatch_level, assessment.thatch_level),
+        turf_density: scoreValue(adjustedScores?.turf_density, assessmentRow.turf_density),
+        weed_suppression: scoreValue(adjustedScores?.weed_suppression, assessmentRow.weed_suppression),
+        color_health: scoreValue(adjustedScores?.color_health, assessmentRow.color_health),
+        fungus_control: scoreValue(adjustedScores?.fungus_control, assessmentRow.fungus_control),
+        thatch_level: scoreValue(adjustedScores?.thatch_level, assessmentRow.thatch_level),
       };
     // Stress/Damage. The tech now corrects a single "Stress" score directly on
     // the completion screen, so honor an explicit adjustedScores.stress_damage
@@ -1088,8 +1095,8 @@ router.post('/confirm', async (req, res, next) => {
     // already folds in insect/drought/mechanical and the worst per-photo
     // disease/thatch). Pre-stress_damage rows (null floor) fall back to
     // worst-of(fungus, thatch) — never 0.
-      const aiFloor = Number.isFinite(Number(assessment.stress_damage))
-        ? Number(assessment.stress_damage)
+      const aiFloor = Number.isFinite(Number(assessmentRow.stress_damage))
+        ? Number(assessmentRow.stress_damage)
         : 95;
       const derivedStress = Math.min(
         Number(finalScores.fungus_control),
@@ -1111,7 +1118,7 @@ router.post('/confirm', async (req, res, next) => {
     if (adjustedScores) {
       if (adjustedScores.observations != null) updateData.observations = adjustedScores.observations;
       updateData.adjusted_scores = JSON.stringify({
-        ...parseJsonObject(assessment.adjusted_scores),
+        ...parseJsonObject(assessmentRow.adjusted_scores),
         ...finalScores,
         ...(adjustedScores.observations != null ? { observations: adjustedScores.observations } : {}),
       });
@@ -1123,6 +1130,9 @@ router.post('/confirm', async (req, res, next) => {
     if (normalizedStressFlags !== null) {
       updateData.stress_flags = JSON.stringify(normalizedStressFlags);
     }
+    return { finalScores, confirmed, missingScores, calibrationEligible, runAiScores, updateData };
+    };
+    let { finalScores, confirmed, missingScores, calibrationEligible, runAiScores, updateData } = deriveConfirmUpdate(assessment, visitRun);
 
     // A run-backed row writes in ONE transaction: the legacy baseline check
     // under the customer's baseline lock (legacyBaselineFields), the update,
@@ -1138,16 +1148,33 @@ router.post('/confirm', async (req, res, next) => {
     // A run-backed row confirms once: the row is claimed under its lock, and
     // a retry or a second tab arriving after the completing confirm gets the
     // confirmed row back with nothing rewritten and no second pipeline.
-    const installBaseline = propertyHistoryEnabled && confirmed;
+    // Lock order matches every other baseline writer (linkAssessmentServiceRecord,
+    // installConfirmedBaseline: the customer's baseline advisory lock, THEN a
+    // lawn_assessments row): the advisory lock is taken before the row claim,
+    // so a completion back-linking this row while it confirms waits instead of
+    // forming a lock cycle PostgreSQL aborts as a deadlock (Codex #4150 r9).
+    // The technician's protocol field checks write in the same transaction:
+    // a failure rolls the confirm back too, so a retry redoes all of it
+    // instead of taking the already-confirmed return past a write that never
+    // happened (Codex #4150 r9).
+    let currentRun = visitRun;
     const writeConfirm = async (trx) => {
-      if (reviewedRun && !(await visitAssessment.claimConfirm(assessmentId, trx))) return { alreadyConfirmed: true };
-      Object.assign(updateData, await visitAssessment.legacyBaselineFields({ assessment, run: visitRun, confirmed, propertyHistoryEnabled }, trx));
+      if (reviewedRun) {
+        await lawnAssessment.lockCustomerBaseline(assessment.customer_id, trx);
+        const locked = await visitAssessment.claimConfirm(assessmentId, trx);
+        if (!locked) return { alreadyConfirmed: true };
+        currentRun = await visitAssessment.loadRun(assessmentId, trx);
+        ({ finalScores, confirmed, missingScores, calibrationEligible, runAiScores, updateData } = deriveConfirmUpdate(locked, currentRun));
+      }
+      Object.assign(updateData, await visitAssessment.legacyBaselineFields({ assessment, run: currentRun, confirmed, propertyHistoryEnabled }, trx));
+      const installBaseline = propertyHistoryEnabled && confirmed;
       const row = installBaseline
         ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: trx })
         : (await trx('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
       const run = reviewedRun && visitReview.provided
-        ? await visitAssessment.reviewRun({ run: visitRun, review: visitReview, technicianId: req.technicianId }, trx)
+        ? await visitAssessment.reviewRun({ run: currentRun, review: visitReview, technicianId: req.technicianId }, trx)
         : null;
+      if (protocolFieldChecksProvided) await persistProtocolFieldChecks({ assessment: row, checks: protocolFieldChecks, trx });
       return { updated: row, reviewedVisitRun: run };
     };
     const { updated, reviewedVisitRun, alreadyConfirmed } = reviewedRun ? await db.transaction(writeConfirm) : await writeConfirm(db);
@@ -1155,16 +1182,13 @@ router.post('/confirm', async (req, res, next) => {
       const current = await db('lawn_assessments').where({ id: assessmentId }).first();
       return res.json({ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment.responseForRun(visitRun) });
     }
-    if (protocolFieldChecksProvided) {
-      await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
-      Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
-    }
+    if (protocolFieldChecksProvided) Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
 
     // A pending row: the scores and review are saved; everything that reads a
     // confirmed assessment (wiki outcome link, weather, calibration, the
     // customer-facing steps, completion tracking) waits for the confirm that
     // completes it. The client is told which scores are still missing.
-    const runPayload = reviewedRun ? { visitAssessment: visitAssessment.responseForRun(reviewedVisitRun || visitRun) } : {};
+    const runPayload = reviewedRun ? { visitAssessment: visitAssessment.responseForRun(reviewedVisitRun || currentRun) } : {};
     if (!confirmed) {
       return res.json({ success: true, confirmed: false, missingScores, assessment: updated, ...runPayload });
     }

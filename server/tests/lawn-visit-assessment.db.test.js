@@ -156,9 +156,9 @@ const analysis = (overrides = {}) => ({
     const seen = [];
     const confirm = (tag, hold) => db.knex.transaction(async (trx) => {
       const claimed = await visit.claimConfirm(assessment.id, trx);
-      seen.push(`${tag}:${claimed}`);
+      seen.push(`${tag}:${!!claimed}`);
       await hold;
-      if (claimed) await trx('lawn_assessments').where({ id: assessment.id }).update({ confirmed_by_tech: true });
+      if (claimed) await trx('lawn_assessments').where({ id: assessment.id }).update({ confirmed_by_tech: true, turf_density: 55 });
       return claimed;
     });
     let release;
@@ -169,11 +169,38 @@ const analysis = (overrides = {}) => ({
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(seen).toEqual(['first:true']); // the second is waiting on the row lock
     release();
-    expect(await Promise.all([first, second])).toEqual([true, false]);
+    const [firstClaim, secondClaim] = await Promise.all([first, second]);
+    // The claim is the LOCKED row — the confirm derives its update from it, never from a pre-lock snapshot.
+    expect(firstClaim).toMatchObject({ id: assessment.id, confirmed_by_tech: false, turf_density: 72 });
+    expect(secondClaim).toBeNull();
     expect(seen).toEqual(['first:true', 'second:false']);
     // A retry after the completing confirm sees the confirmed row: no claim, nothing to rewrite.
-    expect(await db.knex.transaction((trx) => visit.claimConfirm(assessment.id, trx))).toBe(false);
-    expect(await db.knex.transaction((trx) => visit.claimConfirm(randomUUID(), trx))).toBe(false);
+    expect(await db.knex.transaction((trx) => visit.claimConfirm(assessment.id, trx))).toBeNull();
+    expect(await db.knex.transaction((trx) => visit.claimConfirm(randomUUID(), trx))).toBeNull();
+  });
+
+  test('claimConfirm hands back the row as it is under the lock: a partial confirm that committed while this one waited is what the next derivation reads', async () => {
+    const { assessment } = await seed();
+    const seen = [];
+    const partial = (tag, hold, update) => db.knex.transaction(async (trx) => {
+      const locked = await visit.claimConfirm(assessment.id, trx);
+      seen.push(`${tag}:${locked?.turf_density ?? 'null'}:${locked?.color_health ?? 'null'}`);
+      await hold;
+      await trx('lawn_assessments').where({ id: assessment.id }).update(update); // still pending: confirmed_by_tech stays false
+      return locked;
+    });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const first = partial('first', held, { color_health: 80 });
+    while (!seen.length) await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = partial('second', Promise.resolve(), { thatch_level: 60 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(seen).toEqual(['first:72:null']);
+    release();
+    await Promise.all([first, second]);
+    // The second claim saw the first's saved score, so its own derivation merges instead of overwriting.
+    expect(seen).toEqual(['first:72:null', 'second:72:80']);
+    expect(await db.knex('lawn_assessments').where({ id: assessment.id }).first()).toMatchObject({ confirmed_by_tech: false, turf_density: 72, color_health: 80, thatch_level: 60 });
   });
 
   test('priorAssessmentCount against the real table: a pending run-backed row is not a prior assessment', async () => {

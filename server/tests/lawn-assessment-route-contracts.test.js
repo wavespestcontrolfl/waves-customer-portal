@@ -142,9 +142,19 @@ describe('lawn assessment route contracts', () => {
     test('/confirm validates the review before any write, preserves NULL scores for a run-backed row, records a review only when one was sent, and confirms only a complete row', () => {
       expect(confirm.indexOf('visitAssessment.validateReview(')).toBeLessThan(confirm.indexOf('installConfirmedBaseline('));
       // One branch: the run-backed row's scores, overall and confirmed verdict come from the module; the legacy block is untouched.
-      expect(confirm).toMatch(/if \(reviewedRun\) \{\s*\(\{ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible, aiScores: runAiScores \} = visitAssessment\.confirmScores\(assessment, visitRun, adjustedScores, \{ scoreValue, calculateOverallScore \}\)\);/);
+      // The derivation is a function of (row, run): it runs once from the pre-lock snapshot and AGAIN from the
+      // locked row inside the write transaction, so two partial confirms that raced merge instead of the later
+      // one overwriting the earlier one's saved scores with its stale snapshot.
+      expect(confirm).toMatch(/const deriveConfirmUpdate = \(assessmentRow, runRow\) => \{/);
+      expect(confirm).toMatch(/if \(reviewedRun\) \{\s*\(\{ finalScores, overallScore, confirmed, missing: missingScores, calibrationEligible, aiScores: runAiScores \} = visitAssessment\.confirmScores\(assessmentRow, runRow, adjustedScores, \{ scoreValue, calculateOverallScore \}\)\);/);
+      const derive = confirm.slice(confirm.indexOf('const deriveConfirmUpdate = '), confirm.indexOf('let { finalScores, confirmed, missingScores, calibrationEligible, runAiScores, updateData } = deriveConfirmUpdate(assessment, visitRun);'));
+      expect(derive).toMatch(/return \{ finalScores, confirmed, missingScores, calibrationEligible, runAiScores, updateData \};\s*\};\s*$/);
+      // Inside the derivation every read is of the row it was handed, never the pre-lock snapshot.
+      expect(derive).not.toMatch(/\bassessment\./);
+      expect(derive).not.toMatch(/\bvisitRun\b/);
       // A run-backed row calibrates against the run's own scores, a legacy row against its stored JSON.
       expect(confirm).toMatch(/const calibrationBaseline = runAiScores \|\| assessment\.adjusted_scores \|\| assessment\.composite_scores;/);
+      expect(confirm).toMatch(/parseJsonObject\(assessmentRow\.adjusted_scores\)/);
       expect(confirm).toMatch(/overall_score: overallScore,/);
       // confirmed_by_tech / confirmed_at are stamped only on a confirmed row; a pending row never becomes the property baseline.
       expect(confirm).toMatch(/\.\.\.\(confirmed \? \{ confirmed_by_tech: true, confirmed_at: new Date\(\) \} : \{\}\),\s*updated_at: new Date\(\),/);
@@ -156,13 +166,27 @@ describe('lawn assessment route contracts', () => {
       // a lost review can never ride a successful confirm and two first confirms cannot both become the
       // baseline. A run-backed row always writes in a transaction; a pre-gate row writes as before.
       const write = confirm.slice(confirm.indexOf('const writeConfirm = async (trx) => {'), confirm.indexOf('const { updated, reviewedVisitRun, alreadyConfirmed } ='));
-      // A run-backed row is claimed under its row lock first: a confirm arriving after the completing one rewrites nothing and runs no pipeline.
-      expect(write).toMatch(/^const writeConfirm = async \(trx\) => \{\s*if \(reviewedRun && !\(await visitAssessment\.claimConfirm\(assessmentId, trx\)\)\) return \{ alreadyConfirmed: true \};\s*Object\.assign\(updateData, await visitAssessment\.legacyBaselineFields\(\{ assessment, run: visitRun, confirmed, propertyHistoryEnabled \}, trx\)\);/);
+      // A run-backed row: the customer's baseline advisory lock FIRST (the order every other baseline writer
+      // uses — linkAssessmentServiceRecord and installConfirmedBaseline take the advisory lock, then the row —
+      // so a completion back-link racing a confirm waits instead of deadlocking), then the row claim; a confirm
+      // arriving after the completing one rewrites nothing and runs no pipeline. The update is re-derived from
+      // the LOCKED row and its run, never from the pre-lock snapshot.
+      expect(write).toMatch(/^const writeConfirm = async \(trx\) => \{\s*if \(reviewedRun\) \{\s*await lawnAssessment\.lockCustomerBaseline\(assessment\.customer_id, trx\);\s*const locked = await visitAssessment\.claimConfirm\(assessmentId, trx\);\s*if \(!locked\) return \{ alreadyConfirmed: true \};\s*currentRun = await visitAssessment\.loadRun\(assessmentId, trx\);\s*\(\{ finalScores, confirmed, missingScores, calibrationEligible, runAiScores, updateData \} = deriveConfirmUpdate\(locked, currentRun\)\);\s*\}\s*Object\.assign\(updateData, await visitAssessment\.legacyBaselineFields\(\{ assessment, run: currentRun, confirmed, propertyHistoryEnabled \}, trx\)\);\s*const installBaseline = propertyHistoryEnabled && confirmed;/);
       expect(write).toMatch(/installBaseline\s*\? await lawnAssessment\.installConfirmedBaseline\(\{ assessmentId, updateData \}, \{ knex: trx \}\)\s*: \(await trx\('lawn_assessments'\)\.where\(\{ id: assessmentId \}\)\.update\(updateData\)\.returning\('\*'\)\)\[0\];/);
-      expect(write).toMatch(/const run = reviewedRun && visitReview\.provided\s*\? await visitAssessment\.reviewRun\(\{ run: visitRun, review: visitReview, technicianId: req\.technicianId \}, trx\)\s*: null;/);
+      expect(write).toMatch(/const run = reviewedRun && visitReview\.provided\s*\? await visitAssessment\.reviewRun\(\{ run: currentRun, review: visitReview, technicianId: req\.technicianId \}, trx\)\s*: null;/);
+      expect(write.indexOf('lockCustomerBaseline(')).toBeLessThan(write.indexOf('claimConfirm('));
+      expect(write.indexOf('claimConfirm(')).toBeLessThan(write.indexOf('legacyBaselineFields('));
       expect(write.indexOf('legacyBaselineFields(')).toBeLessThan(write.indexOf('installConfirmedBaseline('));
+      // The technician's protocol field checks write INSIDE the confirm transaction (same trx), after the row
+      // and the review: a failed write rolls the confirm back, so a retry redoes it instead of taking the
+      // already-confirmed return past a write that never happened.
+      expect(write).toMatch(/if \(protocolFieldChecksProvided\) await persistProtocolFieldChecks\(\{ assessment: row, checks: protocolFieldChecks, trx \}\);\s*return \{ updated: row, reviewedVisitRun: run \};/);
+      expect(confirm.match(/persistProtocolFieldChecks\(/g)).toHaveLength(1);
+      expect(write.indexOf('reviewRun(')).toBeLessThan(write.indexOf('persistProtocolFieldChecks('));
       expect(confirm).toMatch(/const \{ updated, reviewedVisitRun, alreadyConfirmed \} = reviewedRun \? await db\.transaction\(writeConfirm\) : await writeConfirm\(db\);\s*if \(alreadyConfirmed\) \{[\s\S]{0,300}return res\.json\(\{ success: true, confirmed: true, alreadyConfirmed: true, assessment: current, visitAssessment: visitAssessment\.responseForRun\(visitRun\) \}\);/);
-      expect(confirm.indexOf('if (alreadyConfirmed) {')).toBeLessThan(confirm.indexOf('persistProtocolFieldChecks('));
+      expect(confirm).toMatch(/if \(protocolFieldChecksProvided\) Object\.assign\(updated, protocolFieldChecks, \{ protocol_field_checks: protocolFieldChecks \}\);/);
+      // The response reads the run the transaction reviewed (or loaded under the lock), not the pre-lock snapshot.
+      expect(confirm).toMatch(/visitAssessment\.responseForRun\(reviewedVisitRun \|\| currentRun\)/);
       expect(confirm).not.toMatch(/reviewRun\([\s\S]{0,120}, db\)/);
       expect(confirm).not.toMatch(/legacyBaselineFields\([\s\S]{0,120}, db\)/);
       // Calibration compares the run's scores with the RESOLVED confirmation — every score the row confirmed
