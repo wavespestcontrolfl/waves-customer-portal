@@ -4,7 +4,8 @@ import { Link } from "react-router-dom";
 // SPA on every click; an in-app path goes through the router, an absolute
 // URL keeps the anchor, and a row with no destination is not a link at all.
 export function RowLink({ href, className, children }) {
-  if (typeof href === "string" && href.startsWith("/")) {
+  // "/path" is in-app; "//host/path" is protocol-relative and external.
+  if (typeof href === "string" && href.startsWith("/") && !href.startsWith("//")) {
     return (
       <Link to={href} className={className}>
         {children}

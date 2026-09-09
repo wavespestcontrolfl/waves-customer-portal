@@ -85,12 +85,13 @@ describe("ActionInbox", () => {
       <ActionInbox
         alerts={[
           { id: "ext", kind: "action", severity: "warn", label: "External", href: "https://example.test/x" },
+          { id: "rel", kind: "action", severity: "warn", label: "Protocol relative", href: "//example.test/y" },
           { id: "none", kind: "action", severity: "warn", label: "No destination" },
         ]}
       />,
     );
     const links = screen.getAllByRole("link");
-    expect(links.map((a) => a.getAttribute("href"))).toEqual(["https://example.test/x"]);
+    expect(links.map((a) => a.getAttribute("href"))).toEqual(["https://example.test/x", "//example.test/y"]);
     expect(screen.getByText(/No destination/).closest("a")).toBeNull();
   });
 
