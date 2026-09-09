@@ -563,8 +563,8 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
   // clamped inside its hour (atHour), a relative one moves freely. The
   // completion panel names the cadence ticks either end lands on.
   // A relative answer keeps its jitter only inside the 9 AM–5 PM fences
-  // (normalizeReviewSendWindow falls back to the unjittered instant), so an
-  // end that crosses a fence collapses to `at` (codex #4140 r15 P2).
+  // (normalizeReviewSendWindow falls back to the unjittered instant). Keep
+  // valid interior minute samples even when an endpoint crosses a fence.
   const hourStart = new Date(at.getTime());
   hourStart.setUTCMinutes(0, 0, 0); // ET offsets are whole hours
   const insideFences = (d) => { const h = etParts(d).hour; return h >= 9 && h < 17; };
@@ -574,8 +574,14 @@ function calculateReviewSendPlan(completedAt, serviceType, { jitter: withJitter 
     earliestAt = new Date(Math.max(earliestAt.getTime(), hourStart.getTime()));
     latestAt = new Date(Math.min(latestAt.getTime(), hourStart.getTime() + 59 * 60000));
   } else {
-    if (!insideFences(earliestAt)) earliestAt = at;
-    if (!insideFences(latestAt)) latestAt = at;
+    earliestAt = at;
+    latestAt = at;
+    for (let offset = -JITTER_MAX_MINUTES; offset <= JITTER_MAX_MINUTES; offset++) {
+      const sample = new Date(at.getTime() + offset * 60000);
+      if (!insideFences(sample)) continue;
+      if (sample < earliestAt) earliestAt = sample;
+      if (sample > latestAt) latestAt = sample;
+    }
   }
   return { at, kind, bucket, earliestAt, latestAt };
 }
@@ -5401,6 +5407,7 @@ const ReviewService = {
       const parked = r.status !== "active";
       if (parked && map[r.customer_id] && !map[r.customer_id].parked) return;
       const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
+      const nextFrom = r.next_run_at ? new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now())) : null;
 
       map[r.customer_id] = {
         id: r.id,
@@ -5412,12 +5419,12 @@ const ReviewService = {
         // runner holds the claim). An overdue row (missed tick, gate re-enabled
         // between ticks) is picked up at the next tick from NOW, not at a tick
         // that has already passed (codex #4140 r8).
-        nextSendTickAt: r.next_run_at ? nextSendTickFor(plan[r.current_step], new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now()))) : null,
+        nextSendTickAt: nextFrom ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom)) : null,
         // An ask step can swap channel at send time (sendOutreachTouch: the
         // intended channel unavailable, the other allowed) — email→SMS then
         // meets the send window, SMS→email escapes it — so the page shows the
         // other channel's tick when it differs (codex #4140 r14, r16 P2).
-        ...fallbackTickFor(plan[r.current_step], r.next_run_at ? new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now())) : null),
+        ...fallbackTickFor(plan[r.current_step], parked ? null : nextFrom),
         // next_run_at NULL on an active row = the runner holds the send claim
         // right now (or an inline start is in progress). The claim stamps
         // updated_at; one older than the runner's own reconciliation horizon
