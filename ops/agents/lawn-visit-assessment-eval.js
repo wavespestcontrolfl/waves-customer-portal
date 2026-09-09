@@ -49,6 +49,7 @@ const path = require('path');
 
 const REPO = path.resolve(__dirname, '..', '..');
 const SCORE_COLUMNS = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
+const FIXTURE_VERSION = 1; // Older exports could contain mutable, post-visit prompt context.
 
 // A count flag: a finite positive whole number, or the script stops before
 // any export or paid call — `--sample -1` / `--limit -1` sliced almost the
@@ -146,10 +147,10 @@ async function exportFixture(args) {
       // was read by the original model. Completion turf readings are editable
       // after Analyze too. Omit these fields instead of replaying later data.
       cases.push(evalLib.fixtureCase(row, photos, {
-        omitted: ['grassType', 'irrigation', 'turfHeightIn', 'priorSummary'].map((field) => ({ field, reason: 'legacy_assessment_has_no_prompt_snapshot' })),
+        omitted: ['grassType', 'irrigation', 'turfHeightIn', 'priorSummary', 'technicianNotes'].map((field) => ({ field, reason: 'legacy_assessment_has_no_prompt_snapshot' })),
       }));
     }
-    const fixture = { generatedAt: new Date().toISOString(), propertyHistory: propertyHistoryEnabled, population: all.length, cases };
+    const fixture = { fixtureVersion: FIXTURE_VERSION, generatedAt: new Date().toISOString(), propertyHistory: propertyHistoryEnabled, population: all.length, cases };
     const omittedCases = cases.filter((c) => c.context.omitted.length).length;
     console.error(`context omitted (not provably visit-time) in ${omittedCases} of ${cases.length} case(s)${omittedCases ? `: ${Object.entries(cases.flatMap((c) => c.context.omitted).reduce((acc, o) => ({ ...acc, [o.field]: (acc[o.field] || 0) + 1 }), {})).map(([f, n]) => `${f} ×${n}`).join(', ')}` : ''}`);
     console.error(`exported ${cases.length} case(s) of ${all.length} confirmed assessments with photos · export property history ${propertyHistoryEnabled ? 'on' : 'off'} · photos ${cases.reduce((n, c) => n + c.photos.length, 0)} · zone-labeled ${cases.reduce((n, c) => n + c.photos.filter((p) => p.zone).length, 0)}`);
@@ -198,7 +199,10 @@ async function runReplay(args) {
   assertNoLedgerWrites(gates, 'after imports');
 
   const fixture = JSON.parse(fs.readFileSync(args.run, 'utf8'));
-  const cases = evalLib.selectCases(fixture.cases || [], { ids: args.ids }).slice(0, args.limit);
+  if (fixture?.fixtureVersion !== FIXTURE_VERSION || !Array.isArray(fixture.cases)) {
+    throw new Error('Unsupported evaluation fixture; re-export with this version before replaying. Older exports may contain unproven prompt context.');
+  }
+  const cases = evalLib.selectCases(fixture.cases, { ids: args.ids }).slice(0, args.limit);
   if (!cases.length) { console.error('no cases selected'); process.exit(2); }
   const policy = MODELS.TEXT_POLICIES.lawnVisitAssessment;
   // What this replay varies from the production policy, named once — on the

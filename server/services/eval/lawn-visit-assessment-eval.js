@@ -339,7 +339,9 @@ function scoreResult(testCase, analysis, { adjust = (scores, month) => applySeas
     adjusted,
     deltas,
     undeterminable,
-    causeNamedBelowModerate: causeNamedBelowModerate(analysis.findings),
+    // Traceability/quality gates can downgrade the normalized confidence;
+    // naming discipline measures what the model actually claimed.
+    causeNamedBelowModerate: causeNamedBelowModerate(analysis.raw.findings),
     findings: (analysis.findings || []).map((finding) => ({
       finding_id: finding.finding_id, name: finding.name, label: finding.label, confidence: finding.confidence, severity: finding.severity,
       urgency: finding.urgency, photo_refs: finding.photo_refs, zone: finding.zone, can_determine: finding.can_determine,

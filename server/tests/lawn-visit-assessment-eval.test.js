@@ -24,6 +24,10 @@ const analysis = (overrides = {}) => ({
   status: 'complete', reason: null, provider: 'gemini', model: 'gemini-3.8-flash', fallbackUsed: false, failures: [], latencyMs: 4200,
   usage: { input_tokens: 9000, output_tokens: 4000, reasoning_tokens: 1000 }, contextHash: 'h', observations: 'obs', grassType: 'st_augustine',
   photoQuality: [{ photo: 1, quality: 'adequate', issue: '' }],
+  raw: { findings: [
+    { finding_id: 'F1', name: 'Irregular browning along the edge', confidence: 'moderate' },
+    { finding_id: 'F2', name: 'Chinch bug damage', confidence: 'low' },
+  ] },
   findings: [
     { finding_id: 'F1', name: 'Irregular browning along the edge', label: 'a lawn condition we are monitoring', confidence: 'moderate', severity: 'moderate', urgency: 'follow_up', photo_refs: [1], zone: 'front', can_determine: true, cannot_determine_reason: '', observed_evidence: ['x'], negative_evidence: [], confirmation_step: 'float test' },
     { finding_id: 'F2', name: 'Chinch bug damage', label: 'general lawn stress', confidence: 'low', severity: 'mild', urgency: 'monitor', photo_refs: [], zone: 'unknown', can_determine: false, cannot_determine_reason: 'no close-up', observed_evidence: [], negative_evidence: [], confirmation_step: '' },
@@ -153,7 +157,7 @@ describe('scoring', () => {
     expect(r.deltas.vsConfirmed).toEqual({ turf_density: 0, weed_suppression: -5, fungus_control: 0, thatch_level: 0, stress_damage: -5 });
     expect(r.deltas.vsLegacyAi).toEqual({ turf_density: 0, weed_suppression: -5, fungus_control: 0, thatch_level: 0, stress_damage: 0 });
     expect(r.undeterminable).toEqual(['color_health']);
-    expect(r.causeNamedBelowModerate).toEqual([{ finding_id: 'F2', name: 'Chinch bug damage', confidence: 'low', label: 'general lawn stress' }]);
+    expect(r.causeNamedBelowModerate).toEqual([{ finding_id: 'F2', name: 'Chinch bug damage', confidence: 'low', label: undefined }]);
     // The vocabulary is the production governed-cause lexicon, generic classes included: a low "fungal activity",
     // "disease pressure" or "insect damage" counts; a symptom-only name never does.
     const low = (name) => ({ finding_id: 'F9', name, confidence: 'low', label: 'general lawn stress' });
@@ -162,6 +166,19 @@ describe('scoring', () => {
     expect(r.costUsd).toBe(0.0255); // (9000 × 0.75 + 5000 × 3.75) / 1e6, reasoning billed as output
     expect(r.findings).toHaveLength(2);
     expect(r.findings[1]).toMatchObject({ can_determine: false, cannot_determine_reason: 'no close-up' });
+  });
+
+  test('naming discipline uses raw confidence while reported findings retain the evidence gate', () => {
+    const answer = analysis({ raw: { findings: [{ finding_id: 'model-1', name: 'Chinch bug damage', confidence: 'high', photo_refs: [], can_determine: true }] } });
+    const visit = require('../services/lawn-visit-assessment');
+    const normalized = visit.normalizeAssessment({ findings: answer.raw.findings, photo_quality: [{ photo: 1, quality: 'adequate' }], severities: answer.severities, scores: answer.scores }, 1);
+    const result = evalLib.scoreResult(testCase, { ...answer, findings: normalized.findings });
+    expect(result.causeNamedBelowModerate).toEqual([]);
+    expect(result.findings[0]).toMatchObject({ confidence: 'unknown', can_determine: false, label: 'general lawn stress' });
+    answer.raw.findings[0].confidence = 'low';
+    expect(evalLib.scoreResult(testCase, { ...answer, findings: normalized.findings }).causeNamedBelowModerate).toEqual([
+      expect.objectContaining({ name: 'Chinch bug damage', confidence: 'low' }),
+    ]);
   });
 
   test('an unavailable replay carries the reason and no scores', () => {
@@ -305,13 +322,14 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     try {
       await exportFixture(parseArgs(['node', 'eval', '--export', '--all']));
       const fixture = JSON.parse(write.mock.calls[0][0]);
-      expect(fixture).toMatchObject({ propertyHistory: hasRunTable, population: 1, cases: [{ assessmentId: 'a1', context: {
+      expect(fixture).toMatchObject({ fixtureVersion: 1, propertyHistory: hasRunTable, population: 1, cases: [{ assessmentId: 'a1', context: {
         grassType: null, irrigation: null, turfHeightIn: null, priorSummary: null,
         omitted: [
           { field: 'grassType', reason: 'legacy_assessment_has_no_prompt_snapshot' },
           { field: 'irrigation', reason: 'legacy_assessment_has_no_prompt_snapshot' },
           { field: 'turfHeightIn', reason: 'legacy_assessment_has_no_prompt_snapshot' },
           { field: 'priorSummary', reason: 'legacy_assessment_has_no_prompt_snapshot' },
+          { field: 'technicianNotes', reason: 'legacy_assessment_has_no_prompt_snapshot' },
         ],
       } }] });
       expect(fixture.cases[0].photos.map((photo) => photo.s3Key)).toEqual(['k1', 'k2']);
@@ -325,8 +343,8 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
         analyzeVisit: async () => analysis(),
         loadPhoto: async () => ({ data: 'test-photo', mimeType: 'image/jpeg' }),
       });
-      expect(summary.contextOmitted).toEqual({ runs: 1, byField: { grassType: 1, irrigation: 1, turfHeightIn: 1, priorSummary: 1 } });
-      expect(evalLib.renderMarkdown(summary)).toContain('grassType ×1, irrigation ×1, turfHeightIn ×1, priorSummary ×1');
+      expect(summary.contextOmitted).toEqual({ runs: 1, byField: { grassType: 1, irrigation: 1, turfHeightIn: 1, priorSummary: 1, technicianNotes: 1 } });
+      expect(evalLib.renderMarkdown(summary)).toContain('grassType ×1, irrigation ×1, turfHeightIn ×1, priorSummary ×1, technicianNotes ×1');
     } finally {
       process.env = env;
       write.mockRestore(); error.mockRestore();
@@ -343,7 +361,7 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     process.env = { ...env, GATE_LAWN_PROPERTY_HISTORY: String(!propertyHistory) };
     const readFile = fs.readFileSync;
     const read = jest.spyOn(fs, 'readFileSync').mockImplementation((filename, ...args) => (
-      filename === 'eval-fixture.json' ? JSON.stringify({ propertyHistory, cases: [evalLib.fixtureCase(row(), photos)] }) : readFile(filename, ...args)
+      filename === 'eval-fixture.json' ? JSON.stringify({ fixtureVersion: 1, propertyHistory, cases: [evalLib.fixtureCase(row(), photos)] }) : readFile(filename, ...args)
     ));
     const run = jest.spyOn(evalLib, 'runEval').mockResolvedValue({ results: [], skipped: [], summary: evalLib.summarize([]) });
     const write = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
@@ -360,6 +378,37 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
       config.s3.bucket = bucket;
       process.env = env;
       read.mockRestore(); run.mockRestore(); write.mockRestore(); log.mockRestore(); error.mockRestore();
+    }
+  });
+
+  test('pre-provenance and unsupported fixtures are rejected before reading photos or calling a model', async () => {
+    const config = require('../config');
+    const visit = require('../services/lawn-visit-assessment');
+    const photoService = require('../services/photos');
+    const bucket = config.s3.bucket;
+    config.s3.bucket = 'eval-test';
+    const env = process.env;
+    process.env = { ...env };
+    let fixtureVersion;
+    const readFile = fs.readFileSync;
+    const read = jest.spyOn(fs, 'readFileSync').mockImplementation((filename, ...args) => (
+      filename === 'old-eval-fixture.json'
+        ? JSON.stringify({ fixtureVersion, cases: [evalLib.fixtureCase(row(), photos, { grassType: 'Zoysia', priorSummary: 'A later summary.' })] })
+        : readFile(filename, ...args)
+    ));
+    const analyze = jest.spyOn(visit, 'analyzeVisit');
+    photoService.getPhotoBase64.mockClear();
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (fixtureVersion of [undefined, 0, 2, '1', null]) {
+        await expect(runReplay(parseArgs(['node', 'eval', '--run', 'old-eval-fixture.json']))).rejects.toThrow('Unsupported evaluation fixture; re-export');
+      }
+      expect(photoService.getPhotoBase64).not.toHaveBeenCalled();
+      expect(analyze).not.toHaveBeenCalled();
+    } finally {
+      config.s3.bucket = bucket;
+      process.env = env;
+      read.mockRestore(); analyze.mockRestore(); error.mockRestore();
     }
   });
 
