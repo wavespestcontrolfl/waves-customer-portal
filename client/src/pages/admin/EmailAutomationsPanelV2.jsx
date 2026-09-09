@@ -150,11 +150,7 @@ export default function EmailAutomationsPanelV2() {
                     </td>{" "}
                     <td className="px-4 py-3">
                       {" "}
-                      <Badge
-                        tone={
-                          t.asm_group === "newsletter" ? "muted" : "neutral"
-                        }
-                      >
+                      <Badge tone="neutral">
                         {t.asm_group}
                       </Badge>{" "}
                     </td>{" "}
