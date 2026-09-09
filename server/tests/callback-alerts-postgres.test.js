@@ -11,7 +11,7 @@ run('callback reminder transitions on PostgreSQL', () => {
   const ledger = require('../services/call-commitments');
   const notifications = require('../services/notification-service');
   const cards = require('../services/callback-cards');
-  const now = new Date(), ago = new Date(now.getTime() - 3600000), future = new Date(now.getTime() + 3600000);
+  const now = new Date(), ago = new Date(now.getTime() - 86400000), future = new Date(now.getTime() + 3600000);
   let conn, trx, customerId, original, insert;
   beforeAll(() => {
     if (process.env.WAVES_LOCAL_DEV !== '1' || !/^\/waves_qa_[a-f0-9]+$/.test(new URL(process.env.DATABASE_URL).pathname)) throw new Error('Managed synthetic QA database required');
@@ -47,8 +47,8 @@ run('callback reminder transitions on PostgreSQL', () => {
       status: 'open', source: 'human', description: 'Synthetic callback', callback_due_at: ago, created_at: ago, ...patch }).returning('*');
     return row;
   }
-  const runSweep = () => cards.notifyDueCallbacks(trx, { now });
-  const bells = () => trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' LIKE 'callback-card%'");
+  const runSweep = () => require('../services/call-commitments-watchdog').runInner({ now });
+  const bells = () => trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment%'");
   const unread = () => bells().whereNull('read_at');
 
   test('five to six to five reminders preserves staff acknowledgments and repeats without duplicates', async () => {
@@ -82,7 +82,7 @@ run('callback reminder transitions on PostgreSQL', () => {
     await trx('call_commitments').where({ id: row.id }).update(patch);
     await runSweep();
     const active = await unread();
-    expect(active).toHaveLength(1); expect(active[0].id).not.toBe(first.id);
+    expect(active).toHaveLength(1); expect(active[0].metadata.dedupeVersion).not.toBe(first.metadata.dedupeVersion);
     await runSweep(); expect(await unread()).toHaveLength(1);
   });
 
@@ -103,7 +103,7 @@ run('callback reminder transitions on PostgreSQL', () => {
     for (let i = 0; i < 6; i += 1) await seed();
     await runSweep();
     const [first] = await unread();
-    await cards.notifyDueCallbacks(trx, { now: new Date(now.getTime() + 86400000) });
+    await require('../services/call-commitments-watchdog').runInner({ now: new Date(now.getTime() + 86400000) });
     const active = await unread();
     expect(active).toHaveLength(1); expect(active[0].id).not.toBe(first.id);
   });
@@ -126,7 +126,7 @@ run('callback reminder transitions on PostgreSQL', () => {
     await runSweep(); const [first] = await unread();
     jest.spyOn(ledger, 'refreshFulfillment').mockResolvedValueOnce({ failed: 1 });
     await seed();
-    expect(await runSweep()).toEqual({ alerted: 0 });
+    expect(await runSweep()).toMatchObject({ alerted: 0 });
     const active = await unread();
     expect(active).toHaveLength(1); expect(active[0]).toEqual(first);
   });
@@ -141,8 +141,62 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect(await unread()).toHaveLength(0);
   });
 
-  test('the gate disables the sweep without creating or acknowledging reminders', async () => {
+  test('claim then release refreshes a previously acknowledged individual identity', async () => {
+    const row = await seed(); await runSweep(); const [first] = await unread();
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    const claimed = await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id,
+      expectedAt: row.updated_at, now: new Date(now.getTime() + 1000) });
+    await runSweep();
+    await cards.actOnCallback(trx, row.id, { action: 'release', actorId: staff.id,
+      expectedAt: claimed.updated_at, now: new Date(now.getTime() + 2000) });
+    await runSweep(); const active = await unread();
+    expect(active).toHaveLength(1); expect(active[0].id).toBe(first.id);
+    expect(active[0].metadata.dedupeVersion).not.toBe(first.metadata.dedupeVersion);
+  });
+
+  test.each([5, 6])('reading a backlog acknowledges unchanged individual versions after starting with %s', async (initial) => {
+    const rows = [];
+    for (let i = 0; i < initial; i += 1) rows.push(await seed());
+    await runSweep();
+    if (initial === 5) { rows.push(await seed()); await runSweep(); }
+    const [aggregate] = await unread();
+    await trx('notifications').where({ id: aggregate.id }).update({ read_at: now });
+    await trx('call_commitments').where({ id: rows[5].id }).update({ status: 'fulfilled' });
+    await runSweep(); expect(await unread()).toHaveLength(0);
+    await runSweep(); expect(await unread()).toHaveLength(0);
+    // A later staff transition is new work even though its prior version was read.
+    await trx('call_commitments').where({ id: rows[0].id }).update({ updated_at: new Date(now.getTime() + 1000) });
+    await runSweep(); expect(await unread()).toHaveLength(1);
+  });
+
+  test('mixed callback and non-callback backlogs share one identity through both gate transitions', async () => {
+    const callbacks = [];
+    for (let i = 0; i < 5; i += 1) callbacks.push(await seed());
+    const other = await seed({ kind: 'other', due_at: ago });
+    process.env.GATE_CALLBACK_CARD = 'false'; await runSweep();
+    const [original] = await unread();
+    process.env.GATE_CALLBACK_CARD = 'true'; await runSweep();
+    expect((await unread()).map((r) => r.id)).toEqual([original.id]);
+    process.env.GATE_CALLBACK_CARD = 'false'; await runSweep();
+    expect((await unread()).map((r) => r.id)).toEqual([original.id]);
+    process.env.GATE_CALLBACK_CARD = 'true';
+    await trx('call_commitments').whereIn('id', callbacks.map((r) => r.id)).update({ status: 'fulfilled' });
+    await runSweep(); const active = await unread();
+    expect(active).toHaveLength(1); expect(active[0].metadata.commitment_id).toBe(other.id);
+  });
+
+  test('undated open cards keep the legacy digest fallback, while staff-closed cards stay closed', async () => {
+    const row = await seed({ callback_due_at: null });
+    await trx('call_log').where({ id: row.call_log_id }).update({ disposition: 'callback_task_created',
+      created_at: new Date(now.getTime() - 60000), updated_at: ago });
+    const load = require('../services/unworked-comms-watcher')._private.loadCallbackCalls;
+    expect((await load()).some((r) => r.id === row.call_log_id)).toBe(true);
+    await trx('call_commitments').where({ id: row.id }).update({ status: 'fulfilled' });
+    expect((await load()).some((r) => r.id === row.call_log_id)).toBe(false);
+  });
+
+  test('gate rollback keeps one shared reminder for the same callback', async () => {
     await seed(); await runSweep(); process.env.GATE_CALLBACK_CARD = 'false';
-    expect(await runSweep()).toEqual({ alerted: 0 }); expect(await unread()).toHaveLength(1);
+    await runSweep(); expect(await unread()).toHaveLength(1);
   });
 });

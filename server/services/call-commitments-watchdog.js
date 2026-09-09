@@ -22,7 +22,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
-const { listOpenCommitments, selectOverdue, refreshFulfillment, stillOpenIds, OVERDUE_IMPLICIT_DAYS } = require('./call-commitments');
+const commitments = require('./call-commitments');
+const { OVERDUE_IMPLICIT_DAYS } = commitments;
 
 // Registered in notification-triggers (techVisible) so the bell reaches the
 // staff who work the Owed tab, not only admins: scopeAdminFeedToRole hides
@@ -42,7 +43,7 @@ const MAX_PAGES = 25;
 async function listAllOpenWaves(now) {
   const all = [];
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const rows = await listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, now });
+    const rows = await commitments.listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, now });
     all.push(...rows);
     if (rows.length < SCAN_LIMIT) break;
   }
@@ -69,6 +70,12 @@ function etWhen(value) {
   return value ? new Date(value).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null;
 }
 
+function reminderVersion(row) {
+  if (row.kind !== 'callback') return row.id;
+  return JSON.stringify([row.id, row.updated_at, row.due_at || row.callback_due_at || null,
+    row.snoozed_until || null, row.reviewed_at || null, row.assigned_to || null]);
+}
+
 async function runCallCommitmentsWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('callCommitments')) return { skipped: true, reason: 'gated_off' };
@@ -79,96 +86,106 @@ async function runCallCommitmentsWatchdog({ now = new Date() } = {}) {
 async function runInner({ now = new Date() } = {}) {
   const today = require('../utils/datetime-et').etDateString(now);
   let rows = await listAllOpenWaves(now);
-  if (require('./callback-cards').enabled()) rows = rows.filter((r) => r.kind !== 'callback');
   // A promise a later record already kept must not ring: nothing stamps
   // fulfillment unless someone opens the queue or the panel, so refresh the
   // candidate calls here — the same cheap indexed lookups the queue route
   // runs — and re-list before deciding what is overdue.
   // A call whose refresh FAILED — the call threw, or any of its lookups did
-  // (`failed` in the summary) — is not verified either way: its promise may
-  // already be kept, so it is left out of today's bell (and logged) rather
-  // than paged on a stale row; tomorrow's tick retries it.
+  // (`failed` in the summary) — is not verified either way. Preserve the
+  // existing reminder set until the next tick can verify the entire batch.
   const callIds = [...new Set(rows.map((r) => r.call_log_id))];
   const unverifiedCalls = new Set();
   let refreshed = 0;
   for (const id of callIds) {
-    const r = await refreshFulfillment(db, id).catch((err) => {
+    const r = await commitments.refreshFulfillment(db, id).catch((err) => {
       logger.warn(`[call-commitments-watchdog] fulfillment refresh failed for call ${id}: ${err.message}`);
       unverifiedCalls.add(id);
       return {};
     });
     if (r.failed > 0) {
-      logger.warn(`[call-commitments-watchdog] ${r.failed} fulfillment lookup(s) failed for call ${id} — left out of today's bell`);
+      logger.warn(`[call-commitments-watchdog] ${r.failed} fulfillment lookup(s) failed for call ${id} — reminder reconciliation deferred`);
       unverifiedCalls.add(id);
     }
     refreshed += r.fulfilled || 0;
   }
   if (refreshed > 0) rows = await listAllOpenWaves(now);
-  const candidates = selectOverdue(rows, { now }).filter((r) => !(r.kind === 'callback' && require('./callback-cards').enabled())
-    && !isInternalTestCustomerId(r.customer_id) && !unverifiedCalls.has(r.call_log_id));
+  const candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id) && !unverifiedCalls.has(r.call_log_id));
   const unverified = unverifiedCalls.size;
   // The snapshot is minutes old by now (one refresh per candidate call):
   // a promise the office marked done or dismissed meanwhile must not ring.
-  const liveIds = await stillOpenIds(db, candidates.map((r) => r.id), { now });
-  const overdue = candidates.filter((r) => liveIds.has(r.id));
-  if (!overdue.length) return { skipped: false, scanned: rows.length, overdue: 0, alerted: 0, unverified };
-
-  // A human-recorded promise has been open since it was RECORDED (the
-  // same instant implicitDueAt ages it from), not since a call that may be
-  // weeks older (Codex #3725 r18 P2).
-  const openSince = (r) => (r.source === 'human' ? r.created_at : (r.call_started_at || r.created_at));
-  const describe = (r) => `${whoFor(r)} — ${r.description}${r.due_at ? ` (due ${etWhen(r.due_at)} ET)` : ` (open since ${etWhen(openSince(r))} ET)`}`;
-
-  if (overdue.length > AGGREGATE_THRESHOLD) {
-    const ids = overdue.map((r) => r.id).sort();
-    // ONE aggregate row per ET day. Keying identity to the batch would mint
-    // a fresh bell every time the overdue set moved between runs (an
-    // operator settling one item) and page the office again for the same
-    // backlog (Codex #3725 r16 P2). The standing row is refreshed instead:
-    // a changed count rewrites its title/body/metadata and surfaces it
-    // unread again; identical content is a plain dedupe.
-    const notif = await NotificationService.notifyAdmin(
-      'alert',
-      `${overdue.length} promises to callers are overdue`,
-      `${overdue.length} things Waves told callers it would do have not happened. Oldest: ${describe(overdue[0])}. Open the Owed tab and work them oldest-first.`,
-      {
-        link: '/admin/communications#tab=owed',
-        dedupeKey: `call-commitments-overdue:${today}`,
-        refreshOnDedupe: true,
-        bell: true,
-        metadata: { triggerKey: TRIGGER_KEY, overdue_count: overdue.length, overdue_commitment_ids: ids },
-      },
-    );
-    if (!persisted(notif)) {
-      logger.error('[call-commitments-watchdog] aggregate alert did NOT persist — overdue promises are unannounced');
-      return { skipped: false, scanned: rows.length, overdue: overdue.length, alerted: 0, unannounced: overdue.length, aggregate: true, unverified };
+  if (unverified) return { skipped: false, scanned: rows.length, overdue: 0, alerted: 0, unverified };
+  const liveIds = await commitments.stillOpenIds(db, candidates.map((r) => r.id), { now });
+  return db.transaction(async (trx) => {
+    // Fence the notification version against a concurrent staff action.
+    const live = await trx('call_commitments as cc').whereIn('cc.id', [...liveIds]).where('cc.status', 'open')
+      .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`).orderBy('cc.id').forUpdate('cc').select('cc.*');
+    const current = live.map((r) => ({ ...candidates.find((c) => c.id === r.id), ...r }));
+    const overdue = commitments.selectOverdue(current, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
+    const result = { skipped: false, scanned: rows.length, overdue: overdue.length, alerted: 0, unverified };
+    const noticeRows = () => trx('notifications').where({ recipient_type: 'admin' });
+    // Both schedules use the existing identities. A gate change changes the
+    // callback deadline policy, never the owner of persisted reminder rows.
+    await trx('notifications as n').where({ recipient_type: 'admin' }).whereNull('read_at')
+      .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
+      .whereNotExists(trx('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
+        .whereRaw("cc.id::text = n.metadata->>'commitment_id'").where({ 'cc.status': 'open', 'cc.party': 'waves' })
+        .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`)
+        .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} < ?`, [now])
+        .modify((q) => { if (require('./callback-cards').enabled()) q.whereRaw("(cc.kind <> 'callback' OR cc.snoozed_until IS NULL OR cc.snoozed_until <= ?)", [now]); }))
+      .update({ read_at: now });
+    if (!overdue.length) {
+      await noticeRows().whereNull('read_at').whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
+        .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
+      return result;
     }
-    logger.warn(`[call-commitments-watchdog] ${overdue.length} overdue promises — aggregate alert fired`);
-    return { skipped: false, scanned: rows.length, overdue: overdue.length, alerted: 1, aggregate: true, unverified };
-  }
-
-  let alerted = 0;
-  let unannounced = 0;
-  for (const r of overdue) {
-    const notif = await NotificationService.notifyAdmin(
-      'alert',
-      'A promise to a caller is overdue',
-      `${describe(r)}. Open the Owed tab to mark it done or dismiss it.`,
-      {
-        link: '/admin/communications#tab=owed',
-        dedupeKey: `call-commitment-overdue:${r.id}:${today}`,
-        bell: true,
-        metadata: { triggerKey: TRIGGER_KEY, commitment_id: r.id, call_log_id: r.call_log_id, kind: r.kind },
-      },
-    );
-    if (!persisted(notif)) {
-      unannounced += 1;
-      logger.error(`[call-commitments-watchdog] overdue commitment ${r.id} alert did NOT persist — unannounced`);
-      continue;
+    const versions = Object.fromEntries(overdue.map((r) => [r.id, reminderVersion(r)]));
+    const openSince = (r) => r.source === 'human' ? r.created_at : (r.call_started_at || r.created_at);
+    const describe = (r) => `${whoFor(r)} — ${r.description}${r.due_at ? ` (due ${etWhen(r.due_at)} ET)` : ` (open since ${etWhen(openSince(r))} ET)`}`;
+    if (overdue.length > AGGREGATE_THRESHOLD) {
+      const ids = overdue.map((r) => r.id).sort();
+      const notif = await NotificationService.notifyAdmin('alert', `${overdue.length} promises to callers are overdue`,
+        `${overdue.length} things Waves told callers it would do have not happened. Oldest: ${describe(overdue[0])}. Open the Owed tab and work them oldest-first.`, {
+          link: '/admin/communications#tab=owed', dedupeKey: `call-commitments-overdue:${today}`,
+          dedupeVersion: require('node:crypto').createHash('sha256').update(JSON.stringify(ids.map((id) => versions[id]))).digest('hex'),
+          refreshOnDedupe: true, bell: true, trx,
+          metadata: { triggerKey: TRIGGER_KEY, overdue_count: overdue.length, overdue_commitment_ids: ids, overdue_versions: versions, retired: false },
+        });
+      if (!persisted(notif)) return { ...result, unannounced: overdue.length, aggregate: true };
+      await noticeRows().whereNull('read_at').whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
+        .whereIn(trx.raw("metadata->>'commitment_id'"), ids)
+        .update({ read_at: now, metadata: trx.raw("metadata || jsonb_build_object('batchedBy', ?::text)", [notif.id]) });
+      await noticeRows().whereNull('read_at').whereNot('id', notif.id)
+        .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
+        .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true}'::jsonb") });
+      return { ...result, alerted: 1, aggregate: true };
     }
-    alerted += 1;
-  }
-  return { skipped: false, scanned: rows.length, overdue: overdue.length, alerted, unannounced, unverified };
+    const priorAggregate = await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
+      .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at');
+    const aggregateMeta = typeof priorAggregate?.metadata === 'string' ? JSON.parse(priorAggregate.metadata) : priorAggregate?.metadata;
+    let unannounced = 0;
+    for (const r of overdue) {
+      const notif = await NotificationService.notifyAdmin('alert', 'A promise to a caller is overdue',
+        `${describe(r)}. Open the Owed tab to mark it done or dismiss it.`, {
+          link: '/admin/communications#tab=owed', dedupeKey: `call-commitment-overdue:${r.id}:${today}`,
+          dedupeVersion: r.kind === 'callback' ? versions[r.id] : undefined, refreshOnDedupe: true, bell: true, trx,
+          metadata: { triggerKey: TRIGGER_KEY, commitment_id: r.id, call_log_id: r.call_log_id, kind: r.kind, customer_id: r.customer_id },
+        });
+      if (!persisted(notif)) { unannounced += 1; continue; }
+      const meta = typeof notif.metadata === 'string' ? JSON.parse(notif.metadata) : notif.metadata;
+      const acknowledged = priorAggregate?.read_at && !aggregateMeta?.retired && aggregateMeta?.overdue_versions?.[r.id] === versions[r.id];
+      if (acknowledged || meta?.batchedBy) {
+        await noticeRows().where({ id: notif.id }).update({ read_at: acknowledged ? priorAggregate.read_at : null,
+          metadata: trx.raw("metadata - 'batchedBy'") });
+      }
+      if (!acknowledged) result.alerted += 1;
+      await noticeRows().whereNull('read_at').whereNot('id', notif.id)
+        .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
+        .whereRaw("metadata->>'commitment_id' = ?", [r.id]).update({ read_at: now });
+    }
+    if (!unannounced) await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
+      .update({ read_at: now, metadata: trx.raw("metadata || '{\"retired\":true,\"dedupeVersion\":\"individuals\"}'::jsonb") });
+    return { ...result, unannounced };
+  });
 }
 
 module.exports = {

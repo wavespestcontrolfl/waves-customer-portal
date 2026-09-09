@@ -1432,20 +1432,19 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Call cards escalate at their deadline; the daily watchdog retains the
-  // other kinds and takes callbacks back when their replacement is off.
+  // The same watchdog and persisted identities own reminders before and
+  // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
     if (!require('./callback-cards').enabled()) return;
     try {
-      const { runExclusive } = require('../utils/cron-lock');
-      const result = await runExclusive('callback-cards', () => require('./callback-cards').notifyDueCallbacks(require('../models/db')));
-      if (result?.skipped === true && result.reason !== 'lease_held') {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
-        const startedAt = Date.now();
-        const error = new Error(`Callback tick skipped: ${result.reason || 'no_connection'}`);
-        await recordJobStart('callback-cards').catch(() => {});
-        await recordJobEnd('callback-cards', startedAt, error).catch(() => {});
-        throw error;
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Callback reminder tick skipped: ${result.reason || 'no_connection'}`);
       }
     } catch (err) {
       logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);

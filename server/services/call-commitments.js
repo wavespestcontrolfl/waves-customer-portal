@@ -1889,6 +1889,7 @@ module.exports = {
   witnessAt,
   directEstimatesSentAfter,
   implicitDueAt,
+  effectiveDueSql,
   staleAiRowSql,
   stillOpenIds,
   OVERDUE_IMPLICIT_ESTIMATE_HOURS,

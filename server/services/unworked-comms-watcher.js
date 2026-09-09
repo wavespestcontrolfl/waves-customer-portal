@@ -140,6 +140,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
         SELECT 1 FROM call_commitments cc
         WHERE cc.call_log_id = c.id AND cc.kind = 'callback' AND cc.party = 'waves'
           AND NOT ${staleAiRowSql('cc')}
+          AND (cc.status <> 'open' OR COALESCE(cc.due_at, cc.callback_due_at) IS NOT NULL)
       ))
       -- Not yet due (codex r37): an explicitly agreed future callback
       -- time (scheduling.follow_up_start_at) is scheduled work, not an
