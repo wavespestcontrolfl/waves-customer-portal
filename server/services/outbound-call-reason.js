@@ -7,7 +7,7 @@
  *
  *   quote_request   the web quote-form auto-bridge (call_log.source) — they
  *                   just submitted a quote request; or a manual follow-up
- *                   call to someone we quote-bridged inside the last 72h
+ *                   call to someone we quote-bridged inside the last 48h
  *                   (the replay showed the office redialing a form lead a
  *                   day or two later).
  *   returning_call  a callback of a specific inbound call
@@ -39,7 +39,7 @@ const QUOTE_REQUEST_SOURCES = new Set(['lead-webhook-auto-bridge']);
 // Same set context-aggregator uses to keep junk calls out of customer context.
 const NON_CONTACT_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
 const LOOKBACK_MS = 48 * 60 * 60 * 1000;
-const QUOTE_BRIDGE_LOOKBACK_MS = 72 * 60 * 60 * 1000;
+const QUOTE_BRIDGE_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 
 function last10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
@@ -109,7 +109,7 @@ async function latestInboundText({ customerId, phoneLast10, before, since }) {
     .first('id', 'created_at');
 }
 
-// Our own quote-form auto-bridge to this person inside the last 72h: the
+// Our own quote-form auto-bridge to this person inside the last 48h: the
 // follow-up call is still about their quote request. The bridge row's
 // to_phone is the admin cell; the prospect's number is metadata.leadPhone.
 async function latestQuoteBridge({ customerId, phoneLast10, before }) {

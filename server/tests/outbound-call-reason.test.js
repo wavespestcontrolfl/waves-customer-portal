@@ -180,7 +180,7 @@ describe('resolveOutboundCallReason', () => {
     expect(state.queries[1].wheres.some((w) => w[0] === 'OR')).toBe(false);
   });
 
-  test('our own quote-form bridge to them inside 72h → quote_request (the follow-up call is about the quote)', async () => {
+  test('our own quote-form bridge to them inside 48h → quote_request (the follow-up call is about the quote)', async () => {
     installDb({ quote_bridges: [{ id: 'ab-1', created_at: hoursAgo(45) }] });
     const r = await resolveOutboundCallReason({ call: call({ source: 'admin-callback' }), phone: PHONE });
     expect(r).toEqual({ reason: REASONS.QUOTE_REQUEST, evidence: { quote_bridge_call_id: 'ab-1', at: hoursAgo(45) } });
@@ -190,12 +190,12 @@ describe('resolveOutboundCallReason', () => {
       ['created_at', '>=', new Date(T0.getTime() - QUOTE_BRIDGE_LOOKBACK_MS)],
     ]));
     expect(q.wheres.find((w) => w[0] === 'OR')[1].__raw).toContain("metadata->>'leadPhone'");
-    expect(QUOTE_BRIDGE_LOOKBACK_MS).toBe(72 * 3600000);
+    expect(QUOTE_BRIDGE_LOOKBACK_MS).toBe(48 * 3600000);
   });
 
   test('a quote bridge loses to a MORE RECENT inbound call or text', async () => {
     installDb({
-      quote_bridges: [{ id: 'ab-1', created_at: hoursAgo(70) }],
+      quote_bridges: [{ id: 'ab-1', created_at: hoursAgo(40) }],
       call_log: [{ id: 'in-1', created_at: hoursAgo(7), ai_extraction_enriched: { call_nature: 'new_lead' } }],
     });
     const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
