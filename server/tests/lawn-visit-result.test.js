@@ -41,11 +41,28 @@ test('the chain validator rejects a malformed, finding-less or partly-rated answ
     expect(visit.validateAssessmentJson({ json: answer({ findings: [{ ...answer().findings[0], photo_refs: ['1'], severity: 'high' }] }) }, 2)).toBeNull();
     // Every photo needs a valid quality read: none, a missing photo, an out-of-range or invalid entry all fail.
     expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [] }) }, 2)).toBe('incomplete_photo_quality');
-    expect(visit.validateAssessmentJson({ json: answer() }, 3)).toBe('incomplete_photo_quality'); // photo 3 unrated (7 is out of range)
+    expect(visit.validateAssessmentJson({ json: answer() }, 3)).toBe('incomplete_photo_quality'); // photo 3 unrated
     expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [{ photo: 1, quality: 'adequate' }, { photo: 2, quality: 'great' }] }) }, 2)).toBe('incomplete_photo_quality');
     expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [{ photo: 1, quality: 'adequate' }, { photo: 1, quality: 'poor' }] }) }, 2)).toBe('incomplete_photo_quality');
     expect(visit.validateAssessmentJson({ json: answer({ photo_quality: [{ photo: 2, quality: 'limited' }, { photo: 1, quality: 'poor' }] }) }, 2)).toBeNull();
   });
+
+test.each([
+  [{ photo: 1, quality: 'poor' }, { photo: 1, quality: 'adequate' }, { photo: 2, quality: 'adequate' }],
+  [{ photo: 1, quality: 'adequate' }, { photo: 2, quality: 'adequate' }, { photo: 7, quality: 'adequate' }],
+])('rejects duplicate or extra ratings instead of letting a later entry replace poor evidence: %j', (...photo_quality) => {
+  expect(visit.validateAssessmentJson({ json: answer({ photo_quality }) }, 2)).toBe('incomplete_photo_quality');
+});
+
+test.each([false, undefined, 'true'])('an indeterminate clean-lawn finding does not assert health: %s', (can_determine) => {
+  const result = visit.normalizeAssessment(answer({ findings: [finding({ name: 'No major visible stress', photo_refs: [], can_determine })] }), 2);
+  expect(result.findings[0]).toMatchObject({ can_determine: false, confidence: 'unknown', label: 'general lawn stress' });
+});
+
+test('a clean-lawn finding still needs a usable photo even when it has no numbered references', () => {
+  const result = visit.normalizeAssessment(answer({ findings: [finding({ name: 'No major visible stress', photo_refs: [] })], photo_quality: [{ photo: 1, quality: 'poor' }, { photo: 2, quality: 'poor' }] }), 2);
+  expect(result.findings[0]).toMatchObject({ can_determine: false, confidence: 'unknown', label: 'general lawn stress' });
+});
 
 test('a determinable finding that cites no photo of this visit is undeterminable; the clean-lawn finding is exempt', () => {
     const json = answer({ findings: [
@@ -88,6 +105,9 @@ test('the photo-storage inputs: poor and unrated photos fail the customer gate; 
 
 test('a complete answer that rates every photo poor is all-poor — the legacy retake hold — one usable photo is not', () => {
     const poor = (n) => Array.from({ length: n }, (_, i) => ({ photo: i + 1, quality: 'poor', issue: 'blurred' }));
+    const normalized = visit.normalizeAssessment(answer({ photo_quality: poor(2) }), 2);
+    expect(normalized.status).toBe('complete');
+    expect(visit.photoRowInputs(normalized).allPoor).toBe(true);
     expect(visit.photoRowInputs({ status: 'complete', photoQuality: poor(3) }).allPoor).toBe(true);
     expect(visit.photoRowInputs({ status: 'complete', photoQuality: [...poor(2), { photo: 3, quality: 'limited', issue: '' }] }).allPoor).toBe(false);
     expect(visit.photoRowInputs({ status: 'complete', photoQuality: [] }).allPoor).toBe(false);

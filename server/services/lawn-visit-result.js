@@ -87,7 +87,7 @@ function validateAssessmentJson(result, photoCount) {
 }
 
 function ratesEveryPhoto(list, photoCount) {
-  if (!Array.isArray(list)) return false;
+  if (!Array.isArray(list) || list.length !== photoCount) return false;
   const rated = new Set();
   for (const entry of list) {
     const photo = Number(entry?.photo);
@@ -114,7 +114,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
     // mixed-quality visit one adequate photo lifts the retake hold, so the
     // gate is applied per finding — undeterminable, no cause published
     // (Codex #4149 r6).
-    const unsupported = photoRefs.length > 0 && !photoRefs.some((ref) => usable.has(ref));
+    const unsupported = !usable.size || (photoRefs.length > 0 && !photoRefs.some((ref) => usable.has(ref)));
     // Determinability is a claim the answer has to make: only a literal
     // `true` keeps the confidence. The shape check lets any scalar through,
     // so an omitted key or the string "false" must read as undeterminable,
@@ -135,7 +135,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
       cannot_determine_reason: canDetermine ? '' : (clip(raw.cannot_determine_reason, 300) || (untraceable ? 'no photo of this visit cited' : '') || (unsupported ? 'every cited photo rated poor' : '') || (unstated && raw.can_determine !== false ? 'determinability not stated' : '')),
       // The allowlisted customer label — the naming gate applied here, once,
       // so no consumer ever maps the raw name itself.
-      label: safeConditionLabel(finding.name, confidence),
+      label: canDetermine ? safeConditionLabel(finding.name, confidence) : 'general lawn stress',
       source: 'model',
     };
   });
@@ -150,6 +150,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
   };
   const grass = normalizeGrassType(json.grass_type);
   return {
+    status: 'complete',
     findings,
     severities,
     scores,
@@ -161,6 +162,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
 
 function emptyAnalysis(photoCount) {
   return {
+    status: 'unavailable',
     findings: [],
     severities: null,
     scores: { turf_density: null, weed_coverage: null, color_health: null },
