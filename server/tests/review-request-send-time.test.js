@@ -15,7 +15,7 @@ const ReviewService = require('../services/review-request');
 const { etParts } = require('../utils/datetime-et');
 
 describe('review request send-time calculator', () => {
-  const { calculateReviewSendTime, calculateReviewSendPlan } = ReviewService.__private;
+  const { calculateReviewSendPlan } = ReviewService.__private;
 
   test('a jitter-free plan names the eligibility range live jitter can land in: ±15 min, clamped inside the hour for an anchored answer (codex #4140 r14 P2)', () => {
     // 1 PM ET lawn → anchored 4:30 PM; minute clamped to the hour → 4:15..4:45.
@@ -51,7 +51,7 @@ describe('review request send-time calculator', () => {
     expect(plan.latestAt.toISOString()).toBe(latest);
     const samples = Array.from({ length: 31 }, (_,i) => {
       const random = jest.spyOn(Math, 'random').mockReturnValue((i + 0.5) / 31);
-      try { return calculateReviewSendTime(new Date(completed), 'wdo inspection').getTime(); }
+      try { return calculateReviewSendPlan(new Date(completed), 'wdo inspection').at.getTime(); }
       finally { random.mockRestore(); }
     });
     expect(plan.earliestAt.getTime()).toBe(Math.min(...samples));
@@ -59,15 +59,15 @@ describe('review request send-time calculator', () => {
   });
 
   test('keeps lawn and mosquito review requests before 5 PM ET', () => {
-    const lawn = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care');
-    const mosquito = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'mosquito');
+    const lawn = calculateReviewSendPlan(new Date('2026-05-26T17:00:00Z'), 'lawn care').at;
+    const mosquito = calculateReviewSendPlan(new Date('2026-05-26T17:00:00Z'), 'mosquito').at;
 
     expect(etParts(lawn)).toMatchObject({ year: 2026, month: 5, day: 26, hour: 16 });
     expect(etParts(mosquito)).toMatchObject({ year: 2026, month: 5, day: 26, hour: 16 });
   });
 
   test('moves early-morning review requests into the allowed window', () => {
-    const sendAt = calculateReviewSendTime(new Date('2026-05-26T11:00:00Z'), 'pest control');
+    const sendAt = calculateReviewSendPlan(new Date('2026-05-26T11:00:00Z'), 'pest control').at;
     const parts = etParts(sendAt);
 
     expect(parts.year).toBe(2026);
@@ -78,7 +78,7 @@ describe('review request send-time calculator', () => {
   });
 
   test('moves late-afternoon review requests to the next morning', () => {
-    const sendAt = calculateReviewSendTime(new Date('2026-05-26T20:30:00Z'), 'pest control');
+    const sendAt = calculateReviewSendPlan(new Date('2026-05-26T20:30:00Z'), 'pest control').at;
 
     expect(etParts(sendAt)).toMatchObject({ year: 2026, month: 5, day: 27, hour: 10 });
   });
@@ -87,17 +87,17 @@ describe('review request send-time calculator', () => {
     // WDO at 3:29 PM ET → +90 min = 4:59 PM; a +15 jitter used to spill past 5 PM
     // and reschedule to 10 AM next day while the jitter-free preview said today.
     const completedAt = new Date('2026-05-26T19:29:00Z'); // 3:29 PM EDT
-    const preview = calculateReviewSendTime(completedAt, 'WDO inspection', { jitter: false });
+    const preview = calculateReviewSendPlan(completedAt, 'WDO inspection', { jitter: false }).at;
     for (let i = 0; i < 200; i += 1) {
-      const live = calculateReviewSendTime(completedAt, 'WDO inspection');
+      const live = calculateReviewSendPlan(completedAt, 'WDO inspection').at;
       expect(etParts(live).day).toBe(etParts(preview).day);
       expect(etParts(live).hour).toBeLessThan(17);
     }
   });
 
   test('jitter:false gives the completion panel a stable preview of the same rule', () => {
-    const a = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });
-    const b = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });
+    const a = calculateReviewSendPlan(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false }).at;
+    const b = calculateReviewSendPlan(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false }).at;
     expect(a.getTime()).toBe(b.getTime());
     expect(etParts(a)).toMatchObject({ year: 2026, month: 5, day: 26, hour: 16, minute: 30 });
   });
@@ -120,7 +120,7 @@ describe('review request send-time calculator', () => {
       const lawn = calculateReviewSendPlan(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });
       expect(lawn.kind).toBe('anchored');
       expect(lawn.bucket).toBe('anchored:2026-05-26T16:30');
-      expect(lawn.at.getTime()).toBe(calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false }).getTime());
+      expect(lawn.at.getTime()).toBe(calculateReviewSendPlan(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false }).at.getTime());
     });
 
     test('crossing a rule boundary changes the bucket — that is the change the panel re-confirms', () => {
@@ -140,7 +140,7 @@ describe('review request send-time calculator', () => {
   });
 
   test('moves WDO review requests that would land after 5 PM to the next morning', () => {
-    const sendAt = calculateReviewSendTime(new Date('2026-05-26T19:45:00Z'), 'wdo inspection');
+    const sendAt = calculateReviewSendPlan(new Date('2026-05-26T19:45:00Z'), 'wdo inspection').at;
 
     expect(etParts(sendAt)).toMatchObject({ year: 2026, month: 5, day: 27, hour: 10 });
   });
