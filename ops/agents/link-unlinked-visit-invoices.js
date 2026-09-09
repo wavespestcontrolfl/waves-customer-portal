@@ -25,7 +25,18 @@
 //     is re-evaluated — held through commit (pre-push r4 + r5 P1).
 //   - the customer has exactly ONE live visit on that date, with NO add-on
 //     lines, no other non-void invoice (direct or through its service
-//     records), and not owned by a saved grouped closeout;
+//     records), no visit_billing_dispositions row (a human already ruled
+//     the visit billed or intentionally_free in Billing Recovery — the
+//     /bill and /dismiss routes refuse such a visit and job-costing treats
+//     the ruling as authoritative; GitHub r8 P1), and not owned by a saved
+//     grouped closeout;
+//   - the invoice is the customer's ONLY live unlinked invoice dated that
+//     day. Under --execute that predicate is read from LOCKED rows: EVERY
+//     invoice row the customer has — any date, any status — is taken FOR
+//     UPDATE (in the pre-lock ladder, before any customer lock) and held
+//     through commit, so a terminal sibling flipped back to live
+//     (handleRefundFailed rewinding refunded → paid) or an invoice redated
+//     onto the day contends on its own row and waits (GitHub r8 P1);
 //   - a positive line reads like the visit's application: exactly the
 //     visit's label or an active catalog service name in the visit's family
 //     (or a ≥8-char label contained in one); fee/charge and product words
@@ -39,15 +50,21 @@
 //
 // Two-step by design (the review IS the safeguard):
 //   1. Dry run prints the pairings and writes them to --plan-out=<file>
-//      (ids only) — ALWAYS, an empty plan included, so a stale file from an
-//      earlier scan can never be the one --execute consumes (GitHub r3 P2).
-//      The operator reads the list.
+//      — ALWAYS, an empty plan included, so a stale file from an earlier
+//      scan can never be the one --execute consumes (GitHub r3 P2). Each
+//      pairing carries the ids, the figures the reviewer reads (invoice
+//      total, visit service) and a sha256 DIGEST of every review-relevant
+//      invoice and visit field (status, dates, service type, line items,
+//      amounts, technician, completion record). The operator reads the list.
 //   2. --execute --plan=<file> links ONLY the pairs in that reviewed file —
 //      never a recomputed list — in one transaction; per pair the visit's
 //      mint lock chain (advisory → customer key share → visit row FOR
 //      UPDATE), the invoice row FOR UPDATE, and the FULL rule re-evaluated
-//      on the locked rows; any drift (different visit, record or technician)
-//      aborts the whole batch. --execute without --plan is refused.
+//      on the locked rows; the digest recomputed from the locked rows must
+//      equal the reviewed one, so an invoice amount / line edit or a visit
+//      service change after the review — even one that still passes the
+//      rule — aborts the whole batch (GitHub r8 P1). A plan without digests
+//      is refused. --execute without --plan is refused.
 // --days=N: lookback on invoices.created_at (120) for the plan.
 //
 // Run (repo root):
@@ -57,6 +74,7 @@
 const path = require('path');
 const ROOT = path.join(__dirname, '..', '..');
 const fs = require('fs');
+const crypto = require('crypto');
 const EXECUTE = process.argv.includes('--execute');
 const argValue = (name) => { const hit = process.argv.find((a) => a.startsWith(`--${name}=`)); return hit ? hit.slice(name.length + 3) : null; };
 const DAYS = Math.max(1, parseInt(argValue('days') || '120', 10) || 120);
@@ -85,6 +103,18 @@ const norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').tr
 const dateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (String(v || '').match(/^(\d{4}-\d{2}-\d{2})/) || [])[1] || null);
 function parseLines(row) { let i = row?.line_items; if (typeof i === 'string') { try { i = JSON.parse(i); } catch { i = null; } } return Array.isArray(i) ? i : null; }
 function lineAmount(li) { const q = li?.quantity != null ? Number(li.quantity) : 1; const a = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * q; return Number.isFinite(a) ? a : NaN; }
+
+// What the reviewer signed off on. Recomputed from the LOCKED rows at
+// --execute and compared with the plan: any review-relevant edit in between
+// (amount, lines, status, dates, service type, technician, completion
+// record) aborts the batch even when the edited rows still pass the rule.
+const INVOICE_DIGEST_FIELDS = ['id', 'customer_id', 'status', 'service_date', 'service_type', 'title', 'line_items', 'subtotal', 'discount_amount', 'tax_amount', 'total', 'technician_id', 'payer_id'];
+const VISIT_DIGEST_FIELDS = ['id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id'];
+function pairingDigest(inv, svc, serviceRecordId) {
+  const pick = (row, keys) => keys.map((k) => { const v = row[k]; return v instanceof Date ? v.toISOString() : (v === undefined ? null : v); });
+  const body = JSON.stringify({ invoice: pick(inv, INVOICE_DIGEST_FIELDS), visit: pick(svc, VISIT_DIGEST_FIELDS), serviceRecordId: serviceRecordId || null });
+  return crypto.createHash('sha256').update(body).digest('hex');
+}
 
 function invoiceBillsVisitApplication(invoice, svc, catalogNames) {
   const visitFamily = serviceKeyFor({ service_type: svc.service_type });
@@ -158,21 +188,40 @@ async function evaluate(conn, invoiceId, catalogNames, { lock = false } = {}) {
   } else {
     svc = await conn('scheduled_services').where({ id: visits[0].id }).first('id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id');
   }
-  const others = await conn('invoices').where({ customer_id: inv.customer_id })
-    .whereNull('scheduled_service_id').whereNull('service_record_id').whereNull('annual_prepay_term_id').whereNull('archived_at')
-    .whereRaw('service_date::date = ?::date', [day]).whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES).count({ n: '*' }).first();
-  if (Number(others.n) !== 1) return { skip: 'ambiguous' };
+  // The invoice must be the customer's ONLY live unlinked invoice dated
+  // that day. Under the locks the predicate is read from EVERY invoice row
+  // the customer has — any date, any status — taken FOR UPDATE and held
+  // through commit (GitHub r8 P1): a terminal sibling that a refund-failed
+  // webhook rewinds to paid, or an invoice redated onto the day, contends
+  // on its own row and waits; a NEW invoice for the customer waits on the
+  // customer row held FOR UPDATE above. The pre-lock ladder in --execute
+  // already holds these rows (re-entrant), so no customer lock is taken
+  // while a fresh invoice row is still wanted.
+  const customerInvoices = await conn('invoices').where({ customer_id: inv.customer_id })
+    .modify((q) => { if (lock) q.forUpdate(); })
+    .select('id', 'status', 'service_date', 'scheduled_service_id', 'service_record_id', 'annual_prepay_term_id', 'archived_at');
+  const sameDayLive = customerInvoices.filter((row) => dateOnly(row.service_date) === day
+    && row.scheduled_service_id == null && row.service_record_id == null && row.annual_prepay_term_id == null && row.archived_at == null
+    && !InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(row.status)));
+  if (sameDayLive.length !== 1 || String(sameDayLive[0].id) !== String(inv.id)) return { skip: 'ambiguous' };
   if (await conn('scheduled_service_addons').where({ scheduled_service_id: svc.id }).first('id')) return { skip: 'visitHasAddons' };
   const invoiced = await conn('invoices')
     .where((qb) => qb.where({ scheduled_service_id: svc.id })
       .orWhereIn('service_record_id', conn('service_records').select('id').where({ scheduled_service_id: svc.id })))
     .whereNot('status', 'void').first('id');
   if (invoiced) return { skip: 'visitAlreadyInvoiced' };
+  // A human already ruled this visit in Billing Recovery (billed against
+  // some invoice, or intentionally_free): honor it as the canonical /bill
+  // and /dismiss routes do (GitHub r8 P1). Both writers insert under the
+  // visit's mint advisory lock, which the chain above holds, so under
+  // --execute a ruling cannot land between this read and the commit.
+  if (await conn('visit_billing_dispositions').where({ scheduled_service_id: svc.id }).first('id')) return { skip: 'dispositioned' };
   try { await assertScheduledInvoiceNotPacketOwned(conn, svc.id); } catch { return { skip: 'packetOwned' }; }
   if (!invoiceBillsVisitApplication(inv, svc, catalogNames)) return { skip: 'noEvidence' };
   const record = await canonicalCompletionRecordId(conn, svc.id);
-  return { pairing: { invoiceId: inv.id, invoiceStatus: inv.status, serviceDate: day, visitId: svc.id, visitStatus: svc.status,
-    serviceRecordId: record, technicianId: svc.technician_id || null } };
+  return { pairing: { invoiceId: inv.id, invoiceStatus: inv.status, invoiceTotal: inv.total == null ? null : Number(inv.total), serviceDate: day,
+    visitId: svc.id, visitStatus: svc.status, visitService: svc.service_type || null,
+    serviceRecordId: record, technicianId: svc.technician_id || null, digest: pairingDigest(inv, svc, record) } };
 }
 
 // The visit's canonical completion record, or null when it cannot be told:
@@ -210,6 +259,7 @@ async function plan(conn) {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DIGEST_RE = /^[0-9a-f]{64}$/;
 function readPlan(file) {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   const pairs = Array.isArray(parsed?.pairings) ? parsed.pairings : null;
@@ -217,6 +267,9 @@ function readPlan(file) {
   for (const p of pairs) {
     if (!UUID_RE.test(String(p.invoiceId)) || !UUID_RE.test(String(p.visitId)) || (p.serviceRecordId && !UUID_RE.test(String(p.serviceRecordId)))) {
       throw new Error(`${file}: malformed pairing ${JSON.stringify(p)}`);
+    }
+    if (!DIGEST_RE.test(String(p.digest || ''))) {
+      throw new Error(`${file}: pairing for invoice ${p.invoiceId} has no review digest — re-run the dry run with --plan-out and review the fresh plan`);
     }
   }
   return pairs;
@@ -228,7 +281,8 @@ function readPlan(file) {
       const { scanned, pairings, skipped } = await plan(knex);
       console.log(`DRY RUN — ${scanned} unlinked invoice(s) in the last ${DAYS} days; ${pairings.length} pairing(s); skipped: ${JSON.stringify(skipped)}`);
       for (const p of pairings) {
-        console.log(`  ${p.serviceDate}  invoice ${p.invoiceId} (${p.invoiceStatus}) -> visit ${p.visitId} (${p.visitStatus})${p.serviceRecordId ? ` + record ${p.serviceRecordId}` : ''}`);
+        const total = p.invoiceTotal == null ? '' : ` $${p.invoiceTotal.toFixed(2)}`;
+        console.log(`  ${p.serviceDate}  invoice ${p.invoiceId} (${p.invoiceStatus}${total}) -> visit ${p.visitId} (${p.visitStatus}${p.visitService ? `, ${p.visitService}` : ''})${p.serviceRecordId ? ` + record ${p.serviceRecordId}` : ''}`);
       }
       if (PLAN_OUT) {
         // Written on EVERY scan, an empty plan included — a stale file from
@@ -258,22 +312,30 @@ function readPlan(file) {
       for (const visitId of [...new Set(reviewed.map((p) => String(p.visitId)))].sort()) {
         await acquireScheduledInvoiceMintLock(trx, visitId);
       }
-      // Then every reviewed INVOICE row, sorted, before any customer lock
-      // (pre-push r7 P1): credit settlement locks an invoice row and then
-      // waits on its customer, so a second reviewed invoice of a customer
-      // whose row we already hold FOR UPDATE would deadlock with it. Any
-      // order inversion this ladder still misses is caught by Postgres
-      // deadlock detection, which aborts the ONE batch transaction —
-      // nothing half-written; re-run the reviewed plan.
-      for (const invoiceId of [...new Set(reviewed.map((p) => String(p.invoiceId)))].sort()) {
-        await trx('invoices').where({ id: invoiceId }).forUpdate().first('id');
+      // Then EVERY invoice row of every reviewed invoice's customer — any
+      // date, any status — sorted, before any customer lock (pre-push r7 +
+      // GitHub r8 P1): credit settlement locks an invoice row and then
+      // waits on its customer, so an invoice row of a customer whose row we
+      // already hold FOR UPDATE would deadlock with it; and the uniqueness
+      // recheck inside evaluate() reads the same-day predicate from these
+      // locked rows. Any order inversion this ladder still misses is caught
+      // by Postgres deadlock detection, which aborts the ONE batch
+      // transaction — nothing half-written; re-run the reviewed plan.
+      const reviewedIds = [...new Set(reviewed.map((p) => String(p.invoiceId)))];
+      const owners = await trx('invoices').whereIn('id', reviewedIds).select('id', 'customer_id');
+      if (owners.length !== reviewedIds.length) throw new Error('a reviewed invoice no longer exists — batch aborted, nothing written');
+      const customerIds = [...new Set(owners.map((r) => String(r.customer_id)))];
+      const ladder = await trx('invoices').whereIn('customer_id', customerIds).orderBy('id').select('id');
+      for (const { id } of ladder) {
+        await trx('invoices').where({ id }).forUpdate().first('id');
       }
       for (const p of reviewed) {
         const again = await evaluate(trx, p.invoiceId, catalogNames, { lock: true });
         const same = again.pairing && String(again.pairing.visitId) === String(p.visitId)
           && String(again.pairing.serviceRecordId || '') === String(p.serviceRecordId || '')
-          && String(again.pairing.technicianId || '') === String(p.technicianId || '');
-        if (!same) throw new Error(`invoice ${p.invoiceId}: pairing changed since the reviewed plan (${again.skip || 'different visit/record/technician'}) — batch aborted, nothing written`);
+          && String(again.pairing.technicianId || '') === String(p.technicianId || '')
+          && again.pairing.digest === p.digest;
+        if (!same) throw new Error(`invoice ${p.invoiceId}: pairing changed since the reviewed plan (${again.skip || 'different visit/record/technician, or the reviewed invoice/visit fields were edited'}) — batch aborted, nothing written`);
         // Everything written comes from the LOCKED re-evaluation, not the plan.
         const live = again.pairing;
         const updated = await trx('invoices').where({ id: live.invoiceId }).whereNull('scheduled_service_id').whereNull('service_record_id')
