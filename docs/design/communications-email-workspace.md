@@ -35,7 +35,7 @@ Verified with Node 20.20.2 on September 9, 2026:
 | Check | Result |
 | --- | --- |
 | Email draft/workspace/inbox, draft storage, body encoding, header and Quick Links Vitest suites | 82 tests passed. The three late-response regressions failed before the request-ownership fix and pass afterward. |
-| `node scripts/qa/admin-email-workspace.cjs` | 20 scenarios passed; 36 screenshots; zero unmatched API requests and zero page errors. Chromium desktop/mobile/tablet widths and WebKit at 390px cover replies, compose recovery, Quick Links, focus return, retries, filters, attachments, sandboxed HTML, history scrolling, CSR exclusion and a UTC/Eastern date boundary. |
+| `node scripts/qa/admin-email-workspace.cjs` | 20 scenarios passed; 36 screenshots; zero unmatched API requests and zero page errors. Chromium desktop/mobile/tablet widths and WebKit at 390px cover replies, compose recovery, Quick Links, focus return, retries, filters, attachments, sandboxed HTML, history scrolling, CSR exclusion, summary/list alignment with native browser styles and a UTC/Eastern date boundary. |
 | Screenshot inspection | Desktop at 1440px, mobile at 390px, WebKit, failed reply/partial data and contracted composer viewport reviewed. Visible controls meet the 44px target; buttons are at least 14px and inputs at least 16px. Physical iPhone notch/keyboard behavior was not tested. |
 | `npm run build --workspace=client` | Passed. Portal-brand and IB coverage checks were also run directly. |
 | ESLint on the Email files and QA script | Passed without warnings. |

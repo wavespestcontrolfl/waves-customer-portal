@@ -132,6 +132,14 @@ async function main() {
         const { page } = await openPage(width);
         await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
         await page.getByText(a.subject, { exact: false }).first().waitFor();
+        if (!baseline) {
+          await page.getByText('Email activity', { exact: true }).click();
+          await page.locator('dl dd').first().waitFor();
+          assert.equal(await page.locator('dl').evaluate((node) => [...node.children].every((card) =>
+            Math.abs(card.querySelector('dt').getBoundingClientRect().left - card.querySelector('dd').getBoundingClientRect().left) < 1)),
+          true, 'Summary values must align with their labels');
+          await page.getByText('Email activity', { exact: true }).click();
+        }
         await shot(page, `inbox-${width}`);
         await page.getByText(a.subject, { exact: false }).first().click();
         await page.getByRole('textbox', { name: 'Reply', exact: true }).waitFor();
@@ -292,6 +300,10 @@ async function main() {
         await inbox(page);
         await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked senders', exact: true }).click();
         await page.getByText('unwanted.example.invalid', { exact: true }).waitFor();
+        assert.equal(await page.getByRole('region', { name: 'Blocked senders', exact: true }).locator('ul').evaluate((node) => {
+          const card = node.parentElement.getBoundingClientRect(), row = node.firstElementChild.getBoundingClientRect();
+          return Math.abs(card.left - row.left) <= 1 && Math.abs(card.right - row.right) <= 1;
+        }), true, 'Blocked rows must fill their card without native list indentation');
         await page.getByLabel('Domain or email to block', { exact: true }).fill('newsletter.example.invalid');
         state.fail.add('/admin/email/block');
         await page.getByRole('button', { name: 'Block', exact: true }).click();
