@@ -358,6 +358,46 @@ describe("Finance workflow preservation", () => {
     );
     await screen.findByText("Total Expenses", { exact: true });
   });
+  it.each([
+    [{}, "0"],
+    [{ matched_expense: 2, matched_payout: 3 }, "5"],
+  ])(
+    "keeps unavailable matched counts distinct from a loaded total (%j)",
+    async (counts, expected) => {
+      const key = "GET /api/admin/tax/bank-import/status";
+      overrides.set(key, () => response({ enabled: true, counts: {} }));
+      overrides.set("GET /api/admin/tax/bank-import/coverage", () =>
+        response({ months: [] }),
+      );
+      overrides.set("GET /api/admin/tax/bank-import/transactions", () =>
+        response({ transactions: [], hasMore: false }),
+      );
+      open(TaxPage);
+      await taxSection("Expenses");
+      await screen.findByRole("button", { name: "Bank Import", exact: true });
+      const release = hold(key);
+      await taxSection("Expenses", "Bank Import");
+      const matched = within(
+        (await screen.findByText("Matched", { exact: true })).parentElement,
+      );
+      expect(matched.getByText("—", { exact: true })).toBeInTheDocument();
+      await act(async () =>
+        release(response({ error: "Counts unavailable" }, 503)),
+      );
+      const error = await screen.findByRole("alert");
+      expect(error).toHaveTextContent("Counts unavailable");
+      expect(matched.getByText("—", { exact: true })).toBeInTheDocument();
+      overrides.set(key, () => response({ enabled: true, counts }));
+      fireEvent.click(
+        within(error).getByRole("button", { name: "Try again", exact: true }),
+      );
+      await waitFor(() =>
+        expect(
+          matched.getByText(expected, { exact: true }),
+        ).toBeInTheDocument(),
+      );
+    },
+  );
   it("does not append an old page while a new bank-import filter is loading", async () => {
     const key = "GET /api/admin/tax/bank-import/transactions";
     const oldRow = { id: "old-row", description: "Previous filter row", status: "ignored", amount: 10 };

@@ -5112,7 +5112,11 @@ function BankImportTab() {
         />
         <StatCard
           label="Matched"
-          value={(counts.matched_expense || 0) + (counts.matched_payout || 0)}
+          value={
+            countsReady
+              ? (counts.matched_expense || 0) + (counts.matched_payout || 0)
+              : "\u2014"
+          }
           color={"#18181B"}
         />
         <StatCard

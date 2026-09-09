@@ -87,3 +87,14 @@ coverage gate remains at zero source drift, and portal brand checks pass.
 Evidence: `.tmp/admin-finance-foundation/report.json`,
 `.tmp/admin-finance-review-colors/report.json`, and the integration PR's native
 image attachments. All APIs are synthetic; no live financial actions occurred.
+
+### Matched-count readiness follow-up
+
+The Matched card now uses the same existing `countsReady` state as its adjacent
+cards, while preserving the loaded sum of matched expenses and payouts. Two
+regressions fail before the correction and pass afterward, covering pending,
+failed, loaded-zero and loaded-nonzero results. All 37 finance/layout tests,
+the production build, brand and request-census checks pass. A focused
+Chromium/WebKit run verifies 42 layout cases over pending, failed and recovered
+zero states, with six screenshots and no page errors or unmatched requests
+(`.tmp/admin-finance-matched-states/report.json`).
