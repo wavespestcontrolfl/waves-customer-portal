@@ -82,3 +82,17 @@ it('keeps a busy visit mounted on browser Back and permits Back after settlement
   expect(await screen.findByRole('link', { name: 'Open visit' })).toBeInTheDocument();
   expect(unmounted).toHaveBeenCalledTimes(1);
 });
+
+it('protects document departure without a router history index only while busy', () => {
+  render(<TechNavigationLock><MemoryRouter><Routes><Route element={<TechFieldShell techName="Fixture Tech" />}>
+    <Route index element={<Visit />} />
+  </Route></Routes></MemoryRouter></TechNavigationLock>);
+  fireEvent.click(screen.getByRole('button', { name: 'Start contact' }));
+  const busyDeparture = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(busyDeparture);
+  expect(busyDeparture.defaultPrevented).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Settle contact' }));
+  const settledDeparture = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(settledDeparture);
+  expect(settledDeparture.defaultPrevented).toBe(false);
+});
