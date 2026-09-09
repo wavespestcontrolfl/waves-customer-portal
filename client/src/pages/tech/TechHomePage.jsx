@@ -608,7 +608,7 @@ export default function TechHomePage({ section = 'today' }) {
     setSearchParams((params) => { params.delete('visit'); return params; });
   };
   const openServiceReport = (service) => {
-    if (TERMINAL_STATUSES_VISIT.has(service.status)) return;
+    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket) return;
     if (usesDispatchCompletion(service)) openTypedCompletion(service);
     else if (isPestControlService(service)) setRecapService(service);
     else openProjectOrContinue(service);

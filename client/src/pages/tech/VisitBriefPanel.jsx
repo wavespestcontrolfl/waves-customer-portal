@@ -470,7 +470,8 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
 // Per-service actions keep terminal reports read-only and preserve the
 // trace-eligibility guard — one row per member service on a grouped stop.
 function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead }) {
-  const reportDisabled = TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status);
+  const reportDisabled = !service.visitCloseoutPacket
+    && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
   const btn = {
     padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
     border: `1px solid ${DARK.border}`, background: 'transparent',
@@ -490,11 +491,11 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
         </p>
       )}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button disabled={reportDisabled} onClick={() => onProject(service)} style={{ ...btn, ...(reportDisabled ? { color: DARK.muted, cursor: 'default' } : {}) }}>
+        <button disabled={reportDisabled} onClick={() => onProject(service)} style={{ ...btn, fontSize: 14, ...(reportDisabled ? { color: DARK.muted, cursor: 'default' } : {}) }}>
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}
-          {service.linkedProject?.status === 'sent'
+          {service.visitCloseoutPacket ? 'Open closeout' : service.linkedProject?.status === 'sent'
             ? '🗂️ Sent'
             : service.linkedProject?.status === 'closed' || service.status === 'completed'
               ? '🗂️ Completed'
