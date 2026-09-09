@@ -74,6 +74,8 @@ jest.setTimeout(30000);
     await db('services').insert({ id: serviceId, name: 'Termite Bait Station Service', service_key: 'termite_bait' });
     await db('scheduled_services').where({ id: ids.visitId }).update({ service_key_snapshot: null, service_id: serviceId });
     expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'identityConflict' });
+    await db('services').where({ id: serviceId }).update({ name: 'Pest Control', service_key: 'pest_termite_bait_quarterly' });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'identityConflict' });
     await db('services').where({ id: serviceId }).update({ name: 'Pest Control', service_key: 'pest_general_quarterly' });
     await db('scheduled_services').where({ id: ids.visitId }).update({ service_key_snapshot: 'pest_general_quarterly' });
     expect((await evaluate(db, ids.invoiceId)).pairing).toMatchObject({ visitId: ids.visitId });
