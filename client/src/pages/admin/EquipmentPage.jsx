@@ -1,4 +1,4 @@
-import { Button, Field, Input, Select, Textarea, Badge, Card, UiSurface, ActionFeedback, Tabs, TabList, Tab, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../../components/ui";
+import { Button, Field, Input, Select, Textarea, Badge, Card, UiSurface, ActionFeedback, Tabs, TabList, Tab, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, Table, THead, TBody, TR, TH, TD } from "../../components/ui";
 import { useState, useEffect, useCallback, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { useOutletContext, useSearchParams } from "react-router-dom";
@@ -11,7 +11,6 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly while keeping semantic green/amber/red distinct.
 
-const MONO = "'JetBrains Mono', monospace";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -24,24 +23,6 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
-const sCard = {
-  background: "#FFFFFF",
-  border: `1px solid ${"#E4E4E7"}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)"
-};
-const sBtn = (bg, color) => ({
-  padding: "8px 16px",
-  background: bg,
-  color,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer"
-});
 const fmt = n => n != null ? "$" + Number(n).toLocaleString(undefined, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2
@@ -561,11 +542,13 @@ function EquipmentEditModal({
 }
 
 // ── Tank Mix Tab ──
-
 // ── Tank Mix Tab ──
 function TankMixTab({
   showToast
 }) {
+  const actionRef = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const [pendingAction, setPendingAction] = useState("");
   const isMobile = useIsMobile(640);
   const [mixes, setMixes] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -594,15 +577,24 @@ function TankMixTab({
     };
   }, [loadMixes]);
   const recalculate = async id => {
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setActionError("");
+    setPendingAction(id);
     try {
-      await adminFetch(`/admin/equipment/tank-mixes/${id}/recalculate`, {
-        method: "POST"
-      });
-      if (!mounted.current) return;
-      showToast("Costs recalculated from current inventory prices");
-      await loadMixes();
-    } catch (e) {
-      if (mounted.current) showToast(`Failed: ${e.message}`);
+      try {
+        await adminFetch(`/admin/equipment/tank-mixes/${id}/recalculate`, {
+          method: "POST"
+        });
+        if (!mounted.current) return;
+        showToast("Costs recalculated from current inventory prices");
+        await loadMixes();
+      } catch (e) {
+        if (mounted.current) setActionError(`Failed: ${e.message}`);
+      }
+    } finally {
+      actionRef.current = false;
+      setPendingAction("");
     }
   };
   if (loading && mixes.length === 0) return <div style={{
@@ -613,186 +605,168 @@ function TankMixTab({
         Loading tank mixes...
       </div>;
   return <div>
-      {loadError && <div role="alert" style={{
-      ...sCard,
-      color: "#991B1B",
+      {actionError && <ActionFeedback error className="mb-4">
+          {actionError}
+        </ActionFeedback>}
+      {loadError && <Card role="alert" style={{
+      color: "#C8312F",
       fontSize: 14
-    }}>
+    }} className="p-4 mb-3">
           Could not load tank mixes.
           {mixes.length > 0 && " Showing previously loaded mixes; costs may be out of date."}
-          <button onClick={loadMixes} aria-label="Retry tank mixes" style={{
-        ...sBtn("#18181B", "#fff"),
-        marginLeft: 12,
-        fontSize: 14
-      }}>
+          <Button onClick={loadMixes} aria-label="Retry tank mixes" style={{
+        marginLeft: 12
+      }} type="button" variant="primary" className="min-w-11" disabled={!!pendingAction}>
             Retry
-          </button>
-        </div>}
+          </Button>
+        </Card>}
       {loading && <div role="status" style={{
       color: "#71717A"
-    }}>Refreshing tank mixes...</div>}
-      {mixes.length === 0 ? !loadError && <div style={{
-      ...sCard,
+    }}>
+          Refreshing tank mixes...
+        </div>}
+      {mixes.length === 0 ? !loadError && <Card style={{
       textAlign: "center",
       padding: 40,
       color: "#71717A"
-    }}>
-          No tank mixes configured yet. Add your standard mixes to track costs
-          per application.
-        </div> : mixes.map(m => {
+    }} className="p-4 mb-3">
+              No tank mixes configured yet. Add your standard mixes to track
+              costs per application.
+            </Card> : mixes.map(m => {
       const products = typeof m.products === "string" ? JSON.parse(m.products) : m.products || [];
-      return <div key={m.id} style={{
-        ...sCard
-      }}>
-              {" "}
-              <div style={{
+      return <Card key={m.id} className="p-4 mb-3">
+                {" "}
+                <div style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
           marginBottom: 12
         }}>
-                {" "}
-                <div>
                   {" "}
-                  <div style={{
+                  <div>
+                    {" "}
+                    <div style={{
               fontSize: 15,
               fontWeight: 500,
               color: "#09090B"
             }}>
-                    {m.name}
-                  </div>{" "}
-                  <div style={{
-              fontSize: 12,
+                      {m.name}
+                    </div>{" "}
+                    <div style={{
+              fontSize: 14,
               color: "#71717A"
             }}>
-                    {m.service_type} · {m.tank_size_gal}gal tank · covers{" "}
-                    {(m.coverage_sqft || 0).toLocaleString()} sqft
+                      {m.service_type} · {m.tank_size_gal}gal tank · covers{" "}
+                      {(m.coverage_sqft || 0).toLocaleString()} sqft
+                    </div>{" "}
                   </div>{" "}
-                </div>{" "}
-                <div style={{
+                  <div style={{
             display: "flex",
             gap: 8,
             alignItems: "center"
           }}>
-                  {" "}
-                  <div style={{
-              textAlign: "right"
-            }}>
                     {" "}
                     <div style={{
-                fontFamily: MONO,
+              textAlign: "right"
+            }}>
+                      {" "}
+                      <div style={{
                 fontSize: 18,
-                fontWeight: 700,
-                color: m.cost_incomplete ? "#A16207" : "#15803D"
+                fontWeight: 500,
+                color: m.cost_incomplete ? "#52525B" : "#18181B"
               }}>
-                      {fmt(m.cost_per_tank)}/tank
-                    </div>{" "}
-                    <div style={{
-                fontFamily: MONO,
-                fontSize: 12,
+                        {fmt(m.cost_per_tank)}/tank
+                      </div>{" "}
+                      <div style={{
+                fontSize: 14,
                 color: "#71717A"
               }}>
-                      {fmt(m.cost_per_1000sf)}/1000sf
-                    </div>{" "}
-                    {m.cost_incomplete && <div style={{
-                fontSize: 11,
-                color: "#A16207"
+                        {fmt(m.cost_per_1000sf)}/1000sf
+                      </div>{" "}
+                      {m.cost_incomplete && <div style={{
+                fontSize: 14,
+                color: "#52525B"
               }}>
-                        incomplete — unpriced component excluded
-                      </div>}{" "}
+                          incomplete — unpriced component excluded
+                        </div>}{" "}
+                    </div>{" "}
+                    <Button onClick={() => recalculate(m.id)} type="button" variant="secondary" className="min-w-11" disabled={!!pendingAction} loading={pendingAction === m.id}>
+                      Recalc
+                    </Button>{" "}
                   </div>{" "}
-                  <button onClick={() => recalculate(m.id)} style={{
-              ...sBtn("transparent", "#71717A"),
-              border: `1px solid ${"#E4E4E7"}`,
-              padding: "4px 8px",
-              fontSize: 10
-            }}>
-                    Recalc
-                  </button>{" "}
                 </div>{" "}
-              </div>{" "}
-              <div style={{
+                <div style={{
           overflowX: "auto",
           WebkitOverflowScrolling: "touch"
         }}>
-                {" "}
-                <table style={{
-            width: "100%",
-            borderCollapse: "collapse",
+                  {" "}
+                  <Table style={{
             minWidth: isMobile ? 400 : undefined
           }}>
-                  {" "}
-                  <thead>
-                    <tr>
-                      {["Product", "Rate/1000sf", "Oz/Tank", "Cost"].map(h => <th key={h} style={{
-                  fontSize: 10,
+                    <THead>
+                      <TR>
+                        {["Product", "Rate/1000sf", "Oz/Tank", "Cost"].map(h => <TH key={h} style={{
                   color: "#71717A",
-                  textTransform: "uppercase",
-                  letterSpacing: 1,
-                  textAlign: "left",
-                  padding: "4px 8px",
-                  borderBottom: `1px solid ${"#E4E4E7"}22`
+                  textAlign: "left"
                 }}>
-                            {h}
-                          </th>)}
-                    </tr>
-                  </thead>{" "}
-                  <tbody>
-                    {products.map((p, i) => <tr key={i}>
-                        {" "}
-                        <td style={{
-                  padding: "6px 8px",
-                  fontSize: 12,
+                              {h}
+                            </TH>)}
+                      </TR>
+                    </THead>
+                    <TBody>
+                      {products.map((p, i) => <TR key={i}>
+                          <TD style={{
                   color: "#09090B"
                 }}>
-                          {p.product_name}
-                        </td>{" "}
-                        <td style={{
-                  padding: "6px 8px",
-                  fontSize: 12,
-                  fontFamily: MONO
+                            {p.product_name}
+                          </TD>
+                          <TD>
+                            {p.rate_per_1000sf} {p.rate_unit}
+                          </TD>
+                          <TD>{p.oz_per_tank}</TD>
+                          <TD style={{
+                  color: "#18181B"
                 }}>
-                          {p.rate_per_1000sf} {p.rate_unit}
-                        </td>{" "}
-                        <td style={{
-                  padding: "6px 8px",
-                  fontSize: 12,
-                  fontFamily: MONO
-                }}>
-                          {p.oz_per_tank}
-                        </td>{" "}
-                        <td style={{
-                  padding: "6px 8px",
-                  fontSize: 12,
-                  fontFamily: MONO,
-                  color: "#15803D"
-                }}>
-                          {fmt(p.cost)}
-                        </td>{" "}
-                      </tr>)}
-                  </tbody>{" "}
-                </table>{" "}
-              </div>{" "}
-            </div>;
+                            {fmt(p.cost)}
+                          </TD>
+                        </TR>)}
+                    </TBody>
+                  </Table>{" "}
+                </div>{" "}
+              </Card>;
     })}
     </div>;
 }
 
+// ── Job Cost Tab ──
 // ── Job Cost Tab ──
 function JobCostTab() {
   const isMobile = useIsMobile(640);
   const [summary, setSummary] = useState(null);
   const [costs, setCosts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [readError, setReadError] = useState("");
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    Promise.all([adminFetch("/admin/equipment/job-costs/summary").catch(() => null), adminFetch("/admin/equipment/job-costs?limit=30").catch(() => ({
-      costs: []
-    }))]).then(([s, c]) => {
+    let active = true;
+    setLoading(true);
+    setReadError("");
+    Promise.all([adminFetch("/admin/equipment/job-costs/summary"), adminFetch("/admin/equipment/job-costs?limit=30")]).then(([s, c]) => {
+      if (!active) return;
       setSummary(normalizeJobCostSummary(s));
       setCosts(c.job_costs || c.costs || []);
-      setLoading(false);
+    }).catch(error => {
+      if (active) setReadError(error.message);
+    }).finally(() => {
+      if (active) setLoading(false);
     });
-  }, []);
+    return () => {
+      active = false;
+    };
+  }, [attempt]);
+  if (readError) return <ActionFeedback error onRetry={() => setAttempt(v => v + 1)}>
+        Could not load job costs: {readError}
+      </ActionFeedback>;
   if (loading) return <div style={{
     color: "#71717A",
     padding: 40,
@@ -810,49 +784,45 @@ function JobCostTab() {
           {[{
         label: "Avg Margin",
         value: summary.avgMargin != null ? `${summary.avgMargin.toFixed(1)}%` : "—",
-        color: summary.avgMargin == null || summary.avgMargin >= 50 ? "#15803D" : "#A16207"
+        color: summary.avgMargin == null || summary.avgMargin >= 50 ? "#18181B" : "#52525B"
       }, {
         label: "Avg Revenue/Job",
         value: fmt(summary.avgRevenue),
-        color: "#15803D"
+        color: "#18181B"
       }, {
         label: "Avg Cost/Job",
         value: fmt(summary.avgCost),
-        color: "#A16207"
+        color: "#52525B"
       }, {
         label: "Total Jobs Costed",
         value: summary.totalJobs || 0,
         color: "#09090B"
-      }].map(s => <div key={s.label} style={{
-        ...sCard,
+      }].map(s => <Card key={s.label} style={{
         flex: isMobile ? "1 1 calc(50% - 6px)" : "1 1 140px",
         minWidth: isMobile ? 0 : 140,
         marginBottom: 0,
         textAlign: "center"
-      }}>
+      }} className="p-4 mb-3">
               {" "}
               <div style={{
-          fontFamily: MONO,
           fontSize: isMobile ? 18 : 22,
-          fontWeight: 700,
+          fontWeight: 500,
           color: s.color
         }}>
                 {s.value}
               </div>{" "}
               <div style={{
-          fontSize: 9,
+          fontSize: 14,
           color: "#71717A",
-          textTransform: "uppercase",
-          letterSpacing: 1,
           marginTop: 2
         }}>
                 {s.label}
               </div>{" "}
-            </div>)}
+            </Card>)}
         </div>}
 
       {/* By service type */}
-      {summary?.byServiceType && <div style={sCard}>
+      {summary?.byServiceType && <Card className="p-4 mb-3">
           {" "}
           <div style={{
         fontSize: 15,
@@ -867,7 +837,7 @@ function JobCostTab() {
         justifyContent: "space-between",
         padding: "8px 0",
         borderBottom: `1px solid ${"#E4E4E7"}22`,
-        fontSize: 12
+        fontSize: 14
       }}>
               {" "}
               <span style={{
@@ -883,41 +853,40 @@ function JobCostTab() {
                 {" "}
                 <span style={{
             color: "#71717A"
-          }}>{stats.count} jobs</span>{" "}
+          }}>
+                  {stats.count} jobs
+                </span>{" "}
                 <span style={{
-            color: "#15803D",
-            fontFamily: MONO
+            color: "#18181B"
           }}>
                   Rev: {fmt(stats.avgRevenue)}
                 </span>{" "}
                 <span style={{
-            color: "#A16207",
-            fontFamily: MONO
+            color: "#52525B"
           }}>
                   Cost: {fmt(stats.avgCost)}
                 </span>{" "}
                 <span style={{
-            color: stats.avgMargin >= 50 ? "#15803D" : "#A16207",
-            fontFamily: MONO,
-            fontWeight: 700
+            color: stats.avgMargin >= 50 ? "#18181B" : "#52525B",
+            fontWeight: 500
           }}>
                   {stats.avgMargin?.toFixed(1)}%
                 </span>{" "}
               </div>{" "}
             </div>)}
-        </div>}
+        </Card>}
 
-      {costs.length === 0 && <div style={{
-      ...sCard,
+      {costs.length === 0 && <Card style={{
       textAlign: "center",
       padding: 40,
       color: "#71717A"
-    }}>
+    }} className="p-4 mb-3">
           No job costs recorded yet
-        </div>}
+        </Card>}
     </div>;
 }
 
+// ── Maintenance Tab ──
 // ── Maintenance Tab ──
 function MaintenanceTab({
   showToast
@@ -951,19 +920,17 @@ function MaintenanceTab({
     }}>
         Upcoming Maintenance
       </div>
-      {equipment.length === 0 ? <div style={{
-      ...sCard,
+      {equipment.length === 0 ? <Card style={{
       textAlign: "center",
       padding: 40,
       color: "#71717A"
-    }}>
+    }} className="p-4 mb-3">
           No equipment needs service soon
-        </div> : equipment.map(e => {
+        </Card> : equipment.map(e => {
       const hoursLeft = e.next_service_hours - (e.current_hours || 0);
-      return <div key={e.id} style={{
-        ...sCard,
-        borderLeft: `3px solid ${hoursLeft <= 10 ? "#991B1B" : "#A16207"}`
-      }}>
+      return <Card key={e.id} style={{
+        borderLeft: `3px solid ${hoursLeft <= 10 ? "#C8312F" : "#52525B"}`
+      }} className="p-4 mb-3">
               {" "}
               <div style={{
           display: "flex",
@@ -981,13 +948,13 @@ function MaintenanceTab({
                     {e.name}
                   </div>{" "}
                   <div style={{
-              fontSize: 12,
+              fontSize: 14,
               color: "#71717A"
             }}>
                     {e.next_service_type} — in {Math.round(hoursLeft)} hours
                   </div>{" "}
                 </div>{" "}
-                <button onClick={async () => {
+                <Button onClick={async () => {
             try {
               await adminFetch(`/admin/equipment/equipment/${e.id}/maintenance`, {
                 method: "POST",
@@ -1000,11 +967,11 @@ function MaintenanceTab({
             } catch (err) {
               showToast(`Failed: ${err.message}`);
             }
-          }} style={sBtn("#15803D", "#FFFFFF")}>
+          }} type="button" variant="primary" className="min-w-11">
                   Mark Complete
-                </button>{" "}
+                </Button>{" "}
               </div>{" "}
-            </div>;
+            </Card>;
     })}
     </div>;
 }
