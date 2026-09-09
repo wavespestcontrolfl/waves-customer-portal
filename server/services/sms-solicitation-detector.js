@@ -17,7 +17,7 @@ const SOLICITATION_MARKERS = [
   // A prospect can offer enough service work to fill our schedule.
   // This needs an independent outreach clue, like other capacity wording.
   { key: 'grow_business', strong: false, re: /\b(?:grow|scale|book(?:ing)?\s+more|fill)\s+(?:your\s+)?(?:business|schedule|calendar)\b/i },
-  { key: 'sender_growth_offer', strong: true, re: /\b(?:we|i)\s+(?:(?:can|could|will)\s+)?(?:help\s+(?:you\s+)?)?(?:grow|scale)\s+your\s+business\b/i },
+  { key: 'sender_growth_offer', strong: true, re: /\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:help\s+(?:you\s+)?)?(?:grow|scale)\s+your\s+business\b/i },
   { key: 'vendor_tool', strong: true, re: /\b(?:having|offer(?:ing)?|provid(?:e|ing)|try)\s+(?:an?\s+|our\s+)?ai\s+receptionist\b|\breview\s+system\b[^.!?]{0,80}\bfor\s+your\s+business\b/i },
   // Matching homeowners to contractors is lead generation; connecting us
   // with a property manager for access is ordinary quote coordination.
