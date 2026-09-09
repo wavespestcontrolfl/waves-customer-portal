@@ -1070,6 +1070,20 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       }
     });
 
+    test.each(['deferred', 'redeeming'])('a %s final rechecks at night without an SMS-window hold', async status => {
+      mockGates.smsSendWindow = true;
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-27T01:00:00Z').getTime());
+      const mock = makeMock({ review_sequences: [{ id: 'parked-night', customer_id: 'night-customer', status,
+        current_step: 0, plan: '[{"day":0,"channel":"sms","templateKey":"day0_ask"}]',
+        next_run_at: new Date('2026-05-27T01:05:00Z') }] });
+      db.mockImplementation(mock);
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['night-customer']);
+        expect(map['night-customer'].nextSendTickAt.toISOString()).toBe('2026-05-27T01:14:00.000Z');
+        expect(map['night-customer']).toMatchObject({ parked: true, fallbackTickAt: null, fallbackChannel: null, plannedChannel: null });
+      } finally { nowSpy.mockRestore(); mockGates.smsSendWindow = false; }
+    });
+
     test('a parked series final is a cadence in the candidate map (parked, next re-check), and an active row wins over it (codex #4140 r12 P2)', async () => {
       const parkAt = new Date(Date.now() + 20 * 60000);
       const mock = makeMock({
