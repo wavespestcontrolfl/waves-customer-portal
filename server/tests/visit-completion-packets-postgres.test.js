@@ -303,6 +303,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const app = require('express')();
     app.use(require('express').json());
     app.use('/api/admin/visit-closeouts', require('../routes/admin-visit-closeouts'));
+    app.use('/api/visit-summary', require('../routes/visit-summary-public'));
     app.use('/api/admin/schedule', require('../routes/admin-schedule'));
     app.use('/api/admin/dispatch', require('../routes/admin-dispatch'));
     app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
@@ -406,10 +407,23 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
     expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(fullBehavior ? 1 : 0);
+    const summaryPath = result.body.summaryUrl.replace('/visit/', '/api/visit-summary/');
+    const summary = await request(summaryPath);
+    expect(summary.status).toBe(200);
+    expect(summary.body.services).toHaveLength(2);
+    expect(summary.headers['referrer-policy']).toBe('no-referrer');
+    expect(summary.headers['x-robots-tag']).toContain('noindex');
+    expect(summary.headers['cache-control']).toContain('no-store');
     expect((await request(`${path}/revoke-summary`, { method: 'POST', auth, body: {} })).status).toBe(403);
     await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'admin' });
     expect((await request(path, { auth })).body.canRevokeSummary).toBe(true);
     expect((await request(`${path}/revoke-summary`, { method: 'POST', auth, body: {} })).body).toEqual({ revoked: true });
+    const revoked = await request(summaryPath);
+    const malformed = await request('/api/visit-summary/not-a-token');
+    expect(revoked.status).toBe(404);
+    expect(malformed.status).toBe(404);
+    expect(revoked.body).toEqual(malformed.body);
+
     const claimToken = randomUUID();
     await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' })
       .update({ status: 'claimed', claim_token: claimToken, claimed_at: mockPg.fn.now() });
