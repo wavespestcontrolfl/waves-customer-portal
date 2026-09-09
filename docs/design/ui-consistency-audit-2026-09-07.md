@@ -1211,7 +1211,7 @@ Full table of the 43 (verifier notes in full):
 
 ### K.5 Not verified in this pass
 
-364 P2/P3 findings that were neither P1 nor flagged autofixable were not sent through the refute pass (613 rows − 243 with a verdict (163 confirmed, 76 downgraded, 4 refuted) − 6 folded aliases) (all are listed, with their evidence lines and proposed fixes, in the companion inventory `docs/design/ui-consistency-audit-2026-09-07-inventory.md`, which lands separately in #4200). They are consistency, duplication, typography and dead-code observations; treat each as "reader-reported" until a fix PR re-reads its lines.
+363 P2/P3 findings that were neither P1 nor flagged autofixable were not sent through the refute pass (613 rows − 243 with a verdict (163 confirmed, 76 downgraded, 4 refuted) − 7 folded aliases: F0009, F0020, F0050, F0060, F0172, F0232, F0535) (all are listed, with their evidence lines and proposed fixes, in the companion inventory `docs/design/ui-consistency-audit-2026-09-07-inventory.md`, which lands separately in #4200). They are consistency, duplication, typography and dead-code observations; treat each as "reader-reported" until a fix PR re-reads its lines.
 
 ---
 
