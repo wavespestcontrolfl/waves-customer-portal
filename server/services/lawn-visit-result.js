@@ -17,11 +17,12 @@ const STRESS_SIGNALS = ['fungal_activity', 'insect_damage', 'drought_stress', 'm
 const NO_STRESS_LABEL = 'no major visible stress';
 
 const clip = (value, max) => String(value == null ? '' : value).trim().slice(0, max);
+const photoNumber = (value) => (typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN);
 
 function uniqueInts(values, max) {
   const out = [];
   for (const value of Array.isArray(values) ? values : []) {
-    const n = Number(value);
+    const n = photoNumber(value);
     if (Number.isInteger(n) && n >= 1 && n <= max && !out.includes(n)) out.push(n);
   }
   return out.sort((a, b) => a - b);
@@ -46,7 +47,7 @@ function scoreOrNull(raw, min, max) {
 function normalizePhotoQuality(list, photoCount) {
   const rows = Array.from({ length: photoCount }, (_, i) => ({ photo: i + 1, quality: UNRATED_QUALITY, issue: 'not rated by the model' }));
   for (const entry of Array.isArray(list) ? list : []) {
-    const index = Number(entry?.photo) - 1;
+    const index = photoNumber(entry?.photo) - 1;
     if (!Number.isInteger(index) || index < 0 || index >= photoCount) continue;
     if (!PHOTO_QUALITY.includes(entry?.quality)) continue;
     rows[index] = { photo: index + 1, quality: entry.quality, issue: clip(entry.issue, 200) };
@@ -61,10 +62,12 @@ function zoneFromRefs(photoRefs, photoZones = []) {
 
 function containerShape(schema) {
   if (schema.type === 'object') {
-    return { type: 'object', properties: Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, containerShape(value)])) };
+    return { type: 'object', additionalProperties: false, properties: Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, containerShape(value)])) };
   }
   if (schema.type === 'array') return { type: 'array', items: containerShape(schema.items) };
-  return {};
+  // Scalar coercion may preserve a numeric string, but an object/array in a
+  // scalar position is malformed and can throw from String/Number conversion.
+  return { not: { anyOf: [{ type: 'object' }, { type: 'array' }] } };
 }
 
 const hasResponseShape = new Ajv().compile(containerShape(RESPONSE_SCHEMA));
@@ -90,7 +93,7 @@ function ratesEveryPhoto(list, photoCount) {
   if (!Array.isArray(list) || list.length !== photoCount) return false;
   const rated = new Set();
   for (const entry of list) {
-    const photo = Number(entry?.photo);
+    const photo = photoNumber(entry?.photo);
     if (Number.isInteger(photo) && photo >= 1 && photo <= photoCount && PHOTO_QUALITY.includes(entry?.quality)) rated.add(photo);
   }
   return rated.size === photoCount;
@@ -122,6 +125,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
     const unstated = raw.can_determine !== true;
     const canDetermine = !unstated && !untraceable && !unsupported;
     const confidence = canDetermine ? finding.confidence : 'unknown';
+    const label = canDetermine ? safeConditionLabel(finding.name, confidence) : 'general lawn stress';
     return {
       ...finding,
       // Server-authored ids: the review keys on them, so a duplicate or a
@@ -135,7 +139,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
       cannot_determine_reason: canDetermine ? '' : (clip(raw.cannot_determine_reason, 300) || (untraceable ? 'no photo of this visit cited' : '') || (unsupported ? 'every cited photo rated poor' : '') || (unstated && raw.can_determine !== false ? 'determinability not stated' : '')),
       // The allowlisted customer label — the naming gate applied here, once,
       // so no consumer ever maps the raw name itself.
-      label: canDetermine ? safeConditionLabel(finding.name, confidence) : 'general lawn stress',
+      label: label === NO_STRESS_LABEL && !['moderate', 'high'].includes(confidence) ? 'general lawn stress' : label,
       source: 'model',
     };
   });
@@ -187,6 +191,7 @@ function photoRowInputs(analysis) {
 function compositeFor(analysis) {
   if (!analysis) return { grass_type: null };
   const level = (key) => analysis.severities?.[key]?.level ?? null;
+  const overwatering = level('overwatering_signal');
   return {
     grass_type: analysis.grassType || null,
     turf_density: analysis.scores?.turf_density ?? null,
@@ -197,7 +202,7 @@ function compositeFor(analysis) {
     drought_stress: level('drought_stress'),
     mechanical_damage: level('mechanical_damage'),
     thatch_visibility: level('thatch_visibility'),
-    overwatering_signal: level('overwatering_signal') === 'yes',
+    overwatering_signal: ['yes', 'no'].includes(overwatering) ? overwatering === 'yes' : null,
     observations: analysis.observations || '',
   };
 }
