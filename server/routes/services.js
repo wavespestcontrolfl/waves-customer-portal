@@ -9,7 +9,7 @@ const { authenticate } = require('../middleware/auth');
 // inspection-fee scrub (codex #2817).
 const { customerSafeServiceNotes } = require('../services/project-types');
 const { etDateString } = require('../utils/datetime-et');
-const { applyPropertyPredicate, resolveSessionScope } = require('../services/account-properties');
+const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 
 // Saved-property scope (GATE_APP_PROPERTY_SCOPE) on a service-record query
 // that LEFT JOINs the visit: the shared predicate's "every property retired"
@@ -168,6 +168,10 @@ router.get('/', async (req, res, next) => {
     const total = await totalQuery.count('service_records.id as count').first();
 
     res.json({
+      // The selection this read was scoped to (propertyScoped only): Home
+      // compares it with the house it shows and withholds the Last Visit card
+      // on a mismatch (uncapped codex r1v P1) — same echo as /schedule.
+      ...(scope ? { propertyScope: resolvedScopePayload(scope) } : {}),
       services: enriched,
       total: parseInt(total.count),
       limit: parseInt(limit),

@@ -2660,7 +2660,13 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const [balanceStatus, setBalanceStatus] = useState('loading');
   // The selected house's last visit (server-scoped; a no-op off the gate).
   const lastRead = usePortalRead('latest-service', () => api.getServices({ limit: 1, propertyScoped: 1 }));
-  const lastService = lastRead.data?.services?.[0] || null;
+  // The read echoes the selection it was scoped to; a mismatch (the selected
+  // house retired while Home was open — the server fell back to the primary)
+  // withholds the card and its report link, exactly like the next visit
+  // (uncapped codex r1v P1).
+  const lastScopeStale = scopeEchoMismatch(lastRead.data?.propertyScope, dashboardEntry, dashboardSavedScope);
+  useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
+  const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
   const [pendingSatisfactionStatus, setPendingSatisfactionStatus] = useState('loading');
@@ -14015,7 +14021,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
     let stale = false;
     setSubmitError('');
     api.getServices({ limit: 1, propertyScoped: 1 }).then(d => {
-      if (!stale && d.services?.length) setLastService(d.services[0]);
+      // A last visit scoped to another house than this overlay names is not
+      // this house's (the callback-eligibility copy would be wrong).
+      if (!stale && d.services?.length && !scopeEchoMismatch(d.propertyScope, currentEntry, savedScope)) setLastService(d.services[0]);
     }).catch(() => {});
     api.getNextService().then(d => { if (!stale) setNextService(d.next || null); }).catch(() => {});
     // Fail-closed on every path: reset BEFORE the fetch and null on failure,

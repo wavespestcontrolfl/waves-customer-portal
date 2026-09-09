@@ -68,6 +68,7 @@ describe('GET /services?propertyScoped=1 — the selected house\'s last visit', 
     global.__SCOPE__ = SECONDARY;
     const res = await fetch(`${base}/services?limit=1`);
     expect(res.status).toBe(200);
+    expect((await res.json()).propertyScope).toBeUndefined(); // no echo on the customer-wide read
     const { resolveSessionScope } = require('../services/account-properties');
     expect(resolveSessionScope).not.toHaveBeenCalled();
     expect(recordChains().flatMap(propertyPredicates)).toEqual([]);
@@ -76,6 +77,8 @@ describe('GET /services?propertyScoped=1 — the selected house\'s last visit', 
     global.__SCOPE__ = SECONDARY;
     const res = await fetch(`${base}/services?limit=1&propertyScoped=1`);
     expect(res.status).toBe(200);
+    // The RESOLVED selection is echoed, like /schedule, for the client's mismatch check.
+    expect((await res.json()).propertyScope).toEqual({ enabled: true, propertyId: 'prop-b', closed: false });
     const [list, total] = recordChains();
     expect(propertyPredicates(list)).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
     expect(total.some((c) => c[0] === 'leftJoin' && c[1] === 'scheduled_services')).toBe(true);

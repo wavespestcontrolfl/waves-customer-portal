@@ -59,4 +59,18 @@ describe('Home under a saved-property selection', () => {
     expect(screen.queryByText('Property Alerts')).not.toBeInTheDocument();
     expect(screen.queryByText('What to watch this week')).not.toBeInTheDocument();
   });
+
+  it('Last Visit follows the echo: a read the server scoped to ANOTHER house is withheld and the list is re-read; a matching echo renders the card', async () => {
+    const visit = { id: 'svc-9', type: 'Quarterly Pest Control', date: '2026-09-01', status: 'completed' };
+    const refresh = vi.fn();
+    // The selected secondary was retired: the server fell back to the primary.
+    api.getServices.mockResolvedValue({ services: [visit], propertyScope: { enabled: true, propertyId: 'pa', closed: false } });
+    const view = render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} onSavedScopeUnavailable={refresh} />);
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(screen.queryByText('Last Visit')).not.toBeInTheDocument();
+    view.unmount();
+    api.getServices.mockResolvedValue({ services: [visit], propertyScope: { enabled: true, propertyId: 'pb', closed: false } });
+    render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    expect(await screen.findByText('Last Visit')).toBeInTheDocument();
+  });
 });

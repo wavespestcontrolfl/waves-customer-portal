@@ -454,7 +454,16 @@ function ProtectedRoute({ children }) {
   // profile entries carry neither.
   const listIsProfileShaped = properties.length > 0
     && !properties.some((property) => property.key || Object.prototype.hasOwnProperty.call(property, 'propertyId'));
-  const targetPropertyId = listIsProfileShaped ? null : targetPropertyHint;
+  // Only PROPERTY-scoped destinations (Home, Visits, My Property — the tabs
+  // whose reads follow the saved-property selection) care which house.
+  // Billing, Refer, Documents, Plan and Learn are customer-wide, so a push
+  // to them requires only the right profile — neither the profile's primary
+  // (uncapped codex r1r P1) nor the house a completion or receipt push
+  // names (uncapped codex r1v P1): a retired house must not turn a report
+  // or an invoice into "Property unavailable" when the tab itself opens.
+  const destinationTab = new URLSearchParams(location.search).get('tab') || 'dashboard';
+  const propertyScopedDestination = !['billing', 'refer', 'documents', 'plan', 'learn'].includes(destinationTab);
+  const targetPropertyId = listIsProfileShaped || !propertyScopedDestination ? null : targetPropertyHint;
   const profileDiffers = !!targetProperty && String(customer?.id) !== targetProperty;
   // A saved property named by the link wins. A profile-only link (every push
   // minted before the composers carry the property) means that profile's
@@ -463,14 +472,6 @@ function ProtectedRoute({ children }) {
   // an arbitrary house whose scoped reads would hide the notified visit.
   const currentProfileEntries = properties.filter((property) => String(property.customerId || property.id) === String(customer?.id));
   const primaryEntry = currentProfileEntries.find((property) => property.isPrimaryProperty) || null;
-  // Only PROPERTY-scoped destinations (Home, Visits, My Property — the tabs
-  // whose reads follow the saved-property selection) need that profile's
-  // primary. Billing, Refer, Documents, Plan and Learn are customer-wide, so
-  // an account-wide push (an invoice, a receipt) requires only the right
-  // profile — a retired primary must not turn it into "Property unavailable"
-  // when opening the tab directly works (uncapped codex r1r P1).
-  const destinationTab = new URLSearchParams(location.search).get('tab') || 'dashboard';
-  const propertyScopedDestination = !['billing', 'refer', 'documents', 'plan', 'learn'].includes(destinationTab);
   const resolvedTargetPropertyId = targetPropertyId
     || (propertyScopedDestination && !profileDiffers && primaryEntry && selectedProperty?.propertyId && String(selectedProperty.propertyId) !== String(primaryEntry.propertyId)
       ? String(primaryEntry.propertyId)
