@@ -2710,7 +2710,9 @@ function AnalyticsTab() {
               display: "flex",
               alignItems: "flex-end",
               gap: 4,
-              height: 100,
+              // 80px bar + 13px value + 12px rotated label + gaps: the old
+              // 100px box let the tallest columns overflow into the heading.
+              height: 136,
             }}
           >
             {weeklyTrend.map((w, i) => {
