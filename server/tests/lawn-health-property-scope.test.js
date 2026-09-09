@@ -66,6 +66,8 @@ describe('GET /lawn-health/:customerId under the saved-property scope', () => {
     const body = await res.json();
     expect(History.visitEligibility).not.toHaveBeenCalled();
     expect(body.propertyScope).toBeUndefined();
+    // No property reads at all while the lawn gate is off.
+    expect(require('../services/account-properties').resolveSessionScope).not.toHaveBeenCalled();
   });
   test('history: no echo either while the lawn gate is off', async () => {
     global.__SCOPE__ = SECONDARY; global.__LAWN_GATE__ = false;
@@ -94,5 +96,12 @@ describe('GET /lawn-health/:customerId under the saved-property scope', () => {
   test('another customer id is forbidden', async () => {
     global.__SCOPE__ = SECONDARY;
     expect((await fetch(`${base}/lawn-health/cust-2`)).status).toBe(403);
+  });
+  test('no-assessments branch: the pending probe is scoped to the session house too', async () => {
+    global.__SCOPE__ = SECONDARY;
+    const wheres = [];
+    db.mockImplementation((table) => { const c = chain([]); const w = c.where; c.where = jest.fn((...a) => { wheres.push([table, ...a]); return w(...a); }); return c; });
+    await fetch(`${base}/lawn-health/cust-1`);
+    expect(wheres).toEqual(expect.arrayContaining([['lawn_assessments', { customer_id: 'cust-1', property_id: 'prop-b' }]]));
   });
 });

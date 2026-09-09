@@ -124,6 +124,21 @@ function parseJsonArray(value, fallback = []) {
   return fallback;
 }
 
+// App property scope (PR 4): the SESSION's selected saved property is the
+// house whose lawn the dashboard and history describe — handed to the
+// per-property history reader (#4039) and echoed as `propertyScope` so the
+// client can drop a read served under another house than it shows. Resolved
+// ONLY while GATE_LAWN_PROPERTY_HISTORY is on: with it off the reads are
+// customer-wide (no extra property reads, no echo — never dressed as the
+// selected house's). No selection / single home = the reader's own default.
+async function lawnSessionScope(req, propertyHistoryEnabled) {
+  if (!propertyHistoryEnabled) return { sessionPropertyId: undefined, scopeEcho: {} };
+  const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+  const scope = await resolveSessionScope(req);
+  const sessionPropertyId = scope?.enabled && scope.scoped && scope.property ? scope.property.id : undefined;
+  return { sessionPropertyId, scopeEcho: scope?.enabled ? { propertyScope: resolvedScopePayload(scope) } : {} };
+}
+
 // =========================================================================
 // GET /api/lawn-health/:customerId — Full lawn health dashboard data
 // =========================================================================
@@ -137,20 +152,7 @@ router.get('/:customerId', async (req, res, next) => {
 
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
     const historyReader = propertyHistoryEnabled ? require('../services/lawn-assessment-history') : null;
-    // App property scope (PR 4): the SESSION's selected saved property is the
-    // house whose lawn this dashboard describes — passed into the
-    // per-property history reader (#4039, behind GATE_LAWN_PROPERTY_HISTORY).
-    // No selection / single home = the reader's own default (sole or
-    // primary), exactly as before. Echoed as `propertyScope` so Home can
-    // drop a read served under another house than it shows.
-    const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
-    const scope = await resolveSessionScope(req);
-    const sessionPropertyId = scope?.enabled && scope.scoped && scope.property ? scope.property.id : undefined;
-    // The echo is emitted ONLY when the per-property reader applied the
-    // session property (GitHub codex #4322 r0 P1): with lawn history off the
-    // fallback query below is customer-wide and must not be dressed as the
-    // selected house's.
-    const scopeEcho = propertyHistoryEnabled && scope?.enabled ? { propertyScope: resolvedScopePayload(scope) } : {};
+    const { sessionPropertyId, scopeEcho } = await lawnSessionScope(req, propertyHistoryEnabled);
     const eligibleVisitIds = historyReader
       ? await historyReader.eligibleVisitIds(await historyReader.visitEligibility({ customerId, propertyId: sessionPropertyId }, db), db)
       : undefined;
@@ -170,8 +172,11 @@ router.get('/:customerId', async (req, res, next) => {
       .orderBy('service_date', 'asc');
 
     if (!assessments.length) {
+      // Under a session property the pending probe is that house's too — a
+      // customer-wide probe would answer another house's draft/program under
+      // an echo that vouches for the shown house.
       const pending = await db('lawn_assessments')
-        .where({ customer_id: customerId })
+        .where({ customer_id: customerId, ...(sessionPropertyId ? { property_id: sessionPropertyId } : {}) })
         .orderBy('service_date', 'asc');
 
       return res.json({
@@ -339,9 +344,7 @@ router.get('/:customerId/history', async (req, res, next) => {
     }
 
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
-    // Same session property as the dashboard read (app property scope, PR 4).
-    const historyScope = await require('../services/account-properties').resolveSessionScope(req);
-    const historyPropertyId = historyScope?.enabled && historyScope.scoped && historyScope.property ? historyScope.property.id : undefined;
+    const { sessionPropertyId: historyPropertyId, scopeEcho: historyEcho } = await lawnSessionScope(req, propertyHistoryEnabled);
     const assessments = propertyHistoryEnabled ? await require('../services/lawn-assessment-history').latestForCustomer(customerId, { propertyId: historyPropertyId }, db) : await db('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
       .orderBy('service_date', 'asc');
@@ -370,12 +373,7 @@ router.get('/:customerId/history', async (req, res, next) => {
       })
     );
 
-    res.json({
-      // Same echo rule as the dashboard read: only when the property reader
-      // applied the session property (GitHub codex #4322 r0 P2).
-      ...(propertyHistoryEnabled && historyScope?.enabled ? { propertyScope: require('../services/account-properties').resolvedScopePayload(historyScope) } : {}),
-      history,
-    });
+    res.json({ ...historyEcho, history });
   } catch (err) {
     next(err);
   }

@@ -2745,8 +2745,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // server resolved it to the shown house (GATE_LAWN_PROPERTY_HISTORY +
   // the session property — app property scope, PR 4): its echo must name
   // this entry, exactly like the next/last reads.
-  const lawnScopedToShownHouse = !!(dashboardEntry?.propertyId && lawnHealth.propertyScope?.enabled
-    && !scopeEchoMismatch(lawnHealth.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed)
+  // The hook withholds a mismatched echo for every consumer (scopeStale); here
+  // only "did the server resolve the lawn to the shown house" remains.
+  const lawnScopedToShownHouse = !!(dashboardEntry?.propertyId && lawnHealth.propertyScope?.enabled && !lawnHealth.scopeStale
     && String(lawnHealth.propertyScope.propertyId || '') === String(dashboardEntry.propertyId));
   // Unified Property Score (GATE_PROPERTY_SCORE) — null until the gate is on
   // and the load succeeds, so the card costs nothing while dark.
@@ -3520,19 +3521,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
 // =========================================================================
 // SERVICES TAB
 // =========================================================================
-function ServicesTab({ currentEntry = null, savedScope = false, selectedProperty = null, activePropertyId = null, onSavedScopeUnavailable = null }) {
+function ServicesTab() {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
-  // Saved-property scope (app property scope, PR 4): completed visits and
-  // reports follow the selected house — stamped visits under their house,
-  // unstamped (pre-linkage) visits under the primary — via the same
-  // `propertyScoped` read Home's Last Visit uses; the server echoes the
-  // selection it honored and a mismatch (the shown house retired, or the
-  // gate flipped) withholds the list and re-reads the property list.
-  const historyRead = usePortalRead(`service-history:${savedScope ? activePropertyId || 'primary' : 'profile'}`, () => api.getServices({ limit: 100, ...(savedScope ? { propertyScoped: 1 } : {}) }));
-  const scopeStale = scopeEchoMismatch(historyRead.data?.propertyScope, currentEntry, savedScope, selectedProperty?.propertyId || null);
-  useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
+  // The Completed list stays CUSTOMER-wide by ruling (PR 2 r1f; kept in PR 4
+  // after review): a retired house has no picker entry left to reach its
+  // visits and reports, and pre-linkage visits must stay reachable when the
+  // primary itself is retired. The disclosure below says so.
+  const historyRead = usePortalRead('service-history', () => api.getServices({ limit: 100 }));
   const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
@@ -3561,7 +3558,7 @@ function ServicesTab({ currentEntry = null, savedScope = false, selectedProperty
     const d = historyRead.data;
     moreSequence.current += 1;
     setLoadingMore(false);
-    setServices(scopeStale ? [] : (d.services || []));
+    setServices(d.services || []);
     setServicesOffset(d.nextOffset ?? (d.services || []).length);
     setTotalServices(Number.isFinite(d.total) ? d.total : null);
     return () => { moreSequence.current += 1; };
@@ -3573,15 +3570,9 @@ function ServicesTab({ currentEntry = null, savedScope = false, selectedProperty
     if (loadingMore) return;
     setLoadingMore(true);
     const attempt = ++moreSequence.current;
-    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset, ...(savedScope ? { propertyScoped: 1 } : {}) })
+    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
       .then(d => {
         if (moreSequence.current !== attempt) return;
-        // A page served under another house than this list shows is not
-        // this house's: drop it and re-read the property list.
-        if (scopeEchoMismatch(d.propertyScope, currentEntry, savedScope, selectedProperty?.propertyId || null)) {
-          if (onSavedScopeUnavailable) onSavedScopeUnavailable();
-          return;
-        }
         // The offset runs against a live newest-first query — a visit
         // completed between pages shifts the boundary and re-sends the last
         // row of the previous page. Dedupe by id so it can't render twice,
@@ -3637,7 +3628,7 @@ function ServicesTab({ currentEntry = null, savedScope = false, selectedProperty
   if (historyRead.saved || historyRead.offline) {
     return <div>
       <SavedPortalRead title="Saved completed visits" read={historyRead}>
-        <SavedVisitDetails visits={scopeStale ? [] : (historyRead.data?.services || [])} />
+        <SavedVisitDetails visits={historyRead.data?.services || []} />
       </SavedPortalRead>
       {previewOverlay}
     </div>;
@@ -15629,17 +15620,11 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
               P2): a profile whose other houses were retired still lists their
               visits and reports here, under the remaining house's address. */}
           {properties.some((p) => p.key) && (
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }} data-testid="completed-property-scope-notice">
-              Completed visits and reports for this property. Visits from before your properties were saved are listed under your primary residence.
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }} data-testid="completed-profile-wide-notice">
+              Completed visits and reports are listed for this whole profile, including any property that is no longer active.
             </div>
           )}
-          <ServicesTab
-            currentEntry={properties.find((p) => p.id === activePropertyId) || null}
-            savedScope={properties.some((p) => p.key)}
-            selectedProperty={selectedProperty}
-            activePropertyId={activePropertyId}
-            onSavedScopeUnavailable={onSavedScopeUnavailable}
-          />
+          <ServicesTab />
         </>
       )}
     </div>
