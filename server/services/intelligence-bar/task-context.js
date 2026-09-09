@@ -435,7 +435,7 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_outreach_candidates', 'get_unresponded_reviews', 'search_reviews',
   'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
-  'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents',
+  'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging',
 ]);
 
 const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);

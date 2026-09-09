@@ -2698,8 +2698,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // promise), true keeps thread mode even when this exchange's append
       // failed best-effort.
       threadsEnabled: threadPersistenceActive,
+      // needs_information is reserved for a clarification the operator can
+      // act on from the task card: choosing the customer (no resolved target,
+      // or saved candidates). A child-record clarification (appointment,
+      // email, call, lead) on an already-resolved page target has no card
+      // path; it is answered in the response text and the task stays responded.
       ...(activeTask ? { taskId: activeTask.id, taskState: pendingProposals.length ? 'awaiting_approval'
-        : unresolvedClarifications.size ? 'needs_information' : 'responded',
+        : unresolvedClarifications.size && (!taskContext.target || taskContext.candidates?.length) ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
     if (activeTask) {

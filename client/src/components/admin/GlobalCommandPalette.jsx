@@ -468,6 +468,9 @@ function GlobalCommandPalette({ user }, ref) {
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
     setPendingActions([]);
     setToolActivity([]);
+    // A thread from History is not the open task: its card (and Confirm
+    // controls) must not stay attached above another conversation.
+    setActiveTask(null);
     try { localStorage.removeItem(dismissedThreadKey()); } catch { /* storage unavailable */ }
     const lastAssistant = [...hist].reverse().find((t) => t.role === "assistant");
     setResponse(

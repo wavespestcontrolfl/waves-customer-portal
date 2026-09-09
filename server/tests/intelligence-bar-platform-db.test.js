@@ -243,6 +243,22 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(result.body.taskState).toBe('responded');
   }, 30000);
 
+  test('a child-record clarification on a page-resolved customer does not park the task without a continuation path', async () => {
+    const foreignCall = crypto.randomUUID();
+    await db('call_log').insert({ id: foreignCall, customer_id: null, transcription: 'Foreign private page-scoped call', status: 'completed' });
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'call log' }, 'discover'))
+      .mockResolvedValueOnce(tools('get_call_log', { call_id: foreignCall }, 'call'))
+      .mockResolvedValueOnce(answer('That call is not this customer\'s; pick the call from their record.'));
+    const response = await api('/query', request('Read this customer\'s last call', { pageData: { route: '/admin/customers', customerId: customerA } }));
+    expect(response.status).toBe(200);
+    expect(response.body.taskTarget.customer_id).toBe(customerA);
+    const result = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'call').content;
+    expect(JSON.parse(result)).toMatchObject({ code: 'target_clarification_required' });
+    expect(result).not.toContain('Foreign private page-scoped call');
+    // No customer to choose: the card cannot continue this, so it is not parked as needs_information.
+    expect(response.body.taskState).toBe('responded');
+  }, 30000);
+
   test('two same-tool calls in one round keep their own clarification markers', async () => {
     const unlinkedCall = crypto.randomUUID(), ownCall = crypto.randomUUID();
     await db('call_log').insert([
