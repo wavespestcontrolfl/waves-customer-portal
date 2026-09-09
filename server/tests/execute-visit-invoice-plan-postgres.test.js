@@ -120,6 +120,26 @@ jest.setTimeout(30000);
     } finally { await insert.commit(); }
     expect((await invoice(ids)).scheduled_service_id).toBeNull();
   });
+  test('fails fast during a partial invoice sweep and releases earlier invoice locks', async () => {
+    const ids = await seedPair(db); const reviewed = await review(ids);
+    const siblingId = randomUUID(); const winnerId = randomUUID();
+    await db('customers').insert({ id: winnerId });
+    await db('invoices').insert({ id: siblingId, customer_id: ids.customerId, status: 'void' });
+    const [firstId, lastId] = [ids.invoiceId, siblingId].sort();
+    const merge = await db.transaction();
+    try {
+      await merge('customers').whereIn('id', [winnerId, ids.customerId]).forUpdate();
+      // Model a bulk merge UPDATE reaching the higher UUID first. The repair
+      // takes the lower UUID first, so blocking on this row would form a cycle.
+      await merge('invoices').where({ id: lastId }).update({ customer_id: winnerId });
+      await expect(executePlan(db, [reviewed])).rejects.toMatchObject({ code: '55P03',
+        message: expect.stringContaining('could not obtain lock on row in relation "invoices"') });
+      await merge.raw("SET LOCAL lock_timeout = '100ms'");
+      expect(await merge('invoices').where({ id: firstId }).update({ customer_id: winnerId })).toBe(1);
+      await merge.commit();
+    } finally { if (!merge.isCompleted()) await merge.rollback(); }
+    expect(await invoice(ids)).toMatchObject({ customer_id: winnerId, scheduled_service_id: null });
+  });
   test.each(['recordEdit', 'newRecord', 'newInvoice', 'siblingInvoice', 'siblingVisit', 'payerEdit', 'attemptEdit', 'newVisit', 'newAddon', 'newPrepay'])('holds %s against changes after revalidation until commit', async (change) => {
     const ids = await seedPair(db);
     const siblingInvoiceId = randomUUID(); const siblingVisitId = randomUUID(); const attemptId = randomUUID();

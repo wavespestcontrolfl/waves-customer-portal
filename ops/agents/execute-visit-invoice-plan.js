@@ -25,8 +25,10 @@ async function executePlan(database, reviewed) {
     const customerIds = [...new Set(owners.map((r) => r.customer_id))].sort();
     // Invoice before customer agrees with credit settlement. Include terminal
     // and other-date siblings: refund failure and redating can make them live
-    // candidates again without touching the reviewed invoice.
-    const invoices = await trx('invoices').whereIn('customer_id', customerIds).orderBy('id').forUpdate().select('id', 'payer_id');
+    // candidates again without touching the reviewed invoice. A merge's
+    // invoice sweep can take these rows in a different order; NOWAIT also
+    // prevents a partial invoice sweep from deadlocking before customer locks.
+    const invoices = await trx('invoices').whereIn('customer_id', customerIds).orderBy('id').forUpdate().noWait().select('id', 'payer_id');
     // Customer merges lock customers before repointing invoices. Never wait
     // here with invoice locks held: NOWAIT makes the repair abort instead of
     // deadlocking that live merge (or an invoice insert holding FK key-share).
