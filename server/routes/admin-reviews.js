@@ -115,7 +115,12 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
     // only while the master GATE_CRON_JOBS is on — with it dark an enrolled
     // sequence never reaches any tick, so the panel must not promise one.
     const schedulerEnabled = isEnabled('cronJobs');
-    const reviewSequencesEnabled = isEnabled('reviewSequences') && schedulerEnabled;
+    // The raw cadence gate is what completion's shouldBundleReview consults
+    // (complete-scheduled-service: reviewCadenceEnabled) — it refuses to
+    // bundle whenever cadences are ON, cron or no cron. The effective state
+    // below is only for the plan the panel previews (codex #4140 r17 P2).
+    const reviewCadenceGate = isEnabled('reviewSequences');
+    const reviewSequencesEnabled = reviewCadenceGate && schedulerEnabled;
     const plan = reviewSequencesEnabled
       ? ReviewService.__private.calculateReviewSendPlan(new Date(), serviceType, { jitter: false })
       : null;
@@ -139,11 +144,19 @@ router.get('/send-time-preview', adminAuthenticate, requireTechOrAdmin, async (r
       // completion exists: legacy path AND no service-report-v1 delivery.
       // Runtime state (a recap already texted on a resumed completion)
       // can only be known at dispatch and is not claimed here (r4 P2).
-      bundlesImmediateAsk: !reviewSequencesEnabled && serviceReportV1Delivery === false,
+      // Legacy path = the RAW gate off, exactly as completion reads it: with
+      // cadences on and the cron dark, completion still refuses the bundle
+      // and enrolls a sequence nothing ticks — the panel must say "paused",
+      // not "[review link inserted]" (r17 P2).
+      bundlesImmediateAsk: !reviewCadenceGate && serviceReportV1Delivery === false,
       // processReviewSequences runs on fixed minutes of the hour (:14/:44);
       // the panel uses them to say when a custom time actually goes out
       // (codex #4140 r5 P2).
       cadenceTickMinutesOfHour: ReviewService.__private.REVIEW_CADENCE_TICK_MINUTES,
+      // The legacy path's worker (processScheduled, the */15 cron) has ticks
+      // of its own; with cadences off the panel names those, not the
+      // requested eligibility minute (codex #4140 r18 P2).
+      legacyTickMinutesOfHour: ReviewService.__private.LEGACY_REVIEW_TICK_MINUTES,
     });
   } catch (err) {
     next(err);
@@ -1038,7 +1051,7 @@ router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => 
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/reviews/outreach/stop-sequence — stop an active cadence.
+// POST /api/admin/reviews/outreach/stop-sequence — stop an active or parked cadence.
 router.post('/outreach/stop-sequence', requireAdmin, async (req, res, next) => {
   try {
     const { sequenceId } = req.body || {};

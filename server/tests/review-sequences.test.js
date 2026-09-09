@@ -122,7 +122,7 @@ function makeMock(initial = {}, opts = {}) {
         state.rows[this.table].push(inserted);
         return { returning: async () => [inserted] };
       },
-      async update(patch) { if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
+      async update(patch) { if (opts.onUpdate) opts.onUpdate(this.table, patch, state); if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
       async del() { const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
       then(res, rej) {
         if (throwSelectWhen && throwSelectWhen(this)) {
@@ -237,6 +237,26 @@ describe('review sequences — cadence engine', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('capped');
+  });
+
+  test('stopReviewSequence reaches a parked (deferred) series final, leaves a redeeming lease alone (codex #4140 r18 P2)', async () => {
+    const mock = makeMock({
+      review_sequences: [
+        { id: 'seqParked', customer_id: 'p1', status: 'deferred', next_run_at: new Date(Date.now() + 30 * 60000), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+        { id: 'seqLease', customer_id: 'p2', status: 'redeeming', next_run_at: null, plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+        { id: 'seqActive', customer_id: 'p3', status: 'active', next_run_at: new Date(), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    expect(await ReviewService.stopReviewSequence('seqParked')).toEqual({ stopped: true });
+    expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'stopped', stop_reason: 'manual', next_run_at: null });
+    expect(await ReviewService.stopReviewSequence('seqLease')).toEqual({ stopped: false });
+    expect(mock.__state.rows.review_sequences[1].status).toBe('redeeming');
+    expect(await ReviewService.stopReviewSequence('seqActive')).toEqual({ stopped: true });
+    // A stopped parked row no longer reads as an enrollment on the Reviews page.
+    expect(await ReviewService.getActiveSequencesForCustomers(['p1', 'p2', 'p3'])).toEqual(expect.objectContaining({ p2: expect.anything() }));
+    expect(Object.keys(await ReviewService.getActiveSequencesForCustomers(['p1', 'p2', 'p3']))).toEqual(['p2']);
   });
 
   test('a cadence stops on a non-promoter draft score tap (no submit)', async () => {
@@ -998,6 +1018,102 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(again.sent).toBe(1);
     });
 
+    test('an immediate start skipped by the customer lock is durably picked up by the next cadence tick', async () => {
+      const mock = makeMock({ customers: [{ id: 'immediate-lock', first_name: 'Ana', nearest_location_id: 'sarasota' }] });
+      db.mockImplementation(mock);
+      global.__reviewLockHeld = new Set(['review-send:immediate-lock']);
+      try {
+        const result = await ReviewService.startReviewSequence({ customerId: 'immediate-lock', serviceType: 'pest control', techName: 'Bea' });
+        expect(result).toMatchObject({ started: true, firstTouch: { deferred: true, reason: 'customer_lock_held' } });
+        expect(result.sequence.next_run_at).toBeInstanceOf(Date);
+        expect(result.sequence.next_run_at.getTime()).toBeLessThanOrEqual(Date.now());
+        expect(parse(result.sequence.decision)).toMatchObject({ reason: 'customer_lock_held', ownerAction: 'none' });
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      } finally {
+        global.__reviewLockHeld = null;
+      }
+      const nextTick = await ReviewService.processReviewSequences();
+      expect(nextTick.sent).toBe(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed immediate-start retry write never reports a queued cadence', async () => {
+      const mock = makeMock({ customers: [{ id: 'immediate-lock-write', nearest_location_id: 'sarasota' }] }, { throwUpdateFor: ['review_sequences'] });
+      db.mockImplementation(mock);
+      global.__reviewLockHeld = new Set(['review-send:immediate-lock-write']);
+      try {
+        const result = await ReviewService.startReviewSequence({ customerId: 'immediate-lock-write', serviceType: 'pest control', techName: 'Bea' });
+        expect(result).toMatchObject({ started: false, reason: 'send_failed' });
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      } finally {
+        global.__reviewLockHeld = null;
+      }
+    });
+
+    test('a held customer lock does not reschedule an existing in-flight claim', async () => {
+      const mock = makeMock({ review_sequences: [{ id: 'live-claim', customer_id: 'live-claim-customer', status: 'active', next_run_at: null }] });
+      db.mockImplementation(mock);
+      global.__reviewLockHeld = new Set(['review-send:live-claim-customer']);
+      try {
+        expect(await ReviewService._runSequenceStep('live-claim')).toMatchObject({ deferred: true, reason: 'customer_lock_held' });
+        expect(mock.__state.rows.review_sequences[0].next_run_at).toBeNull();
+      } finally {
+        global.__reviewLockHeld = null;
+      }
+    });
+
+    test.each([2, 72])('an operator-started cadence spaces from a staff ask sent %s hours BEFORE enrollment', async (hoursAgo) => {
+      jest.useFakeTimers().setSystemTime(new Date('2030-01-01T16:00:00Z'));
+      try {
+        const manualAt = new Date(Date.now() - hoursAgo * 3600000);
+        const mock = makeMock({
+          customers: [{ id: 'prior-staff-ask', first_name: 'Ana', nearest_location_id: 'sarasota' }],
+          sms_log: [{ customer_id: 'prior-staff-ask', direction: 'outbound', status: 'sent', created_at: manualAt, message_body: 'Please leave a review: https://g.page/r/example/review' }],
+        });
+        db.mockImplementation(mock);
+        const result = await ReviewService.startReviewSequence({ customerId: 'prior-staff-ask', serviceType: 'pest control', techName: 'Bea' });
+        expect(result.started).toBe(true);
+        if (hoursAgo < 72) {
+          expect(result.firstTouch).toMatchObject({ deferred: true, reason: 'spacing' });
+          expect(result.sequence.next_run_at.getTime()).toBe(manualAt.getTime() + 72 * 3600000);
+          expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+        } else {
+          expect(result.firstTouch.sent).toBe(true);
+          expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('a pre-enrollment staff ask does not space a private check-in', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'staff-checkin', first_name: 'Ana', nearest_location_id: 'sarasota' }],
+        sms_log: [{ customer_id: 'staff-checkin', direction: 'outbound', status: 'sent', created_at: new Date(Date.now() - 2 * 3600000), message_body: 'Please leave a review: https://g.page/r/example/review' }],
+      });
+      db.mockImplementation(mock);
+      const result = await ReviewService.startReviewSequence({ customerId: 'staff-checkin', serviceType: 'pest control', techName: 'Bea', plan: [{ day: 0, channel: 'sms', templateKey: 'resolution_check' }] });
+      expect(result.firstTouch.sent).toBe(true);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed 72-hour staff-ask lookup defers even when the since-enrollment lookup succeeds', async () => {
+      const mock = makeMock({ customers: [{ id: 'staff-spacing-error', nearest_location_id: 'sarasota' }] });
+      db.mockImplementation(mock);
+      const lookup = jest.spyOn(ReviewService, 'manualReviewAskSentRecently').mockImplementation(async (_id, opts) => {
+        if (opts.returnAt) throw new Error('staff lookup unavailable');
+        return false;
+      });
+      try {
+        const result = await ReviewService.startReviewSequence({ customerId: 'staff-spacing-error', serviceType: 'pest control', techName: 'Bea' });
+        expect(result.firstTouch).toMatchObject({ deferred: true, reason: 'spacing_lookup_unavailable' });
+        expect(result.sequence.next_run_at.getTime()).toBeGreaterThan(Date.now() + 25 * 60000);
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      } finally {
+        lookup.mockRestore();
+      }
+    });
+
     test('a failed staff-sent-ask lookup defers an ask step instead of sending inside 72h (codex #4141 r4 P1)', async () => {
       const mock = makeMock(fixture('seq-sl', { lastAskAgoMs: 100 * 3600000 }), { throwSelectWhen: (q) => q.table === 'sms_log' });
       db.mockImplementation(mock);
@@ -1404,6 +1520,70 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('request capture retries enrollment when the active cadence settles before the update', async () => {
+    const requested = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    const firstTouchAt = new Date(Date.now() + 3600000);
+    const mock = makeMock({
+      customers: [{ id: 'capture-race' }],
+      review_sequences: [{ id: 'settled', customer_id: 'capture-race', status: 'active' }],
+    }, {
+      onUpdate: (table, patch, state) => {
+        if (table === 'review_sequences' && patch.customer_requested) state.rows.review_sequences[0].status = 'completed';
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'capture-race', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, firstTouchAt });
+
+    expect(result).toMatchObject({ started: true, scheduledFor: firstTouchAt });
+    expect(JSON.parse(result.sequence.customer_requested)).toEqual(requested);
+    expect(mock.__state.rows.review_sequences[0].customer_requested).toBeUndefined();
+    expect(mock.__state.rows.review_sequences.filter(row => row.status === 'active')).toHaveLength(1);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])('a vanished unique-index winner retries with the delivery cap rechecked (delivered: %s)', async (delivered) => {
+    const requested = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    let collided = false;
+    const mock = makeMock({ customers: [{ id: 'vanished-winner' }] }, {
+      onInsert: (table, row, state) => {
+        if (table !== 'review_sequences' || collided) return null;
+        collided = true;
+        if (delivered) state.rows.review_requests.push({ id: 'winner-ask', customer_id: row.customer_id, status: 'sent', sent_at: new Date(), template_key: 'day0_ask' });
+        return Object.assign(new Error('concurrent enrollment settled'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'vanished-winner', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, firstTouchAt: new Date(Date.now() + 3600000) });
+
+    if (delivered) {
+      expect(result).toMatchObject({ started: false, reason: 'cooldown' });
+      expect(mock.__state.rows.review_sequences).toHaveLength(0);
+    } else {
+      expect(result.started).toBe(true);
+      expect(JSON.parse(result.sequence.customer_requested)).toEqual(requested);
+    }
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('persistent enrollment contention fails visibly after a bounded capture retry', async () => {
+    let attempts = 0;
+    const mock = makeMock({ customers: [{ id: 'capture-contention' }] }, {
+      onInsert: (table) => {
+        if (table !== 'review_sequences') return null;
+        attempts += 1;
+        return Object.assign(new Error('concurrent enrollment settled'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    await expect(ReviewService.startReviewSequence({ customerId: 'capture-contention', serviceType: 'pest control', techName: 'Bea', customerRequested: { source: 'completion_panel' } }))
+      .rejects.toThrow('Active review cadence changed during request capture');
+    expect(attempts).toBe(2);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('an already_active result without a request leaves the cadence untouched and reports requestRecorded:false', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
@@ -1426,6 +1606,19 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const path = require('path');
       const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
       expect(scheduler).toContain(`cron.schedule('${REVIEW_CADENCE_TICK_MINUTES.join(',')} * * * *'`);
+    });
+
+    test('the legacy scheduler cron (processScheduled, */15) and the legacy tick table name the same minutes (codex #4140 r18 P2)', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const { LEGACY_REVIEW_TICK_MINUTES } = ReviewService.__private;
+      const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+      const legacy = scheduler.slice(scheduler.indexOf("cron.schedule('*/15 * * * *'"), scheduler.indexOf('ReviewService.processScheduled()'));
+      expect(legacy).toContain("cron.schedule('*/15 * * * *'");
+      expect(LEGACY_REVIEW_TICK_MINUTES).toEqual([0, 15, 30, 45]);
+      // The preview route hands the panel both tick tables.
+      const route = fs.readFileSync(path.join(__dirname, '../routes/admin-reviews.js'), 'utf8');
+      expect(route).toContain('legacyTickMinutesOfHour: ReviewService.__private.LEGACY_REVIEW_TICK_MINUTES');
     });
 
     test.each([

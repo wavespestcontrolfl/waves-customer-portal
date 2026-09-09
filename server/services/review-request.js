@@ -641,6 +641,12 @@ function calculateReviewSendTime(completedAt, serviceType, opts) {
 // ELIGIBLE; the text goes out at the first tick on or after it. The Reviews
 // page shows that tick, not the eligibility instant (codex #4140 r4 P2).
 const REVIEW_CADENCE_TICK_MINUTES = [14, 44];
+// The legacy (cadences-off) path: processScheduled runs on the scheduler's
+// `*/15` cron (kept in step by review-sequences.test.js), and a legacy row's
+// scheduled_for is rebuilt from a later Date.now() after the target became a
+// whole-minute delay, so "tomorrow 8:00" is eligible just after 8:00 and
+// texts at 8:15. The panel shows that tick too (codex #4140 r18 P2).
+const LEGACY_REVIEW_TICK_MINUTES = [0, 15, 30, 45];
 // The tick the Reviews page shows for a step: an SMS step's tick must also
 // clear the 8 AM–8 PM send window while GATE_SMS_SEND_WINDOW is on — a
 // 7:50 PM row's 8:14 PM tick is refused by checkSendWindow and held to the
@@ -4316,20 +4322,29 @@ const ReviewService = {
    * for the link" capture is never lost (codex #4140 r4 P2, r9 P2). Only
    * customer_requested is written: the schedule is not moved (a second ask
    * inside the window is what the 3-day rule spaces) and updated_at is the
-   * runner's claim stamp (claimIsStale) and must not be refreshed. A race
-   * that left NO active row (the winner already completed) records nothing.
+   * runner's claim stamp (claimIsStale) and must not be refreshed. If the
+   * winner settled before capture, retry enrollment with all gates intact.
    */
-  async _alreadyActive(active, customerRequested) {
+  async _alreadyActive(active, customerRequested, retryEnrollment) {
+    if (!active) return retryEnrollment();
     let requestRecorded = false;
-    if (customerRequested && active?.id) {
-      await db("review_sequences").where({ id: active.id }).update({ customer_requested: JSON.stringify(customerRequested) });
+    if (customerRequested) {
+      const captured = await db("review_sequences").where({ id: active.id, status: "active" }).update({ customer_requested: JSON.stringify(customerRequested) });
+      if (!captured) return retryEnrollment();
       requestRecorded = true;
     }
     return { started: false, reason: "already_active", sequence: active, requestRecorded };
   },
 
 
-  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null }) {
+  async startReviewSequence(options, captureRetries = 1) {
+    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null } = options;
+    const retryEnrollment = () => {
+      // Re-run caps and visit dedupe too: the settled winner may have sent.
+      // Persistent contention must fail visibly, never claim a lost capture.
+      if (captureRetries <= 0) throw new Error("Active review cadence changed during request capture");
+      return this.startReviewSequence(options, captureRetries - 1);
+    };
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     if (customer.deleted_at) throw new Error("Customer is archived");
@@ -4411,7 +4426,7 @@ const ReviewService = {
         // second ask inside the window is what the 3-day rule (PR 3) spaces.
         // Only customer_requested is written: updated_at is the runner's
         // claim stamp (claimIsStale) and must not be refreshed here.
-        return this._alreadyActive(active, customerRequested);
+        return this._alreadyActive(active, customerRequested, retryEnrollment);
       }
     }
 
@@ -4597,20 +4612,20 @@ const ReviewService = {
           await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal, customerRequested, decision });
           return { started: false, reason: "deferred_inflight", deferred: true };
         }
-        if (existing) return this._alreadyActive(existing, customerRequested);
+        if (existing) return this._alreadyActive(existing, customerRequested, retryEnrollment);
         supersedeOpenerId = null;
         try {
           [sequence] = await insertReplacement();
         } catch (retryErr) {
           if (retryErr?.code === "23505") {
             const raced = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-            return this._alreadyActive(raced, customerRequested);
+            return this._alreadyActive(raced, customerRequested, retryEnrollment);
           }
           throw retryErr;
         }
       } else if (err?.code === "23505") {
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-        return this._alreadyActive(existing, customerRequested);
+        return this._alreadyActive(existing, customerRequested, retryEnrollment);
       } else {
         throw err;
       }
@@ -4626,6 +4641,16 @@ const ReviewService = {
     let firstTouch;
     try {
       firstTouch = await this._runSequenceStep(sequence.id);
+      if (firstTouch?.reason === "customer_lock_held") {
+        // Only this newly inserted immediate start lacks a retry timestamp.
+        // Do not requeue arbitrary NULL schedules in the lock wrapper: those
+        // can be live claims belonging to another worker.
+        const nextEvalAt = new Date();
+        await db("review_sequences")
+          .where({ id: sequence.id, status: "active" })
+          .whereNull("next_run_at")
+          .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "customer_lock_held", nextEvalAt }), updated_at: nextEvalAt });
+      }
     } catch (err) {
       // The Day-0 touch threw during setup (insert / short-link / send). The
       // step's own catch restored next_run_at for a CRON retry, but for a
@@ -4855,8 +4880,8 @@ const ReviewService = {
     // Mid-cadence manual-ask standdown (codex #3235 r1 P1): the owner can
     // hand-send an ask AFTER enrollment (evening of a next-morning Day-0, or
     // between Day 0 and Day 4). Scoped to evidence since the sequence
-    // started — pre-enrollment asks were already screened at enrollment, and
-    // an operator-started sequence keeps its deliberate override.
+    // started. This standdown is distinct from the 72-hour dispatch floor:
+    // an operator-started cadence still needs spacing from earlier staff asks.
     let manualAskRecent = false;
     if (seq.started_at) {
       try {
@@ -4866,6 +4891,8 @@ const ReviewService = {
         logger.warn(`[review] staff-ask lookup failed (sequenceId=${seq.id}): ${err.message}`);
       }
     }
+
+    if (manualAskRecent) return stop("manual_ask_recent");
 
     // The 3-day rule, re-checked at the dispatch boundary (owner ruling
     // 2026-09-07): the schedule computed at the last send can be overtaken —
@@ -4882,6 +4909,16 @@ const ReviewService = {
     // forces it to SMS anyway, and it is still a support message, not an ask.
     // A template-less step (the default email nudge) counts as an ask.
     const stepIsAsk = OUTREACH.isAskTemplate(stepForSpacing.templateKey);
+    let manualAskAt = null;
+    if (stepIsAsk) {
+      try {
+        manualAskAt = await this.manualReviewAskSentRecently(seq.customer_id, {
+          since: new Date(Date.now() - ASK_SPACING_MS), failClosed: true, returnAt: true,
+        });
+      } catch {
+        askLookupFailed = true;
+      }
+    }
     if (stepIsAsk && askLookupFailed) {
       // No evidence is not "no ask": an unavailable lookup (either source)
       // defers the step instead of sending inside the promised 72 h
@@ -4893,16 +4930,15 @@ const ReviewService = {
       return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
     }
     const lastAskAt = latestDeliveredAt(recentAskRows);
-    if (stepIsAsk && lastAskAt && Date.now() - lastAskAt.getTime() < ASK_SPACING_MS) {
-      let spacedAt = new Date(lastAskAt.getTime() + ASK_SPACING_MS);
+    const anchorMs = Math.max(lastAskAt ? lastAskAt.getTime() : 0, manualAskAt ? manualAskAt.getTime() : 0);
+    if (stepIsAsk && anchorMs && Date.now() - anchorMs < ASK_SPACING_MS) {
+      let spacedAt = new Date(anchorMs + ASK_SPACING_MS);
       if (stepForSpacing.weekdaysOnly) spacedAt = shiftToWeekdayMorning(spacedAt);
       await db("review_sequences")
         .where({ id: seq.id, status: "active" })
         .update({ next_run_at: spacedAt, decision: sequenceDecision({ reason: "spacing", plannedAt: spacedAt, nextEvalAt: spacedAt }), updated_at: new Date() });
       return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
     }
-    if (manualAskRecent) return stop("manual_ask_recent");
-
     const step = plan[seq.current_step] || {};
 
     // Final atomic claim right before sending: an admin Stop (or a completing
@@ -5143,8 +5179,16 @@ const ReviewService = {
   },
 
   async stopReviewSequence(sequenceId, reason = "manual") {
+    // A parked series final ('deferred', _parkDeferredFinal) is a durable
+    // enrollment too: it blocks a new cadence for the customer and only the
+    // redemption sweep ever touches it, so the stop path must reach it or
+    // the owner has no way to clear it (codex #4140 r18 P2). A 'redeeming'
+    // row is the sweep's 15-minute lease mid-flight — every lease
+    // transition is status-guarded, so it is left to settle (deferred,
+    // active, or gone) and the caller retries; stopped: false says so.
     const updated = await db("review_sequences")
-      .where({ id: sequenceId, status: "active" })
+      .where({ id: sequenceId })
+      .whereIn("status", ["active", "deferred"])
       .update({
         status: "stopped",
         stop_reason: reason,
@@ -5873,6 +5917,7 @@ ReviewService.__private = {
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
+  LEGACY_REVIEW_TICK_MINUTES,
   sequenceDecision,
   nextTouchRunAt,
   shiftToWeekdayMorning,

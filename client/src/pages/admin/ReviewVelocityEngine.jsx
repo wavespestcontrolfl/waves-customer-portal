@@ -320,6 +320,7 @@ const DECISION_LABELS = {
   spacing_lookup_unavailable: "Re-checking the last ask (3-day rule)",
   send_window: "Held for the 8 AM–8 PM send window",
   provider_retry: "Provider retry",
+  customer_lock_held: "Waiting for another review send to finish",
   send_error_retry: "Send error — retrying",
   plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
   cap_stats_unavailable: "Re-checking the ask cap",
@@ -336,7 +337,11 @@ function decisionLine(seq, sequencesEnabled) {
   // An UNKNOWN gate state is not a plan either (codex #4140 r15 P2): only a
   // confirmed-on worker earns a "Next" time. Both gates are needed — the
   // cadence cron registers only under the master GATE_CRON_JOBS.
-  if (sequencesEnabled !== true) return `Paused — cadences are off (GATE_REVIEW_SEQUENCES / GATE_CRON_JOBS)${sequencesEnabled == null ? " or the gate state is unavailable" : ""} · Owner action: turn the gates on, or stop this ${seq.parked ? "parked " : ""}cadence`;
+  // The only action this page offers is the gates: with them on the worker
+  // resumes an active row at its next tick and the sweep redeems (or, after
+  // 24h, clears) a parked one — so say that, not a Stop this page does not
+  // have (codex #4140 r18 P2).
+  if (sequencesEnabled !== true) return `Paused — cadences are off (GATE_REVIEW_SEQUENCES / GATE_CRON_JOBS)${sequencesEnabled == null ? " or the gate state is unavailable" : ""} · Owner action: turn the gates on${seq.parked ? " — the parked final is redeemed by the next sweep" : ""}`;
   if (seq.sending) return "Sending now · Owner action: none";
   // A parked series final (deferred until the opener's send settles) is a
   // durable enrollment the redemption sweep redeems — not "no cadence"
