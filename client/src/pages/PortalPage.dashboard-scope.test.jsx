@@ -107,4 +107,12 @@ describe('Home under a saved-property selection', () => {
     expect(await screen.findByTestId('home-primary-facts-notice')).toHaveTextContent('Your protection score and local alerts');
     await waitFor(() => expect(api.getLawnHealth).toHaveBeenCalled());
   });
+  it('withholds the lawn teaser and re-reads the list when the lawn echo names ANOTHER house', async () => {
+    const refresh = vi.fn();
+    api.getLawnHealth.mockResolvedValue({ hasLawnCare: true, scores: { overallScore: 80 }, initialScores: { overallScore: 60 }, photos: [], trend: [], propertyScope: { enabled: true, propertyId: 'pa', closed: false } });
+    render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} onSavedScopeUnavailable={refresh} />);
+    await waitFor(() => expect(api.getLawnHealth).toHaveBeenCalled());
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(screen.getByTestId('home-primary-facts-notice')).toHaveTextContent('lawn health');
+  });
 });

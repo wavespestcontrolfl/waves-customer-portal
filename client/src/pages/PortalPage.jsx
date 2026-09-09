@@ -614,13 +614,25 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand', 
 // =========================================================================
 // LAWN HEALTH HOOK
 // =========================================================================
-function useLawnHealth(customerId) {
+// `scope` (app property scope, PR 4): the entry the consuming tab shows.
+// A lawn read the server scoped to ANOTHER house than the tab shows (the
+// selected house retired, or the gate flipped) is withheld here, centrally,
+// so Home and My Plan cannot render a fallback house's lawn under the shown
+// address (GitHub codex #4322 r0 P1). A read with no echo under a saved
+// selection is the customer-wide default — consumers keep their own rule
+// for that (Home withholds it under a secondary).
+function useLawnHealth(customerId, scope = null) {
   const [data, setData] = useState({
     scores: null, initialScores: null, hasLawnCare: false, loading: true,
     photos: [], beforeAfter: null, trend: [], recommendations: null,
     assessmentCount: 0, nextMilestone: null,
     seasonalContext: null, neighborBenchmark: null,
   });
+  const scopeStale = !!(scope && data.propertyScope
+    && scopeEchoMismatch(data.propertyScope, scope.currentEntry || null, !!scope.savedScope, scope.selectedPropertyId || null));
+  useEffect(() => {
+    if (scopeStale && scope?.onSavedScopeUnavailable) scope.onSavedScopeUnavailable();
+  }, [scopeStale, scope?.onSavedScopeUnavailable]);
 
   useEffect(() => {
     if (!customerId) return;
@@ -647,6 +659,9 @@ function useLawnHealth(customerId) {
       .catch(() => setData(prev => ({ ...prev, loading: false })));
   }, [customerId]);
 
+  if (scopeStale) {
+    return { ...data, scopeStale: true, hasLawnCare: false, scores: null, initialScores: null, photos: [], beforeAfter: null, trend: [], recommendations: null };
+  }
   return data;
 }
 
@@ -2725,7 +2740,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const [instagramPosts, setInstagramPosts] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
   const [newsletterPosts, setNewsletterPosts] = useState([]);
-  const lawnHealth = useLawnHealth(customer.id);
+  const lawnHealth = useLawnHealth(customer.id, { currentEntry: dashboardEntry, savedScope: dashboardSavedScope, selectedPropertyId: dashboardSelectionNamed, onSavedScopeUnavailable });
   // Under a NON-primary selection the lawn read is customer-keyed unless the
   // server resolved it to the shown house (GATE_LAWN_PROPERTY_HISTORY +
   // the session property — app property scope, PR 4): its echo must name
@@ -3622,7 +3637,7 @@ function ServicesTab({ currentEntry = null, savedScope = false, selectedProperty
   if (historyRead.saved || historyRead.offline) {
     return <div>
       <SavedPortalRead title="Saved completed visits" read={historyRead}>
-        <SavedVisitDetails visits={historyRead.data?.services || []} />
+        <SavedVisitDetails visits={scopeStale ? [] : (historyRead.data?.services || [])} />
       </SavedPortalRead>
       {previewOverlay}
     </div>;
@@ -10612,7 +10627,7 @@ function PlanStationMap({ map }) {
   );
 }
 
-function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
+function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
@@ -10640,7 +10655,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   // disables the hook so the default Plan tab mount doesn't 401 into the
   // API client's retry traffic for data the cancelled panel never renders
   // (codex GH r17 P2).
-  const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id);
+  const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id, { currentEntry, savedScope, selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable });
   const compact = useIsMobile(760);
   // Real billing mode (owner 2026-07-11): per-application / prepaid plans
   // must not present a "$X per month" plan rate — same source of truth as
@@ -16731,7 +16746,7 @@ export default function PortalPage() {
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the

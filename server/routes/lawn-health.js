@@ -146,6 +146,11 @@ router.get('/:customerId', async (req, res, next) => {
     const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
     const scope = await resolveSessionScope(req);
     const sessionPropertyId = scope?.enabled && scope.scoped && scope.property ? scope.property.id : undefined;
+    // The echo is emitted ONLY when the per-property reader applied the
+    // session property (GitHub codex #4322 r0 P1): with lawn history off the
+    // fallback query below is customer-wide and must not be dressed as the
+    // selected house's.
+    const scopeEcho = propertyHistoryEnabled && scope?.enabled ? { propertyScope: resolvedScopePayload(scope) } : {};
     const eligibleVisitIds = historyReader
       ? await historyReader.eligibleVisitIds(await historyReader.visitEligibility({ customerId, propertyId: sessionPropertyId }, db), db)
       : undefined;
@@ -170,7 +175,7 @@ router.get('/:customerId', async (req, res, next) => {
         .orderBy('service_date', 'asc');
 
       return res.json({
-        ...(scope?.enabled ? { propertyScope: resolvedScopePayload(scope) } : {}),
+        ...scopeEcho,
         hasLawnCare: pending.length > 0 || await hasCustomerLawnCare(customerId),
         hasPendingAssessment: pending.length > 0 && !pending[0].confirmed_by_tech,
         scores: null,
@@ -297,7 +302,7 @@ router.get('/:customerId', async (req, res, next) => {
     } catch { /* ignore */ }
 
     res.json({
-      ...(scope?.enabled ? { propertyScope: resolvedScopePayload(scope) } : {}),
+      ...scopeEcho,
       hasLawnCare: true,
       scores: formatScore(latest),
       initialScores: formatScore(initial),
@@ -306,7 +311,11 @@ router.get('/:customerId', async (req, res, next) => {
       trend,
       recommendations,
       seasonalContext,
-      neighborBenchmark: normalizeNeighborBenchmark(neighborBenchmark),
+      // The neighborhood benchmark is CUSTOMER-wide (profile ZIP / latest
+      // customer assessment): under a per-property read it would sit house
+      // A's score next to house B's benchmark — omitted when a session
+      // property was applied (GitHub codex #4322 r0 P1).
+      neighborBenchmark: propertyHistoryEnabled && sessionPropertyId ? null : normalizeNeighborBenchmark(neighborBenchmark),
       mowingHeight,
       assessmentCount: assessments.length,
       nextMilestone: assessments.length < 3
@@ -361,7 +370,12 @@ router.get('/:customerId/history', async (req, res, next) => {
       })
     );
 
-    res.json({ history });
+    res.json({
+      // Same echo rule as the dashboard read: only when the property reader
+      // applied the session property (GitHub codex #4322 r0 P2).
+      ...(propertyHistoryEnabled && historyScope?.enabled ? { propertyScope: require('../services/account-properties').resolvedScopePayload(historyScope) } : {}),
+      history,
+    });
   } catch (err) {
     next(err);
   }

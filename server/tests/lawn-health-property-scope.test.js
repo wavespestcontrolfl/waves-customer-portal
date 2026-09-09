@@ -60,6 +60,19 @@ describe('GET /lawn-health/:customerId under the saved-property scope', () => {
     expect(History.latestForCustomer).toHaveBeenCalledWith('cust-1', { propertyId: 'prop-b' }, expect.anything());
     expect(body.propertyScope).toEqual({ enabled: true, propertyId: 'prop-b', closed: false });
   });
+  test('scope on but LAWN history gate off: customer-wide fallback query, NO echo (never dressed as the selected house)', async () => {
+    global.__SCOPE__ = SECONDARY; global.__LAWN_GATE__ = false;
+    const res = await fetch(`${base}/lawn-health/cust-1`);
+    const body = await res.json();
+    expect(History.visitEligibility).not.toHaveBeenCalled();
+    expect(body.propertyScope).toBeUndefined();
+  });
+  test('history: no echo either while the lawn gate is off', async () => {
+    global.__SCOPE__ = SECONDARY; global.__LAWN_GATE__ = false;
+    const body = await (await fetch(`${base}/lawn-health/cust-1/history`)).json();
+    expect(body.propertyScope).toBeUndefined();
+    expect(body.history).toEqual([]);
+  });
   test('gate off: the reader gets no property (its own default) and nothing is echoed', async () => {
     global.__SCOPE__ = OFF;
     const res = await fetch(`${base}/lawn-health/cust-1`);
@@ -67,11 +80,16 @@ describe('GET /lawn-health/:customerId under the saved-property scope', () => {
     expect(History.visitEligibility).toHaveBeenCalledWith({ customerId: 'cust-1', propertyId: undefined }, expect.anything());
     expect(body.propertyScope).toBeUndefined();
   });
-  test('history: the same session property', async () => {
+  test('history: the same session property, echoed', async () => {
     global.__SCOPE__ = SECONDARY;
     const res = await fetch(`${base}/lawn-health/cust-1/history`);
     expect(res.status).toBe(200);
     expect(History.latestForCustomer).toHaveBeenCalledWith('cust-1', { propertyId: 'prop-b' }, expect.anything());
+    expect((await res.json()).propertyScope).toEqual({ enabled: true, propertyId: 'prop-b', closed: false });
+  });
+  test('the neighborhood benchmark (customer-wide) is omitted from a property-scoped dashboard read', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/lawn-health'), 'utf8');
+    expect(src).toMatch(/neighborBenchmark: propertyHistoryEnabled && sessionPropertyId \? null : normalizeNeighborBenchmark\(neighborBenchmark\)/);
   });
   test('another customer id is forbidden', async () => {
     global.__SCOPE__ = SECONDARY;
