@@ -24,16 +24,20 @@ const ORIGINAL_FETCH = global.fetch;
 const ORIGINAL_NOW = Date.now;
 
 let now;
-function sseBody(frames) {
+function sseBody(frames, splitFrames) {
   const enc = new TextEncoder();
-  const chunks = frames.map(({ event, data }) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+  const chunks = frames.flatMap(({ event, data }) => {
+    const frame = enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const split = frame.indexOf(10) + 1;
+    return splitFrames ? [frame.subarray(0, split), frame.subarray(split)] : [frame];
+  });
   return { getReader: () => ({ read: async () => { now += 1000; return chunks.length ? { done: false, value: chunks.shift() } : { done: true }; } }) };
 }
-function fetchFor(frames) {
+function fetchFor(frames, splitFrames = false) {
   return jest.fn(async (url, opts = {}) => {
     if (opts.method === 'POST' && String(url).endsWith('/sessions')) return { ok: true, status: 200, json: async () => ({ id: 'sess-1' }) };
     if (opts.method === 'POST') return { ok: true, status: 200, json: async () => ({}) };
-    if (/stream=true|\/events\/stream$/.test(String(url))) return { ok: true, status: 200, body: sseBody(frames) };
+    if (/stream=true|\/events\/stream$/.test(String(url))) return { ok: true, status: 200, body: sseBody(frames, splitFrames) };
     throw new Error(`unexpected fetch ${opts.method || 'GET'} ${url}`);
   });
 }
@@ -67,6 +71,12 @@ describe.each(RUNNERS)('%s — the session recorder sees how the stream ended', 
     await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
     expect(mockRecordSessionUsage).toHaveBeenCalledTimes(1);
     expect(recorded()).toMatchObject({ laneId, sessionId: 'sess-1', failure: null });
+  });
+
+  it('event and data in separate network chunks preserve the terminal outcome', async () => {
+    global.fetch = fetchFor([text('QA café 🌊'), { event: 'done', data: {} }], true);
+    await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
+    expect(recorded()).toMatchObject({ laneId, failure: null });
   });
 
   it.each(['turn_end', 'session_end'])('a %s event is a terminal, like done (Codex r10)', async (terminal) => {
