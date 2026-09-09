@@ -87,3 +87,36 @@ source directory. Five existing dispatch, equipment and Terminal request sites
 are proved against merged main and retained as unsupported, for 1,744 cumulative
 sites. Generic lookup verbs cannot turn an unsupported capability into a match.
 The final catalog/coverage suites pass 23 tests.
+
+Post-merge main integration at `a7c689301` records the nine request sites that
+reached main after Part A's final head: the Customer 360 workspace and unread
+conversation hooks from `481ad658f`, and the controlled staff documents from
+`f4b3490f5`. Each is proved against that already-merged revision and retained
+as unsupported/unverified, for 1,753 cumulative sites. Nothing gains coverage;
+this restores the drift gate on main without grandfathering any new action.
+
+Codex review of that integration tightened one matcher: React state setters
+that merely end in `Request` (`setLinkRequest`, `setNewLeadRequest`,
+`setRequest`) perform no request and no longer produce rows, and neither do lazy
+`import()` module loads, for 1,744 cumulative sites. Dynamic and glued-suffix endpoints stay recorded as
+unresolved / `:param` routes pending hand mapping; the scanner is per-file and
+cannot resolve a shared helper's callers or tell a query suffix from a path
+segment, so nothing else left the denominator.
+
+Main integration at `1bd165d6f` (#4016, SMS commitment follow-up) records the
+`OwedCommitmentsSummary` component's two request sites — the collection GET now
+takes the `open` / `sms` collection as a template segment, and the Mark done /
+Dismiss PATCH moved lines — proved against that merged revision and retained
+as unsupported/unverified; the superseded fixed-`open` GET row leaves the
+denominator, which stays at 1,744 cumulative sites. Nothing gains coverage.
+
+#4120 (three-line best-time hint) records the first `reviewed_exception` row.
+The `useBestTimes` hint request moved into a `search` wrapper, so the census
+sees a new site (`16c8f8f115eaeffba01b983c`) rather than a changed one, and a
+pre-merge branch cannot prove a baseline. The row is excepted, not covered:
+admin date pickers fire this POST automatically to decorate the picked hour
+and the best hours, a read-only ranking over the same find-time engine the
+`find_available_slots` read tool already exposes, gated by
+`GATE_BEST_TIME_HINTS`, with no write or approval. The superseded
+`useBestTimes` row stays as history; the denominator is 1,745 recorded sites,
+1,744 unsupported/unverified. No domain action gains coverage.

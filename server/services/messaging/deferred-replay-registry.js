@@ -416,6 +416,32 @@ const REGISTRY = {
     },
   },
 
+  billing_failure_deferred: {
+    async recheck(meta) {
+      try {
+        const payment = await db('payments').where({ id: meta.payment_id, customer_id: meta.customer_id })
+          .first();
+        if (!payment || payment.status !== 'failed') return { eligible: false, reason: 'payment-no-longer-failed' };
+        if (Number(payment.retry_count || 0) !== Number(meta.retry_count)) return { eligible: false, reason: 'retry-superseded' };
+        const customer = await db('customers').where({ id: meta.customer_id }).first();
+        if (!customer || customer.deleted_at) return { eligible: false, reason: 'customer-unavailable' };
+        const { loadRetryContext, classifyFailedPaymentRetry, DISPOSITIONS } = require('../retry-collectibility');
+        const ctx = loadRetryContext();
+        const resolution = await classifyFailedPaymentRetry({ payment, customer, ctx });
+        if (ctx.lookupWarnings.length) throw new Error('Payment resolution lookup unavailable');
+        // A failed row can remain after another payment or prepay settled its
+        // obligation. Reuse the billing sweep's resolution rules. Disabled or
+        // paused Auto Pay still needs this notice; those are not settlements.
+        if ([DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, DISPOSITIONS.SELF_SUPERSEDE].includes(resolution.disposition)) {
+          return { eligible: false, reason: resolution.reason };
+        }
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('billing-failure', meta.payment_id, err);
+      }
+    },
+  },
+
   stripe_webhook_billing_deferred: {
     async recheck(meta) {
       // An ACH failure / action-required notice queued at night can resolve

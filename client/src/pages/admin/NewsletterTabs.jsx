@@ -2422,7 +2422,7 @@ export function HistoryView() {
                         </button>
                       )}
                       {s.segment_filter && (
-                        <Badge tone="muted">Segmented</Badge>
+                        <Badge tone="neutral">Segmented</Badge>
                       )}
                       <StatusChip status={s.status} />{" "}
                     </div>{" "}
@@ -2771,7 +2771,7 @@ function StatusChip({ status }) {
   if (status === "sending") return <Badge tone="neutral">Sending…</Badge>;
   if (status === "scheduled") return <Badge tone="neutral">Scheduled</Badge>;
   if (status === "failed") return <Badge tone="alert">Failed</Badge>;
-  return <Badge tone="muted">Draft</Badge>;
+  return <Badge tone="neutral">Draft</Badge>;
 }
 
 function Stat({ label, value, alert }) {
@@ -3104,7 +3104,7 @@ export function SubscribersView() {
                     {s.email}
                   </span>
                   {s.status === "unsubscribed" && (
-                    <Badge tone="muted">Unsubscribed</Badge>
+                    <Badge tone="neutral">Unsubscribed</Badge>
                   )}
                   {s.status === "pending" && (
                     <Badge tone="neutral">Pending confirmation</Badge>
@@ -3112,7 +3112,7 @@ export function SubscribersView() {
                   {s.bounce_count > 0 && (
                     <Badge tone="alert">Bounced</Badge>
                   )}
-                  {s.customer_id && <Badge tone="muted">Customer</Badge>}
+                  {s.customer_id && <Badge tone="neutral">Customer</Badge>}
                 </div>{" "}
                 <div className="text-11 text-ink-tertiary">
                   {s.first_name || s.last_name

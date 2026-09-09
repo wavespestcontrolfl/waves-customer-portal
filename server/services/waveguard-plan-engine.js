@@ -11,6 +11,7 @@ const {
   summarizeProtocolContext,
 } = require('./lawn-protocol-operating-layer');
 const { describeInventoryConversion } = require('./inventory-units');
+const { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches } = require('./lawn-completion-defaults');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -903,8 +904,12 @@ function summarizeCalibration({ calibration, calibrations, assigned = false }) {
   return { selected, inferred, unresolved, blocks: [], warnings };
 }
 
-function calculateNutrients(items, lawnSqft) {
+// Quantities are mixed for the treated (visit) area; the annual budget is per
+// 1,000 sq ft of the WHOLE property, so the projection divides by the saved
+// property area when a visit-only override is smaller than it.
+function calculateNutrients(items, lawnSqft, { propertyLawnSqft = null } = {}) {
   const treatedUnits = Number(lawnSqft || 0) / 1000;
+  const budgetUnits = Math.max(treatedUnits, Number(propertyLawnSqft || 0) / 1000);
   const totals = { n: 0, p: 0, k: 0 };
   for (const item of items) {
     const amount = Number(item.mix?.amount || 0);
@@ -916,9 +921,9 @@ function calculateNutrients(items, lawnSqft) {
     totals.k += pounds * (Number(item.product.analysis_k || 0) / 100);
   }
   return {
-    nPer1000: treatedUnits ? Number((totals.n / treatedUnits).toFixed(3)) : 0,
-    pPer1000: treatedUnits ? Number((totals.p / treatedUnits).toFixed(3)) : 0,
-    kPer1000: treatedUnits ? Number((totals.k / treatedUnits).toFixed(3)) : 0,
+    nPer1000: budgetUnits ? Number((totals.n / budgetUnits).toFixed(3)) : 0,
+    pPer1000: budgetUnits ? Number((totals.p / budgetUnits).toFixed(3)) : 0,
+    kPer1000: budgetUnits ? Number((totals.k / budgetUnits).toFixed(3)) : 0,
   };
 }
 
@@ -954,15 +959,15 @@ function findNutrientProductsMissingConversions(items) {
   });
 }
 
-function selectProtocolVisit(profile, serviceDate, legacyGrass = null) {
+function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
   const profileRecorded = [profile?.track_key, profile?.grass_type]
     .some((value) => String(value || '').trim());
   const recorded = profileRecorded || String(legacyGrass || '').trim();
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
-    || (recorded ? null : 'st_augustine');
+    || (recorded || requireKnownGrass ? null : 'st_augustine');
   const track = trackKey ? protocols.lawn?.[trackKey] : null;
-  const month = MONTH_ABBR[etParts(serviceDate).month - 1];
+  const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
   return { trackKey, track, month, visit };
 }
@@ -1062,7 +1067,7 @@ async function getProducts(knex, { strict = false } = {}) {
       'default_rate_per_1000', 'rate_unit',
       'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'unit_size_oz', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
-      'label_verified_at',
+      'label_verified_at', 'application_method', 'formulation',
       'active', 'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
     ))
     .catch((err) => { if (strict) throw err; return []; });
@@ -1161,12 +1166,13 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
       'county',
       'blackout_status',
       'service_product_id',
+      'lawn_sqft',
     )
     .orderBy('application_date', 'asc'))
     .catch((err) => { if (strict) throw err; return null; });
 
   const ledgerSummary = Array.isArray(ledgerRows) && ledgerRows.length
-    ? summarizeLedgerRows(ledgerRows, year)
+    ? summarizeLedgerRows(ledgerRows, year, { lawnSqft })
     : null;
 
   const serviceProductQuery = knex('service_products as sp')
@@ -1281,6 +1287,7 @@ function summarizeTurfProfileCompleteness(profile) {
 async function buildPlanForService(serviceId, options = {}) {
   const knex = options.db || db;
   const now = options.now || new Date();
+  const completionDefaultsEnabled = options.completionDefaultsEnabled ?? lawnCompletionDefaultsEnabled();
 
   const service = await knex('scheduled_services as ss')
     .leftJoin('customers as c', 'ss.customer_id', 'c.id')
@@ -1288,7 +1295,7 @@ async function buildPlanForService(serviceId, options = {}) {
     .where('ss.id', serviceId)
     .select(
       'ss.*',
-      'c.first_name', 'c.last_name', 'c.address_line1', 'c.city', 'c.state', 'c.zip',
+      'c.first_name', 'c.last_name', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
       'c.waveguard_tier', 'c.lawn_type',
       't.name as technician_name',
     )
@@ -1306,14 +1313,15 @@ async function buildPlanForService(serviceId, options = {}) {
   // reading as "nothing on file" — turf profile, catalog, substitutions,
   // latest assessment, ordinance context, manager approvals. The Lawn plan
   // and closeout keep the lenient default.
-  const strict = options.strict === true;
+  const strict = options.strict === true || completionDefaultsEnabled;
+  const completionContext = completionDefaultsEnabled ? await loadLawnCompletionContext(service, knex) : null;
   const profile = await knex('customer_turf_profiles')
     .where({ customer_id: service.customer_id, active: true })
     .first();
   const profileCompleteness = summarizeTurfProfileCompleteness(profile);
   const products = await getProducts(knex, { strict });
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products, { strict });
-  const latestAssessment = await getLatestAssessment(knex, service.customer_id, { strict });
+  const latestAssessment = completionContext ? completionContext.latestAssessment : await getLatestAssessment(knex, service.customer_id, { strict });
   const stressFlags = latestAssessment?.stress_flags || {};
   // One resolved city for BOTH the ordinance query and the property gate the
   // panel displays — the restriction must be labeled with the city it was
@@ -1328,15 +1336,28 @@ async function buildPlanForService(serviceId, options = {}) {
   const activeCalibrations = await getActiveCalibrations(knex, {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,
-  });
+  }, { strict });
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
-  const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate, service.lawn_type);
-  const structuredProtocolContext = await getProtocolWindowContext(knex, {
+  const calendarProtocol = selectProtocolVisit(profile, serviceDate, service.lawn_type, { requireKnownGrass: completionDefaultsEnabled });
+  const structuredProtocolContext = (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
     serviceDate,
-    grassTrack: trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
+    grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
-  }).catch((err) => { if (strict) throw err; return null; });
+    ...(completionDefaultsEnabled ? {
+      strict: true, windowKey: service.lawn_protocol_window_key,
+      protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version,
+    } : {}),
+  }).catch((err) => { if (strict) throw err; return null; }) : null;
+  // Select the assigned window's field-reference recipe, while weather,
+  // ordinance and nutrient-ledger checks keep the actual appointment date.
+  const selection = completionDefaultsEnabled
+    ? selectProtocolVisit(profile, serviceDate, service.lawn_type, {
+      requireKnownGrass: true, month: structuredProtocolContext?.window?.month,
+    }) : calendarProtocol;
+  const { trackKey, track, month } = selection;
+  const visit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
+    ? null : selection.visit;
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const baseLines = parseProtocolLines(visit?.primary, 'base');
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
@@ -1363,10 +1384,12 @@ async function buildPlanForService(serviceId, options = {}) {
   const rigCarrier = Number(calibration?.carrier_gal_per_1000 || 0);
   const carrier = rigCarrier > 0 ? rigCarrier : Number(structuredProtocol?.window?.defaultCarrierGalPer1000 || 0);
   const carrierSource = rigCarrier > 0 ? 'rig' : (carrier > 0 ? 'protocol_default' : null);
-  const lawnSqft = Number(profile?.lawn_sqft || 0);
+  const lawnSqft = completionContext
+    ? Number(options.lawnSqft !== undefined ? options.lawnSqft : (completionContext.propertyMatchesProfile ? profile?.lawn_sqft : 0)) || 0
+    : Number(profile?.lawn_sqft || 0);
   const planItems = candidateItems.map((item) => {
     const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
-    const plannedProduct = substitution?.substitute
+    const plannedProduct = substitution
       ? {
           ...substitution.substitute,
           default_rate_per_1000: substitution.rate_per_1000 != null
@@ -1411,7 +1434,9 @@ async function buildPlanForService(serviceId, options = {}) {
         activeIngredient: plannedProduct.active_ingredient,
         active: plannedProduct.active !== false,
         groups: getProductGroups(plannedProduct),
-        labelVerifiedAt: plannedProduct.label_verified_at || null,
+        labelVerifiedAt: plannedProduct.label_verified_at,
+        applicationMethod: plannedProduct.application_method,
+        formulation: plannedProduct.formulation,
         analysis_n: plannedProduct.analysis_n,
         analysis_p: plannedProduct.analysis_p,
         analysis_k: plannedProduct.analysis_k,
@@ -1440,11 +1465,16 @@ async function buildPlanForService(serviceId, options = {}) {
       mix,
     };
   });
+  // An archived assignment cannot silently borrow a later field recipe or
+  // catalog rate. Keep its stored protocol visible, but offer no calculated
+  // products when the old recipe cannot be reproduced from the current inputs.
+  const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
+  if (archivedRecipeUnavailable) planItems.length = 0;
   const plannedItems = planItems.filter((item) => item.selected);
   const materialCostSummary = summarizeMaterialCost(plannedItems);
 
   const ordinanceSummary = summarizeOrdinanceStatus({ date: serviceDate, ordinances, candidateItems: plannedItems });
-  const nutrientProjection = calculateNutrients(plannedItems, lawnSqft);
+  const nutrientProjection = calculateNutrients(plannedItems, lawnSqft, { propertyLawnSqft: profile?.lawn_sqft });
   const inventorySummary = summarizeInventoryStatus(plannedItems);
   const warnings = [
     ...ordinanceSummary.warnings,
@@ -1456,6 +1486,17 @@ async function buildPlanForService(serviceId, options = {}) {
     ...calibrationSummary.blocks,
     ...inventorySummary.blocks,
   ];
+  if (archivedRecipeUnavailable) {
+    blocks.push({ code: 'lawn_archived_recipe_unavailable', severity: 'block', message: 'The assigned archived recipe cannot be reproduced with the current products and rates. Review the assigned protocol and enter the actual work.' });
+  }
+  if (completionContext && !completionContext.propertyMatchesProfile) {
+    blocks.push({ code: 'lawn_property_unresolved', severity: 'block', message: 'The saved turf profile does not prove this service property; suggested amounts are unavailable.' });
+  }
+  if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
+    protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,
+  }, trackKey)) {
+    blocks.push({ code: 'lawn_protocol_unresolved', severity: 'block', message: 'The appointment has no matching lawn protocol; suggested amounts are unavailable.' });
+  }
 
   if (!profile) {
     blocks.push({
@@ -1471,7 +1512,7 @@ async function buildPlanForService(serviceId, options = {}) {
       message: `Turf profile is missing: ${profileCompleteness.missing.map((item) => item.label).join(', ')}.`,
     });
   }
-  if (profile && !profile.lawn_sqft) {
+  if (profile && !(completionContext ? lawnSqft : profile.lawn_sqft)) {
     blocks.push({
       code: 'missing_lawn_area',
       severity: 'block',
@@ -1578,7 +1619,7 @@ async function buildPlanForService(serviceId, options = {}) {
 
   const status = blocks.length ? 'blocked' : warnings.length ? 'warning' : 'approved';
 
-  return {
+  const plan = {
     status,
     serviceId: service.id,
     generatedAt: now.toISOString(),
@@ -1591,7 +1632,10 @@ async function buildPlanForService(serviceId, options = {}) {
       trackName: track?.name || null,
       month,
       visit: visit?.visit || null,
-      lawnSqft: profile?.lawn_sqft || null,
+      lawnSqft: completionContext ? lawnSqft || null : profile?.lawn_sqft || null,
+      // The saved whole-property area, untouched by a visit-only override: the
+      // denominator every annual per-1,000 nutrient figure shares.
+      profileLawnSqft: profile?.lawn_sqft || null,
       municipality: resolvedOrdinanceCity,
       county: profile?.county || null,
       ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',
@@ -1632,7 +1676,7 @@ async function buildPlanForService(serviceId, options = {}) {
       carrierGalPer1000: carrier > 0 ? carrier : null,
       carrierSource,
       tankCapacityGal: calibration?.tank_capacity_gal ? Number(calibration.tank_capacity_gal) : null,
-      lawnSqft: profile?.lawn_sqft || null,
+      lawnSqft: completionContext ? lawnSqft || null : profile?.lawn_sqft || null,
       nutrientProjection,
       materialCostSummary,
       items: plannedItems,
@@ -1662,6 +1706,11 @@ async function buildPlanForService(serviceId, options = {}) {
         : null,
     },
   };
+  if (options.includeCompletionDefaults) {
+    plan.completionDefaults = completionContext
+      ? buildLawnCompletionDefaults(plan, completionContext) : { enabled: false };
+  }
+  return plan;
 }
 
 module.exports = {

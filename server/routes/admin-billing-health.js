@@ -229,11 +229,14 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       return res.status(502).json({ error: err.message });
     }
 
-    await logAutopay(customerId, 'manual_charge', {
-      amountCents: Math.round(chargeAmount * 100),
+    await logAutopay(customerId, payment?.status === 'paid' ? 'manual_charge' : 'manual_charge_processing', {
+      amountCents: Math.round(Number(payment?.amount) * 100),
       paymentId: payment?.id || null,
       details: { source: 'manual_charge', description: desc, admin_id: req.technicianId || null },
     });
+
+    // An accepted bank payment is not evidence of a completed charge.
+    if (payment?.status !== 'paid') return res.json({ success: true, payment });
 
     // Send receipt SMS
     let receiptUrl = null;

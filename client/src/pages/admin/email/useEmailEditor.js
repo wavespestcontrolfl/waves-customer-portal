@@ -12,6 +12,19 @@ const SEND_ERRORS = {
   compose: "Failed to send: ",
 };
 
+// The composer and reply boxes are plain textareas, but the server sends the
+// body as text/html. Escape the four HTML-significant characters before
+// turning newlines into <br>, so "price <100 and >50" arrives intact and
+// pasted markup is shown, not rendered.
+export function encodeEmailBody(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/\n/g, "<br>");
+}
+
 export default function useEmailEditor(userId) {
   const [draftSession] = useState(() => loadEmailDrafts(userId));
   const snapshot = () => ({
@@ -56,7 +69,7 @@ export default function useEmailEditor(userId) {
         method: "POST",
         body: JSON.stringify({
           ...payload,
-          body: payload.body.replace(/\n/g, "<br>"),
+          body: encodeEmailBody(payload.body),
         }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
