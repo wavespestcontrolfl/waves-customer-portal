@@ -106,6 +106,14 @@ const gates = {
   // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
   // logGateStatus only; consumers use gateEnvValue at CALL time.
   lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
+  // GATE_APP_PROPERTY_SCOPE: the customer app scopes visits and appointment
+  // texts by SAVED PROPERTY (customer_properties) instead of by sibling
+  // profile (docs/multi-property-model.md, "App property scope"). Off: the
+  // session's propertyId claim is ignored (req.propertyId null),
+  // GET /auth/properties answers the profile list, and select-property
+  // ignores propertyId — tonight's behavior exactly. Registered for
+  // logGateStatus; consumers read it at CALL time (gateEnvValue).
+  appPropertyScope: gateEnvValue('GATE_APP_PROPERTY_SCOPE'),
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.

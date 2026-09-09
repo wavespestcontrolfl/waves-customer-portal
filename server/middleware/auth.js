@@ -123,8 +123,9 @@ async function insertRefreshRecord(
   familyId = crypto.randomUUID(),
   jti = crypto.randomUUID(),
   parentJti = null,
+  propertyId = null,
 ) {
-  const refreshToken = generateRefreshToken(customerId, accountId, { jti, familyId });
+  const refreshToken = generateRefreshToken(customerId, accountId, { jti, familyId, propertyId });
   const expiresAt = refreshExpiryDate(refreshToken);
   await executor(REFRESH_TABLE).insert({
     jti,
@@ -234,6 +235,15 @@ async function rotateRefreshSession(refreshToken, options = {}) {
         return { ok: false, code: 'INVALID_REFRESH_TOKEN' };
       }
     }
+    // Selected saved property (GATE_APP_PROPERTY_SCOPE). A same-profile
+    // rotation forwards the claim the family was minted with; a profile
+    // switch drops it unless the switch names a target property. Never
+    // validated here — the access-token middleware re-checks the row
+    // against the customer on every request, so a stale claim can only ever
+    // fall back to the primary.
+    const nextPropertyId = options.targetPropertyId !== undefined
+      ? (options.targetPropertyId || null)
+      : (String(nextCustomer.id) === String(customer.id) ? (decoded.propertyId || null) : null);
 
     let row;
     if (decoded.jti && decoded.familyId) {
@@ -329,8 +339,9 @@ async function rotateRefreshSession(refreshToken, options = {}) {
       row.family_id,
       nextJti,
       row.jti,
+      nextPropertyId,
     );
-    return { ok: true, ...next, customer: nextCustomer, accountId };
+    return { ok: true, ...next, customer: nextCustomer, accountId, propertyId: nextPropertyId };
   });
 
   if (result.code === 'REFRESH_TOKEN_REUSED') {
@@ -351,12 +362,16 @@ async function reissueRefreshSessionForProperty(
   accountId,
   expectedCustomerId,
   expectedFamilyId,
+  { propertyId = null } = {},
 ) {
   return rotateRefreshSession(refreshToken, {
     targetCustomerId: customerId,
     expectedAccountId: accountId,
     expectedCustomerId,
     expectedFamilyId,
+    // Explicit (null included) so a switch to a profile's PRIMARY clears a
+    // previously selected secondary instead of forwarding it.
+    targetPropertyId: propertyId || null,
     revokeReason: 'property_switch',
   });
 }
@@ -502,6 +517,25 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
     req.customerInactive = customer.active !== true;
     req.accountId = decoded.accountId || customerAccountId;
     req.authSessionId = decoded.sessionId || null;
+    // Selected saved property (GATE_APP_PROPERTY_SCOPE). Honored only when
+    // the row is THIS customer's and active; anything else — another
+    // customer's property, a row the office retired, gate off — resolves to
+    // "no selection", which every property-scoped read treats as the
+    // primary. Fail-safe rather than 401: no other customer's data is
+    // reachable through the claim, and a property retired mid-session must
+    // not sign the customer out.
+    req.propertyId = null;
+    req.property = null;
+    if (decoded.propertyId && require('../config/feature-gates').gateEnvValue('GATE_APP_PROPERTY_SCOPE')) {
+      const property = await db('customer_properties')
+        .where({ id: decoded.propertyId, customer_id: customer.id, active: true })
+        .first()
+        .catch(() => null);
+      if (property) {
+        req.propertyId = property.id;
+        req.property = property;
+      }
+    }
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -533,9 +567,15 @@ function authenticateAllowInactive(req, res, next) {
 /**
  * Generate JWT for a customer
  */
-function generateToken(customerId, accountId = null, sessionId = null) {
+function generateToken(customerId, accountId = null, sessionId = null, { propertyId = null } = {}) {
   return jwt.sign(
-    { customerId, accountId: accountId || undefined, sessionId: sessionId || undefined },
+    {
+      customerId,
+      accountId: accountId || undefined,
+      sessionId: sessionId || undefined,
+      // Selected saved property (customer_properties.id) — absent = primary.
+      propertyId: propertyId || undefined,
+    },
     config.jwt.secret,
     // Customer access tokens are deliberately short-lived. Existing signed
     // tokens still verify until their original expiry, while the client uses
@@ -548,7 +588,14 @@ function generateRefreshToken(customerId, accountId = null, options = {}) {
   const jti = options.jti || crypto.randomUUID();
   const familyId = options.familyId || crypto.randomUUID();
   return jwt.sign(
-    { customerId, accountId: accountId || undefined, type: 'refresh', jti, familyId },
+    {
+      customerId,
+      accountId: accountId || undefined,
+      type: 'refresh',
+      jti,
+      familyId,
+      propertyId: options.propertyId || undefined,
+    },
     config.jwt.secret,
     { expiresIn: config.jwt.refreshExpiry }
   );
