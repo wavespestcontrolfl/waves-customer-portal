@@ -206,3 +206,32 @@ test.each(['send_lead_response', 'queue_for_adam', 'update_lead_pipeline', 'flag
     expect(mockDb).not.toHaveBeenCalled();
   },
 );
+
+test.each(['bookkeeping', 'audit'])('a known provider acceptance survives %s failure', async failure => {
+  mockMessage.mockImplementation(async () => {
+    mockState.lead.customer_id = 'reassigned';
+    const outcome = { sent: true, providerMessageId: 'SM_accepted' };
+    if (failure === 'audit') throw Object.assign(new Error('audit unavailable'), { providerOutcome: outcome });
+    return outcome;
+  });
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context)).toMatchObject({ sent: true });
+  expect(mockPipeline).not.toHaveBeenCalled();
+  expect(mockState.inserts).toBe(0);
+});
+
+test.each(['SMS_HANDOFF_CHECK_FAILED', 'CONSENT_LOOKUP_FAILED', 'SUPPRESSION_LOOKUP_FAILED'])('retryable %s counts as a tool failure', async code => {
+  mockMessage.mockResolvedValue({ sent: false, blocked: true, code, retryable: true });
+  expect(await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context))
+    .toMatchObject({ sent: false, blocked: true, code, retryable: true, failed: true, error: code });
+  expect(mockPipeline).not.toHaveBeenCalled();
+});
+
+
+test.each(['SMS_OPTED_OUT', 'LEAD_SUBJECT_CHANGED'])('deterministic %s does not count as a tool failure', async code => {
+  mockMessage.mockResolvedValue({ sent: false, blocked: true, code });
+  const result = await executeLeadTool('send_lead_response', { message: 'Synthetic reply' }, context);
+  expect(result).toMatchObject({ sent: false, blocked: true, code });
+  expect(result.error).toBeUndefined();
+  expect(result.failed).toBeUndefined();
+  expect(mockPipeline).not.toHaveBeenCalled();
+});
