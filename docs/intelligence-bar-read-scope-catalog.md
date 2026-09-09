@@ -111,8 +111,9 @@ old list).
   candidate is validated as an appointment reference that must belong to a
   task customer. Without a candidate it returns per-technician minute
   budgets only: the IB executor strips the measurement's planned-stop ids,
-  visit ids and arrival windows (kept for the route-performance ledger) and
-  the ids on late-visit rows, so a date-only call reads no
+  visit ids and arrival windows (kept for the route-performance ledger), the
+  missing-coordinate and default-duration id lists (now counts) and the ids
+  on late-visit rows, so a date-only call reads no
   customer-identifying rows and stays open for a resolved, unnamed or
   unresolved task ("gaps for Labor Day" reads "Labor" as a name;
   `SELECTOR_FREE_READS_NO_CUSTOMER_ROWS` in task-context.js).

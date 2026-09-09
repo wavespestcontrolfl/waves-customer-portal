@@ -1528,13 +1528,17 @@ async function swapTechAssignments(input, actionContext = {}) {
 // The measurement result is shared with the route-performance ledger, which
 // needs every planned stop's id. The Intelligence Bar does not: inside a
 // task about one customer the other stops on the route are other customers'
-// appointments, so their ids and arrival windows are reduced to counts and
-// the late-visit rows lose their ids before the model sees them.
+// appointments, so their ids and arrival windows are reduced to counts, the
+// diagnostic id lists (missing coordinates, default durations) become
+// counts, and the late-visit rows lose their ids before the model sees them.
 function withoutStopIdentifiers(result) {
   if (!Array.isArray(result?.days)) return result;
-  return { ...result, days: result.days.map(day => ({ ...day, byTech: (day.byTech || []).map(({ plannedStops, modeledLateVisits, ...tech }) => ({
+  const count = list => (Array.isArray(list) ? list.length : null);
+  return { ...result, days: result.days.map(day => ({ ...day, byTech: (day.byTech || []).map(({ plannedStops, modeledLateVisits, missingCoordinates, defaultDurations, ...tech }) => ({
     ...tech,
-    plannedStopCount: Array.isArray(plannedStops) ? plannedStops.length : null,
+    plannedStopCount: count(plannedStops),
+    missingCoordinateCount: count(missingCoordinates),
+    defaultDurationCount: count(defaultDurations),
     modeledLateVisits: Array.isArray(modeledLateVisits) ? modeledLateVisits.map(({ id, visitId, ...late }) => late) : modeledLateVisits,
   })) })) };
 }
