@@ -12,7 +12,7 @@
  * for genuinely overdue/past-due amounts.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useId, useRef } from "react";
 import {
   Sheet,
   SheetHeader,
@@ -25,6 +25,8 @@ import {
   TabPanel,
   Select,
   Input,
+  ActionFeedback,
+  Field,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 
@@ -83,25 +85,23 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const [statements, setStatements] = useState([]);
   const [ar, setAr] = useState(null);
   const [loading, setLoading] = useState(true);
-  // UI audit F0502: failures must not read as empty. The two endpoints are
-  // independent, so each keeps its own error — a failed AR read must not hide
-  // loaded statements, and a later statements success must not erase it.
   const [statementsError, setStatementsError] = useState("");
-  const [arError, setArError] = useState("");
   const [arLoading, setArLoading] = useState(true);
+  const [arError, setArError] = useState("");
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
   const [openStmtId, setOpenStmtId] = useState(null);
 
   const loadStatements = useCallback(async () => {
     setLoading(true);
+    setStatementsError("");
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/statements`);
       const d = await r.json().catch(() => null);
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       setStatements(Array.isArray(d?.statements) ? d.statements : []);
-      setStatementsError("");
-    } catch (e) {
-      setStatements([]);
-      setStatementsError(e?.message || "Could not load this payer's statements.");
+    } catch (err) {
+      setStatementsError(err.message || "Could not load this payer's statements.");
     } finally {
       setLoading(false);
     }
@@ -109,16 +109,15 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
 
   const loadAr = useCallback(async () => {
     setArLoading(true);
+    setArError("");
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/ar`);
       const d = await r.json().catch(() => null);
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       if (!d?.summary) throw new Error("Could not load this payer's balance.");
       setAr(d);
-      setArError("");
-    } catch (e) {
-      setAr(null);
-      setArError(e?.message || "Could not load this payer's balance.");
+    } catch (err) {
+      setArError(err.message || "Could not load this payer's balance.");
     } finally {
       setArLoading(false);
     }
@@ -134,62 +133,64 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
     if (onChanged) onChanged();
   }, [loadStatements, loadAr, onChanged]);
 
+  const onPendingChange = (value) => {
+    pendingRef.current = value;
+    setPending(value);
+  };
+  const close = () => { if (!pendingRef.current) onClose(); };
+
   return (
-    <Sheet open onClose={onClose} width="lg" ariaLabel={`${payer.display_name} payer details`}>
+    <Sheet open onClose={close} width="lg" ariaLabel={`${payer.display_name} payer details`}>
       <SheetHeader>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-16 font-medium text-zinc-900">{payer.display_name}</h2>
+        <div className="flex flex-wrap w-full items-start justify-between gap-3">
+          <div className="min-w-0 flex-1 break-words">
+            <h2 className="text-18 leading-[1.35] font-medium text-zinc-900">{payer.display_name}</h2>
             {payer.company_name && payer.company_name !== payer.display_name && (
-              <p className="text-12 text-zinc-500">{payer.company_name}</p>
+              <p className="text-ui-caption text-ink-secondary">{payer.company_name}</p>
             )}
-            <p className="text-12 text-zinc-500 mt-0.5">
+            <p className="text-ui-caption text-ink-secondary mt-1">
               {payer.ap_email || "no AP email"} · {termLabel(payer.payment_terms)}
             </p>
           </div>
+          <Button variant="ghost" size="sm" disabled={pending} onClick={close} aria-label="Close">Close</Button>
           {ar?.summary && !arLoading && !arError && (
-            <div className="text-right shrink-0">
-              <div className="text-11 text-zinc-500 uppercase tracking-label">Outstanding</div>
-              <div className="text-16 font-medium text-zinc-900">{money(ar.summary.outstanding_total)}</div>
+            <div className="w-full sm:w-auto sm:text-right u-nums">
+              <div className="text-ui-caption text-ink-secondary font-medium">Outstanding</div>
+              <div className="text-18 leading-[1.35] font-medium u-nums text-zinc-900">{money(ar.summary.outstanding_total)}</div>
               {ar.summary.past_due_total > 0 && (
-                <div className="text-12 text-alert-fg">{money(ar.summary.past_due_total)} past due</div>
+                <div className="text-ui-caption text-alert-fg">{money(ar.summary.past_due_total)} past due</div>
               )}
             </div>
           )}
-          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">Close</Button>
         </div>
       </SheetHeader>
       <SheetBody>
-        <Tabs value={tab} onValueChange={setTab}>
-          <TabList>
-            <Tab value="statements">Statements</Tab>
-            <Tab value="ar">AR / aging</Tab>
+        <Tabs value={tab} onValueChange={setTab} variant="section">
+          <TabList scrollable aria-label="Payer sections">
+            <Tab value="statements" disabled={pending}>Statements</Tab>
+            <Tab value="ar" disabled={pending}>AR / aging</Tab>
           </TabList>
 
-          <TabPanel value="statements" className="pt-3">
-            {statementsError && !loading && (
-              <p role="alert" className="text-13 text-alert-fg py-2">
-                {statementsError}{" "}
-                <Button size="sm" variant="ghost" onClick={loadStatements}>
-                  Retry
-                </Button>
-              </p>
-            )}
-            {loading ? (
-              <p className="text-13 text-zinc-400 py-4">Loading statements…</p>
-            ) : statementsError ? null : statements.length === 0 ? (
-              <p className="text-13 text-zinc-400 py-4">
+          {/* Keep a payment draft across section navigation. The directory keys
+              this sheet by payer; closing it or changing payer clears the draft. */}
+          <TabPanel value="statements" keepMounted>
+            {statementsError && <ActionFeedback error onRetry={loadStatements}>{statementsError}</ActionFeedback>}
+            {loading && <ActionFeedback>Loading…</ActionFeedback>}
+            {!loading && !statementsError && statements.length === 0 ? (
+              <p className="text-ui-body text-ink-secondary py-4">
                 No statements yet. NET-terms visits accrue here once payer statements are enabled.
               </p>
             ) : (
-              <div className="divide-y divide-zinc-100 border-hairline rounded-sm">
+              <div className="divide-y divide-zinc-100 border-hairline border-zinc-200 rounded-md">
                 {statements.map((s) => (
                   <StatementRow
                     key={s.id}
                     payerId={payer.id}
                     statement={s}
                     expanded={openStmtId === s.id}
-                    onToggle={() => setOpenStmtId(openStmtId === s.id ? null : s.id)}
+                    onToggle={() => { if (!pendingRef.current) setOpenStmtId(openStmtId === s.id ? null : s.id); }}
+                    pending={pending}
+                    onPendingChange={onPendingChange}
                     onChanged={refresh}
                   />
                 ))}
@@ -197,19 +198,10 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
             )}
           </TabPanel>
 
-          <TabPanel value="ar" className="pt-3">
-            {arLoading ? (
-              <p className="text-13 text-zinc-400 py-4">Loading balance…</p>
-            ) : arError ? (
-              <p role="alert" className="text-13 text-alert-fg py-2">
-                {arError}{" "}
-                <Button size="sm" variant="ghost" onClick={loadAr} disabled={arLoading}>
-                  Retry
-                </Button>
-              </p>
-            ) : (
-              <ArSummary summary={ar?.summary} />
-            )}
+          <TabPanel value="ar">
+            {arLoading ? <ActionFeedback>Loading…</ActionFeedback>
+              : arError ? <ActionFeedback error onRetry={loadAr}>{arError}</ActionFeedback>
+              : <ArSummary summary={ar?.summary} />}
           </TabPanel>
         </Tabs>
       </SheetBody>
@@ -221,19 +213,23 @@ function termLabel(v) {
   return { due_on_receipt: "Due on receipt", net15: "Net 15", net30: "Net 30" }[v] || v || "—";
 }
 
-function StatementRow({ payerId, statement, expanded, onToggle, onChanged }) {
+function StatementRow({ payerId, statement, expanded, onToggle, onChanged, pending, onPendingChange }) {
+  const detailsId = useId();
   const overdue =
     statement.overdue && OUTSTANDING.has(statement.status) && statement.status !== "paid";
   return (
     <div>
-      <button
-        type="button"
+      <Button
+        variant="ghost"
         onClick={onToggle}
-        className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-zinc-50"
+        disabled={pending}
+        aria-expanded={expanded}
+        aria-controls={expanded ? detailsId : undefined}
+        className="w-full flex-wrap justify-between px-4 py-3 text-left"
       >
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-zinc-900 text-13">S-{statement.id}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-zinc-900 text-ui-body">S-{statement.id}</span>
             <Badge tone={STATUS_TONE[statement.status] || "neutral"}>
               {STATUS_LABEL[statement.status] || statement.status}
             </Badge>
@@ -241,47 +237,56 @@ function StatementRow({ payerId, statement, expanded, onToggle, onChanged }) {
               <Badge tone="alert">{statement.days_past_due}d past due</Badge>
             )}
           </div>
-          <div className="text-12 text-zinc-500 mt-0.5">
+          <div className="text-ui-caption text-ink-secondary mt-1 u-nums">
             {dateOnly(statement.period_start)} – {dateOnly(statement.period_end)} ·{" "}
             {statement.invoice_count || 0} visit{(statement.invoice_count || 0) === 1 ? "" : "s"}
             {statement.due_date ? ` · due ${dateOnly(statement.due_date)}` : ""}
           </div>
         </div>
-        <div className="text-right shrink-0">
-          <div className="font-medium text-zinc-900 text-13">{money(statement.total)}</div>
-          <div className="text-11 text-zinc-400">{expanded ? "Hide" : "Details"}</div>
+        <div className="text-right shrink-0 u-nums">
+          <div className="font-medium text-zinc-900 text-ui-body">{money(statement.total)}</div>
+          <div className="text-ui-caption text-ink-secondary">{expanded ? "Hide" : "Details"}</div>
         </div>
-      </button>
+      </Button>
       {expanded && (
-        <StatementDetail payerId={payerId} statement={statement} onChanged={onChanged} />
+        <div id={detailsId}>
+          <StatementDetail payerId={payerId} statement={statement} onChanged={onChanged} onPendingChange={onPendingChange} />
+        </div>
       )}
     </div>
   );
 }
 
-function StatementDetail({ payerId, statement, onChanged }) {
+function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
   const [lines, setLines] = useState(null);
   const [sequence, setSequence] = useState(null);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState(null); // { tone: 'ok'|'err', text }
   const [reconcileOpen, setReconcileOpen] = useState(false);
+  const busyRef = useRef(false);
+  const [linesError, setLinesError] = useState("");
+  const [sequenceError, setSequenceError] = useState("");
 
   const base = `/admin/payers/${payerId}/statements/${statement.id}`;
 
   const loadDetail = useCallback(async () => {
+    setLinesError("");
+    setSequenceError("");
     try {
       const r = await adminFetch(base);
-      const d = await r.json();
+      const d = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(d?.error || "Could not load statement visits.");
       setLines(Array.isArray(d?.lines) ? d.lines : []);
-    } catch {
-      setLines([]);
+    } catch (err) {
+      setLinesError(err.message || "Could not load statement visits.");
     }
     try {
       const r2 = await adminFetch(`${base}/followups`);
       const d2 = await r2.json();
+      if (!r2.ok) throw new Error(d2?.error || "Could not load reminder status.");
       setSequence(d2?.sequence ?? null);
-    } catch {
-      setSequence(null);
+    } catch (err) {
+      setSequenceError(err.message || "Could not load reminder status.");
     }
   }, [base]);
 
@@ -290,6 +295,9 @@ function StatementDetail({ payerId, statement, onChanged }) {
   }, [loadDetail]);
 
   async function act(label, path, body) {
+    if (busyRef.current) return false;
+    busyRef.current = true;
+    onPendingChange(true);
     setBusy(label);
     setNotice(null);
     try {
@@ -304,16 +312,21 @@ function StatementDetail({ payerId, statement, onChanged }) {
         // close button that can't escape the blocked first-delivery key.
         if (d?.statement) {
           await loadDetail();
-          if (onChanged) onChanged();
+          if (onChanged) await onChanged();
         }
+        return false;
       } else {
         setNotice({ tone: "ok", text: `${label} ✓` });
         await loadDetail();
-        if (onChanged) onChanged();
+        if (onChanged) await onChanged();
+        return true;
       }
     } catch {
       setNotice({ tone: "err", text: "Network error." });
+      return false;
     } finally {
+      busyRef.current = false;
+      onPendingChange(false);
       setBusy("");
     }
   }
@@ -325,34 +338,34 @@ function StatementDetail({ payerId, statement, onChanged }) {
   const showDunning = DUNNABLE.has(status) || (sequence && sequence.status);
 
   return (
-    <div className="px-3 pb-3 pt-1 bg-zinc-50/60">
+    <div className="p-4 bg-zinc-50/60">
       {/* Visit lines */}
-      {lines === null ? (
-        <p className="text-12 text-zinc-400 py-2">Loading visits…</p>
+      {linesError ? <ActionFeedback error onRetry={loadDetail}>{linesError}</ActionFeedback> : lines === null ? (
+        <p className="text-ui-caption text-ink-secondary py-2">Loading visits…</p>
       ) : lines.length === 0 ? (
-        <p className="text-12 text-zinc-400 py-2">No visits on this statement.</p>
+        <p className="text-ui-caption text-ink-secondary py-2">No visits on this statement.</p>
       ) : (
-        <div className="text-12 text-zinc-600 py-1">
+        <div className="text-ui-caption text-zinc-600 py-1">
           {lines.map((l, i) => (
             <div key={i} className="flex items-center justify-between gap-3 py-1 border-b border-zinc-100 last:border-0">
-              <span className="min-w-0 truncate">
+              <span className="min-w-0 break-words">
                 {dateOnly(l.service_date)} · {l.service_type || "Service"}
                 {l.service_address ? ` · ${l.service_address}` : ""}
               </span>
-              <span className="shrink-0 text-zinc-700">{money(l.total)}</span>
+              <span className="shrink-0 text-zinc-700 u-nums">{money(l.total)}</span>
             </div>
           ))}
         </div>
       )}
 
       {/* Actions */}
-      <div className="flex flex-wrap items-center gap-2 mt-2">
+      <div className="ui-record-actions mt-3">
         {canClose && (
           <>
-            <Button size="sm" disabled={!!busy} onClick={() => act("Closed & sent", `${base}/close`, { send: true })}>
-              {busy === "Closed & sent" ? "Working…" : "Close & send"}
+            <Button size="sm" loading={busy === "Closed & sent"} disabled={!!busy} onClick={() => act("Closed & sent", `${base}/close`, { send: true })}>
+              Close & send
             </Button>
-            <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => act("Closed", `${base}/close`, {})}>
+            <Button size="sm" variant="ghost" loading={busy === "Closed"} disabled={!!busy} onClick={() => act("Closed", `${base}/close`, {})}>
               Close only
             </Button>
           </>
@@ -361,6 +374,7 @@ function StatementDetail({ payerId, statement, onChanged }) {
           <Button
             size="sm"
             variant="ghost"
+            loading={busy === "Sent"}
             disabled={!!busy}
             // A first delivery (finalized) sends `force` so a blocked/suppressed
             // attempt can be retried after AP fixes the bounce — otherwise it
@@ -380,7 +394,7 @@ function StatementDetail({ payerId, statement, onChanged }) {
           </Button>
         )}
         {status === "paid" && (
-          <span className="text-12 text-zinc-500">Settled {statement.paid_at ? `on ${dateInET(statement.paid_at)}` : ""}.</span>
+          <span className="text-ui-caption text-ink-secondary">Settled {statement.paid_at ? `on ${dateInET(statement.paid_at)}` : ""}.</span>
         )}
       </div>
 
@@ -389,18 +403,20 @@ function StatementDetail({ payerId, statement, onChanged }) {
           total={statement.total}
           busy={busy}
           onCancel={() => setReconcileOpen(false)}
-          onSubmit={(method, amount) =>
-            act("Payment recorded", `${base}/reconcile`, { method, amount }).then(() => setReconcileOpen(false))
-          }
+          onSubmit={async (method, amount) => {
+            const saved = await act("Payment recorded", `${base}/reconcile`, { method, amount });
+            if (saved) setReconcileOpen(false);
+          }}
         />
       )}
 
+      {sequenceError && <ActionFeedback error onRetry={loadDetail} className="mt-3">{sequenceError}</ActionFeedback>}
       {showDunning && (
         <DunningControls base={base} sequence={sequence} busy={busy} act={act} />
       )}
 
       {notice && (
-        <p className={`text-12 mt-2 ${notice.tone === "err" ? "text-alert-fg" : "text-zinc-500"}`}>{notice.text}</p>
+        <ActionFeedback error={notice.tone === "err"} className="mt-3">{notice.text}</ActionFeedback>
       )}
     </div>
   );
@@ -416,33 +432,31 @@ function ReconcileForm({ total, busy, onCancel, onSubmit }) {
   const parsed = parseFloat(amount);
   const valid = Number.isFinite(parsed) && parsed > 0;
   return (
-    <div className="mt-2 p-2 border-hairline rounded-sm bg-white flex flex-wrap items-end gap-2">
-      <label className="block">
-        <span className="block text-11 text-zinc-500 mb-1">Method</span>
+    <fieldset disabled={!!busy} className="min-w-0 m-0 mt-3 p-4 border-hairline border-zinc-200 rounded-md bg-white flex flex-wrap items-end gap-3">
+      <Field label="Method" className="w-full sm:w-auto">
         <Select value={method} onChange={(e) => setMethod(e.target.value)}>
           <option value="check">Check</option>
           <option value="ach">ACH / bank transfer</option>
           <option value="wire">Wire</option>
           <option value="offline">Other (offline)</option>
         </Select>
-      </label>
-      <label className="block">
-        <span className="block text-11 text-zinc-500 mb-1">Amount</span>
+      </Field>
+      <Field label="Amount" error={!valid ? "Enter a positive amount to record payment." : undefined} className="w-full sm:w-40">
         <Input
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
           inputMode="decimal"
-          className="w-28"
+          className="u-nums"
           aria-invalid={!valid}
         />
-      </label>
-      <Button size="sm" disabled={!!busy || !valid} onClick={() => valid && onSubmit(method, parsed)}>
-        {busy === "Payment recorded" ? "Recording…" : "Record"}
+      </Field>
+      <Button size="sm" loading={busy === "Payment recorded"} disabled={!!busy || !valid} onClick={() => valid && onSubmit(method, parsed)}>
+        Record
       </Button>
       <Button size="sm" variant="ghost" disabled={!!busy} onClick={onCancel}>
         Cancel
       </Button>
-    </div>
+    </fieldset>
   );
 }
 
@@ -451,7 +465,7 @@ function DunningControls({ base, sequence, busy, act }) {
   return (
     <div className="mt-2 pt-2 border-t border-zinc-100">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-12 text-zinc-500">
+        <span className="text-ui-caption text-ink-secondary">
           Reminders:{" "}
           {st === "paused"
             ? "paused"
@@ -463,20 +477,20 @@ function DunningControls({ base, sequence, busy, act }) {
             ? `active${sequence?.next_step_label ? ` · next: ${sequence.next_step_label}` : ""}`
             : "not started"}
         </span>
-        <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => act("Reminder sent", `${base}/followups/send-now`, {})}>
+        <Button size="sm" variant="ghost" loading={busy === "Reminder sent"} disabled={!!busy} onClick={() => act("Reminder sent", `${base}/followups/send-now`, {})}>
           Send reminder now
         </Button>
         {st === "paused" ? (
-          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => act("Reminders resumed", `${base}/followups/resume`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders resumed"} disabled={!!busy} onClick={() => act("Reminders resumed", `${base}/followups/resume`, {})}>
             Resume
           </Button>
         ) : st !== "stopped" && st !== "completed" ? (
-          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => act("Reminders paused", `${base}/followups/pause`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders paused"} disabled={!!busy} onClick={() => act("Reminders paused", `${base}/followups/pause`, {})}>
             Pause
           </Button>
         ) : null}
         {st !== "stopped" && (
-          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => act("Reminders stopped", `${base}/followups/stop`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders stopped"} disabled={!!busy} onClick={() => act("Reminders stopped", `${base}/followups/stop`, {})}>
             Stop
           </Button>
         )}
@@ -486,9 +500,9 @@ function DunningControls({ base, sequence, busy, act }) {
 }
 
 function ArSummary({ summary }) {
-  if (!summary) return <p role="alert" className="text-13 text-alert-fg py-2">Payer aging is unavailable.</p>;
+  if (!summary) return <ActionFeedback error>Payer aging is unavailable.</ActionFeedback>;
   if (summary.statement_count === 0) {
-    return <p className="text-13 text-zinc-400 py-2">No outstanding balance.</p>;
+    return <p className="text-ui-body text-ink-secondary py-2">No outstanding balance.</p>;
   }
   const buckets = summary.buckets || {};
   const rows = [
@@ -508,11 +522,11 @@ function ArSummary({ summary }) {
           <Stat label="Oldest past due" value={`${summary.oldest_days_past_due}d`} alert />
         )}
       </div>
-      <div className="border-hairline rounded-sm overflow-hidden">
+      <div className="border-hairline border-zinc-200 rounded-md overflow-hidden">
         {rows.map(([label, b], i) => (
           <div
             key={label}
-            className={`flex items-center justify-between gap-3 px-3 py-1.5 text-12 ${i % 2 ? "bg-zinc-50/60" : ""}`}
+            className={`flex items-center justify-between gap-3 px-3 py-2 text-ui-caption u-nums ${i % 2 ? "bg-zinc-50/60" : ""}`}
           >
             <span className="text-zinc-600">{label}</span>
             <span className={`${i >= 2 && b?.total > 0 ? "text-alert-fg" : "text-zinc-700"}`}>
@@ -528,8 +542,8 @@ function ArSummary({ summary }) {
 function Stat({ label, value, alert }) {
   return (
     <div>
-      <div className="text-11 text-zinc-500 uppercase tracking-label">{label}</div>
-      <div className={`text-16 font-medium ${alert ? "text-alert-fg" : "text-zinc-900"}`}>{value}</div>
+      <div className="text-ui-caption text-ink-secondary font-medium">{label}</div>
+      <div className={`text-18 leading-[1.35] font-medium u-nums ${alert ? "text-alert-fg" : "text-zinc-900"}`}>{value}</div>
     </div>
   );
 }
