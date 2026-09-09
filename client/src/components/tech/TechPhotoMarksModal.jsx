@@ -21,6 +21,7 @@
 // placed.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import useModalFocus from '../../hooks/useModalFocus';
 // The SHARED palette (codex P1). A local copy made the comment below a lie:
 // a correction to markColor would have updated the live card and the PDF and
 // left the capture UI showing the technician different colours from the ones
@@ -56,6 +57,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
   const imgRef = useRef(null);
   const pressRef = useRef(null);
   const removedRef = useRef(false);
+  const dialogRef = useModalFocus(true, () => { if (!saving) onClose(); });
 
   const authHeaders = () => {
     const token = getAdminAuthToken();
@@ -150,7 +152,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
   };
 
   const chipStyle = (on) => ({
-    fontSize: 13, padding: '7px 11px', borderRadius: 999,
+    minHeight: 48, minWidth: 48, fontSize: 14, padding: '7px 11px', borderRadius: 999,
     border: `1px solid ${on ? DARK.teal : DARK.border}`,
     background: on ? DARK.teal : DARK.card,
     color: on ? '#04222f' : DARK.text,
@@ -168,26 +170,30 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
       style={{
         position: 'fixed', inset: 0, zIndex: 1001, background: 'rgba(4,10,16,.72)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14,
+        paddingTop: 'calc(14px + env(safe-area-inset-top, 0px))',
+        paddingBottom: 'calc(14px + env(safe-area-inset-bottom, 0px))',
+        paddingLeft: 'calc(14px + env(safe-area-inset-left, 0px))',
+        paddingRight: 'calc(14px + env(safe-area-inset-right, 0px))',
       }}
       role="dialog"
       aria-modal="true"
       aria-label="Mark treated spots"
     >
-      <div style={{
+      <div ref={dialogRef} style={{
         background: DARK.bg, border: `1px solid ${DARK.border}`, borderRadius: 14,
-        padding: 14, width: '100%', maxWidth: 420, maxHeight: '92vh', overflowY: 'auto',
+        padding: 14, width: '100%', maxWidth: 420, maxHeight: '100%', overflowY: 'auto',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 11 }}>
           <span style={{ color: DARK.text, fontWeight: 650, fontSize: 15 }}>Mark treated spots</span>
-          <span style={{ color: DARK.muted, fontSize: 12 }}>
+          <span style={{ color: DARK.muted, fontSize: 14 }}>
             {marks.length} {marks.length === 1 ? 'mark' : 'marks'}
           </span>
         </div>
 
-        {loading && <p style={{ color: DARK.muted, fontSize: 13 }}>Loading…</p>}
+        {loading && <p style={{ color: DARK.muted, fontSize: 14 }}>Loading…</p>}
 
         {!loading && !kinds.length && (
-          <p style={{ color: DARK.muted, fontSize: 13 }}>
+          <p style={{ color: DARK.muted, fontSize: 14 }}>
             This service does not use treated-point marks.
           </p>
         )}
@@ -239,7 +245,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
                     minWidth: 25, height: 25, padding: '0 6px', borderRadius: 999,
                     border: '2px solid rgba(255,255,255,.94)',
                     background: markColor(mark.kind),
-                    color: '#fff', fontSize: 12, fontWeight: 600, lineHeight: 1,
+                    color: '#fff', fontSize: 14, fontWeight: 600, lineHeight: 1,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     boxShadow: '0 2px 7px rgba(6,16,24,.5)',
                   }}
@@ -264,12 +270,12 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
             </div>
 
             {imageFailed && (
-              <p style={{ color: DARK.red, fontSize: 13, marginTop: 10 }}>
+              <p style={{ color: DARK.red, fontSize: 14, marginTop: 10 }}>
                 This photo could not be loaded, so marks can&apos;t be placed on it.
                 Close and reopen to try again.
               </p>
             )}
-            <p style={{ color: DARK.muted, fontSize: 12, marginTop: 10 }}>
+            <p style={{ color: DARK.muted, fontSize: 14, marginTop: 10 }}>
               Tap to add · hold a mark to remove
               {marks.length >= maxMarks ? ` · limit ${maxMarks} reached` : ''}
             </p>
@@ -277,7 +283,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
         )}
 
         {errorMsg && (
-          <p style={{ color: DARK.red, fontSize: 13, marginTop: 10 }}>{errorMsg}</p>
+          <p style={{ color: DARK.red, fontSize: 14, marginTop: 10 }}>{errorMsg}</p>
         )}
 
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
@@ -288,7 +294,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
             onClick={onClose}
             disabled={saving}
             style={{
-              flex: 1, padding: 10, borderRadius: 8, fontSize: 13.5, fontWeight: 600,
+              flex: 1, minHeight: 48, padding: 10, borderRadius: 8, fontSize: 14, fontWeight: 600,
               border: `1px solid ${DARK.border}`, background: 'transparent',
               color: DARK.text, cursor: 'pointer',
             }}
@@ -300,7 +306,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
             onClick={save}
             disabled={saving || loading || !kinds.length || imageFailed}
             style={{
-              flex: 1, padding: 10, borderRadius: 8, fontSize: 13.5, fontWeight: 600,
+              flex: 1, minHeight: 48, padding: 10, borderRadius: 8, fontSize: 14, fontWeight: 600,
               border: `1px solid ${DARK.teal}`, background: DARK.teal,
               color: '#04222f', cursor: saving ? 'wait' : 'pointer',
             }}
