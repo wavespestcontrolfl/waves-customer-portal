@@ -45,6 +45,8 @@ test.each([
   'We manage several rentals and can fill your schedule; please quote pest control',
   'Can you quote termite service? I can connect you with the property manager for access.',
   'Pest control service is being requested by the tenant; can you quote it?',
+  'I have two leads for you: my neighbors both need pest control. Can you quote them?',
+  'I have more lawn leads for you from my neighbors. Can you quote them?',
 ])('ambiguous service requests reach the bounded model: %s', async (body) => {
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
   expect(await screenInboundSms({ body })).toMatchObject({ solicitation: false, method: 'model', mode: 'shadow' });

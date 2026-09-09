@@ -113,8 +113,8 @@ test('a shadow pitch stays unread, records its verdict, and follows ordinary est
   expect(sendSMS).toHaveBeenCalledTimes(1);
 });
 
-test.each([PITCH, "Please stop texting me. I don't have any leads for you."])(
-  'shadow metadata preserves the existing opt-out response and suppression: %s', async (body) => {
+test.each([[PITCH, true], ["Please stop texting me. I don't have any leads for you.", false]])(
+  'shadow metadata preserves the existing opt-out response and suppression: %s', async (body, solicitation) => {
     const res = await receive(body);
     expect(res.body).toContain('<Message>');
     expect(res.body).toContain('unsubscribed');
@@ -122,7 +122,7 @@ test.each([PITCH, "Please stop texting me. I don't have any leads for you."])(
     expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
     const row = mockWrites.find(({ table }) => table === 'sms_log').row;
     expect(row.message_type).toBe('opt_out');
-    expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: true, mode: 'shadow' });
+    expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation, mode: 'shadow' });
   },
 );
 
