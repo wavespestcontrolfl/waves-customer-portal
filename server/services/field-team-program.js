@@ -86,9 +86,17 @@ async function saveAllocation(input, actor) {
   if (data.coverage_end < data.coverage_start) reject('Coverage must end on or after it begins.');
   if (data.credit_type === 'specialty' && data.planned_visits !== 1) reject('Record separately priced work as one defined allocation.');
   return db.transaction(async trx => {
-    if (!await trx('customers').where({ id: data.customer_id }).forUpdate().first('id')) reject('Customer not found.', 404);
+    const customer = await trx('customers').where({ id: data.customer_id }).forUpdate().first('id', 'deleted_at');
+    if (!customer) reject('Customer not found.', 404);
     const prior = await replay(trx, 'field_credit_allocations', data, actor);
     if (prior) return calendarRow(prior, ['coverage_start', 'coverage_end']);
+    // A merged-away account keeps its row with deleted_at set. Allocations live
+    // on the surviving account so the overlap check sees the whole family.
+    if (customer.deleted_at) {
+      const merge = await trx('customer_merge_journal').where({ loser_customer_id: data.customer_id }).whereNull('undone_at').first('winner_customer_id');
+      if (merge) reject('This customer was merged into another account. Record the allocation on the surviving account.', 409);
+      reject('Customer not found.', 404);
+    }
     if (!await trx('services').where({ service_key: data.service_key }).first('id')) reject('Service key not found.', 404);
     if (data.property_id && !await trx('customer_properties').where({ id: data.property_id, customer_id: data.customer_id }).first('id')) reject('The property does not belong to this customer.');
     const owners = await allocationCustomers(trx, data.customer_id);
@@ -114,10 +122,22 @@ async function allocationCustomers(conn, customerId) {
 
 async function visitFacts(conn, id, lock = false) {
   const query = conn('scheduled_services').where({ id });
-  const visit = await (lock ? query.forUpdate() : query).first('id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_key_snapshot', 'service_type', 'scheduled_date', 'status', 'is_callback');
+  const visit = await (lock ? query.forUpdate() : query).first('id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_key_snapshot', 'service_type', 'scheduled_date', 'status', 'is_callback', 'completed_at', 'actual_end_time', 'actual_start_time');
   if (!visit) reject('Service not found.', 404);
   const catalog = visit.service_id ? await conn('services').where({ id: visit.service_id }).first('service_key') : null;
   return { ...calendarRow(visit, ['scheduled_date']), service_key: visit.service_key_snapshot || catalog?.service_key || null, service_date: dateOnly(visit.scheduled_date) };
+}
+
+// The recorded completion instant orders two services that share a calendar
+// date. Without one on both, same-day ordering cannot be established.
+function completionInstant(visit) {
+  const value = visit.completed_at || visit.actual_end_time || visit.actual_start_time;
+  return value ? new Date(value).getTime() : null;
+}
+function returnedAfter(returned, visit) {
+  if (returned.service_date !== visit.service_date) return returned.service_date > visit.service_date;
+  const [later, earlier] = [completionInstant(returned), completionInstant(visit)];
+  return later != null && earlier != null && later > earlier;
 }
 
 async function validateServiceEvidence(conn, data, visit, last) {
@@ -140,13 +160,15 @@ async function validateServiceEvidence(conn, data, visit, last) {
   ];
   for (const [required, reference, message] of references) if (required && !reference) reject(message);
   if (data.cutoff_at && [new Date(data.cutoff_at) > new Date(), etDateString(new Date(data.cutoff_at)) < visit.service_date].some(Boolean)) reject('The cutoff must be on or after the service date and no later than now.');
-  let returned = null;
-  if (data.return_service_id) {
-    returned = await visitFacts(conn, data.return_service_id);
-    const sameScope = !!visit.service_key && ['customer_id', 'property_id', 'service_key'].every(key => returned[key] === visit[key]);
-    if ([returned.id === visit.id, !sameScope, returned.service_date < visit.service_date, returned.status !== 'completed'].some(Boolean)) reject('The qualifying return must be a completed later service for the same property and service key.');
-  }
   if (data.rework_outcome === 'no_return' && data.return_service_id) reject('A no-return finding cannot include a qualifying return.');
+  return data.return_service_id ? qualifyingReturn(conn, data.return_service_id, visit) : null;
+}
+
+async function qualifyingReturn(conn, id, visit) {
+  const returned = await visitFacts(conn, id, true);
+  const sameScope = !!visit.service_key && ['customer_id', 'property_id', 'service_key'].every(key => returned[key] === visit[key]);
+  if ([returned.id === visit.id, !sameScope, returned.status !== 'completed'].some(Boolean)) reject('The qualifying return must be a completed later service for the same property and service key.');
+  if (!returnedAfter(returned, visit)) reject('The qualifying return must be completed after the original service. Same-day services need recorded completion times that establish the order.');
   return returned;
 }
 
@@ -169,6 +191,10 @@ async function saveServiceEvidence(input, actor) {
   requireManager(actor);
   const data = validate(schemas.evidence, input);
   return db.transaction(async trx => {
+    // Lock the original and its qualifying return together, in id order, so a
+    // concurrent reschedule cannot slip past validation and crossed pairs cannot deadlock.
+    const locked = [...new Set([data.service_id, data.return_service_id].filter(Boolean))].sort();
+    await trx('scheduled_services').whereIn('id', locked).orderBy('id').forUpdate().select('id');
     const visit = await visitFacts(trx, data.service_id, true);
     const prior = await replay(trx, 'field_service_evidence', data, actor);
     if (prior) return calendarRow(prior, ['service_date']);
@@ -280,7 +306,7 @@ async function missingServices(conn, technicianId, range, evidence) {
     .where('scheduled_date', '>=', range.start).where('scheduled_date', '<', range.end)
     .where(q => q.where('status', 'completed').orWhereNotNull('actual_end_time').orWhereNotNull('completed_at'))
     .whereNotIn('id', evidence.map(row => row.service_id))
-    .select('id', 'service_type', 'scheduled_date', 'status').orderBy('scheduled_date').limit(5001);
+    .select('id', 'service_type', 'scheduled_date', 'status').orderBy('scheduled_date').orderBy('id').limit(5001);
   if (rows.length > 5000) reject('Too many services without evidence to calculate this period.', 409);
   return rows.map(row => ({ ...row, scheduled_date: dateOnly(row.scheduled_date) }));
 }
