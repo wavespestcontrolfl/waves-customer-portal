@@ -25,14 +25,16 @@ The application already uses React 18, Vite 5, Tailwind 3, and JSX. This change 
 
 | Layer | Existing source of truth | Decision for this proof |
 | --- | --- | --- |
-| Semantic styles | `client/tailwind.config.js`, shared CSS, admin Roboto override in `client/src/index.css` | Retain existing tokens and typography; scope the reference layout styles to the customer workspace |
-| Shared controls | `client/src/components/ui/`: Button, Input, Select, Checkbox, Radio, Switch, Textarea, Badge, Card, Table, Dialog, Sheet, Tabs | Reuse the Waves controls |
+| Semantic styles | `client/tailwind.config.js`, `client/src/styles/ui-workspace.css`, admin Roboto override in `client/src/index.css` | Shared comfortable density, sentence-case controls, and semantic type tokens; only customer layout and domain indicators remain local |
+| Shared controls | `client/src/components/ui/`: UiSurface, Field, ActionFeedback, Button, Input, Select, Checkbox, Radio, Switch, Textarea, Badge, Card, Table, Dialog, Sheet, Tabs | Reuse the Waves controls and the explicit density/section/table patterns in the admin contract |
 | Component catalog | `client/src/pages/admin/_DesignSystemPage.jsx`, at `/admin/_design-system` in development | Keep this as the single control catalog; do not create a competing Storybook/catalog in the pilot |
 | Page patterns | AdminLayoutV2, AdminCommandHeader, Customer360Sections, Customer360Activity, existing customer forms | Extend existing patterns, with CustomerDirectoryTable as the directory composition |
 | Accessible primitives | Existing native controls and Waves Dialog/Sheet/Tabs behavior | No Base UI, Radix, or shadcn package is currently installed; no new primitive is required for this proof |
 | Types | Existing JavaScript/JSX application | TypeScript remains an incremental follow-up: establish tooling first, then type shared props and response boundaries as components are touched |
 
 The user's proposed shadcn/Base UI foundation is a possible later addition for a demonstrated control gap. Working controls do not need replacement to apply this layout. [shadcn's Base UI announcement](https://ui.shadcn.com/docs/changelog/2026-07-base-ui-default) also retains Radix support; the default change does not require migrating an existing system. Estimate creation and technician job layouts remain subsequent reference implementations after the Customers proof is accepted.
+
+The [admin consistency contract](admin-ui-consistency-contract.md) now governs the reusable presentation; a new page does not need customer-specific CSS for controls. The [September 8 acceptance record](https://github.com/wavespestcontrolfl/waves-customer-portal/blob/459285f2c89e62cbeefbafc86bd7650bfa879284/docs/design/admin-foundation-acceptance-2026-09-08.md) separates the local foundation checks, existing refactor dependency, and the subsequent Estimate/Tech workflow proofs. Catalog form compositions demonstrate primitive reuse; they do not establish pricing, offline completion, sync, or production readiness for those workflows.
 
 ## Messaging and unread count
 
@@ -63,3 +65,11 @@ Focused client checks cover section navigation, directory/filter/edit state, pro
 Browser verification uses synthetic fixtures with backend/provider requests intercepted. Desktop Chromium and mobile/tablet WebKit checks exercise the directory, menus, editing, four sections, billing links, contract expansion and draft retention, messaging tools, history search, filters, and overflow. Desktop and mobile screenshots accompany the PR. The shared static preview contains fictional records and is separate from the portal deployment.
 
 No customer messages, provider AI calls, or charges are performed during verification. Device speech recognition and the installed iPhone home-screen experience still require an on-device check. The layout is the default at `/admin/customers`, including existing customer deep links. `customer360=workspace` links remain valid; use `customer360=overlay` to return to the existing profile presentation. Read-side additions and directory health consolidation apply to the existing Customers route.
+
+### Shared foundation browser runner
+
+Provision Chromium and WebKit once with `npx playwright install --with-deps chromium webkit`; installing the npm dependencies does not install browser binaries.
+
+`node scripts/qa/customer360-foundation.cjs` runs the actual Customer 360 route with synthetic API fixtures in desktop Chromium and touch WebKit. It also accepts the URL of this worktree's managed frontend. Reports and screenshots are written to `.tmp/design-system/customer360/`; the report identifies its source checkout and records the run outcome. The shared font loader must succeed before captures. Failures retain a failed report while browser and preview-server cleanup are attempted.
+
+The foundation composition source `29193ab937e71caebb3081fc39e8045763ec667b` passed the production build and full browser flow: directory edit, workspace navigation, retained edit state, message drafts, Quick Links Escape/focus return, message-drawer focus return, and the overlay/payer forms. Its composition predecessor passed 162 affected tests; the integrated editor-copy correction passed 18 page tests. Browser fixtures made only synthetic read acknowledgments, with no page errors, unmatched requests or horizontal overflow. These are frontend results; final-head CI and the physical-device check are tracked separately.
