@@ -1167,6 +1167,7 @@ module.exports = {
   buildDiagnosis,
   buildReconciliationFlags,
   buildTreatmentRationale,
+  buildWatchItems,
   buildWateringPlan,
   classifyReleaseMode,
   applyAutoReleaseRepair,

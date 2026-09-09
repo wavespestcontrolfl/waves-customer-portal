@@ -1,0 +1,156 @@
+/** Resolve technician evidence and treatment reconciliation from validated review inputs. */
+const { SUMMARY_CAUSE_RE, safeConditionLabel, normalizeProducts, buildTreatmentRationale, buildReconciliationFlags, buildWatchItems } = require('./lawn-diagnostic-report');
+const { NO_STRESS_LABEL } = require('./lawn-visit-result');
+const { safeConfirmationStep } = require('./lawn-visit-customer-copy');
+const { mergedReviewInputs, technicianFindingIds, storedTechnicianHighWater, parseJsonArray, parseJsonObject } = require('./lawn-visit-review-input');
+
+// A technician-added detail becomes a finding of its own: moderate at most
+// (the diagnostic tool's evidence rule — no cause above moderate without a
+// structured field check), evidence = the note itself. A NEGATED detail
+// ("Checked for chinch bugs; none found") is the technician ruling a cause
+// OUT: it keeps its text in the review but carries the clean-lawn label, so
+// it never reconciles as the positive condition or raises a "chinch bug
+// activity: monitor response" watch item (Codex #4149 r11). The label
+// mapper handles a LEADING negation only.
+const NEGATED_DETAIL_RE = /\b(?:none|nothing|no|without|not\s+(?:found|seen|present|observed|detected|evident|visible|active|confirmed)|absent|negative|unlikely|excluded|ruled\s+out|did\s*n[o']t\s+(?:find|see|observe|detect|notice)|couldn['’]?t\s+(?:find|see|confirm)|clear\s+of|free\s+of)\b/i;
+// Negation is scoped to the CLAUSE it sits in ("No signs of drought; chinch
+// bugs confirmed by float test" rules drought out and confirms chinch): the
+// detail is negated only when every cause-bearing clause is, and a positive
+// clause names the finding (Codex #4149 r12).
+const CLAUSE_SPLIT_RE = /[;.!?]|\b(?:but|while|though|although|however)\b/i;
+function detailClauses(text) {
+  return String(text || '').split(CLAUSE_SPLIT_RE).map((clause) => clause.trim()).filter(Boolean);
+}
+// Cause clauses with their negation resolved: a negation in the clause
+// itself, or a negation-only clause right after it ("Checked for chinch
+// bugs; none found") — that clause answers the one before. A clause that
+// names MORE THAN ONE cause is split on commas / and / or into one part per cause
+// ("Drought ruled out and chinch bugs confirmed by float test"), and a part
+// with neither a negation nor a positive marker takes the polarity of the
+// nearest part that has one — the following part first ("chinch and grubs
+// ruled out"), then the preceding ("no signs of chinch or grubs") — so a
+// negation binds to the mentions it governs, not the whole clause (Codex
+// #4149 r13).
+const POSITIVE_MARKER_RE = /\b(?:confirmed|confirms?|active|present|found|seen|observed|visible|spreading|heavy|evident|positive|detected|noted)\b/i;
+function causePartsOf(clause) {
+  const mentions = (String(clause).match(new RegExp(SUMMARY_CAUSE_RE.source, 'gi')) || []).length;
+  const parts = mentions > 1 ? clause.split(/,|\b(?:and|or)\b/i).map((part) => part.trim()).filter(Boolean) : [clause];
+  const entries = parts.map((part) => ({ clause: part, cause: SUMMARY_CAUSE_RE.test(part), negation: NEGATED_DETAIL_RE.test(part), positive: POSITIVE_MARKER_RE.test(part) }));
+  entries.forEach((entry, index) => {
+    if (!entry.cause || entry.negation || entry.positive) return;
+    const marked = entries.slice(index + 1).find((other) => other.negation || other.positive) || [...entries.slice(0, index)].reverse().find((other) => other.negation || other.positive);
+    if (marked) entry.negation = marked.negation;
+  });
+  return entries;
+}
+function causeClausesOf(text) {
+  const clauses = [];
+  for (const clause of detailClauses(text)) {
+    // Attach an answer such as "none found" before splitting a compound
+    // subject, so it also answers "checked for chinch bugs and grubs".
+    if (clauses.length && !SUMMARY_CAUSE_RE.test(clause) && NEGATED_DETAIL_RE.test(clause)) clauses[clauses.length - 1] += ` ${clause}`;
+    else clauses.push(clause);
+  }
+  return clauses.flatMap(causePartsOf).filter((entry) => entry.cause);
+}
+function technicianFinding(detail, findingId) {
+  const causeClauses = causeClausesOf(detail.text);
+  const positive = causeClauses.filter((entry) => !entry.negation).map((entry) => entry.clause);
+  const negatedCause = causeClauses.length > 0 && positive.length === 0;
+  const label = negatedCause ? NO_STRESS_LABEL : safeConditionLabel(positive.length ? positive.join('; ') : detail.text, 'moderate');
+  const negated = negatedCause || label === NO_STRESS_LABEL; // a leading "No …" the mapper already reads as clean
+  return {
+    finding_id: findingId,
+    name: detail.text,
+    confidence: 'moderate',
+    severity: 'moderate',
+    spread_risk: 'unknown',
+    estimated_area_affected: null,
+    urgency: 'monitor',
+    observed_evidence: [detail.text],
+    inferred_context: [],
+    negative_evidence: [],
+    confirmation_step: '',
+    customer_wording: null,
+    photo_refs: [],
+    zone: detail.zone || 'unknown',
+    can_determine: true,
+    cannot_determine_reason: '',
+    label,
+    negated,
+    source: 'technician',
+    keep: true,
+    tech_note: null,
+  };
+}
+
+/**
+ * Apply the review to the run's findings and reconcile the kept ones against
+ * the products the technician confirmed — deterministic, from the diagnostic
+ * tool's own builders. Products absent → every finding reads untreated, which
+ * is the honest state until the completion records what was applied.
+ */
+function buildReview(run, rawReview = {}) {
+  const review = mergedReviewInputs(run, rawReview);
+  const byId = new Map(review.reviewedFindings.map((entry) => [entry.finding_id, entry]));
+  const reviewed = parseJsonArray(run?.findings).map((finding) => {
+    const entry = byId.get(String(finding.finding_id));
+    // A technician rename is already a canonical allowlisted label
+    // (validateReview) — it IS the label; re-mapping it through the pattern
+    // list would turn "general lawn stress" into "color stress". The
+    // confidence behind it is the technician's, not the model's: moderate,
+    // the same ceiling a technician-added finding gets (no cause above
+    // moderate without a structured field check) — a rename never publishes
+    // a cause on a low / unknown-confidence read, and never inherits the
+    // model's high confidence for a cause the model did not name (Codex
+    // #4149 r6).
+    const name = entry?.name || finding.name;
+    return {
+      ...finding,
+      name,
+      confidence: entry?.name ? 'moderate' : finding.confidence,
+      // An unrenamed finding keeps the label the run stored at assessment
+      // time (provenance) — never re-mapped by whatever the pattern list says
+      // at confirmation; a stored run without one (never the case for a run
+      // this module wrote) is mapped once here.
+      label: entry?.name ? entry.name : (finding.label || safeConditionLabel(finding.name, finding.confidence)),
+      keep: entry ? entry.keep !== false : true,
+      tech_note: entry?.tech_note || null,
+      // Rename intent, persisted: a follow-up that omits reviewedFindings
+      // restores the rename (and its technician confidence) only where one
+      // happened.
+      renamed: !!entry?.name,
+      source: finding.source || 'model',
+    };
+  });
+  const storedReconciliation = parseJsonObject(run?.reconciliation);
+  const { ids, highWater } = technicianFindingIds(review.addedDetails, parseJsonArray(run?.added_details), storedTechnicianHighWater(storedReconciliation));
+  const added = review.addedDetails.map((detail, index) => technicianFinding(detail, ids[index]));
+  // The reconciliation builders interpolate finding NAMES into customer-facing
+  // copy (customer_explanation, watch items, flag wording), so they only ever
+  // see the allowlisted label — never the model's or the technician's raw
+  // text. A clean-lawn finding ("No major visible stress") is not a condition
+  // a product treats — it stays in the review, out of the reconciliation.
+  const reconcilable = [...reviewed.filter((finding) => finding.keep), ...added]
+    .filter((finding) => finding.label !== NO_STRESS_LABEL)
+    .map((finding) => ({ ...finding, name: finding.label, confirmation_step: safeConfirmationStep(finding.confirmation_step, finding) }));
+  const products = normalizeProducts(review.appliedProducts);
+  const treatmentRationale = buildTreatmentRationale({ products, findings: reconcilable });
+  const flags = buildReconciliationFlags({ findings: reconcilable, products, treatmentRationale });
+  return {
+    reviewed_findings: reviewed,
+    added_details: added,
+    reconciliation: {
+      products,
+      treatment_rationale: treatmentRationale,
+      flags,
+      watch_items: buildWatchItems(reconcilable, flags),
+      // The highest technician finding number ever assigned on this run —
+      // read back by the next follow-up so a number is never reused.
+      technician_finding_high_water: highWater,
+      computed_at: new Date().toISOString(),
+    },
+  };
+}
+
+module.exports = { buildReview };
