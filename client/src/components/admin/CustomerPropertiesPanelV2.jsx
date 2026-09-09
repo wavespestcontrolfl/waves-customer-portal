@@ -66,9 +66,11 @@ export default function CustomerPropertiesPanelV2({
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
   const [rowBusy, setRowBusy] = useState(null);
+  const rowMutationSeq = useRef(0);
   const [rowErr, setRowErr] = useState("");
   const [canChangePrimary, setCanChangePrimary] = useState(false);
   const [primaryPreview, setPrimaryPreview] = useState(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
   const primaryPreviewSeq = useRef(0);
   const activeCustomer = useRef(customerId);
   activeCustomer.current = customerId;
@@ -77,7 +79,14 @@ export default function CustomerPropertiesPanelV2({
   // ONE write lock for additions and row edits: every response replaces the
   // whole list, so an overlapping POST and PATCH could let an older snapshot
   // land last and hide the new row / revert the edit.
-  const writeBusy = saving || !!rowBusy;
+  const writeBusy = saving || !!rowBusy || previewBusy;
+
+  useEffect(() => {
+    rowMutationSeq.current += 1;
+    setRowBusy(null);
+    setRowErr("");
+    return () => { rowMutationSeq.current += 1; };
+  }, [customerId]);
 
   useEffect(() => {
     primaryPreviewSeq.current += 1;
@@ -87,9 +96,8 @@ export default function CustomerPropertiesPanelV2({
     setLoadErr("");
     setCanChangePrimary(false);
     setPrimaryPreview(null);
-    // A request still in flight for the previous customer must not keep this
-    // customer's controls disabled, and must not clear its own busy state later.
-    setRowBusy(null);
+    // A refreshed preview is obsolete; an in-flight write still owns its lock.
+    setPreviewBusy(false);
     adminFetch(`/admin/customers/${customerId}/properties`)
       .then((d) => {
         if (!cancelled) {
@@ -161,6 +169,7 @@ export default function CustomerPropertiesPanelV2({
   // All row controls are disabled while rowBusy is set (see below).
   const patchRow = async (propertyId, patch) => {
     if (writeBusy) return;
+    const seq = ++rowMutationSeq.current;
     setRowBusy(propertyId);
     setRowErr("");
     try {
@@ -168,11 +177,11 @@ export default function CustomerPropertiesPanelV2({
         `/admin/customers/${customerId}/properties/${propertyId}`,
         { method: "PATCH", body: JSON.stringify(patch) },
       );
-      setProperties(Array.isArray(d.properties) ? d.properties : []);
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setProperties(Array.isArray(d.properties) ? d.properties : []);
     } catch (err) {
-      setRowErr(err.message || "Could not update property");
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowErr(err.message || "Could not update property");
     } finally {
-      if (activeCustomer.current === customerId) setRowBusy(null);
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
@@ -189,7 +198,7 @@ export default function CustomerPropertiesPanelV2({
   const previewPrimary = async (propertyId) => {
     if (writeBusy) return;
     const seq = ++primaryPreviewSeq.current;
-    setRowBusy(propertyId);
+    setPreviewBusy(true);
     setRowErr("");
     try {
       const preview = await adminFetch(`/admin/customers/${customerId}/properties/${propertyId}/primary-preview`);
@@ -197,31 +206,32 @@ export default function CustomerPropertiesPanelV2({
     } catch (err) {
       if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setRowErr(err.message || "Could not preview the primary change");
     } finally {
-      if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setRowBusy(null);
+      if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setPreviewBusy(false);
     }
   };
 
   const confirmPrimary = async () => {
     if (writeBusy || !primaryPreview || primaryPreview.customerId !== customerId) return;
+    const seq = ++rowMutationSeq.current;
     setRowBusy(primaryPreview.propertyId);
     setRowErr("");
     try {
       const d = await adminFetch(`/admin/customers/${customerId}/properties/${primaryPreview.propertyId}/primary`, {
         method: "POST", body: JSON.stringify({ expectedVersion: primaryPreview._version }),
       });
-      if (activeCustomer.current !== customerId) return;
+      if (seq !== rowMutationSeq.current || activeCustomer.current !== customerId) return;
       setProperties(Array.isArray(d.properties) ? d.properties : []);
       setPrimaryPreview(null);
       if (typeof onChanged === "function") {
         try { await onChanged(); } catch { /* saved list is already current */ }
       }
     } catch (err) {
-      if (activeCustomer.current === customerId) {
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) {
         setPrimaryPreview(null);
         setRowErr(err.message || "Could not change the primary property. Refresh to check its saved state.");
       }
     } finally {
-      if (activeCustomer.current === customerId) setRowBusy(null);
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
