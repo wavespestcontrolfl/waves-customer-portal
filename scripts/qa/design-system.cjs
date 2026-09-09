@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { webkit } = require("playwright");
-const { previewServer, launchBrowser, evidence } = require("./browser");
+const { previewServer, launchBrowser, evidence, waitForFonts } = require("./browser");
 const root = path.resolve(__dirname, "../..");
 const output = path.join(root, ".tmp/design-system/browser");
 
@@ -13,6 +13,7 @@ async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = {
     ...evidence(root),
+    passed: false,
     sizes: [],
     scenarios: [],
     screenshots: [],
@@ -95,7 +96,7 @@ async function main() {
     await page
       .getByRole("heading", { name: "Design system", exact: true })
       .waitFor();
-    await page.evaluate(() => document.fonts.ready);
+    await waitForFonts(page);
     return { context, page };
   }
   async function screenshot(page, name, locator) {
@@ -453,6 +454,7 @@ async function main() {
     assert.deepEqual(report.unmatched, []);
     assert.deepEqual(report.pageErrors, []);
     assert.deepEqual(report.consoleErrors, []);
+    report.passed = true;
     console.log(
       JSON.stringify({
         sizes: report.sizes.length,
@@ -460,16 +462,22 @@ async function main() {
         screenshots: report.screenshots.length,
       }),
     );
+  } catch (error) {
+    report.failure = error.message;
+    throw error;
   } finally {
-    try {
-      fs.writeFileSync(
-        path.join(output, "report.json"),
-        JSON.stringify(report, null, 2),
-      );
-    } finally {
-      await Promise.allSettled([browser?.close(), safari?.close()]);
-      await server.close();
+    const cleanup = await Promise.allSettled([
+      Promise.resolve().then(() => browser?.close()),
+      Promise.resolve().then(() => safari?.close()),
+      Promise.resolve().then(() => server.close()),
+    ]);
+    const failures = cleanup.filter((result) => result.status === "rejected").map((result) => result.reason);
+    if (failures.length) {
+      report.passed = false;
+      report.cleanupFailures = failures.map((error) => String(error?.message || error));
     }
+    fs.writeFileSync(path.join(output, "report.json"), JSON.stringify(report, null, 2));
+    if (failures.length) throw new AggregateError(failures, "Browser QA cleanup failed");
   }
 }
 main().catch((error) => {

@@ -45,11 +45,10 @@ cd client
 npm test
 cd ..
 node scripts/qa/design-system.cjs
-node scripts/qa/customer360-foundation.cjs
 npm run build
 ```
 
-Both browser scripts use the existing local preview runner. They can also verify an already-running server from this checkout by appending `http://127.0.0.1:<port>`. They reject non-local origins, block external/socket requests, and fulfill every allowed API call with synthetic responses. Catalog results go to `.tmp/design-system/browser/`; Customer360 results go to `.tmp/design-system/customer360/`. Reports record the branch, SHA, dirty status, geometry or interaction scenarios, and intercepted requests.
+The catalog browser script uses the existing local preview runner. It can also verify an already-running server from this checkout by appending `http://127.0.0.1:<port>`. It rejects non-local origins, blocks external/socket requests, and fulfills every allowed API call with synthetic responses. Results go to `.tmp/design-system/browser/`. Its report records the branch, SHA, dirty status, geometry, completed interaction scenarios, unmatched requests, and the overall pass/failure outcome; it does not inventory successful intercepted requests. The historical Customer360 evidence below comes from the original implementation checkout. That separate runner is published with the Customer360 integration proof, not this catalog slice.
 
 ## Final local evidence
 
