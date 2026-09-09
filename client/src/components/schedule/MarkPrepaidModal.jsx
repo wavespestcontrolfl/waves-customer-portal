@@ -200,7 +200,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
   }
 
   return (
-    <Dialog open onClose={dismiss} style={{ zIndex: 1200 }}>
+    <Dialog open onClose={dismiss} layer={1200}>
         <DialogHeader className="flex items-start justify-between gap-3">
           <div>
             <DialogTitle>

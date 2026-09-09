@@ -2093,7 +2093,7 @@ function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }
   };
 
   return (
-    <Dialog open onClose={onClose} style={{ zIndex: 140 }}>
+    <Dialog open onClose={onClose} layer={140}>
         <DialogHeader className="flex items-center justify-between">
           {" "}
           <DialogTitle>
