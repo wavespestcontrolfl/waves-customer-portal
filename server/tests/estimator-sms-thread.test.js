@@ -264,6 +264,8 @@ describe('_private.threadQuoteSignal', () => {
       'Are you open to more booked jobs over the next 6 weeks? Reply "NO" if you need me to stop texting',
       // two WEAK markers together
       '$0 upfront cost for our pest marketing package. Want more details?',
+      '$0 upfront cost. Reply NO to opt out.',
+      'Our service has $0 upfront cost. Reply NO to opt out.',
     ];
     for (const body of pitches) {
       expect(_private.isSolicitationPitch(body)).toBe(true);
@@ -309,6 +311,12 @@ describe('_private.threadQuoteSignal', () => {
       'Can I get a quote for termite service? I can connect you with the property manager for access.',
       'Pest control service is being requested by our tenant. Can you send an estimate?',
       'I need more estimates for pest control at my other rentals. Would you like more details?',
+      'Your AI receptionist said you would send me a quote for termite treatment.',
+      'Can you handle more lawn jobs at my rentals? Would you like more details?',
+      'Can I get termite service with no upfront cost? Reply NO if you cannot do that.',
+      'I tried to request an estimate but the link leads to your home page.',
+      'Can you handle more pest jobs with no upfront cost?',
+      'Can I get termite service with no upfront cost? Would you like more details?',
     ];
     for (const body of asks) {
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });

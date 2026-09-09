@@ -92,14 +92,16 @@ const QUOTE_HINT_RE = new RegExp(
 // signature: a STRONG marker is phrasing a homeowner never writes and is a
 // verdict alone; a WEAK marker is vendor-flavored but a prospect can write
 // it too ("no upfront cost?", "reply NO if you can't make it", "would you
-// like more details?") and counts only alongside another marker (codex
-// #4212 r2). Anything softer is left to the model, which is told vendors
-// are not quote requests.
+// like more details?"). Weak matches need two distinct categories,
+// including an outreach clue (an opt-out instruction or marketing offer):
+// customers can combine pricing and detail questions in a genuine ask.
+// Anything softer is left to the model, which is told vendors are not
+// quote requests.
 const SOLICITATION_MARKERS = [
-  { key: 'leads_pitch', strong: true, re: /\b(?:(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}(?:leads?|jobs?|customers?|estimates?)|(?:more|extra)\s+(?:\w+\s+){0,3}leads?)\b|\bleads?\s+(?:for|to)\s+(?:you|your)\b/i },
+  { key: 'leads_pitch', strong: true, re: /\b(?:(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}(?:leads?|jobs?|customers?|estimates?)|(?:more|extra)\s+(?:\w+\s+){0,3}leads?)\b|\bleads?\s+for\s+(?:you|your)\b/i },
   { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
   { key: 'grow_business', strong: true, re: /\b(?:grow|scale|book(?:ing)?\s+more|fill)\s+(?:your\s+)?(?:business|schedule|calendar)\b/i },
-  { key: 'vendor_tool', strong: true, re: /\bai\s+receptionist\b|\breview\s+system\b/i },
+  { key: 'vendor_tool', strong: true, re: /\b(?:having|offer(?:ing)?|provid(?:e|ing)|try)\s+(?:an?\s+|our\s+)?ai\s+receptionist\b|\breview\s+system\b[^.!?]{0,80}\bfor\s+your\s+business\b/i },
   // Matching homeowners to contractors is lead generation; connecting us
   // with a property manager for access is ordinary quote coordination.
   { key: 'connects_you', strong: true, re: /\bconnect(?:s|ing)?\s+(?:you\s+with\s+(?:local\s+)?homeowners?\s+(?:requesting|seeking)\s+(?:quotes?|estimates?)|local\s+homeowners\s+with\s+(?:local\s+)?(?:contractors?|professionals?))\b/i },
@@ -111,16 +113,17 @@ const SOLICITATION_MARKERS = [
   // "$" is not a word character, so the boundary sits inside the
   // alternation rather than in front of it (codex r2).
   { key: 'no_upfront', strong: false, re: /(?:\bno|\bzero|\$0)\s+(?:upfront|up-front|set-?up|monthly)\s+(?:cost|costs|fee|fees)?|\bfree\s+(?:setup|set-up|trial)\b/i },
-  { key: 'reply_directive', strong: false, re: /\b(?:reply|say|text)\s+"?(?:stop|no|byebye|end)"?\s+(?:if|to)\b/i },
+  { key: 'reply_directive', strong: false, outreach: true, re: /\b(?:reply|say|text)\s+["']?(?:stop|no|byebye|end)["']?\s+(?:to\s+(?:opt[\s-]?out|stop|unsubscribe|be\s+removed)|if\s+you\s+(?:want|need)\s+(?:me|us)\s+to\s+stop)\b/i },
+  { key: 'marketing_offer', strong: false, outreach: true, re: /\bour\s+(?:\w+\s+){0,3}(?:marketing|lead[\s-]?gen(?:eration)?)\s+(?:package|service|platform|program)\b/i },
   { key: 'more_details', strong: false, re: /\b(?:want|like)\s+(?:more\s+)?details\?/i },
 ];
 
-/** Pure. True when a strong marker hits, or at least two distinct weak ones. */
+/** Pure. A strong marker, or two weak categories including an outreach clue. */
 function isSolicitationPitch(text) {
   const t = String(text || '');
   if (!t.trim()) return false;
   const hits = SOLICITATION_MARKERS.filter((m) => m.re.test(t));
-  return hits.some((m) => m.strong) || hits.filter((m) => !m.strong).length >= 2;
+  return hits.some((m) => m.strong) || (hits.length >= 2 && hits.some((m) => m.outreach));
 }
 
 // Markers that the sender is REPLACING the previous ask rather than
