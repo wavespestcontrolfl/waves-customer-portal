@@ -31,6 +31,11 @@
  */
 
 const db = require('../models/db');
+const {
+  isRetiredSetupIntent,
+  isStripeResourceMissing,
+  followReplacementChain: followSetupIntentReplacementChain,
+} = require('./setup-intent-replacement');
 const logger = require('./logger');
 const StripeService = require('./stripe');
 
@@ -393,16 +398,8 @@ async function shapeCaptureIntent(setupIntent, paymentMethodType) {
 // first non-retired intent, or null when the chain is broken (a stamp that
 // never landed) or ends canceled — the caller then walks the generation
 // salt as it always did.
-const MAX_REPLACEMENT_HOPS = 10;
 async function followReplacementChain(setupIntent) {
-  let current = setupIntent;
-  for (let hop = 0; hop < MAX_REPLACEMENT_HOPS && current && isRetiredSetupIntent(current); hop += 1) {
-    const nextId = current.metadata?.replaced_by;
-    if (!nextId) return null;
-    current = await readLiveSetupIntent(nextId);
-  }
-  if (!current || isRetiredSetupIntent(current) || current.status === 'canceled') return null;
-  return current;
+  return followSetupIntentReplacementChain(setupIntent, readLiveSetupIntent);
 }
 
 async function createRecurringCardSetupIntentForEstimate(estimate, database = db) {
@@ -469,19 +466,9 @@ function intentTenderMatches(setupIntent, paymentMethodType) {
   return bankCapable === bankAllowed;
 }
 
-// Stripe's "No such setupintent" (HTTP 404, code resource_missing) — the
-// id was never minted, so there is nothing to retire and nothing to retry.
-function isStripeResourceMissing(err) {
-  return err?.code === 'resource_missing' || err?.statusCode === 404;
-}
-
-// Retirement stamp (replaceRecurringCardIntent): the customer replaced this
-// capture with a different payment method. Read from Stripe's own metadata
-// so the accept gate and the mint agree without a local row.
-function isRetiredSetupIntent(setupIntent) {
-  return setupIntent?.metadata?.retired === 'true';
-}
-
+// Retirement stamps (`retired` / `replaced_by`) live on the intent in Stripe
+// — see ./setup-intent-replacement.js — so the accept gate and the mint
+// agree without a local row.
 // The intent's metadata pins it to THIS estimate as a recurring card-on-file
 // capture (a one-time HOLD intent must never satisfy the accept gate —
 // different consent, different semantics).

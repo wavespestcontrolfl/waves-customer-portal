@@ -1,4 +1,5 @@
 import { Badge, Card, CardBody, CardHeader, CardTitle } from "../../../components/ui";
+import { RowLink } from "./RowLink";
 
 // TODAY-section exception card: past-dated visits still sitting in an open
 // status (pending/confirmed/en_route/on_site) — the backlog the day-scoped
@@ -26,9 +27,9 @@ export default function StaleVisitsCard({ data }) {
       <CardBody>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           {visits.map((item) => (
-            <a
+            <RowLink
               key={item.id}
-              href={item.href || "#"}
+              href={item.href}
               className="flex flex-col items-start gap-1 xl:flex-row xl:items-center xl:justify-between xl:gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
             >
               <span className="flex items-center gap-2 min-w-0 w-full xl:w-auto">
@@ -48,7 +49,7 @@ export default function StaleVisitsCard({ data }) {
                   →
                 </span>
               </span>
-            </a>
+            </RowLink>
           ))}
         </div>
         {total > visits.length && (

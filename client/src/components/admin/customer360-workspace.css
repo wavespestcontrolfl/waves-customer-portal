@@ -176,7 +176,7 @@
   .c360-directory-page .customer-directory-table button.customer-directory-name { min-height: 44px; }
   .customer-directory-attention > span { grid-column: 2; }
   .customer-directory-actions { position: absolute; top: 16px; right: 16px; }
-  .customer-directory-table .customer-directory-editor { display: block; }
+  .customer-directory-table .customer-directory-editor { display: block; padding: 0; }
   .customer-directory-table .customer-directory-editor > td { padding: 0 16px 16px; }
 }
 @media (min-width: 768px) and (max-width: 1100px) {

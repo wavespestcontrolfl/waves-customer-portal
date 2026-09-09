@@ -114,7 +114,7 @@ function CustomerEditor({ editForm, setEditForm, savingEdit, saveEdit, stages, o
       </div>
     </fieldset>)}
     <div className="ui-record-actions">
-      <Button onClick={saveEdit} loading={savingEdit}>Save</Button>
+      <Button onClick={saveEdit} loading={savingEdit}>{savingEdit ? "Saving…" : "Save"}</Button>
       <Button variant="ghost" onClick={onCancel}>Cancel</Button>
     </div>
   </section>;
