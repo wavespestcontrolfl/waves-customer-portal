@@ -111,6 +111,28 @@ describe('recap interruption recovery', () => {
     expect(screen.queryByRole('button', { name: 'Restore draft', exact: true })).toBeNull();
   });
 
+  it('does not keep a phantom draft after a recorded product is deselected and reselected', async () => {
+    const second = { ...product, id: 2, name: 'Second product' };
+    const record = { id: 'record-a', status: 'completed', technician_notes: 'Recorded', products: [
+      { product_id: 1, product_name: 'Example gel', application_rate: 0.1, rate_unit: 'g/spot' },
+      { product_id: 2, product_name: 'Second product', application_rate: 0.1, rate_unit: 'g/spot' },
+    ] };
+    const request = vi.fn(async (path) => path.endsWith('/context') ? { ...structuredClone(context), products: [product, second], existingRecord: record } : { ok: true });
+    const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
+    const first = open();
+    const gelButton = () => screen.getByRole('button', { name: /Example gel$/ });
+    await screen.findByRole('button', { name: '✓ Example gel', exact: true });
+    fireEvent.click(gelButton());
+    fireEvent.click(gelButton());
+    expect(screen.getByRole('button', { name: '✓ Example gel', exact: true })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/Draft saved on this device/)).toBeNull());
+    first.unmount();
+
+    open();
+    await screen.findByRole('button', { name: '✓ Example gel', exact: true });
+    expect(screen.queryByRole('button', { name: 'Restore draft', exact: true })).toBeNull();
+  });
+
   it('sends the verified visit identity with the completion and explains a server ownership rejection', async () => {
     const service = { ...context.service, customerId: 'customer-a', propertyId: 'property-a', catalogServiceId: 'catalog-a',
       serviceType: 'Pest Control', scheduledDate: '2026-01-01', address: { line1: '100 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' } };

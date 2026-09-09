@@ -45,7 +45,9 @@ export function recapContextIdentity(ctx, authoritative) {
 // rate in state on purpose, and a snapshot carrying that hidden entry
 // would keep an unchanged form dirty and create a phantom draft.
 export function recapDraftSnapshot({ note, message, rates, sendText, includeComms, selected, productById, restoredNames }) {
-  const ids = [...selected];
+  // Canonical order: a deselect + reselect moves an id to the end of the
+  // Set without changing the treatment, and must not read as a new draft.
+  const ids = [...selected].sort((a, b) => String(a).localeCompare(String(b)));
   return {
     note,
     message,
