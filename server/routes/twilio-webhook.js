@@ -270,18 +270,6 @@ router.post('/sms', async (req, res) => {
     // while older customer rows may still have local formatting.
     const customer = await findSingleCustomerByPhone(From);
 
-    // Shadow screen: known relationships bypass it; lookup/model failures
-    // leave ordinary message handling intact. No sender is linked here.
-    let solicitation = null;
-    try {
-      const screen = require('../services/sms-solicitation-classifier');
-      if (screen.classifierMode() !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
-        const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
-        solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
-      }
-    } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
-    const solicitationMeta = solicitation ? { spam_verdict: solicitation } : {};
-
     // Event-driven health rescore on a hot inbound signal (competitor mention,
     // cancellation, price complaint). Fire-and-forget so it never delays the
     // webhook ack; gated behind GATE_EVENT_RESCORE (no-op when off). Defined
@@ -338,7 +326,7 @@ router.post('/sms', async (req, res) => {
     // message row exists BEFORE the sms_reply bell below is written: the
     // thread-read bell cross-clear only clears bells for threads with no
     // unread message, which needs message-before-bell ordering (hook P1).
-    await require('../services/conversations').recordTouchpoint({
+    const inboundTouchpoint = await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
       channel: 'sms',
       ourEndpointId: To,
@@ -355,8 +343,27 @@ router.post('/sms', async (req, res) => {
       // Loud reactions are typed as ordinary inbound so the unanswered digest
       // and completion guard count them (codex r3).
       messageType: quietReaction ? 'sms_reaction' : undefined,
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...solicitationMeta },
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
+
+    // Save the inbox message before any classifier await: the durable SID
+    // claim suppresses retries even if the process dies during a model call.
+    // A failed unified write bypasses screening and keeps the legacy path.
+    let solicitation = null;
+    try {
+      const screen = require('../services/sms-solicitation-classifier');
+      if (inboundTouchpoint?.message?.id && MessageSid && screen.classifierMode() !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
+        const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
+        solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
+        if (solicitation) {
+          await updateByTwilioSid(MessageSid, {
+            metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spam_verdict: solicitation })]),
+            updated_at: new Date(),
+          });
+        }
+      }
+    } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
+    const solicitationMeta = solicitation ? { spam_verdict: solicitation } : {};
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
     const optCommand = detectSmsOptCommand(Body);

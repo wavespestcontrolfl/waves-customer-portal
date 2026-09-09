@@ -17,7 +17,7 @@ function mockDb(table) {
   query.catch = (reject) => Promise.resolve(query.rows).catch(reject);
   return query;
 }
-mockDb.raw = jest.fn(async () => ({ rows: [] }));
+mockDb.raw = jest.fn((sql, bindings) => ({ rows: [], sql, bindings }));
 mockDb.transaction = async (fn) => fn(mockDb);
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate === 'webhooks') }));
@@ -32,7 +32,10 @@ jest.mock('../services/messaging/inbound-dedupe', () => ({
   tryClaimInboundWebhook: jest.fn(async () => ({ processable: true, owned: true })),
   releaseInboundWebhook: jest.fn(async () => ({})),
 }));
-jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => ({})), updateByTwilioSid: jest.fn() }));
+jest.mock('../services/conversations', () => ({
+  recordTouchpoint: jest.fn(async () => ({ message: { id: 'saved-inbound-message' } })),
+  updateByTwilioSid: jest.fn(async () => ({})),
+}));
 jest.mock('../services/sms-media', () => ({ uploadTwilioMedia: jest.fn(async () => []) }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => ({})), isFailureStatus: jest.fn() }));
 jest.mock('../services/sms-intent', () => ({
@@ -52,7 +55,7 @@ jest.mock('../services/tech-line', () => ({ notifyTechLineText: jest.fn(async ()
 
 const { EventEmitter } = require('node:events');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { recordTouchpoint } = require('../services/conversations');
+const { recordTouchpoint, updateByTwilioSid } = require('../services/conversations');
 const { recordSuppression } = require('../services/messaging/validators/suppression');
 const { handleClarifyReply } = require('../services/estimate-clarify-asks');
 const { startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
@@ -101,8 +104,13 @@ test('a shadow pitch stays unread, records its verdict, and follows ordinary est
   const res = await receive('We have exclusive pest leads for you.');
   expect(res.body).toBe('<Response></Response>');
   expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({
-    isRead: false, metadata: expect.objectContaining({ spam_verdict: expect.objectContaining({ solicitation: true, mode: 'shadow' }) }),
+    isRead: false,
   }));
+  expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
+  expect(updateByTwilioSid.mock.calls[0][0]).toBe('SM-synthetic-solicitation');
+  expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict)
+    .toMatchObject({ solicitation: true, mode: 'shadow' });
+  expect(updateByTwilioSid.mock.calls[0][1].is_read).toBeUndefined();
   const writes = mockWrites.filter(({ table }) => table === 'sms_log');
   expect(writes).toHaveLength(1);
   expect(writes[0].row.is_read).not.toBe(true);
@@ -160,4 +168,30 @@ test('the unsupported true gate does no screening or relationship lookup', async
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
   expect(knownCallerPhoneExists).not.toHaveBeenCalled();
+});
+
+test('the model cannot start until the unified inbox message is durably saved', async () => {
+  let finishSave;
+  recordTouchpoint.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+  const delivery = receive('Our software team wants to discuss a partnership.');
+  await new Promise(setImmediate);
+  try {
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(knownCallerPhoneExists).not.toHaveBeenCalled();
+  } finally {
+    finishSave({ message: { id: 'saved-inbound-message' } });
+    await delivery;
+  }
+  expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+});
+
+test('failed unified persistence bypasses screening and retains ordinary SMS logging', async () => {
+  recordTouchpoint.mockResolvedValueOnce(null);
+  await receive('Our software team wants to discuss a partnership.');
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
+  expect(knownCallerPhoneExists).not.toHaveBeenCalled();
+  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+  expect(row.message_body).toBe('Our software team wants to discuss a partnership.');
+  expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
+  expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
 });

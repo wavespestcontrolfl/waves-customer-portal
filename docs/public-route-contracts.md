@@ -144,11 +144,14 @@ same noindex/no-referrer/no-store headers as `/report/:token`),
 unknown-sender SMS. Other values, including `true`, leave this stage off.
 Known primary/secondary/service-contact numbers, reactions, empty bodies,
 standalone carrier commands, and the AI assistant line bypass the classifier.
-Relationship lookup failures bypass screening; model failures record a failed
-non-solicitation verdict. The 3.5-second model budget uses the shared dispatcher.
+The unified inbox message is durably saved before screening. A failed unified
+save or relationship lookup bypasses screening and preserves ordinary handling;
+model failures record a failed non-solicitation verdict. The 3.5-second model
+budget uses the shared dispatcher.
 Shadow verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`)
 are stored under `metadata.spam_verdict` on unified messages and ordinary or
-natural-language opt-out `sms_log` rows. Read state, opt-out suppression,
+natural-language opt-out `sms_log` rows. Verdict attachment merges metadata on
+the saved unified row. Read state, opt-out suppression,
 TwiML replies, notifications, estimator routing, and provider request/auth
 contracts retain their existing behavior. No enforcement is available in
 this stage. The SMS operational extension runs after acknowledgment under
