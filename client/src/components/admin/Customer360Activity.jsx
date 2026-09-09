@@ -25,14 +25,14 @@ export default function Customer360Activity({ timeline, filter, onFilter, search
       <h2 id={`${id}-heading`} className="text-18 font-medium tracking-tight">Activity</h2>
       {!error && <span className="text-14 text-ink-secondary">{timeline.length} events</span>}
     </div>
-    {missingSources.length > 0 && <p role="status" className="mb-3 text-14 text-ink-secondary">Some history is unavailable: {missingSources.join(", ")}. <button type="button" className="underline u-focus-ring" onClick={onRetry} disabled={retrying}>Retry</button></p>}
+    {missingSources.length > 0 && <p role="status" className="mb-3 text-14 text-ink-secondary">Some history is unavailable: {missingSources.join(", ")}. <button data-ui-text-action type="button" className="underline u-focus-ring" onClick={onRetry} disabled={retrying}>Retry</button></p>}
     <Card>
       <div className="c360-activity-toolbar">
         <label className="c360-search-field c360-activity-search">
           <Search size={17} aria-hidden="true" />
           <Input type="search" value={search} onChange={(event) => onSearch(event.target.value)} disabled={error} aria-label="Search activity" placeholder="Search activity…" className="!pl-9 !text-16" />
         </label>
-        <Select className="!w-auto" aria-label="Filter activity" value={filter} onChange={(event) => onFilter(event.target.value)} disabled={error}>
+        <Select className="c360-activity-filter !w-auto" aria-label="Filter activity" value={filter} onChange={(event) => onFilter(event.target.value)} disabled={error}>
           <option value="all">All activity</option>
           {Object.entries(ACTIVITY_TYPES).map(([type, item]) => <option key={type} value={type}>{item.label}</option>)}
         </Select>

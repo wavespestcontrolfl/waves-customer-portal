@@ -2230,6 +2230,16 @@ The owner-approved audit sequence promotes comfortable 44px controls, sentence-c
 
 The existing `/admin/_design-system` route demonstrates labeled fields, stable loading and retry states, missing values versus zero, nested overlays, and record/role draft ownership, with the source for each example. `AdminCommandHeader` gains an explicit workspace variant. These examples do not establish estimate pricing, durable offline recovery, or technician completion behavior; those remain separate workflow proofs in the approved sequence.
 
+## 2026-09-08 — Reproduce Customer 360 foundation checks on the real route
+
+The Customer 360 proof uses the existing browser lifecycle and required-font loader, with synthetic API responses for both workspace and overlay presentations. Review reports identify the source checkout and distinguish failed runs from accepted browser results. Device checks remain a separate acceptance step.
+
+## 2026-09-08 — Prove the shared foundation in the estimate builder
+
+Following owner acceptance of the Customer 360 render, the real Pipeline estimate builder adopts comfortable density, shared fields/controls, scrolling section navigation, and action feedback. Its estimate-specific state bindings remain authoritative; the duplicated field presentation, custom checkbox/caret, and broad font repair are removed. All sections stay mounted. Save and generate use stable pending actions, and saved-offer review shares the control/focus behavior while retaining its existing delivery gates.
+
+A separate regression fix clears customer-specific notes and custom discounts when starting the next estimate while keeping service selections. Saved draft identity, revision preflight, failed-save retention, customer/property boundaries, and server pricing retain their existing mechanisms. See `estimate-foundation-acceptance-2026-09-08.md` for local tests, synthetic actual-route browser evidence, and physical-device limits. This entry does not record a deployment or customer send.
+
 ## 2026-09-08 — Record the Tech shared-foundation proof
 
 The accepted Tech migration reuses shared field/action accessibility and explicit touch density with Tech-owned tokens and the Today / Visit / Complete workflow. Recap text and actual rates use explicit, visit-scoped recovery; pending photos remain in memory while their dialog stays open. The Intelligence Bar retains its separate UX scope. Synthetic Chromium/WebKit evidence covers the actual visit, photo and nested marking workflows; physical camera, keyboard and home-screen checks remain required before release. Source and reproduction details are in `docs/design/tech-foundation-acceptance-2026-09-08.md`.
