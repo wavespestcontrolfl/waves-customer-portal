@@ -68,12 +68,12 @@ function invoiceBillsVisitApplication(invoice, svc) {
   for (const li of items) {
     const desc = String(li.description || '');
     if (NON_APPLICATION_LINE_RE.test(desc)) continue;
-    const label = norm(desc);
-    if (!label) continue;
     // A shared family or catalog substring cannot prove the same application
     // (e.g. termite inspection/foam/bait). Require the visit's own label;
-    // historical aliases and shortened labels stay for manual reconciliation.
-    if (label === visitLabel) evidence = true;
+    // every positive application line must match, not just one line in a
+    // mixed bill. Aliases and shortened labels need manual reconciliation.
+    if (norm(desc) !== visitLabel) return false;
+    evidence = true;
   }
   return evidence;
 }
