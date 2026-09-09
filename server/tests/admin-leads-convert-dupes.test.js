@@ -77,7 +77,7 @@ function makeKnex(resolve, calls) {
   const builder = (table) => {
     const state = { table, ops: [], terminal: null };
     const q = {};
-    const chain = ['where', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereRaw', 'orWhereRaw', 'orWhereNot', 'orderBy', 'forUpdate', 'onConflict', 'ignore', 'returning', 'select'];
+    const chain = ['where', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereRaw', 'orWhereRaw', 'orWhereNot', 'orderBy', 'forUpdate', 'forNoKeyUpdate', 'noWait', 'onConflict', 'ignore', 'returning', 'select'];
     for (const m of chain) {
       q[m] = jest.fn((...args) => { state.ops.push({ op: m, args }); return q; });
     }
@@ -880,8 +880,10 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       expect(res.status).toBe(200);
       const commsIdx = calls.findIndex((c) => c.op === 'raw' && /pg_advisory_xact_lock/.test(c.args[0]) && c.args[1][0] === 'customer-comms:cust-linked');
       const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
+      const customerIdx = calls.findIndex((c) => c.table === 'customers' && c.ops.some((o) => o.op === 'forNoKeyUpdate'));
       expect(commsIdx).toBeGreaterThanOrEqual(0);
-      expect(forUpdateIdx).toBeGreaterThan(commsIdx);
+      expect(customerIdx).toBeGreaterThan(commsIdx);
+      expect(forUpdateIdx).toBeGreaterThan(customerIdx);
     });
   });
 
@@ -899,6 +901,26 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       const tryIdx = raws.find((c) => /pg_try_advisory_xact_lock/.test(c.args[0]));
       expect(tryIdx).toBeTruthy();
       expect(tryIdx.i).toBeGreaterThan(forUpdateIdx);
+      const customerLock = calls.find((c) => c.table === 'customers' && c.ops.some((o) => o.op === 'forNoKeyUpdate'));
+      expect(customerLock.ops.some((o) => o.op === 'noWait')).toBe(true);
+    });
+  });
+
+  it.each(['missing', 'busy'])('customer %s during conversion refuses before writes', async (scenario) => {
+    const calls = [];
+    const resolve = makeResolver({ preLead: scenario === 'missing' ? linkedLead() : baseLead(), lockedLead: lockedLinked });
+    install(makeKnex((table, state) => {
+      if (table === 'customers' && opsOf(state, 'forNoKeyUpdate').length) {
+        if (scenario === 'missing') return null;
+        throw Object.assign(new Error('row locked'), { code: '55P03' });
+      }
+      return resolve(table, state);
+    }, calls));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { rebook: true });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe(scenario === 'missing' ? 'LEAD_OWNER_CHANGED' : 'LEAD_ALREADY_CONVERTED');
+      expect(calls.filter((c) => c.op === 'insert' || c.op === 'update')).toHaveLength(0);
     });
   });
 
