@@ -676,10 +676,10 @@ function classifyReleaseMode(contract = {}) {
 // Safety net for LLM-authored copy; deterministic copy never says "confirmed".
 function stripConfirmedLanguage(text) {
   if (!text) return text;
-  return String(text)
+  return String(text).replace(/\s+/g, ' ')
     .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
-    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation))?\\s+(?:is|are|was|were)\\s+confirmed\\b`, 'gi'),
+    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were)\\s+confirmed\\b`, 'gi'),
       '$1 most consistent with the visible pattern')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }

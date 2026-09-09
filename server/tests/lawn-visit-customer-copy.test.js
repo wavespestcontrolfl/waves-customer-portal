@@ -45,6 +45,19 @@ describe('customer publication', () => {
     expect(copy.customerObservations('The treated area is safe once dry; your technician confirms the timing.')).toMatch(/safe once dry/);
   });
 
+  test.each([200, 600])('screens complete private text before the %i-character display limit', (limit) => {
+    const text = `${'Thin turf. '.repeat(60).slice(0, limit - 8)}Use 4471 at the side gate keypad.`;
+    expect(copy.customerObservations(text)).toBe(copy.NO_OBSERVATIONS);
+    expect(copy.safeConfirmationStep(text)).toBe('');
+  });
+
+  test.each(['Chinch  bugs', 'Chinch\n  bugs', 'Drought stress', 'Gray leaf spot'])('cannot publish a confirmed claim for %s', (cause) => {
+    const text = `${cause} is confirmed along the edge.`;
+    const evidence = { name: cause, label: 'general lawn stress', confidence: 'moderate' };
+    expect(copy.customerObservations(text, [evidence])).not.toMatch(/confirmed/i);
+    expect(copy.safeConfirmationStep(text, evidence)).not.toMatch(/confirmed/i);
+  });
+
   test('requires the named cause at moderate confidence or better in a published finding', () => {
     const text = 'The browning along the driveway is consistent with chinch bug activity.';
     const chinch = { label: 'chinch bug activity', confidence: 'high' };

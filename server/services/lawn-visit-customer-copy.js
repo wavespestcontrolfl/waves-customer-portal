@@ -20,10 +20,11 @@ function withoutNoteInfluencedProse(analysis, notes) {
 }
 
 function customerObservations(text, findings = []) {
-  const scrubbed = scrubCustomerText(text || '').slice(0, 600).trim();
+  if (unpublishableCustomerCopy(text)) return NO_OBSERVATIONS;
+  const scrubbed = scrubCustomerText(text || '');
   if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return NO_OBSERVATIONS;
   if (namesUnpublishedCause(scrubbed, findings)) return NO_OBSERVATIONS;
-  return scrubbed;
+  return scrubbed.slice(0, 600).trim();
 }
 
 // True when the text names a governed cause (the report lane's
@@ -87,9 +88,10 @@ function unpublishableCustomerCopy(text) {
 }
 
 function safeConfirmationStep(text, finding = null) {
-  const scrubbed = scrubCustomerText(text || '').slice(0, 200).trim();
+  if (unpublishableCustomerCopy(text)) return '';
+  const scrubbed = scrubCustomerText(text || '');
   if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return '';
-  return namesUnpublishedCause(scrubbed, [finding]) ? '' : scrubbed;
+  return namesUnpublishedCause(scrubbed, [finding]) ? '' : scrubbed.slice(0, 200).trim();
 }
 
 // lastPublished is the persisted value this module last wrote, including
