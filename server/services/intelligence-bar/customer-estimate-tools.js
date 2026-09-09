@@ -129,6 +129,9 @@ async function estimatePreview(input, database = db, context = null) {
     if (!prior || !sameId(prior.customer_id, input.customer_id) || !sameId(prior.property_id, input.property_id)) {
       throw failure('The estimate does not belong to this customer and service property', 'target_relationship_mismatch');
     }
+    if (prior.status === 'scheduled') {
+      throw failure('This estimate has a queued send. Clear the scheduled send in the estimate editor before revising it.', 'estimate_send_scheduled');
+    }
     body.expectedEditVersion = persistence.estimateEditVersion(prior);
     body.notes = prior.notes;
     body.showOneTimeOption = prior.show_one_time_option;

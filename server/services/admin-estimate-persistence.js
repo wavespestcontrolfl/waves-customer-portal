@@ -3084,16 +3084,18 @@ async function reviseAdminEstimate({
   if (!updated) {
     throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);
   }
-  clearEstimatePricingCache(estimate.id);
-  // The revised address can change the estimate's service zone, and the
-  // slot wrapper cache (5-min TTL) was keyed for the OLD address — left in
-  // place it keeps serving (and letting the customer redeem) offers built
-  // without the new zone's funnel/collision context (codex #3473 r2 P2).
-  // Best-effort, same as reserveSlot's invalidation; lazy require keeps
-  // this module free of a slot-availability import at load time.
-  try {
-    require('./estimate-slot-availability').invalidateEstimate(estimate.id);
-  } catch { /* best-effort */ }
+  // An IB caller still owns its outer transaction after our savepoint ends.
+  // Clear both caches only after that commit, or a public read can refill
+  // the ID-keyed slot cache with the old committed address in the gap.
+  const invalidateCaches = () => {
+    clearEstimatePricingCache(estimate.id);
+    try {
+      require('./estimate-slot-availability').invalidateEstimate(estimate.id);
+    } catch { /* best-effort */ }
+  };
+  const committed = require('../utils/trx-commit-promise').commitPromiseOf(database);
+  if (committed) committed.then(invalidateCaches).catch(() => {});
+  else invalidateCaches();
   return { estimate: updated, memberLinkageWarning, pricingFallbackReason: pricingOut.fallbackReason || null, observedRepriceAttempt };
 }
 

@@ -400,6 +400,85 @@ suite('existing-customer estimates from another workspace', () => {
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
   }, 60000);
 
+  test.each(['before preview', 'after preview', 'after authorization'])('queued delivery blocks an IB revision %s', async timing => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    const queue = () => db('estimates').where({ id: estimateId }).update({
+      status: 'scheduled', scheduled_at: new Date(Date.now() + 86400000),
+    });
+    if (timing === 'before preview') await queue();
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    if (timing === 'before preview') {
+      expect(proposed.body.pendingActions || []).toHaveLength(0);
+    } else {
+      let before;
+      if (timing === 'after authorization') {
+        const persistence = require('../services/admin-estimate-persistence');
+        const original = persistence.lockEstimateGroupAddressRevision;
+        jest.spyOn(persistence, 'lockEstimateGroupAddressRevision').mockImplementation(async (...args) => {
+          await queue();
+          before = await db('estimates').where({ id: estimateId }).first();
+          return original(...args);
+        });
+      } else {
+        await queue();
+        before = await db('estimates').where({ id: estimateId }).first();
+      }
+      const refused = await confirm(proposed);
+      if (timing === 'after authorization') {
+        expect(refused.body).toMatchObject({ success: false, result: { code: 'estimate_send_scheduled' } });
+      } else {
+        expect(refused.status).toBe(409);
+      }
+      expect(await db('estimates').where({ id: estimateId }).first()).toEqual(before);
+    }
+    const refused = await require('../services/intelligence-bar/customer-estimate-tools')
+      .executeCustomerEstimateTool('save_customer_estimate', {
+        customer_id: fixture.customer.id, property_id: fixture.property.id, estimate_id: estimateId,
+      });
+    expect(refused).toMatchObject({ success: false, code: 'estimate_send_scheduled' });
+  }, 60000);
+
+  test.each([false, true])('revision cache invalidation waits for durable commit (rollback=%s)', async rollback => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    const before = await db('estimates').where({ id: estimateId }).first();
+    await db('customer_properties').where({ id: fixture.property.id }).update({ address_line1: '200 Example Grove' });
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    const slots = require('../services/estimate-slot-availability');
+    const invalidate = jest.spyOn(slots, 'invalidateEstimate');
+    const pricing = require('../services/estimate-pricing-cache');
+    pricing.setEstimatePricingCache(estimateId, { oldAddress: before.address });
+    const audit = require('../services/audit-log'), original = audit.recordAuditEvent;
+    let checked = false;
+    jest.spyOn(audit, 'recordAuditEvent').mockImplementation(async options => {
+      if (options.action === 'estimate_revised') {
+        // The savepoint has completed but another connection still sees the old address.
+        expect((await db('estimates').where({ id: estimateId }).first()).address).toBe(before.address);
+        expect(invalidate).not.toHaveBeenCalled();
+        expect(pricing.getEstimatePricingCache(estimateId)).toEqual({ oldAddress: before.address });
+        checked = true;
+        if (rollback) throw new Error('Synthetic audit failure before commit');
+      }
+      return original(options);
+    });
+    const revised = await confirm(proposed);
+    expect(checked).toBe(true);
+    expect(revised.body.success).toBe(!rollback);
+    const saved = await db('estimates').where({ id: estimateId }).first();
+    if (rollback) {
+      expect(saved).toEqual(before);
+      expect(invalidate).not.toHaveBeenCalled();
+    } else {
+      expect(saved.address).toContain('200 Example Grove');
+      expect(invalidate).toHaveBeenCalledWith(estimateId);
+      expect(pricing.getEstimatePricingCache(estimateId)).toBeNull();
+    }
+    pricing.clearEstimatePricingCache(estimateId);
+  }, 60000);
+
   test('a draft deleted between the preview and the row lock refuses deterministically', async () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));

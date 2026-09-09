@@ -31,6 +31,13 @@ lead, appointment, customer message or scheduled send is created.
 - Revisions preserve replayable approved discounts. A stored fixed discount
   without reconstructable allocation refuses for editor review instead of
   silently losing the discount.
+- Estimates with a queued send refuse revision until the operator clears the
+  schedule in the estimate editor. This is checked at preview and again under
+  the confirmation's row lock, preserving the reviewed delivery offer.
+- Revision pricing and slot caches clear only after the outer transaction
+  commits. An audit/receipt rollback leaves the committed estimate and caches
+  intact; public reads during the save cannot repopulate a prematurely cleared
+  slot cache with the old property address.
 - The existing pending-action confirmation binds actor, target, facts, options,
   prices and estimate version. The commit locks customer/property rows first,
   then estimate group address/send guards, then the estimate row. This keeps
