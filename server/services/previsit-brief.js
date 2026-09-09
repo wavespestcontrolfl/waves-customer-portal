@@ -73,7 +73,10 @@ const WDO_BRIEF_TYPE = 'wdo_inspection';
 // v5: the validator repair round. Bumped so templates capped under v4
 // (llm_attempts at the cap, same grounding) hash differently and get their
 // one repair round instead of returning validator_capped forever.
-const PROMPT_VERSION = 'previsit_brief_v5';
+// v6: visit.oneTime fact + 'one-time' grounding token — the bump invalidates
+// same-hash validator_capped templates so capped visits regenerate (codex
+// #4198 r1 P2).
+const PROMPT_VERSION = 'previsit_brief_v6';
 
 // Deterministic validator rejections repeat on every retry while the
 // grounding (and prompt version) are unchanged — the same facts produce the
@@ -821,6 +824,12 @@ async function assembleGrounding(svc, dbh = db) {
       serviceType: serviceIdentity,
       scheduledDate: calendarDay(svc.scheduled_date),
       isRecurring: !!svc.is_recurring,
+      // One-off stop: present ONLY when the canonical recurring-lineage
+      // trio is clear (is_recurring / recurring_parent_id / recurring_pattern
+      // — same set as previsit-card-request-sweep and pay-v2). A series
+      // booster carries is_recurring=false WITH a parent id and must never
+      // ground a "one-time" cadence claim (codex #4198 r1 P1).
+      ...(!svc.is_recurring && !svc.recurring_parent_id && !svc.recurring_pattern ? { oneTime: true } : {}),
       // Omitted entirely when history is unreadable — the model must not
       // see (and the template must not assert) a first-visit claim that an
       // outage manufactured.
@@ -1379,13 +1388,13 @@ function findUngroundedClaim(body, grounding) {
   const groundedValueText = [
     ...collectFactValues(grounding.llmFacts),
     ...(grounding.llmFacts?.visit?.isRecurring === true ? ['recurring'] : []),
-    // The mirror image: a visit that is NOT part of a series is a one-time
-    // stop, and isRecurring === false is the only fact that says so. Without
-    // this token every truthful "one-time" brief on a one-off visit
-    // re-templates (52 of ~230 rejections in the week to 2026-09-08 were
-    // ungrounded_novel_term:one-time). A recurring visit still rejects it
-    // (cadence-binding test below).
-    ...(grounding.llmFacts?.visit && grounding.llmFacts.visit.isRecurring === false ? ['one-time'] : []),
+    // The mirror image: visit.oneTime === true (set only when the whole
+    // recurring-lineage trio is clear) is the only one-off-stop fact.
+    // Without this token every truthful "one-time" brief on a one-off
+    // visit re-templates (52 of ~230 rejections in the week to 2026-09-08
+    // were ungrounded_novel_term:one-time). Recurring visits and series
+    // boosters still reject it (cadence-binding test).
+    ...(grounding.llmFacts?.visit?.oneTime === true ? ['one-time'] : []),
     // visit.newCustomer === true is likewise the only first-visit fact —
     // without this token every truthful "Initial visit" re-templates (r14).
     ...(grounding.llmFacts?.visit?.newCustomer === true ? ['initial'] : []),

@@ -341,6 +341,22 @@ describe('history outage — generation aborts, cached brief survives', () => {
     const { brief } = storedBrief(state);
     expect(brief.access.alerts.map((a) => a.type)).toContain('new_customer');
   });
+
+  test('visit.oneTime is present only when the whole recurring-lineage trio is clear', async () => {
+    const factsFor = async (svc) => {
+      global.__dispatch.mockClear();
+      useDb(baseResponses({ scheduled_services: [{ ...SVC, ...svc }] }));
+      await PrevisitBrief.generateVisitBrief('svc-1');
+      const text = global.__dispatch.mock.calls[0][1].text;
+      return JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    };
+    expect((await factsFor({ is_recurring: false, recurring_parent_id: null, recurring_pattern: null })).visit.oneTime).toBe(true);
+    // A series booster: is_recurring false WITH a parent id.
+    expect((await factsFor({ is_recurring: false, recurring_parent_id: 'parent-1', recurring_pattern: null })).visit.oneTime).toBeUndefined();
+    // A legacy top-level series row: pattern alone marks recurrence.
+    expect((await factsFor({ is_recurring: false, recurring_parent_id: null, recurring_pattern: 'quarterly' })).visit.oneTime).toBeUndefined();
+    expect((await factsFor({ is_recurring: true })).visit.oneTime).toBeUndefined();
+  });
 });
 
 describe('grounded allowlist validation of LLM output', () => {
@@ -4321,11 +4337,14 @@ describe('codex #3423 r77 — active-voice statuses, verb-form history, balance 
 
   test('one-time wording is grounded by a non-recurring visit and only by it', () => {
     const { validateBriefJson } = PrevisitBrief._test;
-    const oneOff = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'One-Time Pest Control', isRecurring: false } } };
+    const oneOff = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest Control Service', isRecurring: false, oneTime: true } } };
     expect(validateBriefJson({ ...BASE, customer_context: 'This is a one-time service visit' }, oneOff).body).toBeTruthy();
-    // Recurring visits and briefs with no visit fact at all still reject it.
+    // Recurring visits, series boosters (isRecurring false but lineage
+    // present, so no oneTime fact) and briefs with no visit fact still reject it.
     const recurring = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Quarterly Pest Control', isRecurring: true } } };
     expect(validateBriefJson({ ...BASE, customer_context: 'This is a one-time service visit' }, recurring).reason).toBe('ungrounded_novel_term:one-time');
+    const booster = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest Control Service', isRecurring: false } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'This is a one-time service visit' }, booster).reason).toBe('ungrounded_novel_term:one-time');
     const noVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
     expect(validateBriefJson({ ...BASE, customer_context: 'This is a one-time service visit' }, noVisit).reason).toBe('ungrounded_novel_term:one-time');
   });
