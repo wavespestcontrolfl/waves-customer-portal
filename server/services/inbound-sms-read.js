@@ -117,6 +117,14 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
     .where('messages.direction', 'inbound')
     .andWhere(function unread() { this.where({ 'messages.is_read': false }).orWhereNull('messages.is_read'); });
   if (customerId) q = q.where('conversations.customer_id', customerId);
+  // A blocked number's existing thread must not keep the badge lit: "Mark
+  // spam" in the inbox blocks the sender and the thread stops counting.
+  // Same last-10 identity the COUNT below groups on.
+  q = q.whereNotExists(function blocked() {
+    this.select(db.raw('1')).from('blocked_numbers')
+      .whereRaw(`RIGHT(regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g'), 10)
+        = RIGHT(regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g'), 10)`);
+  });
   for (const phone of excludePhones) {
     q = q
       .whereNot('conversations.our_endpoint_id', phone)

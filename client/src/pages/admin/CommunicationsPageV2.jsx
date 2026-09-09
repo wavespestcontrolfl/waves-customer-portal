@@ -72,6 +72,7 @@ import {
   Loader2,
   Mail,
   MessageSquare,
+  Ban,
   Mic,
   MicOff,
   PhoneCall,
@@ -534,10 +535,14 @@ function ConversationViewV2({
   onReply,
   onBack,
   onOpenProfile,
+  onMarkSpam,
 }) {
   const contactPhone = thread.contactPhone;
   const contactName = thread.customerName || contactPhone;
   const canOpenProfile = !!(thread.customerName && thread.customerId);
+  // Only a thread with no customer behind it can be spam; a customer's
+  // number is refused server-side anyway (CUSTOMER_NUMBER).
+  const canMarkSpam = !thread.customerName && !!contactPhone && typeof onMarkSpam === "function";
   return (
     <div className="flex flex-col h-full">
       {" "}
@@ -568,6 +573,18 @@ function ConversationViewV2({
           </div>{" "}
         </div>{" "}
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          {canMarkSpam ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="flex-1 md:flex-none"
+              title="Block this number and mark the thread read"
+              onClick={() => onMarkSpam(thread)}
+            >
+              <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Mark spam
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="secondary"
@@ -2188,6 +2205,29 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return { all: threads.length, unread, unanswered, unknown };
   }, [threads]);
 
+  // Mark spam: block the sender (future texts are dropped before they are
+  // logged), mark this thread read (it stops counting toward the badge and
+  // the nightly unanswered-texts digest), and return to the list. Only
+  // offered on threads with no customer behind them; the server refuses a
+  // customer's number (CUSTOMER_NUMBER) regardless.
+  const handleMarkSpam = async (thread) => {
+    const number = thread?.contactPhone;
+    if (!number) return;
+    if (!window.confirm(`Block ${number} as spam? Future texts from this number are dropped and this thread is marked read.`)) return;
+    try {
+      await adminFetch(`/admin/communications/blocked-numbers`, {
+        method: "POST",
+        body: JSON.stringify({ number, reason: "Marked spam from the SMS inbox" }),
+      });
+      await markMessagesRead(thread);
+      setSmsView("threads");
+      setActiveThread(null);
+      loadData(smsSearch);
+    } catch (e) {
+      alert(`Could not mark spam: ${e.message}`);
+    }
+  };
+
   const handleThreadReply = (contactPhone, ourNumber, customerId = null) => {
     setToNumber(contactPhone);
     setToSearch("");
@@ -2931,6 +2971,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               setActiveThread(null);
             }}
             onOpenProfile={(id) => setSelected360Id(id)}
+            onMarkSpam={handleMarkSpam}
           />{" "}
           {renderLoadMore("Load older SMS history")}
         </Card>

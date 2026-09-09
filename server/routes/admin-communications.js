@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
@@ -3024,10 +3025,27 @@ router.get('/blocked-numbers', async (req, res, next) => {
 
 // POST /api/admin/communications/blocked-numbers — add a number
 // Body: { number, blockType?, reason? }
+// The inbox "Mark spam" action posts here for an unknown-sender thread.
+// The number is stored as E.164 because the spam-block middleware matches
+// the Twilio From value exactly; a thread's contactPhone may carry local
+// formatting. A number that resolves to a live customer (main phone or a
+// service-contact slot) is refused, mirroring the call-disposition guard —
+// blocking it would silently drop that customer's texts.
 router.post('/blocked-numbers', async (req, res, next) => {
   try {
-    const { number, blockType, reason } = req.body;
+    const { blockType, reason } = req.body;
+    const number = normalizePhone(req.body.number);
     if (!number) return res.status(400).json({ error: 'number required' });
+
+    const owner = await findKnownCallerCustomer(db, number);
+    if (owner) {
+      return res.status(409).json({
+        error: 'This number belongs to an existing customer and cannot be blocked. Archive or edit the customer record instead.',
+        code: 'CUSTOMER_NUMBER',
+        customer_id: owner.id,
+        customer_name: [owner.first_name, owner.last_name].filter(Boolean).join(' ') || null,
+      });
+    }
 
     const existing = await db('blocked_numbers').where({ number }).first();
     if (existing) return res.json({ success: true, alreadyBlocked: true });

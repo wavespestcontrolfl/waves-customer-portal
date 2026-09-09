@@ -476,6 +476,13 @@ async function loadUnansweredThreads(cutoff = new Date()) {
           AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply')
       ) inbound
       WHERE peer <> ''
+        -- A sender marked spam in the inbox (blocked_numbers) is not
+        -- "waiting on a reply" — nobody may answer it and the block drops
+        -- its next text before it is logged.
+        AND NOT EXISTS (
+          SELECT 1 FROM blocked_numbers b
+          WHERE RIGHT(REGEXP_REPLACE(COALESCE(b.number, ''), '\\D', '', 'g'), 10) = inbound.peer
+        )
       ORDER BY peer, endpoint, created_at DESC
     )
     SELECT l.peer, l.message_body, l.created_at,
