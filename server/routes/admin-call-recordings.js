@@ -293,19 +293,6 @@ router.get('/follow-through', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/commitments/:id/card-action', async (req, res, next) => {
-  try {
-    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid callback id' });
-    const commitment = await require('../services/callback-cards').actOnCallback(db, req.params.id, {
-      action: req.body?.action, actorId: req.technicianId, expectedAt: req.body?.expected_at, snooze: req.body?.snooze,
-    });
-    res.json({ commitment });
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    next(err);
-  }
-});
-
 router.get('/commitments/open', async (req, res, next) => {
   try {
     const { party, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;
