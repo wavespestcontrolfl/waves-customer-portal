@@ -115,8 +115,24 @@ router.post('/tech-trigger', async (req, res, next) => {
       triggeredBy: 'tech',
     });
 
+    // `sent` is the truth (codex #4141 r3 P2): an immediate ask held by the
+    // 3-day rule, the send window or a provider retry is queued, not sent —
+    // the tech app must not tell the customer it went. A send that failed
+    // and could not be queued either says so (codex #4156 r1 P2): no job
+    // will pick it up, so "will go out automatically" would be false.
+    // Additive fields.
+    const unsent = request.sendOutcome && request.sendOutcome.sent === false ? request.sendOutcome : null;
+    // A block or suppression (opt-out, no consented recipient) will not clear
+    // by retrying; only the unqueued provider failure is worth another try.
+    const unsentFields = !unsent ? {}
+      : unsent.failed === 'send_failed_unqueued'
+        ? { failed: unsent.failed, message: 'The review text could not be sent. Try again in a few minutes.' }
+        : unsent.failed
+          ? { failed: unsent.failed, message: 'The review text was not sent: this customer cannot receive review texts right now.' }
+          : { deferred: unsent.deferred, nextAllowedAt: unsent.nextAllowedAt, message: 'The review text is queued and will go out automatically' };
     res.json({
-      sent: true,
+      sent: !unsent,
+      ...unsentFields,
       // The gate-respecting tokenized link — same helper the SMS paths use
       // (/go behind GATE_REVIEW_DIRECT_LINK; with the gate off /go is a rate-
       // page alias, so main's hardcoded /go form and this resolve identically
