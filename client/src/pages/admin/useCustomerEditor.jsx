@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button } from "../../components/ui";
+import { Input, Select, Button, Field } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
 function customerEditValues(c) {
@@ -71,165 +71,51 @@ export default function useCustomerEditor(onSaved, stages) {
   };
 }
 
-function CustomerEditor({
-  editForm,
-  setEditForm,
-  savingEdit,
-  saveEdit,
-  stages,
-  onCancel,
-}) {
-  return (
-    <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
-      {" "}
-      <div className="text-13 font-medium text-ink-primary mb-3">
-        Edit customer
-      </div>{" "}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-        {[
-          { key: "firstName", label: "First name" },
-          { key: "lastName", label: "Last name" },
-          { key: "email", label: "Email", type: "email" },
-          { key: "phone", label: "Phone", type: "tel" },
-          { key: "city", label: "City" },
-          { key: "monthlyRate", label: "$/Mo", type: "number" },
-        ].map((f) => (
-          <div key={f.key}>
-            {" "}
-            <label className="u-label text-ink-tertiary block mb-1">
-              {f.label}
-            </label>{" "}
-            <input
-              value={editForm[f.key] || ""}
-              onChange={(e) =>
-                setEditForm((p) => ({
-                  ...p,
-                  [f.key]: e.target.value,
-                }))
-              }
-              type={f.type || "text"}
-              className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
-            />{" "}
-          </div>
-        ))}
-        <div>
-          {" "}
-          <label className="u-label text-ink-tertiary block mb-1">
-            Tier
-          </label>{" "}
-          <select
-            value={editForm.tier || ""}
-            onChange={(e) =>
-              setEditForm((p) => ({
-                ...p,
-                tier: e.target.value || null,
-              }))
-            }
-            className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 cursor-pointer focus:outline-none focus:border-zinc-900"
-          >
-            {" "}
-            <option value="">No Plan</option>{" "}
-            <option value="Platinum">Platinum (20%)</option>{" "}
-            <option value="Gold">Gold (15%)</option>{" "}
-            <option value="Silver">Silver (10%)</option>{" "}
-            <option value="Bronze">Bronze (0%)</option>{" "}
-            <option value="One-Time">One-Time</option>{" "}
-          </select>{" "}
-        </div>{" "}
-        <div>
-          {" "}
-          <label className="u-label text-ink-tertiary block mb-1">
-            Stage
-          </label>{" "}
-          <select
-            value={editForm.pipelineStage || ""}
-            onChange={(e) =>
-              setEditForm((p) => ({
-                ...p,
-                pipelineStage: e.target.value,
-              }))
-            }
-            className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 cursor-pointer focus:outline-none focus:border-zinc-900"
-          >
-            {stages.map((s) => (
-              <option key={s.key} value={s.key}>
-                {s.label}
-              </option>
-            ))}
-          </select>{" "}
-        </div>{" "}
-      </div>
-      {/* Service contacts — route appointment reminders, post-service
-                          SMS, and review requests to different people than the
-                          bill-payer (e.g. mother pays, son lives at the property).
-                          Up to 3 slots; the server compacts them, so clearing
-                          slot 1 promotes slot 2. */}
+function CustomerEditor({ editForm, setEditForm, savingEdit, saveEdit, stages, onCancel }) {
+  return <section aria-label="Edit customer" className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
+    <h2 className="text-16 font-medium text-ink-primary mb-3">Edit customer</h2>
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
       {[
-        {
-          prefix: "serviceContact",
-          title: "Service Contact",
-          hint: "(optional — overrides primary for reminders, review requests)",
-        },
-        { prefix: "serviceContact2", title: "Service Contact 2" },
-        { prefix: "serviceContact3", title: "Service Contact 3" },
-      ].map((slot) => (
-        <div
-          key={slot.prefix}
-          className="border-t border-hairline border-zinc-200 pt-3 mb-3"
-        >
-          {" "}
-          <div className="u-label text-ink-tertiary mb-2">
-            {slot.title}{" "}
-            {slot.hint && (
-              <span className="normal-case text-11 text-ink-tertiary">
-                {slot.hint}
-              </span>
-            )}{" "}
-          </div>{" "}
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            {[
-              { key: `${slot.prefix}Name`, label: "Name" },
-              {
-                key: `${slot.prefix}Phone`,
-                label: "Phone",
-                type: "tel",
-              },
-              {
-                key: `${slot.prefix}Email`,
-                label: "Email",
-                type: "email",
-              },
-            ].map((f) => (
-              <div key={f.key}>
-                {" "}
-                <label className="u-label text-ink-tertiary block mb-1">
-                  {f.label}
-                </label>{" "}
-                <input
-                  value={editForm[f.key] || ""}
-                  onChange={(e) =>
-                    setEditForm((p) => ({
-                      ...p,
-                      [f.key]: e.target.value,
-                    }))
-                  }
-                  type={f.type || "text"}
-                  className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
-                />{" "}
-              </div>
-            ))}
-          </div>{" "}
-        </div>
-      ))}{" "}
-      <div className="flex gap-2">
-        {" "}
-        <Button variant="primary" onClick={saveEdit} disabled={savingEdit}>
-          {savingEdit ? "Saving…" : "Save"}
-        </Button>{" "}
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>{" "}
-      </div>{" "}
+        { key: "firstName", label: "First name" },
+        { key: "lastName", label: "Last name" },
+        { key: "email", label: "Email", type: "email" },
+        { key: "phone", label: "Phone", type: "tel" },
+        { key: "city", label: "City" },
+        { key: "monthlyRate", label: "$/Mo", type: "number" },
+      ].map((field) => <Field key={field.key} label={field.label}>
+        <Input value={editForm[field.key] || ""} type={field.type || "text"} onChange={(event) => setEditForm((previous) => ({ ...previous, [field.key]: event.target.value }))} />
+      </Field>)}
+      <Field label="Tier">
+        <Select value={editForm.tier || ""} onChange={(event) => setEditForm((previous) => ({ ...previous, tier: event.target.value || null }))}>
+          <option value="">No Plan</option><option value="Platinum">Platinum (20%)</option><option value="Gold">Gold (15%)</option><option value="Silver">Silver (10%)</option><option value="Bronze">Bronze (0%)</option><option value="One-Time">One-Time</option>
+        </Select>
+      </Field>
+      <Field label="Stage">
+        <Select value={editForm.pipelineStage || ""} onChange={(event) => setEditForm((previous) => ({ ...previous, pipelineStage: event.target.value }))}>
+          {stages.map((stage) => <option key={stage.key} value={stage.key}>{stage.label}</option>)}
+        </Select>
+      </Field>
     </div>
-  );
+    {/* The existing recipient slots and server-side compaction remain authoritative. */}
+    {[
+      { prefix: "serviceContact", title: "Service contact", hint: "Optional — overrides primary for reminders, review requests" },
+      { prefix: "serviceContact2", title: "Service contact 2" },
+      { prefix: "serviceContact3", title: "Service contact 3" },
+    ].map((slot) => <fieldset key={slot.prefix} className="border-0 border-t border-solid border-zinc-200 p-0 pt-3 mb-3 min-w-0">
+      <legend className="ui-label text-ink-secondary">{slot.title}</legend>
+      {slot.hint && <p className="text-ui-caption text-ink-secondary mb-2">{slot.hint}</p>}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        {[{ suffix: "Name", label: "Name" }, { suffix: "Phone", label: "Phone", type: "tel" }, { suffix: "Email", label: "Email", type: "email" }].map((field) => {
+          const key = `${slot.prefix}${field.suffix}`;
+          return <Field key={key} label={field.label}>
+            <Input value={editForm[key] || ""} type={field.type || "text"} onChange={(event) => setEditForm((previous) => ({ ...previous, [key]: event.target.value }))} />
+          </Field>;
+        })}
+      </div>
+    </fieldset>)}
+    <div className="ui-record-actions">
+      <Button onClick={saveEdit} loading={savingEdit}>Save</Button>
+      <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+    </div>
+  </section>;
 }
