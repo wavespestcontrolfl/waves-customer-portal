@@ -158,6 +158,18 @@ suite('IB target validation against isolated PostgreSQL', () => {
     for (const prompt of ['Update all accounts', 'Text every client', 'Update the customer']) {
       expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
     }
+    // Integration round: numeric counts and bare plurals are sets; every occurrence of a repeated first name is checked; a bare
+    // name before a temporal word is still stated; a surname that is also a non-name word is compared as part of the whole reference.
+    const link = randomUUID();
+    await mockDb('customers').insert({ id: link, first_name: 'Synthetic', last_name: 'Link', phone: '+15550109997' });
+    for (const prompt of ['Update 2 customers and this customer', 'Text three clients', 'Update customers',
+      "Forward Synthetic Secondfixture's estimate to Synthetic Missingfixture", 'Text Bob tomorrow and update Synthetic Secondfixture', 'Update Synthetic Link Jr']) {
+      expect(await Context.resolve({ prompt, pageData: { customer_id: second } })).toMatchObject({ targets: [], ambiguous: true });
+      expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: second } })).toMatchObject({ code: 'context_mismatch' });
+      expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: link } })).toMatchObject({ code: 'context_mismatch' });
+    }
+    expect((await Context.resolve({ prompt: 'Update Synthetic Link', pageData: {} })).target.customer_id).toBe(link);
+    expect((await Context.resolve({ prompt: "Forward Synthetic Secondfixture's estimate to Synthetic Secondfixture", pageData: {} })).target.customer_id).toBe(second);
     expect(await Context.resolve({ prompt: 'Update all accounts', pageData: { customer_id: customerId } })).toMatchObject({ targets: [], ambiguous: true });
     const twoRecipients = 'Forward the estimate to Synthetic Targetfixture and text Synthetic Secondfixture';
     expect(await Context.resolve({ prompt: twoRecipients, pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
