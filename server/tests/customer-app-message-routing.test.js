@@ -318,10 +318,13 @@ describe.each([
     expect(sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
   });
 
-  test.each([false, true])('a delayed App backup text failure honors email_enabled=%s', async (emailEnabled) => {
-    Twilio.sendSMS.mockResolvedValueOnce({ success: false, appUnavailable: true, error: 'no_fresh_device' })
-      .mockResolvedValue({ success: true, sid: 'SMbackup' });
-    await deliverReminder();
+  test.each([...([false, true].flatMap(email => [false, true].map(gate => [email, gate, false]))), [false, false, true]])('a delayed App backup failure honors email_enabled=%s with App gate=%s and contact=%s', async (emailEnabled, appGateEnabled, serviceContact) => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = String(appGateEnabled);
+    if (appGateEnabled) Twilio.sendSMS.mockResolvedValueOnce({ success: false, appUnavailable: true, error: 'no_fresh_device' });
+    Twilio.sendSMS.mockResolvedValue({ success: true, sid: 'SMbackup' });
+    const extra = serviceContact ? { service_contact_phone: '+19415550143', service_contacts_consent_at: new Date() } : {};
+    if (serviceContact) Twilio.sendSMS.mockImplementation(async (to) => ({ success: true, sid: to === input.to ? 'SMprimary' : 'SMbackup' }));
+    await deliverReminder({}, extra);
     const sentInput = persistAudit.mock.calls.at(-1)[0].input;
     expect(sentInput.metadata.requestedChannel).toBe('push');
     prefs.email_enabled = emailEnabled;
@@ -334,7 +337,7 @@ describe.each([
       }));
       return q;
     });
-    await AppointmentReminders.handleUndeliveredSms({ sid: 'SMbackup', status: 'undelivered', errorCode: '30003', to: input.to });
+    await AppointmentReminders.handleUndeliveredSms({ sid: 'SMbackup', status: 'undelivered', errorCode: '30003', to: extra.service_contact_phone || input.to });
     expect(sendAppointmentReminderEmail).toHaveBeenCalledTimes(emailEnabled ? 1 : 0);
   });
 

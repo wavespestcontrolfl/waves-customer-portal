@@ -140,6 +140,10 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({
       service_reminder_72h_channel: 'push', service_reminder_24h_channel: 'push',
     });
+    expect((await get()).body).toMatchObject({ serviceReminder72hChannel: 'sms', serviceReminder24hChannel: 'sms' });
+    expect(await require('../services/appointment-reminders')._test.getReminderPrefs(property)).toMatchObject({
+      reminder72hChannel: 'push', reminder24hChannel: 'push', smsEnabled: false, emailEnabled: false, unavailable: false,
+    });
   });
 
   test('older clients and a gate rollback preserve saved App first values', async () => {

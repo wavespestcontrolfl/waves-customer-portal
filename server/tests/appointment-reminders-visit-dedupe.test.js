@@ -315,6 +315,38 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     expect(flagUpdates(state, `${kind}_sent`)).toHaveLength(0);
   });
 
+  test.each(['72h', '24h'])('%s App rollback retains allowed email backup when texts are off', async (tier) => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
+    try {
+      const row = reminderRow({ appointment_time: new Date(`2026-05-${tier === '72h' ? '08' : '07'}T13:00:00Z`),
+        reminder_72h_sent: tier !== '72h', reminder_24h_sent: tier !== '24h' });
+      const state = installDb({ rows: [row], prefsRow: {
+        [`service_reminder_${tier}_channel`]: 'push', sms_enabled: false, email_enabled: true,
+      } });
+      sendCustomerMessage.mockResolvedValue({ sent: false, code: 'SMS_OPTED_OUT' });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+      expect(flagUpdates(state, `reminder_${tier}_sent`)).toHaveLength(1);
+    } finally { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; }
+  });
+
+  test.each([false, true])('a late App reminder sends only an allowed email backup: email_enabled=%s', async (emailEnabled) => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    const gates = require('../config/feature-gates').gates;
+    const previousWindowGate = gates.smsSendWindow;
+    gates.smsSendWindow = true;
+    jest.setSystemTime(new Date('2026-05-07T00:30:00Z')); // 20:30 ET, day before the visit
+    try {
+      const state = installDb({ rows: [reminderRow()], prefsRow: {
+        service_reminder_24h_channel: 'push', email_enabled: emailEnabled,
+      } });
+      await AppointmentReminders.checkAndSendReminders();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AppointmentEmail.sendAppointmentReminderEmail).toHaveBeenCalledTimes(emailEnabled ? 1 : 0);
+      expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(1);
+    } finally { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; gates.smsSendWindow = previousWindowGate; }
+  });
+
   test('retryable provider failure on the grouped send, no fallback delivery: claim released as retryable, row unmarked — never suppressed (GH codex r6 P1)', async () => {
     const state = installDb({ rows: [reminderRow()], visitIdByService: { 'svc-1': VISIT } });
     // Twilio 5xx-shaped outcome; the customer has no email on file, so the
@@ -500,7 +532,8 @@ describe('round-3 wiring pins (source contracts)', () => {
   test('the SMS-fallback email carries the aggregated grouped hold note', () => {
     const params = src.match(/async function deliverAppointmentEmailFallback\(([^)]*)\)/)?.[1];
     expect(params).toContain('cardHoldNote = null');
-    expect(src).toContain('sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey })');
+    const forwarded = src.match(/const res = await sendAppointmentNoticeEmail\(\{([^}]+)\}\)/)?.[1];
+    expect(forwarded).toContain('cardHoldNote');
   });
 
   test('the night-email leg rechecks the grouped date before sending', () => {
