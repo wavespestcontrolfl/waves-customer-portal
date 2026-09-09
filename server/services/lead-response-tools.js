@@ -12,24 +12,39 @@ const {
   withAutomatedEstimatePhoneLock,
 } = require('./estimate-automation-duplicates');
 
-async function executeLeadTool(toolName, input) {
+const { phoneMatchDigits } = require('../utils/phone');
+
+// Authority comes from the server's assigned session, never model arguments.
+async function resolveLeadSubject(input, context) {
+  if (!context?.leadId || !context?.customerId) return { error: 'Missing assigned lead context', validationError: true };
+  if ((input.lead_id && input.lead_id !== context.leadId) ||
+      (input.customer_id && input.customer_id !== context.customerId)) {
+    return { error: 'Tool target does not match assigned lead', validationError: true };
+  }
+  const customerQuery = db('customers').where('id', context.customerId).whereNull('deleted_at');
+  const customer = await customerQuery.first();
+  if (!customer) return { error: 'Assigned customer is unavailable', validationError: true };
+  const query = db('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at');
+  const lead = await query.first();
+  if (!lead) return { error: 'Assigned lead is unavailable', validationError: true };
+  if (input.phone != null) {
+    const variants = phoneMatchDigits(input.phone);
+    const matches = [lead.phone, customer.phone].some(phone => phoneMatchDigits(phone).some(value => variants.includes(value)));
+    if (!matches) return { error: 'Tool phone does not match assigned lead', validationError: true };
+  }
+  return { lead, customer };
+}
+
+async function executeLeadTool(toolName, input, context) {
+  const subject = await resolveLeadSubject(input, context);
+  if (subject.error) return subject;
+  input = { ...input, lead_id: context.leadId, customer_id: context.customerId };
   switch (toolName) {
 
     // ── Lead data ───────────────────────────────────────────────
 
     case 'get_lead_details': {
-      let lead;
-      if (input.lead_id) {
-        lead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first();
-      } else if (input.phone) {
-        const clean = (input.phone || '').replace(/\D/g, '');
-        if (!clean || clean.length < 10) return { found: false };
-        lead = await db('leads').where(function () {
-          this.where('phone', clean).orWhere('phone', `+1${clean}`).orWhere('phone', `+${clean}`);
-        }).whereNull('deleted_at').orderBy('first_contact_at', 'desc').first();
-      }
-
-      if (!lead) return { found: false };
+      const { lead } = subject;
 
       // Pull AI triage if available
       const triageActivity = await db('lead_activities')
@@ -90,40 +105,11 @@ async function executeLeadTool(toolName, input) {
 
     case 'get_customer_context': {
       const ContextAggregator = require('./context-aggregator');
-      const phone = input.phone || null;
-      const customerId = input.customer_id || null;
-
-      if (phone) {
-        const ctx = await ContextAggregator.getFullCustomerContext(phone);
-        return ctx;
-      }
-
-      if (customerId) {
-        const customer = await db('customers').where('id', customerId).first();
-        if (customer?.phone) {
-          return ContextAggregator.getFullCustomerContext(customer.phone);
-        }
-      }
-
-      return { known: false };
+      return ContextAggregator.getContextForCustomer(subject.customer);
     }
 
     case 'check_existing_estimates': {
       const customerId = input.customer_id;
-      const phone = input.phone;
-
-      const clean = (phone || '').replace(/\D/g, '');
-      const baseQuery = () => {
-        if (customerId) return db('estimates').where({ customer_id: customerId });
-        if (phone) {
-          return db('estimates').where(function () {
-            this.where('customer_phone', clean)
-              .orWhere('customer_phone', `+1${clean}`)
-              .orWhere('customer_phone', `+${clean}`);
-          });
-        }
-        return null;
-      };
 
       // Only rows the customer can actually OPEN are listed (uncapped codex
       // P1 r33 on #3750): an expired, send-failed, never-published, or
@@ -156,19 +142,18 @@ async function executeLeadTool(toolName, input) {
       const PAGE = 15;
       const viewable = [];
       let hiddenCount = 0;
-      if (baseQuery()) {
-        for (let offset = 0; ; offset += PAGE) {
-          const rows = await baseQuery().orderBy('created_at', 'desc').offset(offset).limit(PAGE);
-          for (const row of rows) {
-            // Rows past the cap are neither evaluated nor counted (uncapped
-            // codex P1 r36): the hidden count reports only rows the
-            // customer cannot open, never valid estimates beyond the limit.
-            if (viewable.length >= LIMIT) break;
-            if (await customerCanOpen(row)) viewable.push(row);
-            else hiddenCount += 1;
-          }
-          if (viewable.length >= LIMIT || rows.length < PAGE) break;
+      for (let offset = 0; ; offset += PAGE) {
+        const rows = await db('estimates').where({ customer_id: customerId })
+          .orderBy('created_at', 'desc').offset(offset).limit(PAGE);
+        for (const row of rows) {
+          // Rows past the cap are neither evaluated nor counted (uncapped
+          // codex P1 r36): the hidden count reports only rows the
+          // customer cannot open, never valid estimates beyond the limit.
+          if (viewable.length >= LIMIT) break;
+          if (await customerCanOpen(row)) viewable.push(row);
+          else hiddenCount += 1;
         }
+        if (viewable.length >= LIMIT || rows.length < PAGE) break;
       }
 
       if (!viewable.length) {
