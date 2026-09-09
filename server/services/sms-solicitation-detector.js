@@ -12,7 +12,7 @@ const SOLICITATION_MARKERS = [
   { key: 'lead_referral', strong: false, re: /\b(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b|\bleads?\s+for\s+(?:you|your)\b/i },
   // A sender's own neighbors/neighborhood establishes referral context
   // across the message, including when the sender offers to deliver leads.
-  { key: 'lead_supplier', strong: false, outreach: true, re: /^(?![\s\S]*\b(?:my|our)\s+neighbou?r(?:s|hood)?\b)[\s\S]*\b(?:we|i|our\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer|send|bring)s?\s+(?:you\s+(?:with\s+)?)?(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b/i },
+  { key: 'lead_supplier', strong: false, outreach: true, re: /^(?![\s\S]*\b(?:my|our)\s+neighbou?r(?:s|hood)?\b)[\s\S]*\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer|send|bring)s?\s+(?:you\s+(?:with\s+)?)?(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b/i },
   { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
   // A prospect can offer enough service work to fill our schedule.
   // This needs an independent outreach clue, like other capacity wording.
@@ -28,13 +28,13 @@ const SOLICITATION_MARKERS = [
   // Even "exclusive rates for new customers" or "unlimited estimates"
   // needs a separate outreach clue before it can establish a pitch.
   { key: 'additional_work', strong: false, re: /\b(?:handle|open\s+to)\s+(?:\d+(?:\s*[-–]\s*\d+)?\s+)?(?:more|extra)\s+(?:[\w-]+\s+){0,3}(?:jobs?|customers?|estimates?)\b|\b(?:exclusive|qualified|unlimited)\s+(?:[\w-]+\s+){0,3}(?:jobs?|customers?|estimates?)\b/i },
-  { key: 'sender_work_offer', strong: true, re: /\b(?:we|i|our\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:have|offer|provide)s?\s+(?:you\s+(?:with\s+)?)?(?:exclusive|qualified|unlimited)\s+(?:[\w-]+\s+){0,3}jobs?\s+available\b/i },
+  { key: 'sender_work_offer', strong: true, re: /\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:have|offer|provide)s?\s+(?:you\s+(?:with\s+)?)?(?:exclusive|qualified|unlimited)\s+(?:[\w-]+\s+){0,3}jobs?\s+available\b/i },
   // Offering customers is vendor evidence; having customers or asking
   // whether they qualify for a discount is ordinary service context.
-  { key: 'sender_customer_offer', strong: true, re: /\b(?:we|i|our\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:offer|provide)s?\s+(?:you\s+(?:with\s+)?)?(?:exclusive|qualified|unlimited)\s+(?:(?:pest(?:[\s-]+control)?|lawn(?:[\s-]+care)?|local|new)\s+)?customers?\b/i },
+  { key: 'sender_customer_offer', strong: true, re: /\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:offer|provide)s?\s+(?:you\s+(?:with\s+)?)?(?:exclusive|qualified|unlimited)\s+(?:(?:pest(?:[\s-]+control)?|lawn(?:[\s-]+care)?|local|new)\s+)?customers?\b/i },
   // Explicit sender-side offers to contractors are outreach; a customer
   // asking whether WE offer estimates for their contractors is not.
-  { key: 'contractor_offer', strong: false, outreach: true, re: /\b(?:we|i|our\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer)s?\s+(?:you\s+(?:with\s+)?)?(?:(?:exclusive|qualified|unlimited)\s+)?(?:(?:pest[\s-]+control|lawn[\s-]+care|[\w-]+)\s+)?(?:jobs?|customers?|estimates?|leads?)\s+for\s+(?:local\s+)?contractors?\b/i },
+  { key: 'contractor_offer', strong: false, outreach: true, re: /\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer)s?\s+(?:you\s+(?:with\s+)?)?(?:(?:exclusive|qualified|unlimited)\s+)?(?:(?:pest[\s-]+control|lawn[\s-]+care|[\w-]+)\s+)?(?:jobs?|customers?|estimates?|leads?)\s+for\s+(?:local\s+)?contractors?\b/i },
   // "$" is not a word character, so the boundary sits inside the
   // alternation rather than in front of it (codex r2).
   { key: 'no_upfront', strong: false, re: /(?:\bno|\bzero|\$0)\s+(?:upfront|up-front|set-?up|monthly)\s+(?:cost|costs|fee|fees)?|\bfree\s+(?:setup|set-up|trial)\b/i },
