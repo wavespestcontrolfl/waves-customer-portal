@@ -48,6 +48,9 @@ describe('regex layer', () => {
     'I tried to request an estimate but the link leads to your home page.',
     'Can you handle more lawn jobs at my rentals? Would you like more details?',
     'Can I get termite service with no upfront cost? Reply NO if you cannot do that.',
+    'Do you offer exclusive rates for new customers?',
+    'Can I get unlimited estimates for my rental properties?',
+    'Do qualified customers get a discount on pest control?',
   ])('a customer request reaches the model and remains actionable: %s', async (body) => {
     process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
     mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
@@ -72,6 +75,9 @@ describe('regex layer', () => {
     expect(isSolicitationPitch('I have termites at my new house. Would you like more details?')).toBe(false);
     expect(isSolicitationPitch('I need pest control Tuesday; reply NO if you cannot make it.')).toBe(false);
     expect(isSolicitationPitch('Can I get termite service with no upfront cost?')).toBe(false);
+    expect(isSolicitationPitch('Our network offers exclusive lawn jobs.')).toBe(false);
+    expect(isSolicitationPitch('We provide unlimited estimates for contractors.')).toBe(false);
+    expect(isSolicitationPitch('Our network offers exclusive lawn jobs. Reply NO to opt out.')).toBe(true);
     expect(isSolicitationPitch('$0 upfront cost for our marketing package. Want more details?')).toBe(true);
   });
 });

@@ -374,7 +374,10 @@ router.post('/sms', async (req, res) => {
     // ── STOP / UNSUBSCRIBE keyword handling ──
     const optCommand = detectSmsOptCommand(Body);
 
-    if (optCommand.action === 'opt_out') {
+    // An enforced vendor's "reply NO if you need me to stop texting"
+    // footer is not an instruction for Waves to send a confirmation.
+    // Standalone carrier commands bypass screening and still run here.
+    if (optCommand.action === 'opt_out' && !solicitationEnforced) {
       const normalizedFrom = normalizeE164(From);
       await recordSuppression({
         phone: normalizedFrom || From,
@@ -403,6 +406,7 @@ router.post('/sms', async (req, res) => {
           customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
           message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
           metadata: JSON.stringify({
+            ...solicitationMeta,
             opt_out_reason: optCommand.reason,
             detection_method: optCommand.detectionMethod,
             source_keyword: optCommand.sourceKeyword,

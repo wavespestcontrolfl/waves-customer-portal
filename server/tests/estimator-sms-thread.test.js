@@ -290,8 +290,8 @@ describe('_private.threadQuoteSignal', () => {
   test.each([
     'We can provide more lawn leads.',
     'We have extra qualified pest leads.',
-    'Our network offers exclusive lawn jobs.',
-    'We provide unlimited estimates for contractors.',
+    'Our network offers exclusive lawn leads.',
+    'We provide unlimited leads for contractors.',
   ])('explicit lead-generation wording stands alone: %s', (body) => {
     expect(_private.isSolicitationPitch(body)).toBe(true);
   });
@@ -317,6 +317,9 @@ describe('_private.threadQuoteSignal', () => {
       'I tried to request an estimate but the link leads to your home page.',
       'Can you handle more pest jobs with no upfront cost?',
       'Can I get termite service with no upfront cost? Would you like more details?',
+      'Do you offer exclusive rates for new customers?',
+      'Can I get unlimited estimates for my rental properties?',
+      'Do qualified customers get a discount on pest control?',
     ];
     for (const body of asks) {
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });
