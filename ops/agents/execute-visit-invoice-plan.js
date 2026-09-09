@@ -44,7 +44,13 @@ async function executePlan(database, reviewed) {
     // onto the reviewed date. This also locks the reviewed visits, after the
     // mint and customer locks above. All remaining row locks use NOWAIT:
     // a visit-first editor may next need an invoice already held by the repair.
-    const visits = await trx('scheduled_services').whereIn('customer_id', customerIds).orderBy('id').forUpdate().noWait().select('id', 'payer_id');
+    const visits = await trx('scheduled_services').whereIn('customer_id', customerIds).orderBy('id').forUpdate().noWait().select('id', 'payer_id', 'service_id');
+    // Eligibility reads the catalog row behind each reviewed visit's
+    // service_id. The visit lock does not block an edit of that row, so hold
+    // it too: a catalog identity edit must wait for (and then re-evaluate
+    // after) the repair rather than land between revalidation and commit.
+    const serviceIds = [...new Set(visits.filter((v) => visitIds.includes(v.id)).map((v) => v.service_id).filter(Boolean))].sort();
+    await trx('services').whereIn('id', serviceIds).orderBy('id').forUpdate().noWait().select('id');
     // Existing callback flags and canonical completion attempts need row
     // locks too. The held visit FK prevents insertions/retargeting into this
     // set; these locks prevent existing records changing after evaluation.

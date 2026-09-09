@@ -51,8 +51,13 @@ jest.setTimeout(30000);
     await executePlan(db, [await review(ids)]);
     expect(await invoice(ids)).toMatchObject({ technician_id: ids.techId, tech_name: 'Fixture Technician' });
   });
-  test.each(['visitCallback', 'recordCallback', 'composite', 'amount', 'techName', 'newRecord', 'disposition', 'prepay', 'legacyInvoice'])('refuses post-review drift: %s', async (change) => {
-    const ids = await seedPair(db); const reviewed = await review(ids);
+  test.each(['visitCallback', 'recordCallback', 'composite', 'amount', 'techName', 'newRecord', 'disposition', 'prepay', 'legacyInvoice', 'catalogEdit'])('refuses post-review drift: %s', async (change) => {
+    const ids = await seedPair(db);
+    const serviceId = randomUUID();
+    await db('services').insert({ id: serviceId, name: 'Pest Control', service_key: 'pest_general_quarterly' });
+    await db('scheduled_services').where({ id: ids.visitId }).update({ service_id: serviceId });
+    const reviewed = await review(ids);
+    if (change === 'catalogEdit') await db('services').where({ id: serviceId }).update({ service_key: 'pest_termite_bait_quarterly' });
     if (change === 'visitCallback') await db('scheduled_services').where({ id: ids.visitId }).update({ is_callback: true });
     if (change === 'recordCallback') await db('service_records').where({ id: ids.recordId }).update({ is_callback: true });
     if (change === 'composite') await db('scheduled_services').where({ id: ids.visitId }).update({ service_type: 'Quarterly Pest + Termite Bait Station Service' });
@@ -155,9 +160,11 @@ jest.setTimeout(30000);
     } finally { if (!merge.isCompleted()) await merge.rollback(); }
     expect(await invoice(ids)).toMatchObject({ customer_id: winnerId, scheduled_service_id: null });
   });
-  test.each(['recordEdit', 'newRecord', 'newInvoice', 'siblingInvoice', 'siblingVisit', 'payerEdit', 'attemptEdit', 'newVisit', 'newAddon', 'newPrepay'])('holds %s against changes after revalidation until commit', async (change) => {
+  test.each(['recordEdit', 'newRecord', 'newInvoice', 'siblingInvoice', 'siblingVisit', 'payerEdit', 'attemptEdit', 'newVisit', 'newAddon', 'newPrepay', 'catalogEdit'])('holds %s against changes after revalidation until commit', async (change) => {
     const ids = await seedPair(db);
-    const siblingInvoiceId = randomUUID(); const siblingVisitId = randomUUID(); const attemptId = randomUUID();
+    const siblingInvoiceId = randomUUID(); const siblingVisitId = randomUUID(); const attemptId = randomUUID(); const serviceId = randomUUID();
+    await db('services').insert({ id: serviceId, name: 'Pest Control', service_key: 'pest_general_quarterly' });
+    await db('scheduled_services').where({ id: ids.visitId }).update({ service_id: serviceId });
     await db('payers').insert({ id: 1 });
     await db('scheduled_services').where({ id: ids.visitId }).update({ payer_id: 1 });
     await db('invoices').where({ id: ids.invoiceId }).update({ payer_id: 1 });
@@ -185,6 +192,7 @@ jest.setTimeout(30000);
         if (change === 'newAddon') query = edit('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: ids.visitId });
         if (change === 'payerEdit') query = edit('payers').where({ id: 1 }).update({ tax_exempt: true });
         if (change === 'newPrepay') query = edit('annual_prepay_terms').insert({ id: randomUUID(), prepay_invoice_id: ids.invoiceId });
+        if (change === 'catalogEdit') query = edit('services').where({ id: serviceId }).update({ service_key: 'pest_termite_bait_quarterly' });
         await expect(query).rejects.toMatchObject({ code: '55P03' });
       } finally { await edit.rollback(); }
     } finally { await barrier.commit(); }
