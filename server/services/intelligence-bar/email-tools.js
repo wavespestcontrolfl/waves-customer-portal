@@ -216,7 +216,41 @@ async function getInboxSummary({ days = 1 }) {
   }
 }
 
-async function searchEmails({ search, from, category, days_back = 30, has_attachment, is_unread, limit = 20 }) {
+function emailOwnershipRows() {
+  // Converted leads keep their email links. Missing/deleted leads and conflicting
+  // direct/lead owners are unavailable, never anonymous replies in an owned thread.
+  const rows = db('emails as scope_email').leftJoin('leads as scope_lead', 'scope_email.lead_id', 'scope_lead.id')
+    .select('scope_email.id', 'scope_email.gmail_thread_id')
+    .select(db.raw('COALESCE(scope_email.customer_id, scope_lead.customer_id) AS customer_id'))
+    .select(db.raw(`(scope_email.lead_id IS NOT NULL AND (scope_lead.id IS NULL OR scope_lead.deleted_at IS NOT NULL
+      OR (scope_email.customer_id IS NOT NULL AND scope_lead.customer_id IS NOT NULL
+        AND scope_email.customer_id <> scope_lead.customer_id))) AS invalid_owner`));
+  return db.from(rows.as('email_ownership'));
+}
+
+function scopeEmailCandidates(query, customerIds) {
+  if (!customerIds.length) return query;
+  // A name in a sender/subject is only a search filter. Linked task rows
+  // and unlinked replies in exclusively owned threads establish scope.
+  const ownedThreads = emailOwnershipRows().whereIn('customer_id', customerIds).where('invalid_owner', false)
+    .whereNotNull('gmail_thread_id').select('gmail_thread_id');
+  const foreignThreads = emailOwnershipRows().where(function () {
+    this.where('invalid_owner', true).orWhere(function () {
+      this.whereNotNull('customer_id').whereNotIn('customer_id', customerIds);
+    });
+  })
+    .whereNotNull('gmail_thread_id').select('gmail_thread_id');
+  const allowed = emailOwnershipRows().where('invalid_owner', false).where(function () {
+    this.whereIn('customer_id', customerIds).orWhere(function () {
+      this.whereNull('customer_id').whereIn('gmail_thread_id', ownedThreads);
+    });
+  }).where(function () {
+    this.whereNull('gmail_thread_id').orWhereNotIn('gmail_thread_id', foreignThreads);
+  }).select('id');
+  return query.whereIn('id', allowed);
+}
+
+async function searchEmails({ search, from, category, days_back = 30, has_attachment, is_unread, limit = 20 }, customerIds = []) {
   try {
     const since = new Date();
     since.setDate(since.getDate() - days_back);
@@ -225,6 +259,8 @@ async function searchEmails({ search, from, category, days_back = 30, has_attach
       .where('received_at', '>=', since)
       .orderBy('received_at', 'desc')
       .limit(Math.min(limit, 50));
+
+    query = scopeEmailCandidates(query, customerIds);
 
     if (search) {
       query = query.where(function () {
@@ -257,13 +293,25 @@ async function searchEmails({ search, from, category, days_back = 30, has_attach
   }
 }
 
-async function getEmailThread({ thread_id, from_name, from_email, subject_search }) {
+async function emailReadTargetFailure(messages, customerIds = []) {
+  if (!customerIds.length) return null;
+  const ids = [...new Set(messages.map(message => message.id))];
+  const ownership = await emailOwnershipRows().whereIn('id', ids).select('id', 'customer_id', 'invalid_owner');
+  const linked = ownership.map(message => message.customer_id).filter(Boolean);
+  if (ownership.length !== ids.length || ownership.some(message => message.invalid_owner)
+    || !linked.some(id => customerIds.includes(id)) || linked.some(id => !customerIds.includes(id))) {
+    return { error: 'This email thread is not linked exclusively to the selected task customer. Select the intended thread or correct its customer link.', code: 'target_clarification_required' };
+  }
+  return null;
+}
+
+async function getEmailThread({ thread_id, from_name, from_email, subject_search }, customerIds = []) {
   try {
     let threadId = thread_id;
 
     // Find thread by sender or subject
     if (!threadId) {
-      let finder = db('emails').orderBy('received_at', 'desc');
+      let finder = scopeEmailCandidates(db('emails'), customerIds).orderBy('received_at', 'desc');
       if (from_name) finder = finder.whereILike('from_name', `%${from_name}%`);
       if (from_email) finder = finder.whereILike('from_address', `%${from_email}%`);
       if (subject_search) finder = finder.whereILike('subject', `%${subject_search}%`);
@@ -277,6 +325,8 @@ async function getEmailThread({ thread_id, from_name, from_email, subject_search
       .orderBy('received_at', 'asc')
       .select('id', 'from_name', 'from_address', 'to_address', 'subject',
         'body_text', 'received_at', 'classification', 'has_attachments', 'customer_id');
+    const targetFailure = await emailReadTargetFailure(messages, customerIds);
+    if (targetFailure) return targetFailure;
 
     // Get attachments
     const emailIds = messages.map(m => m.id);
@@ -297,7 +347,7 @@ async function getEmailThread({ thread_id, from_name, from_email, subject_search
   }
 }
 
-async function draftEmailReply(emailId, threadId, fromName, instructions) {
+async function draftEmailReply(emailId, threadId, fromName, instructions, customerIds = []) {
   try {
     // Find the email
     let email;
@@ -306,7 +356,7 @@ async function draftEmailReply(emailId, threadId, fromName, instructions) {
     } else if (threadId) {
       email = await db('emails').where('gmail_thread_id', threadId).orderBy('received_at', 'desc').first();
     } else if (fromName) {
-      email = await db('emails').whereILike('from_name', `%${fromName}%`).orderBy('received_at', 'desc').first();
+      email = await scopeEmailCandidates(db('emails'), customerIds).whereILike('from_name', `%${fromName}%`).orderBy('received_at', 'desc').first();
     }
     if (!email) return { error: 'Email not found' };
 
@@ -314,7 +364,9 @@ async function draftEmailReply(emailId, threadId, fromName, instructions) {
     const thread = await db('emails')
       .where('gmail_thread_id', email.gmail_thread_id)
       .orderBy('received_at', 'asc')
-      .select('from_name', 'from_address', 'subject', 'body_text', 'received_at');
+      .select('id', 'from_name', 'from_address', 'subject', 'body_text', 'received_at', 'customer_id');
+    const targetFailure = await emailReadTargetFailure([email, ...thread], customerIds);
+    if (targetFailure) return targetFailure;
 
     // Load customer context if matched
     let customerContext = '';
@@ -420,23 +472,30 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
       body.replace(/\n/g, '<br>'),
       email.gmail_thread_id
     );
+    if (!result?.id) return { outcome_unknown: true, warning: 'Gmail returned no message identifier. Check the sent thread before retrying.' };
 
     // Log internal ids, not the recipient address (PII stays out of logs).
     logger.info(`[intelligence-bar:email] Sent reply to email ${email.id}: ${result.id}`);
 
     return {
       success: true,
+      state: 'provider_accepted',
+      providerMessageId: result.id,
       sent_to: email.from_address,
       message_id: result.id,
       subject: email.subject,
     };
   } catch (err) {
-    logger.error('[intelligence-bar:email] send_email_reply failed:', err);
+    if (err.providerOutcome?.outcomeUnknown) {
+      return { outcome_unknown: true, warning: 'Gmail did not confirm the send outcome. Check the sent thread before creating another send.' };
+    }
+    logger.error(`[intelligence-bar:email] send_email_reply failed for email ${email_id}: ${err.code || 'send_error'}`);
     return { error: err.message };
   }
 }
 
 async function replyViaSms({ email_id, customer_name, message, customer_id, _pinned_phone, _pinned_email }) {
+  let providerOutcome = null;
   try {
     let phone = null;
     let custName = customer_name;
@@ -521,6 +580,7 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
     if (!smsResult.sent) {
       return { error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' };
     }
+    providerOutcome = smsResult;
 
     // Mark the email as responded via SMS. The card disclosed this inbox
     // update — a zero-row update (email deleted while the card was pending)
@@ -552,14 +612,25 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
 
     return {
       success: true,
+      state: 'provider_accepted',
+      providerMessageId: smsResult.providerMessageId || null,
+      auditLogId: smsResult.auditLogId || null,
       sent_to: phone,
       customer: custName,
       message,
-      note: `SMS sent to ${custName} at ${phone} instead of email reply.`,
-      ...(inboxWarning ? { warning: inboxWarning } : {}),
+      note: 'The SMS provider accepted the reply; delivery is not yet confirmed.',
+      ...(inboxWarning ? { warning: inboxWarning, partial: true } : {}),
     };
   } catch (err) {
-    logger.error('[intelligence-bar:email] reply_via_sms failed:', err);
+    const accepted = providerOutcome || err.providerOutcome;
+    if (accepted?.sent === true) return {
+      success: true, state: 'provider_accepted',
+      providerMessageId: accepted.providerMessageId || null,
+      auditLogId: accepted.auditLogId || null,
+      partial: !!email_id,
+      warning: 'The provider accepted the SMS, but the local inbox or audit update failed. Check its status before retrying.',
+    };
+    logger.error(`[intelligence-bar:email] reply_via_sms failed (code=${err.code || 'unknown'})`);
     return { error: err.message };
   }
 }
@@ -731,13 +802,13 @@ async function blockSender({ email_address, domain }) {
 
 // ─── Tool execution router ───────────────────────────────────────
 
-async function executeEmailTool(toolName, input) {
+async function executeEmailTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'get_inbox_summary': return await getInboxSummary(input);
-      case 'search_emails': return await searchEmails(input);
-      case 'get_email_thread': return await getEmailThread(input);
-      case 'draft_email_reply': return await draftEmailReply(input.email_id, input.thread_id, input.from_name, input.instructions);
+      case 'search_emails': return await searchEmails(input, actionContext.readCustomerIds);
+      case 'get_email_thread': return await getEmailThread(input, actionContext.readCustomerIds);
+      case 'draft_email_reply': return await draftEmailReply(input.email_id, input.thread_id, input.from_name, input.instructions, actionContext.readCustomerIds);
       case 'send_email_reply': return await sendEmailReply(input);
       case 'reply_via_sms': return await replyViaSms(input);
       case 'get_vendor_invoices': return await getVendorInvoices(input);

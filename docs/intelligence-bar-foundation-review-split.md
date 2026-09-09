@@ -9,8 +9,8 @@ communications are outside the development/testing authorization.
 
 | Part | Branch | Scope |
 | --- | --- | --- |
-| A | `feat/ib-registry-coverage-foundation` | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
-| B1 | `feat/ib-target-validation-foundation` | Current-request identity resolution, fresh parent/child validation and scoped reader input preparation. |
+| A | `feat/ib-registry-coverage-foundation` / #4041 | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
+| B1 | `feat/ib-target-validation-foundation` / #4062 | Current-request identity resolution, fresh parent/child validation and scoped reader input preparation. |
 | B2 | `feat/ib-target-context-foundation` / #4044 | Scoped domain readers, provider outcome classification and identity-bound review publishing. |
 | C | `feat/ib-task-recovery-foundation` | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
 | D | `feat/ib-platform-foundation` / #4019 | Route and UI integration, durable conversation continuation, desktop/mobile and real dev-database acceptance tests. |
@@ -59,6 +59,31 @@ write-gate scanner now recognizes `action-registry.js` as a non-tool helper;
 catalog, coverage, and write-gate suites pass all 46 tests. These resolve the
 first CI run's exact failures (new upstream sites and the helper allowlist).
 
+Part B introduces the target-context reader for integration in D. Review IDs
+participate in the same parent/customer checks as other records; an unlinked
+review needs its native deep link or an explicit UUID, and cannot be substituted
+for a selected customer. Its approval pin includes raw customer attribution,
+location, content, and review identity separately from the public-copy grounding
+fingerprint. The existing publisher checks that pin inside its claim and after
+the Google read; its local-only path also rechecks under the review row lock.
+The route must call review read validation even with no customer target and
+carry the server-authored pin through confirmation; those calls belong to D.
+
+History now uses the same outcome classifier as receipts, including unknown,
+provider-accepted, partial, failed, blocked, and completed states. Copied shared
+email/provider changes preserve uncertain sends and acceptance IDs; copied
+customer/bulk-lead changes compare full-precision versions under existing locks.
+Part B uses controlled provider/unit fixtures; the integrated dev-DB/browser
+proof remains in D. No real communication or publication is authorized for QA.
+
+### Deferred P2s in B
+
+- `server/services/intelligence-bar/task-context.js:229`: the shared target
+  validator exceeds the structural complexity warning. Its ordered ownership,
+  bulk-cohort, and recipient checks remain together; moving them into one-use
+  helpers would only relocate the decisions. Further simplification must
+  preserve every independently tested authorization path.
+
 Part A review remediation validates arguments again inside registry execution.
 Trusted confirmation and private version pins use the server action context;
 model-supplied approval or private fields fail schema validation. Discovery is
@@ -68,6 +93,21 @@ retains dynamic admin verb-wrapper calls. All 1,736 recorded sites remain
 unsupported/unverified. Backend registrations remain a manual inventory in
 this split; automated backend drift enforcement is deferred to the final
 capability reconciliation, so this gate currently enforces frontend sites only.
+
+Part B review remediation resolves prepositional and overlapping customer
+selectors before considering page fallback. Target versions use PostgreSQL
+`updated_at::text` throughout fresh page, operator, full-name and single-name
+lookups. Two isolated Postgres tests verify microsecond preservation and
+misspelling refusal with actual synthetic rows, rolled back after each test.
+The affected six service/confirmation suites pass 165 tests.
+
+The shared outcome classifier now requires affirmative success. Optimizer
+no-op, unavailable tax-advisor, and empty bulk-update paths explicitly block;
+dry runs remain previews. Estimate flag toggles report success only after an
+affected row. Message-only, warning-only and unnormalized legacy output stays
+unknown. Legacy payout, SEO enqueue and SEO approval results still need
+individual lifecycle adapters before those capabilities can be verified; no
+platform coverage is claimed for them by this split.
 
 Part A integrates merged main `e7c4e9eb4` and records its changed property-editor
 request as unsupported. Optional request calls now join the census; registry
@@ -127,6 +167,14 @@ The final checks pass 148 unit/write-boundary tests and 13 real PostgreSQL tests
 Generic action-object refusal hints (3947287736) remain deferred: recipient
 parsing must preserve earlier explicit targets across compound clauses.
 
+B2 message search rereads the resolved customer's saved phone before including
+unlinked historical messages. Foreign linked rows, stale supplied numbers and
+unavailable customers are excluded. The final parent-integrated checks pass
+20 isolated PostgreSQL tests and 143 targeting/reader/pinning/history unit tests;
+earlier unchanged provider/publisher checks remain recorded above.
+
+Customer-ID-only searches retain linked history after a phone-number change; only unlinked messages depend on the current saved phone. An explicit phone selector still narrows the results. The final seven adapter DB cases and 32 reader/pinning/history tests pass after this correction, and independent review closed it.
+
 B1 also binds explicit child identifiers in the request, requires a deliberate
 reference for customerless calls, and freshly validates every child owner.
 Emails inherit a converted lead's customer and reject deleted or conflicting
@@ -135,6 +183,22 @@ page hints survive stale auxiliary hints, including compound “this customer an
 that estimate” requests. Name lookup now uses the same punctuation and space
 normalization as request matching. The resulting scope passes 154 unit/write
 boundary cases and 19 rollback-only PostgreSQL cases. No provider was called.
+
+B2 propagates Gmail uncertainty through the native email route and editor.
+The existing tab-scoped draft store saves an attempt before submission, retains
+the guard through reloads and quota failures, and requires explicit Sent-folder
+reconciliation before another send. Gmail acceptance requires its message ID;
+inbox-refresh failure cannot become a send failure. The shared Gmail client
+also rejects ID-less responses as unknown, so the existing outreach claim and
+manual reconciliation path retain their send lock. This closes native-tab retry
+behavior, not cross-device/server idempotency; that remains Phase 3 work.
+
+Controlled desktop (1440) and mobile (390) browser checks covered compose/reply
+uncertainty, reload, both reconciliation verdicts and no duplicate send. Three
+screenshots were inspected; no JavaScript errors or horizontal overflow appeared.
+The provider was stubbed in browser QA. Actual native-route tests and the real
+Google SDK with a controlled transporter separately cover outcome classification.
+The parent-integrated database suites pass 26 rollback-only cases.
 
 The next B1 correction generalizes canonical name-selector guards to all
 classified writes, including lead status, and requires explicit current-request
@@ -145,6 +209,21 @@ explicit estimate IDs, while message-body commands grant no record authority.
 Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
 PostgreSQL tests. Independent review closed both additional edge cases before
 the fifth remote review. No provider, customer message or production write ran.
+
+Scoped email history now resolves effective ownership through converted leads
+for search candidates, owned/foreign Gmail thread sets and complete-thread
+read/draft validation. Missing/deleted lead links or conflicting direct and
+lead owners refuse before model egress. The controlled PostgreSQL suite covers
+lead-only success, mixed-thread isolation, contradictory links, ownership
+changes and deletion. Its eight cases pass; the affected email-outcome and
+operational-read units add 16 passes. No live model/provider was called.
+
+The shared outcome classifier now also replaces the older route-local failure
+predicate in B2, so a blocked optimizer preview cannot create an approval card
+and blocked commit/execute results cannot return success. The existing route
+confirmation suite passes 49 cases, including both new outcome regressions.
+This brings the adapter's blocked-result contract forward from D so the smaller
+B2 review unit has the same behavior before downstream route integration.
 
 Post-merge main integration at `a7c689301` records the nine request sites that
 reached main after Part A's final head: the Customer 360 workspace and unread

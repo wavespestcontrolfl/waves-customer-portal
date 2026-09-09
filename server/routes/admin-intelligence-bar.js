@@ -60,6 +60,7 @@ const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligenc
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
+const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
@@ -74,10 +75,6 @@ const SEO_CONFIRMED_ACTION_TOOL_NAMES = new Set(['run_seo_pipeline', 'approve_se
 // Membership lives in write-gates.js so the contract-test registry flags the
 // same tools sideEffects — one source, no drift.
 const CONFIRMED_ACTION_TOOL_NAMES = new Set(CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES);
-
-function isToolFailure(result) {
-  return result && typeof result === 'object' && (result.error || result.failed === true);
-}
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -2589,7 +2586,7 @@ router.post('/execute', async (req, res, next) => {
       });
 
     res.json({
-      success: !result.error,
+      success: !isToolFailure(result),
       result,
     });
 
@@ -2884,12 +2881,14 @@ router.post('/confirm-action', async (req, res, next) => {
     });
     await PendingActions.recordResult(action.id, result);
 
-    logger.info(`[intelligence-bar:pending] Confirmed action ${action.id} (${action.tool_name})`, {
-      success: !result?.error,
-    });
+    // An accepted-but-unconfirmed provider submission is not a success: the
+    // card must show it as unknown (reconcile before retrying), never as done.
+    const outcome = executionOutcome(result);
+    const success = !isToolFailure(result) && outcome !== 'outcome_unknown';
+    logger.info(`[intelligence-bar:pending] Confirmed action ${action.id} (${action.tool_name})`, { success, outcome });
 
     res.status(result?.preview_changed ? 409 : 200)
-      .json({ success: !result?.error, tool: action.tool_name, result });
+      .json({ success, outcome, tool: action.tool_name, result });
   } catch (err) {
     logger.error('[intelligence-bar] confirm-action failed:', err);
     next(err);

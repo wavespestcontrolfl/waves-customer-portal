@@ -597,7 +597,7 @@ function bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids }) {
 }
 
 async function matchBulkLeads(input) {
-  return bulkLeadCriteriaQuery(input).select('id', 'first_name', 'last_name', 'status', 'updated_at');
+  return bulkLeadCriteriaQuery(input).select('id', 'first_name', 'last_name', 'status', 'updated_at', db.raw('updated_at::text as version'));
 }
 
 // Read-only preview of a bulk update — the route runs this at proposal time
@@ -643,6 +643,7 @@ async function bulkUpdateLeads(input) {
       dry_run: true,
       matches: matching.length,
       matched_ids: matching.map(l => l.id),
+      versions: Object.fromEntries(matching.map(lead => [lead.id, lead.version])),
       // Complete identity list for the confirmation card (W0B): the exact-
       // effects disclosure names EVERY pinned lead, not a sample.
       all_names: matching.map(l => `${l.first_name || ''} ${l.last_name || ''}`.trim() || `lead ${l.id}`),
@@ -674,8 +675,9 @@ async function bulkUpdateLeads(input) {
     try {
       rows = await db.transaction(async (trx) => {
         const rows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
-          .transacting(trx).forUpdate().select('id');
-        if (rows.length !== lead_ids.length) {
+          .transacting(trx).forUpdate().select('id', trx.raw('updated_at::text as version'));
+        if (rows.length !== lead_ids.length || (input._approved_lead_versions
+          && rows.some(row => input._approved_lead_versions[row.id] !== row.version))) {
           const err = new Error('bulk_set_changed');
           err.previewChanged = true;
           throw err;
@@ -696,7 +698,7 @@ async function bulkUpdateLeads(input) {
       .update(updates, ['id']);
   }
   const ids = rows.map(r => r.id);
-  if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
+  if (ids.length === 0) return { blocked: true, updated: 0, note: 'No matching leads found' };
 
   // Funnel-row mirror for the whole batch — one set-based UPDATE with the
   // same monotonic stage predicate as the single-lead bridge. Conditional
