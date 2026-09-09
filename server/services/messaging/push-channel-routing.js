@@ -183,6 +183,7 @@ async function hasFreshPushDevice(customerId, knex = db) {
 // An explicit App choice also lets reminders replace their automatic
 // companion text, while the default PUSH_ROUTING_POLICY stays unchanged.
 const APP_FIRST_TYPES = new Set([
+  'invoice', 'payment_link', 'invoice_followup',
   ...APPOINTMENT_UPDATE_TYPES, 'tech_en_route',
   'reminder_72h', 'appointment_reminder',
   'tech_arrived', 'service_complete', 'service_complete_with_invoice',
@@ -191,6 +192,9 @@ const APP_FIRST_TYPES = new Set([
 ]);
 
 const PREF_CHANNEL_COLUMN = {
+  invoice: 'invoice_channel',
+  payment_link: 'invoice_channel',
+  invoice_followup: 'invoice_channel',
   ...Object.fromEntries(APPOINTMENT_UPDATE_TYPES.map((type) => [type, 'appointment_confirmation_channel'])),
   tech_arrived: 'tech_arrived_channel',
   ...Object.fromEntries([...APP_FIRST_TYPES].filter((type) => type.startsWith('service_')).map((type) => [type, 'service_complete_channel'])),
@@ -366,14 +370,25 @@ async function recordBell(customerId, messageType, body, dedupeKey) {
  * Twilio entirely. Any failure returns { delivered: false } and the SMS
  * proceeds untouched.
  */
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, invoiceId }) {
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly }))) return { delivered: false, reason: 'preference_changed' };
     const fresh = await hasFreshPushDevice(customerId);
     let appNotification = null;
     if (explicitPushOnly) {
-      const { title, link, category } = pushPresentation(messageType);
+      let presentation = pushPresentation(messageType);
+      if (PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel') {
+        const invoice = invoiceId && await db('invoices')
+          .where({ id: invoiceId, customer_id: customerId }).whereNull('payer_id')
+          .first('token', 'status').catch(() => null);
+        if (!invoice?.token || !require('../invoice-helpers').isInvoiceCollectibleStatus(invoice.status)) {
+          return { delivered: false, blocked: true, reason: 'invoice_unavailable' };
+        }
+        presentation = { title: messageType === 'invoice_followup' ? 'Invoice reminder' : 'Your invoice is ready',
+          link: `/pay/${encodeURIComponent(invoice.token)}`, category: 'billing' };
+      }
+      const { title, link, category } = presentation;
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
         link, dedupeKey: notificationEventKey, awaitPush: true,
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },

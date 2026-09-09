@@ -11,6 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(async () => ({})) }));
 jest.mock('../services/apns', () => ({ send: jest.fn(), status: () => ({ configured: true }) }));
 jest.mock('../services/fcm', () => ({ send: jest.fn(), status: () => ({ configured: true }) }));
+jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => ({})) }));
 
 const { randomUUID } = require('node:crypto');
 const express = require('express');
@@ -39,10 +40,18 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     admin = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = require('knex')({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
-    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions']) {
+    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log']) {
       await mockPg.raw('CREATE TABLE ?? (LIKE ?? INCLUDING ALL)', [table, `public.${table}`]);
     }
     expect(await mockPg.schema.hasColumn('notification_prefs', 'push_enabled')).toBe(true);
+    const invoiceMigration = require('../models/migrations/20260909000060_invoice_app_channel');
+    await mockPg.transaction(async (trx) => {
+      await invoiceMigration.up(trx);
+      await invoiceMigration.up(trx);
+      await invoiceMigration.down(trx);
+      await invoiceMigration.down(trx);
+      await invoiceMigration.up(trx);
+    });
     await mockPg('customers').insert([
       { id: owner, account_id: owner, is_primary_profile: true },
       { id: property, account_id: owner, is_primary_profile: false },
@@ -71,6 +80,8 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     await mockPg('notifications').del();
     await mockPg('push_subscriptions').del();
     await mockPg('notification_prefs').del();
+    await mockPg('invoices').del();
+    await mockPg('sms_log').del();
     await mockPg('notification_prefs').insert([owner, property, outsider].map((id) => ({ customer_id: id })));
     apns.send.mockResolvedValue({ ok: true });
     fcm.send.mockResolvedValue({ ok: true });
@@ -144,6 +155,54 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await require('../services/appointment-reminders')._test.getReminderPrefs(property)).toMatchObject({
       reminder72hChannel: 'push', reminder24hChannel: 'push', smsEnabled: false, emailEnabled: false, unavailable: false,
     });
+  });
+
+  test('invoice App choice belongs to the charged profile and survives old-client saves', async () => {
+    expect((await put({ invoiceChannel: 'push' })).status).toBe(409);
+    await device();
+    expect((await put({ invoiceChannel: 'push', smsEnabled: false })).body.preferences).toMatchObject({ invoiceChannel: 'push' });
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({ invoice_channel: 'push', sms_enabled: false });
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({ invoice_channel: 'sms' });
+    expect((await put({ invoiceChannel: 'sms' }, '/api/notifications/preferences')).status).toBe(200);
+    expect((await get()).body.invoiceChannel).toBe('push');
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
+    expect((await get()).body.invoiceChannel).toBeUndefined();
+    expect((await put({ invoiceChannel: 'push' })).status).toBe(400);
+    expect((await put({ invoiceChannel: 'sms' })).status).toBe(200);
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first()).invoice_channel).toBe('push');
+  });
+
+  test('invoice push opens its authorized invoice and deduplicates a retry but not the next follow-up', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    const invoiceToken = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: invoiceToken, invoice_number: 'QA-INVOICE', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.',
+      messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:day3` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(apns.send).toHaveBeenCalledTimes(1);
+    expect(await mockPg('notifications').first()).toMatchObject({ link: `/pay/${invoiceToken}`, title: 'Invoice reminder' });
+    expect(await routing.attemptPushFirst({ ...notice, notificationEventKey: `qa:${invoiceId}:day7` })).toMatchObject({ delivered: true });
+    expect(apns.send).toHaveBeenCalledTimes(2);
+    expect((await mockPg('sms_log').where({ from_phone: 'push', status: 'sent' })).length).toBe(2);
+  });
+
+  test.each(['payer', 'wrong_customer', 'paid', 'void', 'processing'])('invoice App delivery excludes %s invoices', async (kind) => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: kind === 'wrong_customer' ? outsider : property,
+      payer_id: kind === 'payer' ? 999997 : null, token: randomUUID(), invoice_number: 'QA-EXCLUDED',
+      status: ['paid', 'void', 'processing'].includes(kind) ? kind : 'sent' });
+    expect(await require('../services/messaging/push-channel-routing').attemptPushFirst({
+      customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}`,
+    })).toMatchObject({ delivered: false, reason: 'invoice_unavailable' });
+    expect(apns.send).not.toHaveBeenCalled();
+    expect(await mockPg('notifications')).toHaveLength(0);
   });
 
   test('older clients and a gate rollback preserve saved App first values', async () => {

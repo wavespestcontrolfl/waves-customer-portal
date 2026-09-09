@@ -71,6 +71,28 @@ test('App first reaches the app with text settings off, without changing them', 
   expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({ input: expect.objectContaining({ channel: 'push' }), providerOutcome: expect.objectContaining({ provider: 'push' }) }));
 });
 
+test.each(['invoice', 'payment_link', 'invoice_followup'])('explicit invoice choice routes %s and retains invoice identity', async (type) => {
+  prefs.invoice_channel = 'push';
+  prefs.sms_enabled = false;
+  const notice = { ...input, purpose: 'payment_link', metadata: { original_message_type: type,
+    notificationEventKey: 'invoice-followup:qa-sequence:day3' } };
+  expect(await sendCustomerMessage(notice)).toMatchObject({ sent: true, channel: 'push' });
+  expect(Twilio.sendSMS).toHaveBeenCalledWith(input.to, input.body, expect.objectContaining({
+    explicitPushOnly: true, invoiceId: input.invoiceId, notificationEventKey: notice.metadata.notificationEventKey,
+  }));
+});
+
+test('invoice App choice retains operator Text and consent-checked fallback', async () => {
+  prefs.invoice_channel = 'push';
+  const notice = { ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } };
+  await sendCustomerMessage({ ...notice, operatorInitiated: true });
+  expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(false);
+  prefs.sms_enabled = false;
+  Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'no_fresh_device' });
+  expect(await sendCustomerMessage(notice)).toMatchObject({ sent: false, code: 'SMS_OPTED_OUT', requestedChannel: 'push' });
+  expect(Twilio.sendSMS).toHaveBeenCalledTimes(2);
+});
+
 test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc', 'non_mobile'])('hard suppression %s still blocks app delivery', async (reason) => {
   suppression = { reason, active: true };
   const result = await sendCustomerMessage(input);

@@ -7,10 +7,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 vi.mock('../utils/api', () => ({ default: {
   getSchedule: vi.fn(), getNotificationPrefs: vi.fn(), getPropertyNotificationPrefs: vi.fn(),
   getCustomerPushStatus: vi.fn(), updateNotificationPrefs: vi.fn(),
+  getPayments: vi.fn(), getBalance: vi.fn(), getCards: vi.fn(), getAutopay: vi.fn(),
 } }));
 
 import api from '../utils/api';
-import { ScheduleTab } from './PortalPage';
+import { BillingTab, ScheduleTab } from './PortalPage';
 
 const customer = { id: 'qa-app', firstName: 'QA', phone: '9415550142', email: 'qa@example.invalid', property: {} };
 let prefs;
@@ -27,6 +28,10 @@ beforeEach(() => {
   api.getNotificationPrefs.mockImplementation(async () => ({ ...prefs }));
   api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [] });
   api.getCustomerPushStatus.mockResolvedValue({ available: true, enabled: true, registered: true, fresh: true });
+  api.getPayments.mockResolvedValue({ payments: [] });
+  api.getBalance.mockResolvedValue({ currentBalance: 0 });
+  api.getCards.mockResolvedValue({ cards: [] });
+  api.getAutopay.mockResolvedValue({ state: 'disabled' });
   api.updateNotificationPrefs.mockImplementation(async (changes) => {
     prefs = { ...prefs, ...changes };
     return { success: true, preferences: prefs };
@@ -60,10 +65,39 @@ it('includes both reminders in the App shortcut without enabling a muted categor
   await waitFor(() => expect(reminder24()).toHaveValue('push'));
   expect(api.updateNotificationPrefs).toHaveBeenCalledWith({
     appointmentConfirmationChannel: 'push', serviceReminder72hChannel: 'push', serviceReminder24hChannel: 'push',
-    enRouteChannel: 'push', techArrivedChannel: 'push', serviceCompleteChannel: 'push', paymentConfirmationChannel: 'push',
+    enRouteChannel: 'push', techArrivedChannel: 'push', serviceCompleteChannel: 'push', paymentConfirmationChannel: 'push', invoiceChannel: 'push',
   });
   expect(screen.getByRole('switch', { name: '72-Hour Appointment Reminder', exact: true })).toHaveAttribute('aria-checked', 'false');
   expect(prefs).toMatchObject({ serviceReminder72h: false, smsEnabled: false, emailEnabled: false });
+});
+
+it('saves the invoice App choice without enabling text or email and shows save failures', async () => {
+  render(<BillingTab customer={customer} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
+  await waitFor(() => expect(within(select).getByRole('option', { name: 'App', exact: true })).toBeEnabled());
+  fireEvent.change(select, { target: { value: 'push' } });
+  api.updateNotificationPrefs.mockRejectedValueOnce(new Error('unavailable'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await screen.findByText(/Couldn.t save your billing preferences/);
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await screen.findByRole('button', { name: 'Saved', exact: true });
+  expect(api.updateNotificationPrefs).toHaveBeenLastCalledWith(expect.objectContaining({ invoiceChannel: 'push' }));
+  expect(prefs).toMatchObject({ invoiceChannel: 'push', smsEnabled: false, emailEnabled: false });
+});
+
+it('retains the saved invoice choice when the app is stale and hides it with the gate off', async () => {
+  prefs.invoiceChannel = 'push';
+  api.getCustomerPushStatus.mockResolvedValue({ available: true, enabled: true, registered: true, fresh: false });
+  const first = render(<BillingTab customer={customer} />);
+  const select = await screen.findByRole('combobox', { name: 'Delivery method for invoices' });
+  expect(select).toHaveValue('push');
+  expect(within(select).getByRole('option', { name: 'App', exact: true })).toBeDisabled();
+  fireEvent.change(select, { target: { value: 'sms' } });
+  first.unmount();
+  prefs.appPreferencesAvailable = false;
+  render(<BillingTab customer={customer} />);
+  await screen.findByRole('button', { name: 'Save billing preferences' });
+  expect(screen.queryByRole('combobox', { name: 'Delivery method for invoices' })).not.toBeInTheDocument();
 });
 
 it('requires a fresh connected app before selecting App for reminders', async () => {
