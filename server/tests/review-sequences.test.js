@@ -4456,6 +4456,8 @@ describe('shared ask history foundation', () => {
 
   test.each([
     'Thanks for your Google review',
+    'We really appreciate your Google review.',
+    'Your Google review meant the world to us.',
     'Thanks for leaving us a Google review',
     'Office directions: https://maps.app.goo.gl/abc123',
     'Meet here: https://goo.gl/maps/abc123',
@@ -4474,6 +4476,10 @@ describe('shared ask history foundation', () => {
 
   test.each([
     'Could you leave a Google review?',
+    'We’d appreciate a Google review.',
+    'A quick Google review would mean the world.',
+    'We would really love your honest review.',
+    'A review could help our little crew.',
     'Would you mind leaving us a Google review?',
     'https://g.page/office-slug/review',
     'A quick review helps: https://portal.test/l/abc123',
