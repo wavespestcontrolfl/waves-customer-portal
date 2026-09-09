@@ -2017,6 +2017,30 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('property_nutrient_ledger').where({ customer_id: fixture.customerId })).toHaveLength(2);
   });
 
+  test.each([1, 2])('automatic grouping ignores an open version-%s visit after the closeout gate changes', async (previousVersion) => {
+    const groups = require('../services/visit-groups');
+    jest.replaceProperty(require('../config/feature-gates').gates, 'visitGroups', true);
+    process.env.GATE_VISIT_CLOSEOUT = previousVersion === 1 ? 'true' : 'false';
+    const propertyId = randomUUID();
+    await mockPg('customer_properties').insert({ id: propertyId, customer_id: fixture.customerId });
+    await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ property_id: propertyId, status: 'confirmed' });
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ property_id: propertyId,
+      behavior_version: previousVersion, group_family: 'recurring_property_service',
+      stop_base_key: stopBaseKey({ customerId: fixture.customerId, propertyId, scheduledDate: etDateString() }) });
+    const unattached = [randomUUID(), randomUUID()];
+    await mockPg('scheduled_services').insert(unattached.map((id) => ({ id, customer_id: fixture.customerId,
+      property_id: propertyId, technician_id: fixture.techId, service_id: fixture.catalogId,
+      service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+      window_start: '09:00', window_end: '11:00', status: 'confirmed' })));
+
+    const grouped = await groups.maybeGroupRow(unattached[0], { createdBy: 'test' });
+    expect(grouped).toMatchObject({ behavior_version: previousVersion === 1 ? 2 : 1 });
+    expect(grouped.id).not.toBe(fixture.visitId);
+    expect(await mockPg('scheduled_services').where({ visit_id: grouped.id }).pluck('id')).toEqual(expect.arrayContaining(unattached));
+    expect(await mockPg('scheduled_services').where({ visit_id: fixture.visitId }).pluck('id')).toEqual(expect.arrayContaining(fixture.serviceIds));
+  });
+
   test('joining under the closeout gate cannot rewrite an existing legacy visit contract', async () => {
     await mockPg('services').where({ id: fixture.catalogId }).update({ groupable: true, group_family: 'recurring_property_service' });
     await expect(require('../services/visit-groups').createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' }))
