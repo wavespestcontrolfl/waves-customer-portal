@@ -102,6 +102,7 @@ export default function AdminLayoutV2() {
   const [user, setUser] = useState(null);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const menuTriggerRef = useRef(null);
   // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
   // focus returns to the "Open menu" button (F0014).
   const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
@@ -210,7 +211,12 @@ export default function AdminLayoutV2() {
     navigate("/admin/login", { replace: true });
   };
 
-  const openPalette = () => { setSidebarOpen(false); paletteRef.current?.open(); };
+  const closeSidebarForPalette = () => {
+    // The assistant must capture an opener that survives the hidden drawer.
+    if (isMobile && sidebarOpen) menuTriggerRef.current?.focus({ preventScroll: true });
+    setSidebarOpen(false);
+  };
+  const openPalette = () => { closeSidebarForPalette(); paletteRef.current?.open(); };
 
   const sidebarVisible = !isMobile || sidebarOpen;
   // The redirect effect runs after render. Apply its existing role policy to
@@ -256,6 +262,7 @@ export default function AdminLayoutV2() {
         >
           <button
             type="button"
+            ref={menuTriggerRef}
             onClick={() => setSidebarOpen(true)}
             aria-label="Open menu"
             aria-expanded={sidebarOpen}
@@ -760,7 +767,7 @@ export default function AdminLayoutV2() {
       )}
 
       {/* Global ⌘K palette */}
-      <GlobalCommandPalette ref={paletteRef} user={user} onNavigate={() => setSidebarOpen(false)} />
+      <GlobalCommandPalette ref={paletteRef} user={user} onNavigate={closeSidebarForPalette} />
     </div>
     </AdminNavigationProvider>
     </IntelligenceBarPageDataProvider>

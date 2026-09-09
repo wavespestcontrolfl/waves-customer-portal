@@ -187,6 +187,13 @@ async function main() {
     await mobile.getByPlaceholder(/Ask anything/).waitFor();
     check('Ask Waves dismisses the originating mobile drawer', await drawer.count() === 0);
     await mobile.keyboard.press('Escape');
+    check('Closing Ask Waves from page search returns focus to the menu trigger', await mobile.getByRole('button', { name: 'Open menu' }).evaluate((el) => el === document.activeElement));
+    await mobile.getByRole('button', { name: 'Open menu' }).click();
+    await drawer.getByRole('button', { name: 'Ask Waves', exact: true }).click();
+    await mobile.getByPlaceholder(/Ask anything/).waitFor();
+    check('Opening Ask Waves directly dismisses the mobile drawer', await drawer.count() === 0);
+    await mobile.keyboard.press('Escape');
+    check('Closing Ask Waves from the drawer returns focus to the menu trigger', await mobile.getByRole('button', { name: 'Open menu' }).evaluate((el) => el === document.activeElement));
     await mobile.goto(`${server.baseUrl}/admin/more`);
     await mobile.getByRole('group', { name: 'Pinned pages' }).waitFor();
     check('Mobile Settings shares saved pinned pages', await mobile.getByRole('group', { name: 'Pinned pages' }).getByRole('link', { name: 'Inventory', exact: true }).isVisible());
