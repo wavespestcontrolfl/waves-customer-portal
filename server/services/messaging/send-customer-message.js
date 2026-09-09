@@ -477,6 +477,12 @@ async function sendCustomerMessage(input) {
   }
 
   if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
+    if (providerOutcome.error === 'preference_changed'
+      && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
+      // The scan captured App; Email/Both now require a different set of
+      // legs. Leave its reminder open so the next scan reads that choice.
+      return { sent: false, blocked: true, code: 'REMINDER_PREFERENCES_HOLD', reason: 'Reminder channel changed', retryable: true, deferred: true, auditLogId: audit.id };
+    }
     // Re-enter the complete pipeline for an allowed backup, using fresh
     // consent/suppression state. Never clear an opt-out to enable fallback.
     const fallback = await sendCustomerMessage({

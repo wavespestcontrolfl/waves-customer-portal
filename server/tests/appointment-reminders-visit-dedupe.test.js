@@ -294,7 +294,7 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     expect(flagUpdates(state, 'reminder_24h_sent')).toHaveLength(0);
   });
 
-  test.each(['72h', '24h'])('%s pending App delivery leaves the reminder open with no fallback email', async (tier) => {
+  test.each(['72h', '24h'].flatMap(tier => ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].map(code => [tier, code])))('%s App hold %s leaves the reminder open with no fallback email', async (tier, code) => {
     const date = tier === '72h' ? '2026-05-08' : '2026-05-07';
     const kind = `reminder_${tier}`;
     const row = reminderRow({ appointment_time: new Date(`${date}T13:00:00Z`),
@@ -302,7 +302,7 @@ describe('grouped-visit reminder dedupe (24h tier wiring)', () => {
     const state = installDb({ rows: [row], visitIdByService: { 'svc-1': VISIT } });
     const dedupeKey = `${VISIT}:${kind}:${date}`;
     VisitGroups.claimVisitNotification.mockResolvedValue({ state: 'owner', token: 'tok-app', dedupeKey });
-    sendCustomerMessage.mockResolvedValue({ sent: false, code: 'PUSH_IN_FLIGHT', deferred: true, retryable: true });
+    sendCustomerMessage.mockResolvedValue({ sent: false, code, deferred: true, retryable: true });
 
     const result = await AppointmentReminders.checkAndSendReminders();
 

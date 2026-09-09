@@ -304,13 +304,13 @@ function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
 // bare call can log a successful hand-off while no notification exists —
 // silently losing the only durable record of the obligation. One retry,
 // then a loud error naming the lost manual action.
-async function handOffToOffice(title, message) {
+async function handOffToOffice(title, message, options = {}) {
   // bell: true — lifecycle-critical manual-send obligations always ring
   // (codex on-merge r2: GATE_ADMIN_BELL_POLICY would otherwise silence an
   // unallowlisted 'comms' bell with a truthy suppressed sentinel and the
   // only durable record of the obligation would be discarded). Success
   // requires a PERSISTED id, never a sentinel.
-  const notify = () => require('./notification-service').notifyAdmin('comms', title, message, { bell: true });
+  const notify = () => require('./notification-service').notifyAdmin('comms', title, message, { ...options, bell: true });
   try {
     let res = await notify();
     if (!res || !res.id) res = await notify();
@@ -403,7 +403,18 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
   if (requestedChannel === 'push') {
     const prefs = await getReminderPrefs(customerId).catch(() => ({ unavailable: true }));
     if (prefs.unavailable) {
-      if (smsOutcome) smsOutcome.retryable = true;
+      if (smsOutcome) {
+        smsOutcome.retryable = true;
+        smsOutcome.blockedCode = 'REMINDER_PREFERENCES_HOLD';
+      } else {
+        // The status callback has no open reminder claim to retry. Preserve
+        // its owed fallback on the existing durable office exception rail.
+        await handOffToOffice(
+          'Appointment fallback needs a consent check',
+          `App and backup text delivery failed for the ${kind} notice. Verify current email consent and appointment details before sending its email fallback${scheduledServiceId ? ` (service ${scheduledServiceId})` : ''}.`,
+          { link: `/admin/customers/${customerId}`, dedupeKey: `appointment-app-fallback:${emailIdempotencyKey || `${customerId}:${scheduledServiceId}:${kind}:${apptTime ? new Date(apptTime).getTime() : 'unknown'}`}`, metadata: { customerId, scheduledServiceId, kind, reason: 'reminder_preferences_unavailable' } },
+        );
+      }
       return false;
     }
     const categoryEnabled = kind === '72h' ? prefs.serviceReminder72h
@@ -486,7 +497,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome
-    && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(smsOutcome.blockedCode);
+    && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(smsOutcome.blockedCode);
 
   // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
@@ -1563,7 +1574,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // (like retryable/providerAccepted): a later opted-out contact's block
     // must not erase the evidence that an eligible contact was held at the
     // boundary — the callers' defer-don't-close decision reads this code.
-    sendOutcome.blockedCode = ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(sendOutcome.blockedCode)
+    sendOutcome.blockedCode = ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sendOutcome.blockedCode)
       ? sendOutcome.blockedCode
       : (result.code || null);
     // NON-sticky per-call evidence for safeSendAppointment's fan-out loop:
@@ -1626,6 +1637,11 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     : {};
   const heldContacts = [];
   const moveHeldRoles = [];
+  // Only the holder can use App. Resolve that leg before accepting any
+  // contact text, so a pending push can leave the whole reminder open.
+  const primaryPhone = lastTenDigits(customer.phone);
+  allowedContacts = [...allowedContacts].sort((a, b) =>
+    Number(lastTenDigits(b.phone) === primaryPhone) - Number(lastTenDigits(a.phone) === primaryPhone));
   for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)
@@ -1637,7 +1653,17 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     sharedOutcome.lastCode = null;
     sharedOutcome.lastDeferred = false;
     sharedOutcome.lastNextAllowedAt = null;
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null, sharedOutcome, sendOptions.operatorInitiated === true);
+    const checkBeforeSend = sendOptions.expectedChannel === 'push' && lastTenDigits(contact.phone) === primaryPhone
+      ? async () => {
+        const current = await getReminderPrefs(customer.id);
+        const channel = purpose === 'appointment_reminder_72h' ? current.reminder72hChannel : current.reminder24hChannel;
+        if (current.unavailable || channel !== 'push') {
+          return { ok: false, code: 'REMINDER_PREFERENCES_HOLD', reason: 'Reminder channel must be reloaded by the next scan' };
+        }
+        return sendOptions.preDispatchCheck ? sendOptions.preDispatchCheck() : { ok: true };
+      } : sendOptions.preDispatchCheck || null;
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, checkBeforeSend, sharedOutcome, sendOptions.operatorInitiated === true);
+    if (!sent && ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sharedOutcome.lastCode)) break;
     if (!sent && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD'
       && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) {
       heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
@@ -3155,14 +3181,14 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined }, { sendOutcome: smsOutcome72 }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
             }));
             if (reached72 === null) smsOutcome72.blockedCode = 'MOVE_HOLD';
 
             // Boundary hold — leave the row UNMARKED, same as the pre-check
             // defer: the 15-minute cron re-selects it and the reminder goes
             // out at 8:00 AM, still days ahead of the visit.
-            if (!reached72 && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(smsOutcome72.blockedCode)) {
+            if (!reached72 && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(smsOutcome72.blockedCode)) {
               // Release the visit claim as retryable (effect → failed) so
               // the next tick reclaims immediately instead of waiting out
               // the lease; the row itself stays unmarked, as today.
@@ -3436,7 +3462,7 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined }, { sendOutcome: smsOutcome24 }),
+              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined }, { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
               smsOutcome: smsOutcome24,
             }));
             if (reached24 === null) smsOutcome24.blockedCode = 'MOVE_HOLD';
@@ -3446,7 +3472,7 @@ const AppointmentReminders = {
             // owner's ruling (defer when the window reopens before the
             // visit day, otherwise skip+close), which this mid-flight
             // point must not re-implement.
-            if (!reached24 && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(smsOutcome24.blockedCode)) {
+            if (!reached24 && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(smsOutcome24.blockedCode)) {
               // Release the visit claim as retryable — see the 72h twin.
               if (ownsVisit24) await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred to the next scan's window ruling`);

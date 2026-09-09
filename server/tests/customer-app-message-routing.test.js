@@ -17,6 +17,7 @@ const { persistAudit } = require('../services/messaging/audit');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { sendAppointmentReminderEmail } = require('../services/appointment-email');
 const { readCachedLineType } = require('../services/messaging/validators/line-type');
+const { notifyAdmin } = require('../services/notification-service');
 const customerId = '11111111-1111-4111-8111-111111111111';
 let prefs;
 let prefsError;
@@ -201,18 +202,52 @@ describe.each([
     expect(Twilio.sendSMS.mock.calls[2][2].explicitPushOnly).toBe(false);
   });
 
-  async function deliverReminder(sendOptions = {}) {
+  async function deliverReminder(sendOptions = {}, customerExtra = {}, channel = 'push') {
     const outcome = {};
     await AppointmentReminders._test.deliverAppointmentNotice({
-      channel: 'push', kind: tier, customerId, scheduledServiceId: reminder.appointmentId,
+      channel, kind: tier, customerId, scheduledServiceId: reminder.appointmentId,
       smsOutcome: outcome,
       smsAttempt: () => AppointmentReminders.safeSendAppointment(
-        { id: customerId, phone: input.to }, prefs, () => reminder.body,
-        messageType, reminder.purpose, { scheduled_service_id: reminder.appointmentId }, { ...sendOptions, sendOutcome: outcome },
+        { id: customerId, phone: input.to, ...customerExtra }, prefs, () => reminder.body,
+        messageType, reminder.purpose, { scheduled_service_id: reminder.appointmentId }, { ...sendOptions, expectedChannel: channel, sendOutcome: outcome },
       ),
     });
     return outcome;
   }
+
+  test('a pending holder push defers contact texts until the reminder retry', async () => {
+    const extra = { service_contact_phone: '+19415550143', service_contacts_consent_at: new Date() };
+    Twilio.sendSMS.mockImplementation(async (to) => to === input.to
+      ? { success: false, appPending: true } : { success: true, sid: 'SMcontact' });
+    expect(await deliverReminder({}, extra)).toMatchObject({ blockedCode: 'PUSH_IN_FLIGHT' });
+    expect(Twilio.sendSMS.mock.calls.map(([to]) => to)).toEqual([input.to]);
+    expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    Twilio.sendSMS.mockImplementation(async (to) => to === input.to
+      ? { success: true, pushRouted: true, sid: 'push:reminder' } : { success: true, sid: 'SMcontact' });
+    expect(await deliverReminder({}, extra)).toMatchObject({ providerAccepted: true });
+    expect(Twilio.sendSMS.mock.calls.map(([to]) => to)).toEqual([input.to, input.to, extra.service_contact_phone]);
+    expect(Twilio.sendSMS.mock.calls[0][2].notificationEventKey).toBe(Twilio.sendSMS.mock.calls[1][2].notificationEventKey);
+  });
+
+  test.each(['email', 'both'])('a switch to %s during push retries using the current channel', async (channel) => {
+    Twilio.sendSMS.mockImplementationOnce(async () => {
+      prefs[channelColumn] = channel;
+      return { success: false, appUnavailable: true, error: 'preference_changed' };
+    }).mockResolvedValue({ success: true, sid: 'SMreminder' });
+    expect(await deliverReminder()).toMatchObject({ blockedCode: 'REMINDER_PREFERENCES_HOLD' });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    await deliverReminder({}, {}, (await AppointmentReminders._test.getReminderPrefs(customerId))[`reminder${tier}Channel`]);
+    expect(sendAppointmentReminderEmail).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(channel === 'both' ? 2 : 1);
+  });
+
+  test('a stale App scan cannot text after the channel already changed to Both', async () => {
+    prefs[channelColumn] = 'both';
+    expect(await deliverReminder()).toMatchObject({ blockedCode: 'REMINDER_PREFERENCES_HOLD' });
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+    expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
+  });
 
   test.each(['email_enabled', enabledColumn])('failed App delivery honors a %s opt-out made during the push', async (preference) => {
     prefs.sms_enabled = false;
@@ -301,6 +336,31 @@ describe.each([
     });
     await AppointmentReminders.handleUndeliveredSms({ sid: 'SMbackup', status: 'undelivered', errorCode: '30003', to: input.to });
     expect(sendAppointmentReminderEmail).toHaveBeenCalledTimes(emailEnabled ? 1 : 0);
+  });
+
+  test('an unreadable callback preference persists an office follow-up without emailing', async () => {
+    Twilio.sendSMS.mockResolvedValueOnce({ success: false, appUnavailable: true, error: 'no_fresh_device' })
+      .mockResolvedValue({ success: true, sid: 'SMbackup' });
+    await deliverReminder();
+    const sentInput = persistAudit.mock.calls.at(-1)[0].input;
+    const query = db.getMockImplementation();
+    prefsError = true;
+    db.mockImplementation((table) => {
+      const q = query(table);
+      q.orderBy = jest.fn(() => q);
+      if (table === 'messaging_audit_log') q.first = jest.fn(async () => ({
+        channel: 'sms', purpose: sentInput.purpose, customer_id: customerId, metadata: sentInput.metadata,
+      }));
+      return q;
+    });
+    notifyAdmin.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'persisted-follow-up' });
+    await AppointmentReminders.handleUndeliveredSms({ sid: 'SMbackup', status: 'undelivered', errorCode: '30003', to: input.to });
+    expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalledTimes(2);
+    expect(notifyAdmin).toHaveBeenLastCalledWith('comms', expect.any(String), expect.stringContaining('email consent'), expect.objectContaining({
+      bell: true, link: `/admin/customers/${customerId}`,
+      metadata: { customerId, scheduledServiceId: reminder.appointmentId, kind: tier, reason: 'reminder_preferences_unavailable' },
+    }));
   });
 });
 
