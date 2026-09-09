@@ -56,4 +56,16 @@ describe('ReportIssueOverlay mount safety', () => {
     await waitFor(() => expect(refresh).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /submit request/i })).toBeDisabled();
   });
+  // Another tab switched to a newly added house and the list reload failed:
+  // the selection names a house the retained list does not carry. The
+  // server's echo (a fallback house here) has nothing to be compared with —
+  // the ticket is withheld and the list re-read (uncapped codex r2a P1).
+  it('a NAMED selection with no listed entry withholds the ticket even when the echo names some house', async () => {
+    echo.value = { enabled: true, propertyId: 'pa', closed: false };
+    const refresh = vi.fn();
+    render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="" currentEntry={null} savedScope selectedProperty={{ customerId: 'c1', propertyId: 'pc' }} onSavedScopeUnavailable={refresh} />);
+    expect(await screen.findByText('Refreshing your property selection…')).toBeInTheDocument();
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(screen.getByRole('button', { name: /submit request/i })).toBeDisabled();
+  });
 });

@@ -2639,7 +2639,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // A next visit scoped to a different house than Home shows is stale (the
   // office retired the shown house, or the gate flipped): re-read the
   // property list and withhold the card's actions until the label follows.
-  const nextScopeStale = scopeEchoMismatch(nextRead.data?.propertyScope, dashboardEntry, dashboardSavedScope);
+  const dashboardSelectionNamed = !!(selectedProperty && selectedProperty.propertyId);
+  const nextScopeStale = scopeEchoMismatch(nextRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (nextScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [nextScopeStale, onSavedScopeUnavailable]);
   const nextService = nextScopeStale ? null : (nextRead.data?.next || null);
   // The Add-to-Calendar button hides itself once the arrival window closes,
@@ -2671,7 +2672,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // house retired while Home was open — the server fell back to the primary)
   // withholds the card and its report link, exactly like the next visit
   // (uncapped codex r1v P1).
-  const lastScopeStale = scopeEchoMismatch(lastRead.data?.propertyScope, dashboardEntry, dashboardSavedScope);
+  const lastScopeStale = scopeEchoMismatch(lastRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
   const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
@@ -4192,7 +4193,7 @@ function formatTime(t) {
 // means the office retired the shown house, or the gate flipped, while the
 // tab was open: the tab re-reads the property list and withholds actions on
 // these visits until the label follows (codex #4207 r1j).
-export function scopeEchoMismatch(propertyScope, currentEntry, savedScope) {
+export function scopeEchoMismatch(propertyScope, currentEntry, savedScope, selectionNamed = false) {
   if (!propertyScope) return false;
   // The server is NOT scoping any more (gate off, cancelled) while this tab
   // still dresses reads as one house: those reads are customer-wide, so they
@@ -4209,7 +4210,13 @@ export function scopeEchoMismatch(propertyScope, currentEntry, savedScope) {
   // Server scoped to a house while this client is in profile mode (the gate
   // came back after a rollback): stale until the list is re-read.
   if (!savedScope) return !!honored;
-  if (!currentEntry) return false;
+  // A house is SELECTED but the retained list has no entry for it (another
+  // tab switched to a newly added house and the list reload failed): the
+  // server may have fallen back to a different house, and there is no entry
+  // to compare the echo against — stale until the entry resolves, so no
+  // fallback house's visits, tracker or ticket is accepted under the named
+  // selection (uncapped codex r2a P1). No selection named = profile/primary.
+  if (!currentEntry) return !!selectionNamed;
   if (honored) return honored !== String(currentEntry.propertyId || '');
   return currentEntry.isPrimaryProperty !== true;
 }
@@ -4367,7 +4374,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const { loading, error: loadError } = scheduleRead;
   // A read scoped to a different house than this tab shows is stale: re-read
   // the property list and show nothing actionable until the label follows.
-  const scopeStale = scopeEchoMismatch(scheduleRead.data?.propertyScope, currentEntry, savedScope);
+  const scopeStale = scopeEchoMismatch(scheduleRead.data?.propertyScope, currentEntry, savedScope, scopedWithoutEntry);
   useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
   const upcoming = scopeStale ? [] : (scheduleRead.data?.upcoming || []);
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
@@ -11739,8 +11746,8 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   // the server fell back to the primary) must not adopt that house's tracker
   // (uncapped codex r1m P1) — drop it and re-read the property list, exactly
   // like the schedule reads. Refs: the poll callback is stable.
-  const scopeRef = useRef({ entry: null, saved: false, refresh: null });
-  scopeRef.current = { entry: currentEntry, saved: savedScope, refresh: onSavedScopeUnavailable };
+  const scopeRef = useRef({ entry: null, saved: false, named: false, refresh: null });
+  scopeRef.current = { entry: currentEntry, saved: savedScope, named: !!(selectedProperty && selectedProperty.propertyId), refresh: onSavedScopeUnavailable };
   // The arrival checklist's gate-code and pet-plan rows come from
   // /property/preferences, which is keyed by the CUSTOMER — they describe the
   // profile's PRIMARY address. Under a NON-primary saved selection they are
@@ -11758,8 +11765,8 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const profileFactsRef = useRef(profileFactsApply);
   profileFactsRef.current = profileFactsApply;
   const adoptTracker = useCallback((d) => {
-    const { entry, saved, refresh } = scopeRef.current;
-    if (scopeEchoMismatch(d?.propertyScope, entry, saved)) {
+    const { entry, saved, named, refresh } = scopeRef.current;
+    if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
       setTracker(null);
       if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
       return;
@@ -14065,7 +14072,10 @@ function PropertyProfileScopedNotice({ primaryEntry, onSwitch }) {
   );
 }
 
-function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, scopeUnavailable = false, onSavedScopeUnavailable = null }) {
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, selectedProperty = null, scopeUnavailable = false, onSavedScopeUnavailable = null }) {
+  // A house is selected (a saved-property id on the selection) whether or
+  // not the retained list has an entry for it — see scopeEchoMismatch.
+  const selectionNamed = !!(selectedProperty && selectedProperty.propertyId);
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
   const viewport = useSheetViewport(open, dialogRef);
@@ -14104,7 +14114,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
     api.getServices({ limit: 1, propertyScoped: 1 }).then(d => {
       // A last visit scoped to another house than this overlay names is not
       // this house's (the callback-eligibility copy would be wrong).
-      if (!stale && d.services?.length && !scopeEchoMismatch(d.propertyScope, currentEntry, savedScope)) setLastService(d.services[0]);
+      if (!stale && d.services?.length && !scopeEchoMismatch(d.propertyScope, currentEntry, savedScope, selectionNamed)) setLastService(d.services[0]);
     }).catch(() => {});
     api.getNextService().then(d => { if (!stale) setNextService(d.next || null); }).catch(() => {});
     // Fail-closed on every path: reset BEFORE the fetch and null on failure,
@@ -14170,7 +14180,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // house — until the selection is refreshed (uncapped codex r1n P1).
   // scopeUnavailable: the page already knows there is no house (every saved
   // property retired) — withheld before any read lands, no re-read to ask for.
-  const scopeStale = scopeUnavailable || scopeEchoMismatch(scheduleData?.propertyScope, currentEntry, savedScope);
+  const scopeStale = scopeUnavailable || scopeEchoMismatch(scheduleData?.propertyScope, currentEntry, savedScope, selectionNamed);
   useEffect(() => { if (scopeStale && !scopeUnavailable && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, scopeUnavailable, onSavedScopeUnavailable]);
   // Shown in the address slot while the selection is being refreshed.
   const propertyAddressShown = scopeStale ? 'Refreshing your property selection…' : propertyAddress;
@@ -14360,7 +14370,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         photos: photos.map(p => p.data),
         // The house shown in this overlay — the server refuses the ticket
         // when its resolved scope names another (uncapped codex r1o P1).
-        ...(savedScope && currentEntry?.propertyId ? { expectedPropertyId: String(currentEntry.propertyId) } : {}),
+        // Pinned to the SELECTION when the list has no entry for it yet — the
+        // entry's id and the selection's id are the same house whenever both
+        // exist (uncapped codex r2a P1).
+        ...(savedScope && (currentEntry?.propertyId || selectedProperty?.propertyId)
+          ? { expectedPropertyId: String(currentEntry?.propertyId || selectedProperty.propertyId) } : {}),
       });
       // The server's 60s dedupe path returns success against the EARLIER
       // request with photoCount: 0 — if the customer attached photos this
@@ -16606,6 +16620,7 @@ export default function PortalPage() {
         propertyAddress={activePropertyAddress}
         currentEntry={activeProperty}
         savedScope={portalProperties.some((p) => p.key)}
+        selectedProperty={selectedProperty}
         scopeUnavailable={propertyUnavailable}
         onSavedScopeUnavailable={refreshProperties}
       />
