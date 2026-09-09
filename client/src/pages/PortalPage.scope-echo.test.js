@@ -39,6 +39,9 @@ describe('scopeEchoMismatch', () => {
     expect(scopeEchoMismatch({ enabled: true, propertyId: 'pb', closed: false }, secondary, true)).toBe(false);
     expect(scopeEchoMismatch({ enabled: true, propertyId: null, closed: true }, secondary, true)).toBe(true);
     expect(scopeEchoMismatch({ enabled: true, propertyId: null, closed: true }, primary, true)).toBe(true);
+    // Closed is stale with NO entry too (the list names none for this profile) — in saved and in profile mode (GitHub codex r5 P1).
+    expect(scopeEchoMismatch({ enabled: true, propertyId: null, closed: true }, null, true)).toBe(true);
+    expect(scopeEchoMismatch({ enabled: true, propertyId: null, closed: true }, null, false)).toBe(true);
     const profileOnly = { id: 'c9:profile', key: 'c9:profile', propertyId: null, isPrimaryProperty: true };
     expect(scopeEchoMismatch({ enabled: true, propertyId: null, closed: false }, profileOnly, true)).toBe(false);
   });

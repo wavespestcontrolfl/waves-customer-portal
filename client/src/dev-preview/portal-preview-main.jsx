@@ -59,6 +59,10 @@ const savedSelected = () => {
   const e = SAVED_ENTRIES.find((x) => x.key === SAVED_SELECTED_KEY) || SAVED_ENTRIES[0];
   return { key: e.key, customerId: e.customerId, propertyId: e.propertyId };
 };
+// The real routes' scope echo: the selection the read was scoped to.
+const savedScopeEcho = () => ({ enabled: true, propertyId: savedSelected().propertyId, closed: false });
+// The selected house's visits (stamped propertyId); every visit in profile mode.
+const scopedUpcoming = () => (SAVED_PROPERTIES ? UPCOMING.filter((v) => v.propertyId === savedSelected().propertyId) : UPCOMING);
 
 // ── demo persona: Jordan Rivera (fictional) ────────────────────────────────
 const CUSTOMER = {
@@ -94,6 +98,7 @@ const CUSTOMER = {
 const UPCOMING = [
   {
     id: 'visit-up-1',
+    propertyId: 'prop-demo-a',
     date: day(5),
     windowStart: '09:00:00',
     windowEnd: '11:00:00',
@@ -108,6 +113,7 @@ const UPCOMING = [
   },
   {
     id: 'visit-up-2',
+    propertyId: 'prop-demo-b',
     date: day(21),
     windowStart: '13:00:00',
     windowEnd: '15:00:00',
@@ -340,25 +346,35 @@ Object.assign(api, {
     SAVED_SELECTED_KEY = e.key;
     return { token: 'preview-token', refreshToken: 'preview-refresh', customer: CUSTOMER, properties: [], selected: savedSelected() };
   },
+  // Per-property chips derive from the SAME stamped visits as the schedule.
   getSavedPropertiesNext: async () => ({
-    properties: SAVED_ENTRIES.map((e, i) => ({
+    properties: SAVED_ENTRIES.map((e) => ({
       key: e.key, customerId: e.customerId, propertyId: e.propertyId,
-      next: CANCELLED || i === 2 ? null : { id: `svc-demo-${i}`, date: day(7 + i * 9), windowStart: i === 0 ? '09:00:00' : '13:00:00', windowEnd: i === 0 ? '11:00:00' : '15:00:00', serviceType: i === 0 ? 'Quarterly Pest Control' : 'Mosquito Treatment', status: 'confirmed', customerConfirmed: i === 0 },
+      next: CANCELLED ? null : (UPCOMING.find((v) => v.propertyId === e.propertyId) || null),
     })),
   }),
 
   // schedule — reservice/overlayHandoff mirror the streamline payload
   // (GATE_RESERVICE_STREAMLINE) so the Request Service overlay's picker
   // handoff and reschedule-online list render in the preview.
+  // Under ?properties=saved the visit stubs are SCOPED like the real routes
+  // (GitHub codex r5 P2): each demo visit is stamped to a saved property,
+  // the schedule and next-visit reads return the selected house's visits and
+  // echo the selection (`propertyScope`) exactly as /schedule does — so the
+  // preview exercises the scoped-schedule behavior instead of relabeling
+  // another house's visits. Profile mode keeps the customer-wide list.
   getSchedule: async () => (CANCELLED
     ? { hasCancellableWork: false, upcoming: [], reservice: null, overlayHandoff: false }
     : {
+      ...(SAVED_PROPERTIES ? { propertyScope: savedScopeEcho() } : {}),
       hasCancellableWork: true,
-      upcoming: UPCOMING,
-      reservice: { url: '/reservice/demo-reservice-token', lanes: ['pest', 'lawn'] },
+      upcoming: scopedUpcoming(),
+      // The re-service picker books the PRIMARY address: withheld under a
+      // secondary selection, like the real route.
+      reservice: SAVED_PROPERTIES && savedSelected().propertyId !== SAVED_ENTRIES[0].propertyId ? null : { url: '/reservice/demo-reservice-token', lanes: ['pest', 'lawn'] },
       overlayHandoff: true,
     }),
-  getNextService: async () => ({ next: CANCELLED ? null : UPCOMING[0] }),
+  getNextService: async () => ({ ...(SAVED_PROPERTIES ? { propertyScope: savedScopeEcho() } : {}), next: CANCELLED ? null : (scopedUpcoming()[0] || null) }),
   // C4 restart hand-off: the real route mints a normal estimate and answers
   // its /estimate path. The demo path lands back on this harness so the
   // eyeball loop never leaves the preview.

@@ -40,6 +40,14 @@ describe('ReportIssueOverlay mount safety', () => {
     render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="418 Oak Ave, Bradenton FL 34205" currentEntry={secondary} savedScope />);
     expect(await screen.findByText('418 Oak Ave, Bradenton FL 34205')).toBeInTheDocument();
   });
+  it('scopeUnavailable (every saved property retired) withholds the ticket before any read, without asking for a re-read', async () => {
+    echo.value = undefined;
+    const refresh = vi.fn();
+    render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="" currentEntry={null} savedScope scopeUnavailable onSavedScopeUnavailable={refresh} />);
+    expect(await screen.findByText('Refreshing your property selection…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /submit request/i })).toBeDisabled();
+    expect(refresh).not.toHaveBeenCalled();
+  });
   it('a schedule echo scoped to another house than the one shown withholds the ticket and re-reads the selection', async () => {
     echo.value = { enabled: true, propertyId: 'pa', closed: false };
     const refresh = vi.fn();

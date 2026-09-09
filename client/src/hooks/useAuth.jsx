@@ -145,6 +145,14 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
+  // Property-list reads race: loadCustomer's read, refreshProperties (the
+  // shared refresh cycle, the revalidator — whose 15s bound abandons but
+  // does not cancel the underlying request) and a later switch overlap
+  // under ONE session epoch. Only the LATEST-issued read may adopt its
+  // payload or its failure (uncapped codex r1s P1): a delayed older response
+  // would otherwise restore a retired house's selection after a newer read
+  // already adopted the fallback.
+  const propertyReadSeqRef = useRef(0);
   const logoutTokenReleaseRef = useRef(null);
   // Mirrors `customer` for reads inside the stable loadCustomer callback
   // (empty deps ⇒ stale closure) — the transient branch needs to know
@@ -193,11 +201,15 @@ export function AuthProvider({ children }) {
       if (data?.cancelled === true) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
+      const propertyReadSeq = ++propertyReadSeqRef.current;
       try {
         const propertyData = await api.getAuthProperties({ scope: 'saved' });
         if (sessionEpochRef.current !== epoch) return;
-        adoptPropertyPayload(propertyData);
-        setPropertiesError(null);
+        // Superseded by a newer list read: that read owns the selection.
+        if (propertyReadSeqRef.current === propertyReadSeq) {
+          adoptPropertyPayload(propertyData);
+          setPropertiesError(null);
+        }
       } catch (propertyErr) {
         // Same staleness rule as the success path: if the session changed
         // while this secondary fetch was in flight, this failure describes a
@@ -205,6 +217,9 @@ export function AuthProvider({ children }) {
         // (setLoading(false) below) while the previous customer's state is
         // still rendered under the new token.
         if (sessionEpochRef.current !== epoch) return;
+        // A newer list read is in flight or has landed: it owns the
+        // selection and the error state; this stale failure changes nothing.
+        if (propertyReadSeqRef.current === propertyReadSeq) {
         // A saved-property session scopes every read to the selection the
         // SERVER honored even when the list cannot be read (codex #4207 r1 /
         // r1e): take it from /auth/me's `propertyScope` — never the raw token
@@ -239,6 +254,7 @@ export function AuthProvider({ children }) {
         // single property, and surface a retry in the account menu.
         console.error('Failed to load service properties:', propertyErr);
         setPropertiesError('Other service properties are temporarily unavailable.');
+        }
       }
       setError(null);
       // Now authenticated — flush any APNs token captured before login (native
@@ -458,14 +474,18 @@ export function AuthProvider({ children }) {
     // started under a superseded session must not overwrite the new
     // session's property list or surface its error.
     const epoch = sessionEpochRef.current;
+    const seq = ++propertyReadSeqRef.current;
     try {
       const data = await api.getAuthProperties({ scope: 'saved' });
       if (sessionEpochRef.current !== epoch) return false;
+      // Superseded by a newer list read (uncapped codex r1s P1): a delayed
+      // response must not restore a house a newer read already retired.
+      if (propertyReadSeqRef.current !== seq) return false;
       adoptPropertyPayload(data);
       setPropertiesError(null);
       return true;
     } catch (err) {
-      if (sessionEpochRef.current !== epoch) return false;
+      if (sessionEpochRef.current !== epoch || propertyReadSeqRef.current !== seq) return false;
       console.error('Failed to reload service properties:', err);
       setPropertiesError('Other service properties are temporarily unavailable.');
       return false;

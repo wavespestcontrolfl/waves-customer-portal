@@ -305,7 +305,7 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt } = {}) {
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, appointmentId = null } = {}) {
   const { title, link, category } = pushPresentation(messageType);
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
@@ -314,6 +314,9 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     url: link,
     category,
     tag: `push-routed:${messageType}`,
+    // The visit this message is about — the push sink resolves its saved
+    // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
+    ...(appointmentId ? { appointmentId } : {}),
   }, { shouldContinue, minUpdatedAt });
   return { stats, delivered: Number(stats && stats.sent) > 0 };
 }
@@ -366,7 +369,7 @@ async function recordBell(customerId, messageType, body, dedupeKey) {
  * Twilio entirely. Any failure returns { delivered: false } and the SMS
  * proceeds untouched.
  */
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null }) {
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly }))) return { delivered: false, reason: 'preference_changed' };
@@ -375,7 +378,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (explicitPushOnly) {
       const { title, link, category } = pushPresentation(messageType);
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
-        link, dedupeKey: notificationEventKey, awaitPush: true,
+        link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
       if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, reason: 'push_in_flight' };
@@ -389,6 +392,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       : await sendPush(customerId, messageType, body, {
         shouldContinue: windowGuardFrom(preSendCheck),
         minUpdatedAt: heartbeatCutoff(),
+        appointmentId,
       });
     if (!delivered) {
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
@@ -515,7 +519,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
  * accepted the SMS — best-effort, never throws into the send path, and a
  * pipeline retry of a FAILED SMS can never reach it.
  */
-async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck }) {
+async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
     if (!(await hasFreshPushDevice(customerId))) return;
@@ -530,6 +534,7 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
     const { delivered } = await sendPush(customerId, messageType, body, {
       shouldContinue: windowGuardFrom(preSendCheck),
       minUpdatedAt: heartbeatCutoff(),
+      appointmentId,
     });
     if (delivered) await recordBell(customerId, messageType, body);
   } catch (err) {

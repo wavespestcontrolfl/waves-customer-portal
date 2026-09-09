@@ -108,6 +108,10 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
   try {
     const result = await TwilioService.sendSMS(input.to, input.body, {
       customerId: input.customerId || null,
+      // The visit this message is about (every appointment purpose carries
+      // it) — push routing hands it to the push sink, which resolves the
+      // visit's saved property for the app's deep link.
+      appointmentId: input.appointmentId || null,
       explicitPushOnly: input.channel === 'push',
       skipPushRouting: Boolean(input.metadata?.appFallbackReason),
       notificationEventKey: input.metadata?.notificationEventKey,

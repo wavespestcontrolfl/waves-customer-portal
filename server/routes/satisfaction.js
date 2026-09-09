@@ -5,6 +5,7 @@ const { authenticate } = require('../middleware/auth');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
 const ReviewService = require('../services/review-request');
+const { applyPropertyPredicate, resolveSessionScope } = require('../services/account-properties');
 
 router.use(authenticate);
 
@@ -33,9 +34,17 @@ router.get('/pending', async (req, res, next) => {
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    const pending = await db('service_records')
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the prompt renders on
+    // Home, which follows the selected house — a rating for another saved
+    // property's visit must not be asked (or submitted) from this house's
+    // dashboard (GitHub codex r5 P1). Every property retired: nothing to ask.
+    const scope = await resolveSessionScope(req);
+    if (scope.enabled && scope.scoped && (scope.closed || !scope.property)) return res.json({ pending: [] });
+
+    let pendingQuery = db('service_records')
       .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' })
       .where('service_records.service_date', '>=', sevenDaysAgo.toISOString().split('T')[0])
+      .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
       .leftJoin('satisfaction_responses', function () {
         this.on('service_records.id', 'satisfaction_responses.service_record_id')
           .andOn('service_records.customer_id', 'satisfaction_responses.customer_id');
@@ -50,6 +59,8 @@ router.get('/pending', async (req, res, next) => {
       )
       .orderBy('service_records.service_date', 'desc')
       .limit(1); // show one at a time
+    pendingQuery = applyPropertyPredicate(pendingQuery, scope, 'scheduled_services');
+    const pending = await pendingQuery;
 
     res.json({ pending });
   } catch (err) {

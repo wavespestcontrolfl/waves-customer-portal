@@ -340,4 +340,29 @@ describe('cross-tab saved-property switch', () => {
     await act(async () => { await authApi.switchProperty({ customerId: 'cust-1', propertyId: 'prop-b' }); });
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
   });
+
+  it('overlapping list reads: only the LATEST-issued read adopts — a delayed older response cannot restore a house a newer read retired (uncapped codex r1s P1)', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    api.getMe.mockResolvedValue({ id: 'cust-1' });
+    const onB = { ...SAVED, selected: { key: 'cust-1:prop-b', customerId: 'cust-1', propertyId: 'prop-b' } };
+    api.getAuthProperties.mockResolvedValue(onB);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
+
+    // Two refreshes overlap: the FIRST (slow) still lists prop-b as selected;
+    // the SECOND (fast) says the office retired prop-b → the primary.
+    let resolveSlow; let resolveFast;
+    const slow = new Promise((r) => { resolveSlow = r; });
+    const fast = new Promise((r) => { resolveFast = r; });
+    api.getAuthProperties.mockImplementationOnce(() => slow).mockImplementationOnce(() => fast);
+    const retiredB = { ...SAVED, properties: SAVED.properties.filter((e) => e.propertyId !== 'prop-b'), selected: { key: 'cust-1:prop-a', customerId: 'cust-1', propertyId: 'prop-a' } };
+    let first; let second;
+    await act(async () => { first = authApi.refreshProperties(); second = authApi.refreshProperties(); });
+    await act(async () => { resolveFast(retiredB); await second; });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-a');
+    await act(async () => { resolveSlow(onB); await first; });
+    // The stale response was discarded: still the primary, prop-b still gone.
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-a');
+    expect(screen.getByTestId('labels').textContent).not.toMatch(/prop-b/);
+  });
 });

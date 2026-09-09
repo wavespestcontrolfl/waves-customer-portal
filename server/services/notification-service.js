@@ -346,6 +346,10 @@ const NotificationService = {
         notificationId: String(notification.id),
         tag: dedupeKey || `customer-notification:${notification.id}`,
         ...(pushOptions.ephemeral ? { ephemeral: true } : {}),
+        // Saved-property destination (GATE_APP_PROPERTY_SCOPE): the visit or
+        // the house this notification is about, for the push sink's link.
+        ...(createOpts.appointmentId ? { appointmentId: createOpts.appointmentId } : {}),
+        ...(createOpts.propertyId ? { propertyId: createOpts.propertyId } : {}),
       }, { ...pushOptions, ...(dedupeKey ? { notificationId: notification.id } : {}) });
       pushQueued = true;
       // Scheduled advisories can record provider acceptance separately from

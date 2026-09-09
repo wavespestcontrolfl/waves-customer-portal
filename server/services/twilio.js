@@ -802,6 +802,8 @@ const TwilioService = {
           to,
           body,
           messageType: options.messageType,
+          // The visit this message is about — the push link opens its house.
+          appointmentId: options.appointmentId || null,
           fromNumber,
           // Proof-of-send linkage for the scheduled-SMS recovery sweep —
           // without it a crash window makes the sweep resend the message.
@@ -852,6 +854,7 @@ const TwilioService = {
           to,
           body,
           messageType: options.messageType,
+          appointmentId: options.appointmentId || null,
           preSendCheck: options.preSendCheck,
         }).catch(() => {});
       }

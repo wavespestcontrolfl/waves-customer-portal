@@ -164,11 +164,12 @@ class PushNotificationService {
     if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
       const target = new URL(notification.url, 'https://portal.wavespestcontrol.com');
       target.searchParams.set('notificationProperty', String(customerId));
-      // Saved-property destination (GATE_APP_PROPERTY_SCOPE): a composer that
-      // knows the visit's property passes notification.propertyId so the app
-      // opens THAT house, not just the profile (the appointment composers
-      // adopt this in the notifications PR of the lane).
-      if (notification.propertyId) target.searchParams.set('notificationPropertyId', String(notification.propertyId));
+      // Saved-property destination (GATE_APP_PROPERTY_SCOPE): the app opens
+      // the visit's HOUSE, not just the profile — from notification.propertyId
+      // (a composer that knows it) or resolved here from the visit id every
+      // appointment message already carries (see resolveNotificationPropertyId).
+      const notifiedPropertyId = await resolveNotificationPropertyId(customerId, notification);
+      if (notifiedPropertyId) target.searchParams.set('notificationPropertyId', notifiedPropertyId);
       notification = { ...notification, url: `${target.pathname}${target.search}${target.hash}` };
     }
     const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
@@ -302,4 +303,29 @@ const service = new PushNotificationService();
 service.PUSH_HEARTBEAT_HOURS = PUSH_HEARTBEAT_HOURS;
 // Exposed for unit tests (platform routing); not part of the public API.
 service._sendSubscription = sendSubscription;
+// The saved property a push is ABOUT (uncapped codex r1s P1 — the producer
+// half of the lane's push item, pulled forward from PR 3): a composer that
+// knows the house passes notification.propertyId; one that only knows the
+// visit (appointmentId = scheduled_services.id, which every appointment
+// message carries through sendCustomerMessage → twilio → push routing) gets
+// it resolved here, ONCE, instead of at thirty composer sites. An unstamped
+// visit resolves to nothing — the profile-only link, which the app reads as
+// the profile's PRIMARY: exactly the house an unstamped visit belongs to.
+// Best-effort: a lookup failure sends the profile-only link, never blocks
+// the push. The visit must belong to the recipient profile.
+async function resolveNotificationPropertyId(customerId, notification) {
+  if (notification?.propertyId) return String(notification.propertyId);
+  if (!notification?.appointmentId) return null;
+  try {
+    const row = await db('scheduled_services')
+      .where({ id: notification.appointmentId, customer_id: customerId })
+      .first('property_id');
+    return row && row.property_id ? String(row.property_id) : null;
+  } catch (err) {
+    logger.warn(`[push] property lookup for appointment ${notification.appointmentId} failed: ${err.message}`);
+    return null;
+  }
+}
+service._resolveNotificationPropertyId = resolveNotificationPropertyId;
+
 module.exports = service;

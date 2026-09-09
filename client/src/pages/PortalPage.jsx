@@ -2652,7 +2652,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
-  const lastRead = usePortalRead('latest-service', () => api.getServices({ limit: 1 }));
+  // The selected house's last visit (server-scoped; a no-op off the gate).
+  const lastRead = usePortalRead('latest-service', () => api.getServices({ limit: 1, propertyScoped: 1 }));
   const lastService = lastRead.data?.services?.[0] || null;
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
@@ -4168,6 +4169,11 @@ export function scopeEchoMismatch(propertyScope, currentEntry, savedScope) {
   // still dresses reads as one house: those reads are customer-wide, so they
   // are withheld until the client adopts profile mode (uncapped codex r1m).
   if (!propertyScope.enabled) return !!savedScope;
+  // Every property retired (closed): no house to show anything under — stale
+  // in EVERY client state, entry or not (GitHub codex r5 P1): the list is
+  // re-read (it lists no entry for this profile) and property-facing
+  // actions are withheld.
+  if (propertyScope.closed) return true;
   // The RESOLVED selection (what the read was scoped to, fallbacks included):
   // null = no property predicate (single home / profile-keyed entry).
   const honored = propertyScope.propertyId ? String(propertyScope.propertyId) : null;
@@ -4175,8 +4181,6 @@ export function scopeEchoMismatch(propertyScope, currentEntry, savedScope) {
   // came back after a rollback): stale until the list is re-read.
   if (!savedScope) return !!honored;
   if (!currentEntry) return false;
-  // Every property retired: nothing to show under any house entry.
-  if (propertyScope.closed) return !!currentEntry.propertyId;
   if (honored) return honored !== String(currentEntry.propertyId || '');
   return currentEntry.isPrimaryProperty !== true;
 }
@@ -11642,6 +11646,15 @@ function ServiceTracker({ currentEntry = null, savedScope = false, onSavedScopeU
   // like the schedule reads. Refs: the poll callback is stable.
   const scopeRef = useRef({ entry: null, saved: false, refresh: null });
   scopeRef.current = { entry: currentEntry, saved: savedScope, refresh: onSavedScopeUnavailable };
+  // The arrival checklist's gate-code and pet-plan rows come from
+  // /property/preferences, which is keyed by the CUSTOMER — they describe the
+  // profile's PRIMARY address. Under a NON-primary saved selection they are
+  // neither fetched nor shown (uncapped codex r1s P1): "Gate code on file"
+  // for house A must not render on house B's tracker. The generic prep
+  // reminders stay.
+  const profileFactsApply = !(savedScope && currentEntry && currentEntry.propertyId && currentEntry.isPrimaryProperty !== true);
+  const profileFactsRef = useRef(profileFactsApply);
+  profileFactsRef.current = profileFactsApply;
   const adoptTracker = useCallback((d) => {
     const { entry, saved, refresh } = scopeRef.current;
     if (scopeEchoMismatch(d?.propertyScope, entry, saved)) {
@@ -11664,7 +11677,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, onSavedScopeU
     api.getTodayTracker()
       .then(d => { if (seq !== trackerSeqRef.current) return; adoptTracker(d); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) fetchTracker(); });
-    api.getPropertyPreferences().then(d => setPropertyPrefs(d.preferences)).catch(() => {});
+    if (profileFactsRef.current) api.getPropertyPreferences().then(d => setPropertyPrefs(d.preferences)).catch(() => {});
     api.getWeather().then(setWeather).catch(() => {});
   }, [fetchTracker, adoptTracker]);
 
@@ -12047,10 +12060,12 @@ function ServiceTracker({ currentEntry = null, savedScope = false, onSavedScopeU
         <div data-glass="soft" style={subCardBase}>
           <div style={{ fontSize: 16, fontWeight: 600, color: B.glassNavy, marginBottom: 8 }}>Before your tech arrives</div>
           {[
-            propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
-              ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
-              : { icon: 'warning', text: 'No gate code on file', ok: false },
-            propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
+            ...(profileFactsApply ? [
+              propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
+                ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
+                : { icon: 'warning', text: 'No gate code on file', ok: false },
+            ] : []),
+            profileFactsApply && propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
               ? { icon: 'checkCircle', text: `Pet plan: ${petPlanShort}`, ok: true }
               : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
             { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
@@ -13948,7 +13963,7 @@ function PropertyProfileScopedNotice({ primaryEntry, onSwitch }) {
   );
 }
 
-function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, onSavedScopeUnavailable = null }) {
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, scopeUnavailable = false, onSavedScopeUnavailable = null }) {
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
   const viewport = useSheetViewport(open, dialogRef);
@@ -13984,7 +13999,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
     if (!open) return undefined;
     let stale = false;
     setSubmitError('');
-    api.getServices({ limit: 1 }).then(d => {
+    api.getServices({ limit: 1, propertyScoped: 1 }).then(d => {
       if (!stale && d.services?.length) setLastService(d.services[0]);
     }).catch(() => {});
     api.getNextService().then(d => { if (!stale) setNextService(d.next || null); }).catch(() => {});
@@ -14049,8 +14064,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // every action here — the picker handoff, the per-visit reschedule links
   // AND the ticket itself, which the server would file under the fallback
   // house — until the selection is refreshed (uncapped codex r1n P1).
-  const scopeStale = scopeEchoMismatch(scheduleData?.propertyScope, currentEntry, savedScope);
-  useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
+  // scopeUnavailable: the page already knows there is no house (every saved
+  // property retired) — withheld before any read lands, no re-read to ask for.
+  const scopeStale = scopeUnavailable || scopeEchoMismatch(scheduleData?.propertyScope, currentEntry, savedScope);
+  useEffect(() => { if (scopeStale && !scopeUnavailable && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, scopeUnavailable, onSavedScopeUnavailable]);
   // Shown in the address slot while the selection is being refreshed.
   const propertyAddressShown = scopeStale ? 'Refreshing your property selection…' : propertyAddress;
   const overlayHandoff = !scopeStale && !!scheduleData?.overlayHandoff;
@@ -15812,6 +15829,11 @@ export default function PortalPage() {
   // entry ids against this, never against customer.id directly.
   const activePropertyId = selectedProperty?.key || customer.id;
   const activeProperty = portalProperties.find((property) => property.id === activePropertyId) || null;
+  // Every saved property of this profile retired (closed): the list names no
+  // selectable entry (`selected.key` null). No house to show, edit or file
+  // under (GitHub codex r5 P1) — the header shows no address, My Property
+  // renders the profile-scoped notice, the request overlay withholds submit.
+  const propertyUnavailable = propertyScope === 'saved' && !!selectedProperty && !selectedProperty.key;
   const wateringPlanCustomerId = new URLSearchParams(location.search).get('wateringPlanCustomer');
   // The watering-plan deep link names a PROFILE; saved-property entries carry
   // composite ids, so match on the entry's customer (its first entry wins).
@@ -15825,9 +15847,9 @@ export default function PortalPage() {
   // (the list read failed; /auth/me still names the claim — uncapped codex
   // r1r P1): a missing entry is NOT a primary selection, and the tab would
   // read and write the primary's preferences under an unknown house.
-  const savedSecondarySelection = !!(selectedProperty && selectedProperty.propertyId
+  const savedSecondarySelection = propertyUnavailable || !!(selectedProperty && selectedProperty.propertyId
     && (!activeProperty || (activeProperty.key && activeProperty.propertyId && activeProperty.isPrimaryProperty !== true)));
-  const profilePrimaryEntry = savedSecondarySelection
+  const profilePrimaryEntry = savedSecondarySelection && !propertyUnavailable
     ? (portalProperties.find((p) => String(p.customerId) === String(selectedProperty.customerId) && p.isPrimaryProperty === true) || null)
     : null;
   // Keep the destination explicit for Visits and watering-plan deep links.
@@ -15872,7 +15894,7 @@ export default function PortalPage() {
   // not loaded shows no address rather than the primary's (codex #4207 r1).
   const activePropertyAddress = activeProperty
     ? formatPropertyAddress(activeProperty)
-    : (selectedProperty && activePropertyId !== customer.id ? '' : formatPropertyAddress(customer));
+    : (propertyUnavailable || (selectedProperty && activePropertyId !== customer.id) ? '' : formatPropertyAddress(customer));
   const accountMenuItems = (cancelledAccount ? (items) => items.filter(i => CANCELLED_TABS.includes(i.tab)) : (items) => items)([
     { icon: 'home', label: 'Home', sub: 'Portal overview', tab: 'dashboard', action: () => switchTab('dashboard') },
     { icon: 'plan', label: 'My Plan', sub: 'Services and bundle savings', tab: 'plan', action: () => switchTab('plan') },
@@ -16474,6 +16496,7 @@ export default function PortalPage() {
         propertyAddress={activePropertyAddress}
         currentEntry={activeProperty}
         savedScope={portalProperties.some((p) => p.key)}
+        scopeUnavailable={propertyUnavailable}
         onSavedScopeUnavailable={refreshProperties}
       />
     </div>
