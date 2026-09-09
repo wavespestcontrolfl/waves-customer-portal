@@ -247,7 +247,7 @@ function renderMarkdown(text) {
           key={key++}
           style={{ display: "flex", gap: 8, paddingLeft: 4, marginBottom: 3 }}
         >
-          <span style={{ color: D.teal, fontSize: 10, marginTop: 5 }}>●</span>
+          <span style={{ color: D.teal, fontSize: 11, marginTop: 5 }}>●</span>
           <span>{renderInline(line.replace(/^[-•*]\s/, ""))}</span>
         </div>,
       );
@@ -987,7 +987,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                     borderRadius: 4,
                     background: D.bg,
                     border: `1px solid ${D.border}`,
-                    fontSize: 10,
+                    fontSize: 11,
                     color: D.muted,
                     fontFamily: "JetBrains Mono, monospace",
                   }}
@@ -1034,7 +1034,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           <div style={{ flex: 1, overflow: "auto", padding: "10px 18px 14px" }}>
             <div
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 fontWeight: 500,
                 color: D.muted,
                 letterSpacing: "0.06em",
@@ -1190,7 +1190,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           }}
         >
           {" "}
-          <span style={{ fontSize: 10, color: D.border }}>
+          <span style={{ fontSize: 11, color: D.muted }}>
+            {/* UI audit F0086: was 10px in the border colour — invisible */}
             Intelligence Bar — context: {contextLabel}
           </span>{" "}
           {(threadsAvailable || tasksAvailable) && (
@@ -1202,7 +1203,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 border: `1px solid ${showThreads ? accentColor + "55" : D.border}`,
                 borderRadius: 6,
                 color: showThreads ? accentColor : D.muted,
-                fontSize: 10,
+                fontSize: 11,
                 fontWeight: 500,
                 cursor: "pointer",
               }}
@@ -1212,8 +1213,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           )}
           <span
             style={{
-              fontSize: 10,
-              color: D.border,
+              fontSize: 11,
+              color: D.muted,
               fontFamily: "JetBrains Mono, monospace",
             }}
           >
@@ -1792,7 +1793,7 @@ function Section({ label, children }) {
       {" "}
       <div
         style={{
-          fontSize: 10,
+          fontSize: 11,
           fontWeight: 500,
           color: "#71717A",
           letterSpacing: "0.06em",

@@ -391,7 +391,7 @@ function DonutChart({
         </div>{" "}
         <div
           style={{
-            fontSize: 10,
+            fontSize: 11,
             fontWeight: 500,
             color: C.text3,
             textTransform: "uppercase",
@@ -997,7 +997,7 @@ export default function WavesPPCDashboard() {
                         style={{
                           padding: "10px 8px",
                           textAlign: i >= 2 ? "right" : "left",
-                          fontSize: 10,
+                          fontSize: 11,
                           fontWeight: 700,
                           color: C.text3,
                           textTransform: "uppercase",
@@ -1197,7 +1197,7 @@ export default function WavesPPCDashboard() {
                       >
                         {fmt(funnelData.totalLeads)}
                       </div>
-                      <div style={{ fontSize: 10, color: C.text3 }}>
+                      <div style={{ fontSize: 11, color: C.text3 }}>
                         TOTAL LEADS
                       </div>
                     </div>{" "}
@@ -1211,7 +1211,7 @@ export default function WavesPPCDashboard() {
                       >
                         {fmtMoney(funnelData.totalRevenue)}
                       </div>
-                      <div style={{ fontSize: 10, color: C.text3 }}>
+                      <div style={{ fontSize: 11, color: C.text3 }}>
                         REVENUE
                       </div>
                     </div>{" "}
@@ -1225,7 +1225,7 @@ export default function WavesPPCDashboard() {
                       >
                         {funnelData.roas}x
                       </div>
-                      <div style={{ fontSize: 10, color: C.text3 }}>ROAS</div>
+                      <div style={{ fontSize: 11, color: C.text3 }}>ROAS</div>
                     </div>{" "}
                   </div>{" "}
                 </>
@@ -1364,7 +1364,7 @@ export default function WavesPPCDashboard() {
                           style={{
                             padding: "10px 8px",
                             textAlign: i >= 2 ? "right" : "left",
-                            fontSize: 10,
+                            fontSize: 12, // UI audit F0357: matches AdsPage thStyle
                             fontWeight: 700,
                             color: C.text3,
                             textTransform: "uppercase",

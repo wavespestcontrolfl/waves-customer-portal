@@ -3901,14 +3901,21 @@ function initScheduledJobs() {
             // (RED audit R3). Bounded by SCHEDULED_SMS_MAX_ATTEMPTS via the
             // claim-time attempt counter. The message will still send, so
             // parked decisions stay parked — we do NOT reopen them here.
-            const retryAt = smsResult.nextAllowedAt
+            // Native-provider retries share this three-attempt rail. Grow
+            // the provider's minimum delay after each failed replay and add
+            // jitter; held lookups and other channels retain their timing.
+            const nativeRetryMs = smsResult.code === 'APP_PROVIDER_RETRY'
+              ? Math.max(60000, Number(smsResult.retryAfterMs) || 60000)
+                * (2 ** (Number(claimMeta.scheduled_sms_attempts) || 1)) * (1 + Math.random() * 0.2)
+              : null;
+            const retryAt = nativeRetryMs ? new Date(completedAt.getTime() + nativeRetryMs) : smsResult.nextAllowedAt
               ? new Date(smsResult.nextAllowedAt)
               : new Date(Date.now() + 15 * 60 * 1000);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?)", [completedAt, smsResult.code || null]),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {

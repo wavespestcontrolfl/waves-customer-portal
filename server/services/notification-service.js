@@ -392,6 +392,7 @@ const NotificationService = {
           failed: outcome.failed,
           expired: outcome.expired,
           skipped: outcome.skipped,
+          ...(outcome.retryable ? { retryable: outcome.retryable, retryAfterMs: outcome.retryAfterMs } : {}),
           ...(outcome.reason ? { reason: outcome.reason } : {}),
           ...(outcome.deduped ? { deduped: true } : {}),
         } };
