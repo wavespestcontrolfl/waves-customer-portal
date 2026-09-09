@@ -436,7 +436,7 @@ async function executeLeadTool(toolName, input, context) {
           ? (typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : existing.metadata)
           : { draftResponse: input.draft_response, reason: input.reason, urgency: input.urgency,
             sessionId: context.sessionId, toolUseId: context.toolUseId };
-        if (existing && ['notified', 'sent', 'suppressed', 'not_configured'].includes(metadata.alertStatus)) {
+        if (existing && ['notified', 'sent', 'suppressed'].includes(metadata.alertStatus)) {
           return { id: existing.id, replayed: true, alertStatus: metadata.alertStatus };
         }
         if (existing && new Date(metadata.alertLeaseUntil).getTime() > Date.now()) {
@@ -489,7 +489,7 @@ async function executeLeadTool(toolName, input, context) {
       logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
       return { queued: true, activityId: queued.id, alertStatus, replayed: queued.replayed,
         reason: queued.metadata.reason, urgency: queued.metadata.urgency || 'normal',
-        ...(alertStatus === 'failed' ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}) };
+        ...(['failed', 'not_configured'].includes(alertStatus) ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}) };
     }
 
     // ── Pipeline & follow-up ────────────────────────────────────

@@ -123,6 +123,22 @@ const SKIP = !process.env.DATABASE_URL;
     expect(mockSend).toHaveBeenCalledTimes(2);
   });
 
+  test('an unconfigured owner alert remains retryable on the same committed draft', async () => {
+    const configuredPhone = process.env.ADAM_PHONE;
+    try {
+      delete process.env.ADAM_PHONE;
+      const first = await executeLeadTool('queue_for_adam', input, context);
+      expect(first).toMatchObject({ queued: true, failed: true, retryable: true, alertStatus: 'not_configured' });
+      expect(mockSend).not.toHaveBeenCalled();
+      process.env.ADAM_PHONE = configuredPhone;
+      expect(await executeLeadTool('queue_for_adam', input, context)).toMatchObject({
+        queued: true, replayed: true, activityId: first.activityId, alertStatus: 'sent',
+      });
+      expect(await db('lead_activities').where({ lead_id: leadId, activity_type: 'draft_queued' })).toHaveLength(1);
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    } finally { process.env.ADAM_PHONE = configuredPhone; }
+  });
+
   test.each(['before_send', 'abandoned_claim'])('a retry recovers a process exit at %s', async crash => {
     const metadata = { sessionId: context.sessionId, toolUseId: context.toolUseId, draftResponse: input.draft_response, reason: input.reason };
     if (crash === 'abandoned_claim') Object.assign(metadata, { alertClaimToken: randomUUID(), alertLeaseUntil: new Date(Date.now() - 1000).toISOString() });
