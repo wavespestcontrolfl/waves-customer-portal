@@ -194,6 +194,33 @@ describe('finding 3 — address fragments and on-file restatements', () => {
     expect(r.failedOpenFlags).toContain('address_unverified');
   });
 
+  test.each(['same address', 'same as before', 'yes'])('an acknowledgment selects the complete saved address: %s', raw_text => {
+    const ex = v2({ property: { service_address: { raw_text } }, triage_flags: ['address_unverified'] });
+    for (const addressLine2 of [null, 'Apt 4B']) {
+      const knownCustomer = { ...onFile, addressLine2 };
+      const opts = { contactPhone: ANI, failOpen: true, knownCustomer,
+        addressValidation: { status: 'missing_component', inServiceArea: true } };
+      expect(statesNewAddress(ex, knownCustomer)).toBe(false);
+      expect(dispatchesToOnFileAddress(ex, opts)).toBe(true);
+      expect(canAutoRoute(ex, opts)).toMatchObject({ allowed: true, usesOnFileAddress: true });
+    }
+    expect(statesNewAddress(ex, { hasAddress: false })).toBe(true);
+    expect(statesNewAddress(ex, null)).toBe(true);
+  });
+
+  test.each([
+    { street_line_1: '9876 Other Grove Circle' }, { city: 'Sarasota' },
+    { postal_code: '34240' }, { unit: 'Apt 4B' }, { state: 'SC' },
+    { subdivision_or_community: 'Lakewood Ranch' },
+  ])('an acknowledgment cannot override conflicting address evidence: %j', conflict => {
+    const ex = v2({ property: { service_address: { raw_text: 'same address', ...conflict } } });
+    const opts = { contactPhone: ANI, failOpen: true, knownCustomer: onFile,
+      addressValidation: { status: 'missing_component', inServiceArea: true } };
+    expect(statesNewAddress(ex, onFile)).toBe(true);
+    expect(dispatchesToOnFileAddress(ex, opts)).toBe(false);
+    expect(canAutoRoute(ex, opts).allowed).toBe(false);
+  });
+
   test('a DIFFERENT city, ZIP, street or a unit is still a new address', () => {
     expect(statesNewAddress(v2({ property: { service_address: { city: 'Sarasota' } } }), onFile)).toBe(true);
     expect(statesNewAddress(v2({ property: { service_address: { postal_code: '34203' } } }), onFile)).toBe(true);

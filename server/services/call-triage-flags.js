@@ -1603,7 +1603,7 @@ function restatesOnFileAddress(sa, knownCustomer) {
   const expected = restatementStreetParts(onFile.street);
   const agree = streets.map(restatementStreetParts).every(part => part.name && [expected.name, expected.withoutSuffix].includes(part.name)
     && (!part.house || part.house === expected.house));
-  return agree && [streets.length, cities.length, zips.length, rawIsLocality && raw].some(Boolean);
+  return agree && [streets.length, cities.length, zips.length, acknowledgment, rawIsLocality && raw].some(Boolean);
 }
 
 /**
