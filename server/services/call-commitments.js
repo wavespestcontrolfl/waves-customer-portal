@@ -1375,11 +1375,20 @@ function implicitDueAt(row) {
   return new Date(from.getTime() + OVERDUE_IMPLICIT_DAYS * 24 * 60 * 60 * 1000);
 }
 
+// The moment a promise becomes overdue: the stated due time, else the
+// implicit one; a snoozed callback card waits for the later of that and
+// its snooze (effectiveDueSql is the same rule in SQL).
+function overdueAt(row) {
+  const due = row.due_at ? new Date(row.due_at) : implicitDueAt(row);
+  if (!due) return null;
+  const snoozed = row.snoozed_until && require('./callback-cards').enabled() ? new Date(row.snoozed_until) : null;
+  return snoozed && snoozed.getTime() > due.getTime() ? snoozed : due;
+}
+
 function isOverdue(row, now = new Date()) {
   if (!row || row.status !== 'open' || row.human_state === 'dismissed') return false;
-  if (row.due_at) return new Date(row.due_at).getTime() < now.getTime();
-  const implicit = implicitDueAt(row);
-  return !!implicit && implicit.getTime() < now.getTime();
+  const due = overdueAt(row);
+  return !!due && due.getTime() < now.getTime();
 }
 
 // isOverdue's deadline as SQL over a call_commitments alias and its
@@ -1388,14 +1397,21 @@ function isOverdue(row, now = new Date()) {
 function effectiveDueSql(cc = 'cc', cl = 'cl') {
   const basis = `CASE WHEN ${cc}.source = 'human' THEN ${cc}.created_at ELSE ${cl}.created_at END`;
   const promptKinds = [...PROMPT_KINDS].map((k) => `'${k}'`).join(', ');
-  const callbackDue = require('./callback-cards').enabled() ? `${cc}.callback_due_at`
+  const cardsEnabled = require('./callback-cards').enabled();
+  const callbackDue = cardsEnabled ? `${cc}.callback_due_at`
     : `(((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`;
-  return `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
+  const deadline = `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
     + ` WHEN ${cc}.party <> 'waves' THEN NULL`
     + ` WHEN ${cc}.kind = 'send_estimate' THEN (${basis}) + interval '${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours'`
     + ` WHEN ${cc}.kind = 'callback' THEN ${callbackDue}`
     + ` WHEN ${cc}.kind IN (${promptKinds}) THEN (${basis}) + interval '${OVERDUE_IMPLICIT_DAYS} days'`
     + ' ELSE NULL END';
+  if (!cardsEnabled) return deadline;
+  // A snoozed callback card is owed when the snooze ends, not before: the
+  // same rule isOverdue applies, so the queue order, the overdue flag and
+  // the watchdog agree. Only callback cards carry snoozed_until; an undated
+  // row stays undated (GREATEST of a NULL deadline and NULL is NULL).
+  return `GREATEST((${deadline}), CASE WHEN (${deadline}) IS NULL THEN NULL ELSE ${cc}.snoozed_until END)`;
 }
 
 // An untouched AI row a LATER commitments pass no longer detected: kept for
@@ -1416,14 +1432,27 @@ function staleAiRowSql(cc = 'cc') {
 
 // Pure, exported for the watchdog tests.
 function selectOverdue(rows, { now = new Date() } = {}) {
-  const callbacksEnabled = require('./callback-cards').enabled();
-  return (rows || []).filter((r) => isOverdue(r, now)
-    && !(callbacksEnabled && r.kind === 'callback' && r.party === 'waves'
-      && r.snoozed_until && new Date(r.snoozed_until) > now));
+  return (rows || []).filter((r) => isOverdue(r, now));
+}
+
+// The customer / lead scope of a commitments read, over the `cl` call_log
+// alias. Shared by the queue query and callback preparation so a filtered
+// read prepares exactly the rows it returns.
+function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSid = null } = {}) {
+  if (customerId) builder.where('cl.customer_id', customerId);
+  if (leadId) {
+    builder.where(function leadScope() {
+      this.whereRaw("cl.metadata ->> 'lead_id' = ?", [String(leadId)]);
+      // A relay call that REUSED an existing lead leaves leads.twilio_call_sid
+      // on the original call and stamps itself relay_lead_id (capture_lead).
+      this.orWhereRaw("cl.metadata ->> 'relay_lead_id' = ?", [String(leadId)]);
+      if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
+    });
+  }
+  return builder;
 }
 
 async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
-  await require('./callback-cards').prepareCallbackCards(conn);
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -1432,6 +1461,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
     const lead = await conn('leads').where({ id: leadId }).first('twilio_call_sid');
     leadSid = lead?.twilio_call_sid || null;
   }
+  await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')
@@ -1440,16 +1470,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
     .modify((b) => {
       if (party === 'waves' || party === 'customer') b.where('cc.party', party);
       if (kind) b.where('cc.kind', kind);
-      if (customerId) b.where('cl.customer_id', customerId);
-      if (leadId) {
-        b.where(function leadScope() {
-          this.whereRaw("cl.metadata ->> 'lead_id' = ?", [String(leadId)]);
-          // A relay call that REUSED an existing lead leaves leads.twilio_call_sid
-          // on the original call and stamps itself relay_lead_id (capture_lead).
-          this.orWhereRaw("cl.metadata ->> 'relay_lead_id' = ?", [String(leadId)]);
-          if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
-        });
-      }
+      scopeCommitmentRows(b, { customerId, leadId, leadSid });
       if (!includeHints) b.whereNull('cc.fulfillment');
     })
     // Overdue first — by the SAME rule isOverdue applies (the stated due
@@ -1888,6 +1909,7 @@ module.exports = {
   RELAY_EXTRACTOR_VERSION,
   isOverdue,
   selectOverdue,
+  scopeCommitmentRows,
   listOpenCommitments,
   deriveRelayCommitments,
   recordRelayCommitments,

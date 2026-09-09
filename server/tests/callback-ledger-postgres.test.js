@@ -85,6 +85,50 @@ run('callback ledger on PostgreSQL', () => {
     expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('open');
   });
 
+  test('a customer-scoped read prepares its own callback ahead of an older unscoped backlog', async () => {
+    const ledger = require('../services/call-commitments');
+    const older = new Date(ago.getTime() - 86400000);
+    const backlog = Array.from({ length: 200 }, () => ({ callId: randomUUID(), id: randomUUID() }));
+    await trx('call_log').insert(backlog.map(({ callId }) => ({ id: callId, direction: 'inbound', from_phone: phone,
+      to_phone: '+15555550100', status: 'completed', created_at: older, updated_at: older })));
+    await trx('call_commitments').insert(backlog.map(({ callId, id }) => ({ id, call_log_id: callId, commitment_key: `fixture:${id}`,
+      party: 'waves', kind: 'callback', status: 'open', source: 'human', description: 'Synthetic backlog',
+      callback_due_at: null, created_at: older, updated_at: older })));
+    const customer = await trx('customers').first('id');
+    expect(customer).toBeTruthy();
+    const mine = await seed({ callback_due_at: null });
+    await trx('call_log').where({ id: mine.call_log_id }).update({ customer_id: customer.id });
+    const [row] = await ledger.listOpenCommitments(trx, { customerId: customer.id, kind: 'callback' });
+    expect(row.id).toBe(mine.id);
+    expect(row.callback_due_at).not.toBeNull();
+    expect((await trx('call_commitments').where({ id: mine.id }).first()).callback_due_at).not.toBeNull();
+  });
+
+  test('a snoozed callback is not overdue and queues behind actionable work', async () => {
+    const ledger = require('../services/call-commitments');
+    const snoozed = await seed(), due = await seed({ created_at: new Date(ago.getTime() - 60000) });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await cards.actOnCallback(trx, snoozed.id, { action: 'snooze', actorId: staff.id, expectedAt: snoozed.updated_at, snooze: 'two_hours', now });
+    const rows = (await ledger.listOpenCommitments(trx, { kind: 'callback', now })).filter((r) => [snoozed.id, due.id].includes(r.id));
+    expect(rows.map((r) => [r.id, r.overdue])).toEqual([[due.id, true], [snoozed.id, false]]);
+    const later = new Date(now.getTime() + 3 * 3600000);
+    const rearmed = (await ledger.listOpenCommitments(trx, { kind: 'callback', now: later })).find((r) => r.id === snoozed.id);
+    expect(rearmed.overdue).toBe(true);
+  });
+
+  test('an action that leaves the callback open releases its reminder identity for the next due sweep', async () => {
+    const row = await seed();
+    const key = `call-commitment-overdue:${row.id}:2026-09-09`;
+    const [bell] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Fixture reminder',
+      metadata: { commitment_id: row.id, dedupeKey: key } }).returning('*');
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await cards.actOnCallback(trx, row.id, { action: 'snooze', actorId: staff.id, expectedAt: row.updated_at, snooze: 'two_hours', now });
+    const after = await trx('notifications').where({ id: bell.id }).first();
+    expect(after.read_at).not.toBeNull();
+    expect(after.metadata.dedupeKey.startsWith(`${key}:superseded:`)).toBe(true);
+    expect(await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key])).toEqual([]);
+  });
+
   test('acting on one callback preserves a shared reminder for other open promises', async () => {
     const row = await seed(), other = await seed();
     const [bell] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Fixture backlog',

@@ -12,13 +12,14 @@ jest.mock('../services/sms-operational-actions', () => ({
 }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
 jest.mock('../services/callback-cards', () => ({
-  enabled: jest.fn(() => false), prepareCallbackCards: jest.fn(), listCallbackCards: jest.fn(async () => []), actOnCallback: jest.fn(),
+  enabled: jest.fn(() => false), prepareCallbackCards: jest.fn(), decorateCallbackRows: jest.fn(async (_db, rows) => rows), actOnCallback: jest.fn(),
 }));
 jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
   addHumanCommitment: jest.fn(),
   listOpenCommitments: jest.fn(),
   refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
+  COMMITMENT_KINDS: ['callback', 'send_estimate', 'send_report'],
   OVERDUE_IMPLICIT_DAYS: 3,
   OVERDUE_IMPLICIT_ESTIMATE_HOURS: 24,
 }));
@@ -118,50 +119,45 @@ describe('callback actions use the commitment PATCH endpoint', () => {
   });
 });
 
-describe('GET /follow-through', () => {
-  test('bounds each refresh and rotates through every source on a full page', async () => {
+describe('GET /commitments/open — the callback lane', () => {
+  test('kind=callback narrows the canonical feed and returns owner projections with the actor', async () => {
     const cards = require('../services/callback-cards');
     cards.enabled.mockReturnValue(true);
-    cards.listCallbackCards.mockResolvedValue(Array.from({ length: 100 }, (_, i) => ({ id: `card-${i}`, call_log_id: `call-${i}` })));
-    commitments.refreshFulfillment.mockResolvedValue({ fulfilled: 0 });
+    const rows = ['callback-1', 'callback-2'].map((id) => ({ id, call_log_id: CALL_ID, kind: 'callback', party: 'waves', overdue: false }));
+    commitments.listOpenCommitments.mockResolvedValue(rows);
+    cards.decorateCallbackRows.mockImplementationOnce(async (_db, page) => page.map((r) => ({ ...r, owner_name: 'Sam', owner_active: true })));
     await withServer(async (base) => {
-      for (let page = 0; page < 4; page += 1) {
-        const before = commitments.refreshFulfillment.mock.calls.length;
-        const response = await fetch(`${base}/admin/call-recordings/follow-through`);
-        expect(response.status).toBe(200);
-        expect((await response.json()).callbacks).toHaveLength(100);
-        expect(commitments.refreshFulfillment.mock.calls.length - before).toBe(25);
-      }
-    });
-    expect(new Set(commitments.refreshFulfillment.mock.calls.map((args) => args[1])).size).toBe(100);
-  });
-
-  test('refreshes distinct source calls and returns the completed callback off the page before its deadline', async () => {
-    const cards = require('../services/callback-cards');
-    cards.enabled.mockReturnValue(true);
-    const rows = ['callback-1', 'callback-2'].map((id) => ({ id, call_log_id: CALL_ID, overdue: false }));
-    cards.listCallbackCards.mockResolvedValueOnce(rows).mockResolvedValueOnce([]);
-    commitments.refreshFulfillment.mockResolvedValueOnce({ fulfilled: 2 });
-    await withServer(async (base) => {
-      const res = await fetch(`${base}/admin/call-recordings/follow-through`);
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open?party=waves&kind=callback`);
       expect(res.status).toBe(200);
-      expect((await res.json()).callbacks).toEqual([]);
+      const body = await res.json();
+      expect(body.callbacks_enabled).toBe(true);
+      expect(body.actor_id).toBe('tech-1');
+      expect(body.commitments.map((r) => r.owner_name)).toEqual(['Sam', 'Sam']);
+      expect(body.next_offset).toBeNull();
     });
-    expect(commitments.refreshFulfillment).toHaveBeenCalledTimes(1);
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, expect.objectContaining({ party: 'waves', kind: 'callback' }));
+    expect(cards.decorateCallbackRows).toHaveBeenCalledWith(db, rows);
     expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
-    expect(cards.listCallbackCards).toHaveBeenCalledTimes(2);
   });
 
-  test('a disabled feed performs no fulfillment writes', async () => {
-    const cards = require('../services/callback-cards');
-    cards.listCallbackCards.mockResolvedValueOnce([]);
+  test('an unknown kind is rejected before any query', async () => {
     await withServer(async (base) => {
-      const res = await fetch(`${base}/admin/call-recordings/follow-through`);
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open?kind=telepathy`);
+      expect(res.status).toBe(400);
+    });
+    expect(commitments.listOpenCommitments).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a disabled callback lane reports itself without decorating rows', async () => {
+    const cards = require('../services/callback-cards');
+    commitments.listOpenCommitments.mockResolvedValue([]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open?kind=callback`);
       expect(res.status).toBe(200);
       expect((await res.json()).callbacks_enabled).toBe(false);
     });
-    expect(cards.prepareCallbackCards).not.toHaveBeenCalled();
-    expect(commitments.refreshFulfillment).not.toHaveBeenCalled();
+    expect(cards.decorateCallbackRows).toHaveBeenCalledWith(db, []);
   });
 });
 
@@ -225,11 +221,11 @@ describe('GET /commitments/open — the Owed queue', () => {
       expect(body.enabled).toBe(true);
     });
     // limit + 1: the probe row behind has_more.
-    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: false });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: false });
     // hints=0: the refresh candidates come from the UNFILTERED page, so a
     // hint the facts no longer support gets cleared instead of hiding the
     // row for good.
-    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true });
     expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
     expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(3);
   });

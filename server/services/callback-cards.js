@@ -39,14 +39,19 @@ function staffedDeadline(from, calendar, minutes = 240) {
   throw error('No working day found for this callback');
 }
 
-async function prepareCallbackCards(conn, { callId = null } = {}) {
+// A read prepares the callbacks it is about to return: a customer, lead or
+// call scope prepares every undated callback in that scope, so a filtered
+// queue never waits behind an unrelated backlog. An unscoped read walks the
+// backlog oldest-first in batches.
+async function prepareCallbackCards(conn, { callId = null, customerId = null, leadId = null, leadSid = null } = {}) {
   if (!enabled()) return 0;
-  const { staleAiRowSql, callEndedAt } = require('./call-commitments');
+  const { staleAiRowSql, callEndedAt, scopeCommitmentRows } = require('./call-commitments');
+  const scoped = !!(callId || customerId || leadId);
   const rows = await conn('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' })
     .whereNull('cc.callback_due_at').whereRaw(`NOT ${staleAiRowSql('cc')}`)
-    .modify((q) => { if (callId) q.where('cc.call_log_id', callId); })
-    .orderBy('cc.created_at', 'asc').limit(200)
+    .modify((q) => { if (callId) q.where('cc.call_log_id', callId); scopeCommitmentRows(q, { customerId, leadId, leadSid }); })
+    .orderBy('cc.created_at', 'asc').modify((q) => { if (!scoped) q.limit(200); })
     .select('cc.id', 'cc.source', 'cc.created_at', 'cc.updated_at', 'cc.due_at', 'cc.assigned_to', 'cl.created_at as call_started_at',
       'cl.bridged_at', 'cl.duration_seconds', 'cl.direction');
   if (!rows.length) return 0;
@@ -83,18 +88,19 @@ async function prepareCallbackCards(conn, { callId = null } = {}) {
   return prepared;
 }
 
-async function listCallbackCards(conn, { now = new Date(), limit = 100, offset = 0 } = {}) {
-  if (!enabled()) return [];
-  const { listOpenCommitments } = require('./call-commitments');
-  const rows = await listOpenCommitments(conn, { party: 'waves', kind: 'callback', now, limit, offset });
-  const ids = [...new Set(rows.map((r) => r.assigned_to).filter(Boolean))];
+// The canonical commitments feed carries callback ownership: who holds the
+// card and whether that account is still active. Gate off leaves the rows
+// as the existing feed already returns them.
+async function decorateCallbackRows(conn, rows) {
+  if (!enabled()) return rows;
+  const isCard = (r) => r.kind === 'callback' && r.party === 'waves';
+  const ids = [...new Set(rows.filter(isCard).map((r) => r.assigned_to).filter(Boolean))];
   const staff = ids.length ? await conn('technicians').whereIn('id', ids).select('id', 'name', 'employment_status') : [];
-  return rows.map((row) => ({ ...row, card_kind: 'callback',
-    due_at: row.due_at || row.callback_due_at || null,
-    owner_name: staff.find((s) => s.id === row.assigned_to)?.name || null,
-    owner_active: staff.find((s) => s.id === row.assigned_to)?.employment_status === 'active',
-    snoozed: !!row.snoozed_until && new Date(row.snoozed_until) > now,
-  }));
+  return rows.map((row) => {
+    if (!isCard(row)) return row;
+    const owner = staff.find((s) => s.id === row.assigned_to);
+    return { ...row, owner_name: owner?.name || null, owner_active: owner?.employment_status === 'active' };
+  });
 }
 
 async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, description, due_at, note, now = new Date() } = {}) {
@@ -139,11 +145,17 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     await prepareCallbackCards(trx, { callId: row.call_log_id });
     await recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: `callback_${action}`,
       resource_type: 'call_commitment', resource_id: id, metadata: { snoozed_until: until?.toISOString() || null }, critical: true, trx });
+    // Every action retires the reminder for the version staff just acted on
+    // AND releases its per-day dedupe identity: a snoozed, released or
+    // edited callback that is still open rings again the next time the
+    // watchdog finds it due, instead of deduping onto a bell nobody sees.
     await trx('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'commitment_id' = ?", [id])
-      .whereNull('read_at').update({ read_at: now });
+      .whereRaw("metadata->>'dedupeKey' NOT LIKE '%:superseded:%'")
+      .update({ read_at: trx.raw('COALESCE(read_at, ?)', [now]),
+        metadata: trx.raw("metadata || jsonb_build_object('dedupeKey', COALESCE(metadata->>'dedupeKey', '') || ':superseded:' || ?::text)", [now.toISOString()]) });
     return require('./call-commitments').normalizeRow(await trx('call_commitments').where({ id }).first());
   });
 }
 
-module.exports = { enabled, loadCalendar, staffedDeadline, prepareCallbackCards, listCallbackCards, actOnCallback };
+module.exports = { enabled, loadCalendar, staffedDeadline, prepareCallbackCards, decorateCallbackRows, actOnCallback };
