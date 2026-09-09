@@ -101,3 +101,30 @@ describe('completion draft departure', () => {
     expect(readDraft()).toBeNull();
   });
 });
+
+
+describe('completion review timing across midnight', () => {
+  it.each([
+    { cadence: true, window: true, expected: /about Thu,? 8:14 AM/ },
+    { cadence: false, window: true, expected: /about Thu,? 8:00 AM/ },
+    { cadence: true, window: false, expected: /about Thu,? 12:14 AM/ },
+  ])('uses the delivery tick date for cadence=$cadence, window=$window', async ({ cadence, window, expected }) => {
+    vi.setSystemTime(new Date('2030-01-01T16:00:00Z'));
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/send-time-preview') ? {
+        schedulerEnabled: true, reviewSequencesEnabled: cadence,
+        smsSendWindowEnabled: window, cadenceTickMinutesOfHour: [14, 44],
+        legacyTickMinutesOfHour: [0, 15, 30, 45],
+      } : { customer: {}, actions: [], available: false },
+    })));
+    await mount();
+    const timing = document.querySelector('option[value="custom"]').parentElement;
+    fireEvent.change(timing, { target: { value: 'custom' } });
+    fireEvent.change(document.querySelector('input[type="datetime-local"]'), {
+      target: { value: '2030-01-02T23:50' },
+    });
+    expect(screen.getByText(expected)).toBeTruthy();
+    expect(screen.queryByText(/about Wed,? 8:/)).toBeNull();
+  });
+});

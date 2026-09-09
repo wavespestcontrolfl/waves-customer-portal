@@ -466,7 +466,7 @@ function customReviewTimingHint(reviewCustomAt, preview) {
   if (windowOn && (sendHour < 8 || sendHour >= 20)) {
     // The window opens at 8:00; in cadence mode the worker's first tick
     // after that is 8:14 (codex #4140 r7).
-    const openTick = windowOpenTickISO(addETDays(new Date(iso), sendHour >= 20 ? 1 : 0), preview);
+    const openTick = heldToWindowOpenISO(tick || iso, preview);
     return openTick
       ? `Review text is held for the 8 AM–8 PM window — it goes out at the first ${tickNoun(preview)} after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
       : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmtReviewTime(iso)}.`;
