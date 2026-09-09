@@ -186,6 +186,21 @@ run('callback bridge on PostgreSQL', () => {
     expect((await conn('call_log').where({ id: result.json.callLogId }).first()).customer_id).toBeNull();
   });
 
+  test('a completed customer conversation on a card-started call closes the callback through refresh', async () => {
+    const row = await seed();
+    const started = await invoke(row);
+    expect(started.status).toBe(200);
+    const legEnded = new Date().toISOString();
+    await conn('call_log').where({ id: started.json.callLogId }).update({ status: 'completed', v2_extraction_status: 'valid',
+      ai_extraction_enriched: { meta: { is_voicemail: false } },
+      metadata: conn.raw('metadata || ?::jsonb', [JSON.stringify({ customer_leg: { status: 'completed', duration_seconds: 90, ended_at: legEnded } })]) });
+    expect(await require('../services/call-commitments').refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    const kept = await conn('call_commitments').where({ id: row.id }).first();
+    expect(kept.status).toBe('fulfilled');
+    expect(kept.human_state).toBe('confirmed');
+    expect(new Date(kept.fulfilled_at).toISOString()).toBe(legEnded);
+  });
+
   test.each(['conversation', 'voicemail', 'short', 'unrelated'])('fulfillment requires the matching customer conversation: %s', async (evidence) => {
     const row = await seed();
     const legEnded = new Date(Date.now() - 600000).toISOString();
