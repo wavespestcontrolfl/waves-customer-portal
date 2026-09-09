@@ -1131,7 +1131,7 @@ function EquipmentCard({
           overflowY: "auto"
         }}>
                 {" "}
-                <Table className="min-w-[768px]">
+                <Table className="min-w-[768px]" overflow="visible">
                   <THead>
                     <TR style={{
                 borderBottom: `1px solid ${"#E4E4E7"}`,
@@ -1255,7 +1255,8 @@ function InfoRow({
 function MaintenanceForm({
   equipmentId,
   schedules,
-  onDone
+  onDone,
+  onPendingChange
 }) {
   const isMobile = useIsMobile(768);
   const [form, setForm] = useState({
@@ -1279,6 +1280,10 @@ function MaintenanceForm({
     warrantyClaim: false
   });
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    onPendingChange(saving);
+    return () => onPendingChange(false);
+  }, [saving, onPendingChange]);
   const set = (k, v) => setForm(p => ({
     ...p,
     [k]: v
@@ -1556,7 +1561,8 @@ function MaintenanceForm({
 function MileageForm({
   vehicleId,
   currentMiles,
-  onDone
+  onDone,
+  onPendingChange
 }) {
   const isMobile = useIsMobile(768);
   const today = etDateString();
@@ -1573,6 +1579,10 @@ function MileageForm({
     notes: ""
   });
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    onPendingChange(saving);
+    return () => onPendingChange(false);
+  }, [saving, onPendingChange]);
   const set = (k, v) => setForm(p => ({
     ...p,
     [k]: v
