@@ -93,6 +93,11 @@ const PUSH_ROUTING_POLICY = {
 // tap (deep link beats a pasted URL: the notification IS the link).
 const BILLING_UPDATE = { title: 'Billing update', link: '/?tab=billing', category: 'billing' };
 const PAYMENT_ISSUE = { title: 'Payment issue', link: '/?tab=billing', category: 'billing' };
+const PAYMENT_ISSUE_TYPES = new Set([
+  'payment_failure', 'payment_failed', 'autopay_charge_failed',
+  'autopay_retry_failed', 'autopay_retry_final_failed', 'ach_retry_notice',
+  'ach_card_fallback', 'ach_suspended', 'bank_verification_incomplete', 'bank_verification_failed',
+]);
 const APPOINTMENT_UPDATE_TYPES = [
   'appointment_confirmation', 'appointment_rescheduled', 'reschedule_series_confirmation',
   'appointment_cancelled', 'appointment_series_cancelled', 'appointment_no_show',
@@ -183,6 +188,7 @@ async function hasFreshPushDevice(customerId, knex = db) {
 // An explicit App choice also lets reminders replace their automatic
 // companion text, while the default PUSH_ROUTING_POLICY stays unchanged.
 const APP_FIRST_TYPES = new Set([
+  ...PAYMENT_ISSUE_TYPES,
   'invoice', 'payment_link', 'invoice_followup',
   ...APPOINTMENT_UPDATE_TYPES, 'tech_en_route',
   'reminder_72h', 'appointment_reminder',
@@ -204,20 +210,11 @@ const PREF_CHANNEL_COLUMN = {
   appointment_reminder: 'service_reminder_24h_channel',
   reminder_72h: 'service_reminder_72h_channel',
   billing_reminder: 'billing_channel',
-  payment_failure: 'billing_channel',
-  payment_failed: 'billing_channel',
   late_payment: 'billing_channel',
   payment_expiry: 'billing_channel',
   autopay: 'billing_channel',
   autopay_pre_charge: 'billing_channel',
-  autopay_charge_failed: 'billing_channel',
-  autopay_retry_failed: 'billing_channel',
-  autopay_retry_final_failed: 'billing_channel',
-  ach_retry_notice: 'billing_channel',
-  ach_card_fallback: 'billing_channel',
-  ach_suspended: 'billing_channel',
-  bank_verification_incomplete: 'billing_channel',
-  bank_verification_failed: 'billing_channel',
+  ...Object.fromEntries([...PAYMENT_ISSUE_TYPES].map((type) => [type, 'payment_issue_channel'])),
 };
 
 // Channel columns that live on the account PRIMARY profile (see
@@ -258,14 +255,14 @@ async function pushEligibleRuntime(customerId, to, messageType, knex = db, { req
     .first('phone', 'account_id')
     .catch(() => null);
   if (!customer || normalizeDigits(customer.phone) !== toDigits) return false;
-  const preference = await readChannelPreference(customerId, messageType, knex, customer).catch(() => null);
+  const preference = await readChannelPreference(customerId, messageType, knex, customer, { pushEligibility: true }).catch(() => null);
   if (preference === null || preference === 'email' || preference === 'both') return false;
   return !requireExplicit || preference === 'push';
 }
 
 // Appointment channels follow the primary profile; receipt channels follow
 // the charged profile. Both routed notices and lifecycle bells use this read.
-async function readChannelPreference(customerId, messageType, knex = db, customer = null) {
+async function readChannelPreference(customerId, messageType, knex = db, customer = null, { pushEligibility = false } = {}) {
   const col = PREF_CHANNEL_COLUMN[messageType];
   if (!col) return 'sms';
   customer ||= await knex('customers').where({ id: customerId }).first('account_id');
@@ -274,8 +271,12 @@ async function readChannelPreference(customerId, messageType, knex = db, custome
   const ownerId = PRIMARY_SCOPED_COLUMNS.has(col)
     ? await resolvePrimaryProfileId({ customerId, accountId: customer.account_id }, knex, { onError: 'throw' })
     : customerId;
-  const prefs = await knex('notification_prefs').where({ customer_id: ownerId }).first(col);
-  return String(prefs?.[col] || 'sms').toLowerCase();
+  const columns = col === 'payment_issue_channel' ? [col, 'billing_channel'] : [col];
+  const prefs = await knex('notification_prefs').where({ customer_id: ownerId }).first(...columns);
+  // A new explicit Text choice vetoes companion push; null retains legacy behavior.
+  if (pushEligibility && col === 'payment_issue_channel' && prefs?.[col] === 'sms') return null;
+  // Preserve legacy Email/Both vetoes for companion push until explicitly edited.
+  return String(prefs?.[col] || (col === 'payment_issue_channel' && prefs?.billing_channel) || 'sms').toLowerCase();
 }
 
 // A lifecycle bell must not bypass the guarded App first delivery attempt.
@@ -378,6 +379,9 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     let appNotification = null;
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);
+      if (PAYMENT_ISSUE_TYPES.has(messageType)) {
+        presentation = { ...presentation, link: '/?tab=billing&focus=payment-methods' };
+      }
       if (PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel') {
         let invoice;
         try {

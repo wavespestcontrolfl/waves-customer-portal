@@ -4019,7 +4019,7 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
-const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel'];
+const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel'];
 const APP_OPTION = { value: 'push', label: 'App' };
 const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
 const APPOINTMENT_CHANNEL_KEYS = [
@@ -4112,11 +4112,11 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         </button>
       </div>
       <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
+        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices, payment problems and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
       </p>
       <details style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Email copies and other messages</summary>
-        Emailed receipt copies and important billing notices keep their current delivery methods. So do messages with attachments, review requests, conversations, security codes and marketing.
+        Existing emailed receipt copies continue. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
       </details>
       <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         {prefs.smsEnabled === false ? 'Text backup is currently off. ' : 'Text backup remains subject to your text preferences. '}
@@ -5464,7 +5464,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
 // =========================================================================
 const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.';
 
-function BillingTab({ customer, refreshCustomer }) {
+function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
   // credits) and the tokenized Pay now hand-off; every management surface
@@ -5508,6 +5508,8 @@ function BillingTab({ customer, refreshCustomer }) {
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
   const [invoiceChannel, setInvoiceChannel] = useState('sms');
   const [savedInvoiceChannel, setSavedInvoiceChannel] = useState('sms');
+  const [paymentIssueChannel, setPaymentIssueChannel] = useState('sms');
+  const [savedPaymentIssueChannel, setSavedPaymentIssueChannel] = useState('sms');
   const [appPreferencesAvailable, setAppPreferencesAvailable] = useState(false);
   const billingApp = useAppNotifications(appPreferencesAvailable, customer?.id);
   // Receipt texts have no on/off switch (owner 08-28), but a customer who
@@ -5521,6 +5523,11 @@ function BillingTab({ customer, refreshCustomer }) {
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const [billingPrefsLoadError, setBillingPrefsLoadError] = useState(false);
   const compact = useIsMobile(760);
+  useEffect(() => {
+    if (!loading && focusPaymentMethods) {
+      document.getElementById('billing-payment-methods')?.scrollIntoView?.({ block: 'start' });
+    }
+  }, [loading, focusPaymentMethods]);
 
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
@@ -5637,6 +5644,8 @@ function BillingTab({ customer, refreshCustomer }) {
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
           setInvoiceChannel(prefsData.invoiceChannel || 'sms');
           setSavedInvoiceChannel(prefsData.invoiceChannel || 'sms');
+          setPaymentIssueChannel(prefsData.paymentIssueChannel || 'sms');
+          setSavedPaymentIssueChannel(prefsData.paymentIssueChannel || 'sms');
           setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
           setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
@@ -6296,10 +6305,20 @@ function BillingTab({ customer, refreshCustomer }) {
       // email leg.
       billingReminderChannel: hasBillingEmail ? billingReminderChannel : 'sms',
       ...(appPreferencesAvailable && invoiceChannel !== savedInvoiceChannel ? { invoiceChannel } : {}),
+      ...(appPreferencesAvailable && paymentIssueChannel !== savedPaymentIssueChannel ? { paymentIssueChannel } : {}),
       paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
-      .then(() => {
+      .then((result) => {
+        if (appPreferencesAvailable && (
+          (invoiceChannel !== savedInvoiceChannel && result?.preferences?.invoiceChannel !== invoiceChannel)
+          || (paymentIssueChannel !== savedPaymentIssueChannel && result?.preferences?.paymentIssueChannel !== paymentIssueChannel)
+        )) {
+          setInvoiceChannel(result?.preferences?.invoiceChannel || savedInvoiceChannel);
+          setPaymentIssueChannel(result?.preferences?.paymentIssueChannel || savedPaymentIssueChannel);
+          throw new Error('Billing delivery preference was not saved');
+        }
         setSavedInvoiceChannel(invoiceChannel);
+        setSavedPaymentIssueChannel(paymentIssueChannel);
         // Keep local state in step with the coerced save — otherwise
         // re-adding an email (or re-enabling email messages) in the same
         // session resurrects a stale Email/Both selection the server was
@@ -7070,6 +7089,25 @@ function BillingTab({ customer, refreshCustomer }) {
             <option value="sms">Text</option>
             <option value="push" disabled={!billingApp.ready}>App</option>
           </select>
+          </div>
+        </div>}
+
+        {appPreferencesAvailable && <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap',
+          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
+        }}>
+          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Payment problems</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Auto Pay failures, payment retries and bank verification. App opens your payment methods, with an allowed text backup. Email copies continue.</div>
+          </div>
+          <div style={{ display: 'flex', flex: compact ? '1 0 100%' : '0 0 auto', justifyContent: 'flex-end' }}>
+            <select aria-label="Delivery method for payment problems" value={paymentIssueChannel}
+              onChange={(e) => setPaymentIssueChannel(e.target.value)}
+              style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, border: '1px solid #D8D0C0',
+                borderRadius: 8, padding: '7px 10px', minHeight: 44, background: '#fff', fontFamily: 'inherit' }}>
+              <option value="sms">Text</option>
+              <option value="push" disabled={!billingApp.ready}>App</option>
+            </select>
           </div>
         </div>}
 
@@ -16239,7 +16277,7 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
