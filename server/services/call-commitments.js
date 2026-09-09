@@ -1357,6 +1357,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .where({ id: c.id, status: "open" })
         .whereNull("human_state")
         .whereRaw("(fulfillment IS NULL OR fulfillment ->> 'strength' = 'association')")
+        .whereRaw("fulfillment IS DISTINCT FROM ?::jsonb", [JSON.stringify(proof)])
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }

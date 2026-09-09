@@ -195,6 +195,21 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect((await load()).some((r) => r.id === row.call_log_id)).toBe(false);
   });
 
+  test.each([0, 5])('unchanged association hints preserve read reminders with %i companion callbacks', async (companions) => {
+    const row = await seed({ kind: 'send_appointment_confirmation', due_at: ago, callback_due_at: null });
+    for (let i = 0; i < companions; i += 1) await seed();
+    await trx('sms_log').insert({ direction: 'outbound', from_phone: '+15555550177', to_phone: '+15555550176',
+      message_type: 'confirmation', status: 'sent', created_at: new Date(now.getTime() - 60000) });
+    await runSweep();
+    const before = await trx('call_commitments').where({ id: row.id }).first();
+    expect(before.fulfillment.strength).toBe('association');
+    await unread().update({ read_at: now });
+    await runSweep();
+    await runSweep();
+    expect(await unread()).toHaveLength(0);
+    expect((await trx('call_commitments').where({ id: row.id }).first()).updated_at).toEqual(before.updated_at);
+  });
+
   test('changed non-callback work does not inherit an old aggregate acknowledgment', async () => {
     const changed = await seed({ kind: 'other', due_at: ago, callback_due_at: null });
     const callbacks = [];
