@@ -133,6 +133,31 @@ describe('recap interruption recovery', () => {
     expect(screen.queryByRole('button', { name: 'Restore draft', exact: true })).toBeNull();
   });
 
+  it('blocks a draft saved while a recorded product was missing from the catalog once it is representable again', async () => {
+    const record = { id: 'record-a', status: 'completed', technician_notes: 'Recorded', products: [
+      { product_id: 1, product_name: 'Example gel', application_rate: 0.1, rate_unit: 'g/spot' },
+    ] };
+    let current = { ...structuredClone(context), products: [], existingRecord: record };
+    const request = vi.fn(async (path, options) => (path.endsWith('/context') ? structuredClone(current) : { ok: true, options }));
+    const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
+    const first = open();
+    await screen.findByDisplayValue('Recorded');
+    fireEvent.change(noteInput(), { target: { value: 'Edited while the catalog was unavailable.' } });
+    await screen.findByText(/Draft saved on this device/);
+    first.unmount();
+
+    current = { ...current, products: [product] };
+    open();
+    expect(await screen.findByRole('button', { name: 'Restore draft', exact: true })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Complete Service', exact: true })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft', exact: true }));
+    expect(screen.getByRole('button', { name: '✓ Example gel', exact: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete Service', exact: true }));
+    await waitFor(() => expect(request.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(true));
+    const payload = JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'POST')[1].body);
+    expect(payload.products).toMatchObject([{ product_id: 1 }]);
+  });
+
   it('sends the verified visit identity with the completion and explains a server ownership rejection', async () => {
     const service = { ...context.service, customerId: 'customer-a', propertyId: 'property-a', catalogServiceId: 'catalog-a',
       serviceType: 'Pest Control', scheduledDate: '2026-01-01', address: { line1: '100 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' } };

@@ -259,6 +259,7 @@ export default function ServiceRecapModal({
   const draft = useServiceRecapDraft({
     serviceId, ctx, loading, loadError, submitting,
     authoritative: selectionAuthoritative.current,
+    unrepresented: unrepresentedProducts.current,
     form: { note, message, rates, sendText, includeComms, selected, productById, restoredNames },
   });
   const restoreDraft = () => {

@@ -36,9 +36,14 @@ function recordIdentity(record) {
   ])).sort()];
 }
 
-export function recapContextIdentity(ctx, authoritative) {
+// Recorded products the picker could not represent at load time are part
+// of the identity: a draft saved while a recorded product was missing from
+// the catalog holds an empty selection for it and must not be restored
+// once that product is representable (the live preselection would be
+// replaced and the completion would drop it).
+export function recapContextIdentity(ctx, authoritative, unrepresented = []) {
   if (!ctx || !authoritative) return null;
-  return JSON.stringify([recapVisitIdentity(ctx.service), recordIdentity(ctx.existingRecord)]);
+  return JSON.stringify([recapVisitIdentity(ctx.service), recordIdentity(ctx.existingRecord), [...unrepresented].sort()]);
 }
 
 // Rates travel only for selected products: deselecting leaves the typed
@@ -71,7 +76,7 @@ export function restoredRecapForm(saved, hasPhone) {
   };
 }
 
-export default function useServiceRecapDraft({ serviceId, ctx, loading, loadError, authoritative, submitting, form }) {
+export default function useServiceRecapDraft({ serviceId, ctx, loading, loadError, authoritative, unrepresented, submitting, form }) {
   const user = getAdminUser();
   const [key] = useState(() => completionDraftKey(serviceId, `recap_${user?.id || 'local'}_${user?.role || 'local'}`));
   const [storageError, setStorageError] = useState('');
@@ -85,7 +90,7 @@ export default function useServiceRecapDraft({ serviceId, ctx, loading, loadErro
   const baseline = useRef(null);
   const complete = useRef(false);
   const ready = !loading && !loadError;
-  const sourceIdentity = recapContextIdentity(ctx, authoritative && !loadError);
+  const sourceIdentity = recapContextIdentity(ctx, authoritative && !loadError, unrepresented);
   const serialized = JSON.stringify(recapDraftSnapshot(form));
 
   useEffect(() => {
