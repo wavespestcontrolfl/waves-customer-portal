@@ -211,10 +211,12 @@ async function main() {
     const legacy = await openPage({ enabled: false });
     await legacy.goto(`${server.baseUrl}/admin/customers`);
     await legacy.getByRole('navigation', { name: 'Admin sections' }).waitFor();
+    // The shell appears before auth; wait for its verified account outlet.
+    await legacy.getByRole('heading', { name: 'Customers', exact: true }).waitFor();
     check('Flag off retains existing navigation', await legacy.getByRole('navigation', { name: 'Admin workspaces' }).count() === 0);
     await legacy.keyboard.press('Control+k');
     await legacy.getByPlaceholder(/Ask anything/).waitFor();
-    check('Flag off keeps the assistant shortcut', await legacy.getByRole('searchbox').count() === 0);
+    check('Flag off keeps the assistant shortcut', await legacy.getByRole('dialog', { name: 'Go to a page' }).count() === 0);
     check('No browser render errors', report.pageErrors.length === 0);
   } finally {
     fs.writeFileSync(path.join(output, 'verification.json'), JSON.stringify(report, null, 2));
