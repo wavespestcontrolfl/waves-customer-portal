@@ -5,11 +5,12 @@ jest.mock('../models/db', () => {
 });
 const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
-const { validateBidFields } = require('../services/proposal-bid');
+const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
+const { proposalExpiry, assertBidSendDate, validateBidFields } = require('../services/proposal-bid');
 const { roundCents } = require('../../shared/proposal-bid.cjs');
 
 const line = (id, quantity, unitPrice, unit = 'acre') => ({ id, description: `Synthetic ${id}`, quantity, unitPrice, unit, frequency: 'one_time' });
-const estimate = (lines, extra = {}) => ({ estimate_data: { proposal: { enabled: true, buildings: [{ name: 'Synthetic property', lineItems: lines }], ...extra } } });
+const estimate = (lines, extra = {}) => ({ estimate_data: { proposal: { enabled: true, validThrough: '2026-12-21', buildings: [{ name: 'Synthetic property', lineItems: lines }], ...extra } } });
 const normalized = (lines, extra) => normalizeProposal(estimate(lines, extra));
 
 describe('bid quantity authority', () => {
@@ -47,3 +48,24 @@ describe('bid quantity authority', () => {
   });
 });
 
+describe('fixed bid validity', () => {
+  test.each([
+    ['2026-09-22', '2026-09-23T03:59:59.999Z'],
+    ['2026-12-21', '2026-12-22T04:59:59.999Z'],
+    ['2026-03-07', '2026-03-08T04:59:59.999Z'],
+    ['2026-03-08', '2026-03-09T03:59:59.999Z'],
+    ['2026-11-01', '2026-11-02T04:59:59.999Z'],
+  ])('honors the full Eastern calendar day %s, including DST', (validThrough, expected) => {
+    const row = estimate([line('a', 25.8, 100)], { validThrough });
+    expect(proposalExpiry(row).toISOString()).toBe(expected);
+    expect(estimateExpiresAt(() => new Date('2026-09-01T12:00:00Z'), row).toISOString()).toBe(expected);
+    expect(estimateExpiresAt(() => new Date('2026-09-20T12:00:00Z'), row).toISOString()).toBe(expected);
+  });
+  test('retains the seven-day legacy send window and rejects expired or impossible bid dates', () => {
+    expect(estimateExpiresAt(() => new Date('2026-09-01T12:00:00Z')).toISOString()).toBe('2026-09-08T12:00:00.000Z');
+    const row = estimate([line('a', 1, 10)], { validThrough: '2026-09-22' });
+    expect(() => assertBidSendDate(row, new Date('2026-09-23T04:00:00Z'))).toThrow(/validity date has passed/);
+    expect(() => assertBidSendDate(row, new Date('2026-09-23T03:59:59Z'))).not.toThrow();
+    expect(validateBidFields({ validThrough: '2026-02-30' })).toMatch(/calendar date/);
+  });
+});

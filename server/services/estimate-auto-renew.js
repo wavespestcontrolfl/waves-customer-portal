@@ -26,6 +26,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
 const RENEWAL_DAYS = 7;
+const { hasFixedBidValidity, FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
 
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
@@ -69,7 +70,7 @@ const EstimateAutoRenew = {
 
       for (const est of stale) {
         try {
-          if (estimateOptedOutOfAutoRenew(est)) continue;
+          if (estimateOptedOutOfAutoRenew(est) || hasFixedBidValidity(est)) continue;
           // Engine-authoritative pricing gate (#3750, GH codex P1 r13): a
           // renewal re-emails the estimate link — never for a delivered row
           // the engine never verified while the gate is on. Not renewed
@@ -79,10 +80,11 @@ const EstimateAutoRenew = {
             continue;
           }
           const newExpiry = new Date(Date.now() + RENEWAL_DAYS * 86400000);
-          await db('estimates').where({ id: est.id }).update({
+          const updated = await db('estimates').where({ id: est.id }).whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL).update({
             expires_at: newExpiry,
             renewal_count: db.raw('COALESCE(renewal_count, 0) + 1'),
           });
+          if (!updated) continue;
 
           const firstName = (est.customer_name || '').split(' ')[0] || 'there';
           const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;

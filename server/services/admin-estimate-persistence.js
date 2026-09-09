@@ -549,7 +549,9 @@ async function staleCallLinkageReason(dbc, data, {
 }
 
 
-function estimateExpiresAt(now = () => new Date()) {
+function estimateExpiresAt(now = () => new Date(), estimate = null) {
+  const fixed = require('./proposal-bid').proposalExpiry(estimate);
+  if (fixed) return fixed;
   const expiresAt = new Date(now().getTime());
   expiresAt.setDate(expiresAt.getDate() + ESTIMATE_SEND_EXPIRY_DAYS);
   return expiresAt;

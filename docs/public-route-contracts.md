@@ -409,7 +409,11 @@ and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
 requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
 sweep flips never-sent drafts to 'expired' too, and those must never
 qualify) that is past expires_at or sweep-expired, not
-accepted/declined/archived. Concurrency: the 24h dedupe stamp and the
+accepted/declined/archived. Fixed-validity bids and groups containing a
+fixed-validity sibling that an extension would revive are ineligible before
+any claim: both the POST and the expired `/data` response use generic 404
+without the extension-offer bit. Admin extensions refuse the whole group
+before changing any expiry. Concurrency: the 24h dedupe stamp and the
 lifetime auto-grant burn live in DEDICATED estimates columns
 (`extension_requested_at` / `extension_auto_granted_at`, migration
 20260711000001 — never estimate_data, whose full-blob writers could erase
@@ -809,8 +813,10 @@ against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
 Authored commercial proposals expose reviewed four-decimal quantities and unit
-rates, explicit unit labels and cent-rounded line amounts through the existing
-normalized proposal and document output. These additions do not widen draft access.
+rates, explicit unit labels, cent-rounded line amounts, and the fixed
+`validThrough` date in their normalized proposal and document output. A fixed
+price hold governs expiry even after resends and cannot be changed by the
+generic extension or auto-renew paths; these additions do not widen draft access.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the

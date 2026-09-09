@@ -59,7 +59,7 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
-const { validateBidFields } = require('../services/proposal-bid');
+const { proposalExpiry, hasFixedBidValidity, assertBidSendDate, validateBidFields, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
@@ -398,7 +398,7 @@ function assertAutoSendPricingAuthority(row = {}) {
 // `forUpdate`: lock the sibling rows for the caller's transaction (the
 // schedule route), so a concurrent revision of a sibling serializes against
 // the scheduling write instead of slipping between this read and it.
-async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false } = {}) {
+async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend = false, forUpdate = false, sendAt = null } = {}) {
   if (!estimate?.estimate_group_id) return null;
   // Two sets are judged (never re-claimed): the PUBLISHABLE siblings this
   // send would publish (draft / scheduled / send_failed, unlocked) and every
@@ -416,6 +416,9 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
+    if (sendAt && ['draft', 'scheduled', 'send_failed', 'sent', 'viewed'].includes(sibling.status)) {
+      assertBidSendDate(sibling, sendAt);
+    }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,
     // not from the cron parking the anchor at publication (codex r16 P2 on
@@ -452,6 +455,7 @@ function blockingSiblingMessage(blockingSibling, beforeWhat) {
 }
 
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
+  assertBidSendDate(estimate);
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
     err.statusCode = 400;
@@ -1244,10 +1248,11 @@ router.post('/:id/send', async (req, res, next) => {
             ['estimate-group-send', String(estimate.estimate_group_id)],
           );
         }
-        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true });
+        const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true, sendAt: scheduledTime });
         if (blockingSibling) return { blockingSibling };
         await assertReviewedEstimateGroup(trx, estimate, req.body?.groupVersions);
         const lockedRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+        assertBidSendDate(lockedRow, scheduledTime);
         if (req.body?.expectedEditVersion && estimateEditVersion(lockedRow) !== req.body.expectedEditVersion) {
           return { stale: true };
         }
@@ -1287,7 +1292,7 @@ router.post('/:id/send', async (req, res, next) => {
             status: 'scheduled',
             scheduled_at: scheduledTime,
             send_method: sendMethod,
-            expires_at: estimateExpiresAt(() => scheduledTime),
+            expires_at: estimateExpiresAt(() => scheduledTime, lockedRow),
             scheduled_send_attempts: 0,
             last_send_error: null,
             ...(receipt ? { estimate_data: JSON.stringify({ ...lockedData, manualSendAttempts: [...priorAttempts, receipt].slice(-DELIVERY_HISTORY_MAX) }) } : {}),
@@ -2446,7 +2451,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   if (leadShape.parkedKey) await stampLeadHandoffAttempt(estimate, options);
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
-  const nextExpiresAt = estimateExpiresAt(now);
+  assertBidSendDate(estimate, now());
+  const nextExpiresAt = estimateExpiresAt(now, estimate);
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
   const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
   // One tracked short code PER CHANNEL LEG (same rule as estimate-follow-up
@@ -2990,7 +2996,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // final attempt the sibling is released for an operator re-send.
           // A sibling is delivered by the anchor's handoff — the same
           // real-channel test decides whether its scope stamp moves.
-          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
+          const siblingExpiry = estimateExpiresAt(now, sibling);
+          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
           if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
@@ -3009,7 +3016,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               // viewed-aware finalization as the anchor (codex #3244 r3).
               status: db.raw("CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END"),
               sent_at: db.fn.now(),
-              expires_at: nextExpiresAt,
+              expires_at: siblingExpiry,
               scheduled_at: null,
               send_method: null,
               followup_unviewed_sent: true,
@@ -3080,7 +3087,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // Forward-only expiry inside the SET (not the WHERE): a sibling
           // already extended past this send still needs its reminder flags
           // burned — the anchor owns all group comms (codex #3244 r5).
-          expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [nextExpiresAt, nextExpiresAt]),
+          expires_at: db.raw(`CASE WHEN ${FIXED_BID_VALIDITY_ABSENT_SQL} THEN GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz) ELSE expires_at END`, [estimateExpiresAt(now), estimateExpiresAt(now)]),
           followup_unviewed_sent: true,
           followup_viewed_sent: true,
           followup_final_sent: true,
@@ -3706,6 +3713,7 @@ router.get('/:id/proposal', async (req, res, next) => {
         viewedAt: estimate.viewed_at,
         acceptedAt: estimate.accepted_at,
         expiresAt: estimate.expires_at,
+        fixedBidValidity: hasFixedBidValidity(estimate),
         archivedAt: estimate.archived_at,
         priceLockedAt: estimate.price_locked_at,
         billByInvoice: estimate.bill_by_invoice,
@@ -3757,7 +3765,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // the ordinary expired-row recovery: the re-save is allowed, leaves the
     // row expired, and the operator extends it afterwards.
     const { expiredRowRecoverableUnderGate } = require('../services/admin-estimate-persistence');
-    const expiredRecovery = estimate.status === 'expired' && expiredRowRecoverableUnderGate(estimate);
+    const expiredRecovery = estimate.status === 'expired' && (hasFixedBidValidity(estimate) || expiredRowRecoverableUnderGate(estimate));
     const closedStatuses = expiredRecovery
       ? ['accepted', 'declined', 'sending']
       : ['accepted', 'declined', 'expired', 'sending'];
@@ -3771,8 +3779,11 @@ router.put('/:id/proposal', async (req, res, next) => {
       });
     }
 
-    const incoming = req.body?.proposal || req.body || {};
+    const incoming = { ...(req.body?.proposal || req.body || {}) };
     const savedProposal = normalizeProposal(estimate);
+    // Older proposal editors do not send the new date field. An omission
+    // preserves the authored hold; clearing it requires an explicit null.
+    if (!Object.hasOwn(incoming, 'validThrough')) incoming.validThrough = savedProposal.validThrough;
     const bidValidation = validateBidFields(incoming);
     if (bidValidation) return res.status(400).json({ error: bidValidation });
     // Programs-only callers may omit buildings entirely — normalize once
@@ -3783,8 +3794,9 @@ router.put('/:id/proposal', async (req, res, next) => {
       const incomingLines = incomingBuildings.flatMap((building) => building.lineItems || building.line_items || []);
       const omittedIdentifiers = [...savedUnits.values()].some(Boolean) && incomingLines.some((line) => !line.id);
       const unitsChanged = omittedIdentifiers || incomingLines.some((line) => (line.unit || null) !== (savedUnits.get(line.id) || null));
-      if (unitsChanged) {
-        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units remain in place.' });
+      if (unitsChanged
+        || (incoming.validThrough || null) !== (savedProposal.validThrough || null)) {
+        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units and validity dates remain in place.' });
       }
     }
     const hasBuildings = incomingBuildings.length > 0;
@@ -4025,6 +4037,14 @@ router.put('/:id/proposal', async (req, res, next) => {
     }
 
     const existingData = parseEstimateData(estimate.estimate_data) || {};
+    const authoredExpiry = proposalExpiry({ estimate_data: { proposal: normalized } });
+    const hadFixedValidity = hasFixedBidValidity(estimate);
+    const standardStart = estimate.status === 'scheduled'
+      ? estimate.scheduled_at || estimate.sent_at
+      : estimate.sent_at || estimate.scheduled_at;
+    const expiryUpdate = authoredExpiry || (hadFixedValidity && standardStart
+      ? estimateExpiresAt(() => new Date(standardStart)) : null);
+    const revivingBid = expiredRecovery && (expiryUpdate > new Date() || (hadFixedValidity && !expiryUpdate));
     const nextData = {
       ...existingData,
       proposal: {
@@ -4088,6 +4108,10 @@ router.put('/:id/proposal', async (req, res, next) => {
       || (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(locked))) {
       throw retry('The saved proposal changed while you were editing. Reload and review the current proposal before saving.');
     }
+    if (locked.status === 'scheduled' && locked.scheduled_at && authoredExpiry
+      && authoredExpiry < new Date(locked.scheduled_at)) {
+      throw retry('Valid through must include the scheduled send date. Extend the validity date or reschedule before saving.');
+    }
     // The engine block is carried from the LOCKED row, never the pre-read:
     // a clarify re-price guard stamped between the two would otherwise be
     // dropped by this whole-blob write. And the guard this save OBSERVED on
@@ -4127,6 +4151,12 @@ router.put('/:id/proposal', async (req, res, next) => {
         .where((q) => q.where({ status: 'sending' }).orWhereRaw(`NOT (${DELIVERY_CLAIM_NOT_LIVE_SQL})`))
         .first('id');
       if (inFlightMember) throw retry('This multi-property group is being sent right now — wait a moment and retry.');
+      if (authoredExpiry) {
+        const laterSchedule = await trx('estimates').where({ estimate_group_id: groupId, status: 'scheduled' })
+          .whereNot({ id: estimate.id }).whereNull('archived_at').whereNull('price_locked_at')
+          .where('scheduled_at', '>', authoredExpiry).first('id');
+        if (laterSchedule) throw retry('Valid through must include this group’s scheduled send date. Extend the validity date or reschedule before saving.');
+      }
     }
     const updateQuery = trx('estimates')
       .where({ id: estimate.id })
@@ -4166,6 +4196,10 @@ router.put('/:id/proposal', async (req, res, next) => {
       monthly_total: totals.monthlyEquivalent,
       annual_total: totals.annualRecurring,
       onetime_total: totals.oneTime,
+      ...(authoredExpiry || hadFixedValidity ? { expires_at: expiryUpdate } : {}),
+      ...(revivingBid ? { status: estimate.viewed_at ? 'viewed' : estimate.sent_at ? 'sent' : 'draft' } : {}),
+      ...(revivingBid && ['expired_unviewed', 'expired_viewed', 'expired_unsent'].includes(estimate.disposition)
+        ? { disposition: null, disposition_source: null, disposition_at: null, disposition_note: null } : {}),
       updated_at: db.fn.now(),
     });
     });
@@ -4186,8 +4220,7 @@ router.put('/:id/proposal', async (req, res, next) => {
 });
 
 // GET /api/admin/estimates/:id/proposal.pdf — branded commercial proposal
-// PDF (inline). Reuses the same generator that produces the email
-// attachment, so the download and the emailed copy are byte-identical.
+// PDF (inline), using the same generator as its email attachment.
 router.get('/:id/proposal.pdf', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();

@@ -201,6 +201,9 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     // of the same handoff instant; a sibling stamped only at its own
     // earlier send would drop out of a genuinely complete group quote.
     const anchor = estimateRow({ estimate_group_id: 'grp-1' });
+    const anchorData = JSON.parse(anchor.estimate_data) || {};
+    anchorData.proposal = { enabled: true, validThrough: '2099-12-21' };
+    anchor.estimate_data = JSON.stringify(anchorData);
     const frozenScope = { lines: [{ names: ['Lawn Care'], recurring: true, oneTime: false }], address: '77 Oak St, Bradenton, FL 34205', property: null };
     const earlier = '2026-06-01T09:00:00.000Z';
     const sibling = {
@@ -233,6 +236,10 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
       .map(([, bindings]) => { try { return JSON.parse(bindings[0]); } catch { return null; } })
       .find((patch) => patch && patch.groupPublishedByEstimateId === anchor.id);
     expect(siblingPatch).toEqual({ groupPublishedByEstimateId: anchor.id });
+    const expiryReconciliation = db.raw.mock.calls.find(([sql]) => /GREATEST\(COALESCE\(expires_at/.test(String(sql)));
+    const ordinaryExpiry = require('../services/admin-estimate-persistence').estimateExpiresAt(() => new Date(groupInstant));
+    expect(expiryReconciliation[1]).toEqual([ordinaryExpiry, ordinaryExpiry]);
+
     // …and the scope stamp is ONE jsonb_set on the history key alone, at
     // the group instant, reading the row's own scope at write time — never
     // a rebuilt snapshot that could restore pricing a concurrent customer

@@ -188,12 +188,13 @@ beforeEach(() => {
 
 describe('commercial bid authoring', () => {
   beforeEach(() => gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER'));
-  const proposal = () => ({ enabled: true, buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
-  test('PUT stores fractional quote totals atomically', async () => {
+  const proposal = () => ({ enabled: true, validThrough: '2099-12-21', buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
+  test('PUT stores fractional quote totals and fixed expiry atomically', async () => {
     row.status = 'draft';
     const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal() });
     expect(res.statusCode).toBe(200);
     expect(row.onetime_total).toBe(2580);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
     expect(dataOf().proposal.buildings[0].lineItems[0]).toMatchObject({ quantity: 25.8, unit: 'acre', amount: 2580 });
   });
   test('PUT rejects stale editing and invalid quantities without replacing saved prices', async () => {
@@ -206,6 +207,54 @@ describe('commercial bid authoring', () => {
     expect(badQuantity.statusCode).toBe(400);
     expect(mutations).toHaveLength(0);
   });
+  test.each([['2099-12-22T04:59:59.999Z', 200], ['2099-12-22T05:00:00Z', 409]])('scheduled proposal edits respect the full Eastern day at %s', async (scheduledAt, status) => {
+    Object.assign(row, { status: 'scheduled', scheduled_at: new Date(scheduledAt), estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
+    const res = await invoke('/:id/proposal', 'put', { proposal: proposal() });
+    expect(res.statusCode).toBe(status);
+    if (status === 409) {
+      expect(res.body.error).toMatch(/scheduled send date/);
+      expect(mutations).toHaveLength(0);
+      expect(dataOf().proposal.validThrough).toBe('2099-12-31');
+    }
+  });
+  test.each(['draft', 'scheduled', 'send_failed', 'sent', 'viewed'].flatMap(status => [
+    [status, '2099-12-22T04:59:59.999Z', 200], [status, '2099-12-22T05:00:00Z', 409],
+  ]))('editing a %s sibling respects the group send at %s', async (status, sendAt, expected) => {
+    Object.assign(row, { status, estimate_group_id: 'synthetic-group',
+      estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
+    const before = structuredClone(row);
+    db.mockImplementation(table => {
+      const builder = estimateDatabase(table);
+      const originalWhere = builder.where;
+      let pendingSchedule = false;
+      builder.where = jest.fn((key, operator, value) => {
+        if (key?.status === 'scheduled' && key.estimate_group_id === row.estimate_group_id) pendingSchedule = true;
+        if (pendingSchedule && key === 'scheduled_at') {
+          expect(operator).toBe('>');
+          builder.first = jest.fn(async () => new Date(sendAt) > value ? { id: 'scheduled-sibling' } : null);
+          return builder;
+        }
+        return originalWhere(key, operator);
+      });
+      return builder;
+    });
+    const response = await invoke('/:id/proposal', 'put', { proposal: proposal() });
+    expect(response.statusCode).toBe(expected);
+    if (expected === 409) {
+      expect(response.body.error).toMatch(/group’s scheduled send date/);
+      expect(mutations).toHaveLength(0);
+      expect(row).toEqual(before);
+    }
+  });
+  test('an older editor omitting validity preserves the saved price hold', async () => {
+    gateEnvValue.mockReturnValue(false);
+    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+    const incoming = proposal(); delete incoming.validThrough;
+    const res = await invoke('/:id/proposal', 'put', { proposal: incoming });
+    expect(res.statusCode).toBe(200);
+    expect(dataOf().proposal.validThrough).toBe('2099-12-21');
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+  });
   test('a legacy editor cannot discard saved units by omitting line identifiers while the gate is off', async () => {
     gateEnvValue.mockReturnValue(false);
     row.status = 'draft'; row.estimate_data = { proposal: proposal() };
@@ -217,9 +266,23 @@ describe('commercial bid authoring', () => {
     expect(mutations).toHaveLength(0);
     expect(dataOf().proposal.buildings[0].lineItems[0].unit).toBe('acre');
   });
-  test.each(['unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
+  test.each([
+    ['draft', null, null, null], ['expired', null, null, null],
+    ['sent', '2099-01-01T12:00:00Z', null, '2099-01-08T12:00:00.000Z'],
+    ['scheduled', null, '2099-01-10T12:00:00Z', '2099-01-17T12:00:00.000Z'],
+    ['scheduled', '2020-01-01T12:00:00Z', '2099-01-10T12:00:00Z', '2099-01-17T12:00:00.000Z'],
+  ])('clearing fixed validity restores the ordinary %s expiry from delivery, never the save time', async (status, sentAt, scheduledAt, expected) => {
+    Object.assign(row, { status, sent_at: sentAt, scheduled_at: scheduledAt, expires_at: new Date('2026-01-09T04:59:59.999Z'),
+      estimate_data: { proposal: { ...proposal(), validThrough: '2026-01-08' } } });
+    const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: null } });
+    expect(res.statusCode).toBe(200);
+    expect(row.expires_at?.toISOString() ?? null).toBe(expected);
+    if (!sentAt && !scheduledAt) expect(row.status).toBe('draft');
+  });
+  test.each(['validity', 'unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
     row.status = 'draft'; row.estimate_data = { proposal: proposal() };
     const body = { proposal: proposal() };
+    if (field === 'validity') body.proposal.validThrough = null;
     if (field === 'unit') body.proposal.buildings[0].lineItems[0].unit = 'sqft';
     gateEnvValue.mockReturnValue(false);
     const res = await invoke('/:id/proposal', 'put', body);
@@ -227,6 +290,14 @@ describe('commercial bid authoring', () => {
     expect(res.body.error).toMatch(/Bid authoring is currently disabled/);
     expect(mutations).toHaveLength(0);
     expect(dataOf()).toEqual({ proposal: proposal() });
+  });
+  test('an expired fixed bid can be explicitly revised and its expiry disposition is cleared', async () => {
+    row.status = 'expired'; row.sent_at = new Date('2026-01-01T12:00:00Z');
+    row.disposition = 'expired_unviewed';
+    row.estimate_data = { proposal: { ...proposal(), validThrough: '2026-01-08' } };
+    const res = await invoke('/:id/proposal', 'put', { proposal: proposal() });
+    expect(res.statusCode).toBe(200);
+    expect(row.status).toBe('sent'); expect(row.disposition).toBeNull();
   });
 });
 

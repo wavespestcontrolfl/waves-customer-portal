@@ -155,7 +155,7 @@ function lockReason(est) {
   if (est.archivedAt) return 'This estimate is archived. Unarchive it from the estimates list to edit the proposal.';
   if (est.priceLockedAt) return 'This proposal is price-locked (accepted) and can no longer be re-priced.';
   if (est.status === 'sending') return 'This estimate is being sent right now. Refresh once the send finishes.';
-  if (['accepted', 'declined', 'expired'].includes(est.status)) {
+  if (['accepted', 'declined', ...(est.fixedBidValidity ? [] : ['expired'])].includes(est.status)) {
     return `A ${STATUS_LABELS[est.status]?.toLowerCase() || est.status} estimate can no longer be re-priced.`;
   }
   return null;
@@ -205,6 +205,7 @@ function CommercialProposalEditor() {
   const [propertyAddress, setPropertyAddress] = useState('');
   const [taxRatePct, setTaxRatePct] = useState('0');
   const [terms, setTerms] = useState('');
+  const [validThrough, setValidThrough] = useState('');
   const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
   const showUnitColumn = bidToolsEnabled || buildings.some((building) => building.lineItems.some((line) => line.unit));
@@ -269,6 +270,7 @@ function CommercialProposalEditor() {
     setPropertyAddress(p.propertyAddress || est?.address || '');
     setTaxRatePct(String((Number(p.taxRate) || 0) * 100));
     setTerms(p.terms || '');
+    setValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
     setBuildings(
       Array.isArray(p.buildings) && p.buildings.length
@@ -641,7 +643,7 @@ function CommercialProposalEditor() {
   // from what is actually on screen.
   const formRef = React.useRef(null);
   formRef.current = {
-    title, preparedFor, propertyAddress, taxRate, terms,
+    title, preparedFor, propertyAddress, taxRate, terms, validThrough,
     buildings, scopeItems, programsState, correctiveWork, responsibilitiesText, commercialTerms,
     loadedAuthored, dirty,
   };
@@ -723,6 +725,7 @@ function CommercialProposalEditor() {
       propertyAddress: f.propertyAddress.trim(),
       taxRate: f.taxRate,
       terms: f.terms.trim() || null,
+      ...(bidToolsEnabled ? { validThrough: f.validThrough || null } : {}),
       ...structuredSectionsPayload(f),
       // Priced programs ARE the recurring itemization — the server rejects
       // building line items beside them, so the payload omits buildings
@@ -1457,6 +1460,12 @@ function CommercialProposalEditor() {
               <CardTitle>Commercial terms</CardTitle>
             </CardHeader>
             <CardBody>
+              {(bidToolsEnabled || validThrough) && <label className="block mb-4 text-14">
+                Valid through (Eastern time)
+                <Input type="date" value={validThrough} disabled={!!locked || !bidToolsEnabled} className="mt-1 max-w-xs"
+                  onChange={(e) => { setValidThrough(e.target.value); markEdit(); }} />
+                <span className="block mt-1 text-zinc-600">Prices remain valid through the end of this date, including resends. Leave blank for the standard seven days after sending. For a bid hold, enter the date required by the solicitation.</span>
+              </label>}
               <div className="text-12 text-zinc-500 mb-2">
                 Optional — structured terms shown as their own section on the proposal.
                 Free-text terms below become &ldquo;Additional terms&rdquo; once any of these are set.
