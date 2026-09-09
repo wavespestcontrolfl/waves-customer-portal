@@ -26,6 +26,22 @@ function Harness({ withPanels = true, initial = 'a' }) {
 }
 
 describe('ui/Tabs', () => {
+  it('removes overflow arrows when tabs fit the full navigation after widening', () => {
+    const { container } = render(<Tabs value="a"><TabList scrollable><Tab value="a">Alpha</Tab><Tab value="b">Beta</Tab></TabList></Tabs>);
+    const navigation = container.querySelector('.ui-tab-navigation'), strip = container.querySelector('.ui-tab-strip');
+    let width = 320;
+    Object.defineProperty(navigation, 'clientWidth', { get: () => width });
+    Object.defineProperties(strip, { scrollWidth: { value: 500 }, clientWidth: { get: () => width - 88 } });
+    fireEvent.scroll(strip);
+    expect(screen.getByRole('button', { name: 'Scroll sections right' })).toBeInTheDocument();
+    width = 520;
+    fireEvent.scroll(strip);
+    expect(screen.queryByRole('button', { name: 'Scroll sections right' })).toBeNull();
+    width = 480;
+    fireEvent.scroll(strip);
+    expect(screen.getByRole('button', { name: 'Scroll sections right' })).toBeInTheDocument();
+  });
+
   it('retains an opted-in draft while hidden, and discards it when the record changes', () => {
     function Draft() {
       const [draft, setDraft] = useState('');
