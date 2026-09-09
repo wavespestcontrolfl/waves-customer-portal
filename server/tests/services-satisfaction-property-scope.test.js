@@ -46,6 +46,7 @@ function chain(rows) {
 let server; let base;
 beforeAll((done) => {
   const app = express();
+  app.use(express.json());
   app.use('/services', servicesRouter);
   app.use('/satisfaction', satisfactionRouter);
   app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
@@ -120,6 +121,28 @@ describe('GET /satisfaction/pending — the prompt follows the selected house', 
     jest.clearAllMocks(); global.__SCOPE__ = CLOSED;
     res = await fetch(`${base}/satisfaction/pending`);
     expect(await res.json()).toEqual({ pending: [], propertyScope: expect.objectContaining({ closed: true }) });
+    expect(db).not.toHaveBeenCalled();
+  });
+  // POST applies the same predicate to the record lookup (GitHub codex r12
+  // P2): a stale prompt or a replayed record id cannot rate another house's
+  // visit from this session; every property retired rates nothing.
+  test('POST /: the record lookup joins the visit and applies the predicate; a record outside the house is 404; closed is 404 before any read', async () => {
+    global.__SCOPE__ = SECONDARY;
+    // No record inside the house: first() yields nothing (the shared chain
+    // helper answers `{ count: 0 }` for count reads).
+    db.mockImplementation((table) => {
+      if (table === 'service_records') { const c = chain([]); c.first = jest.fn(async () => undefined); return c; }
+      throw new Error(`unexpected table ${table}`);
+    });
+    let res = await fetch(`${base}/satisfaction`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceRecordId: 'rec-1', rating: 9 }) });
+    expect(res.status).toBe(404);
+    const [lookup] = recordChains();
+    expect(lookup.some((c) => c[0] === 'leftJoin' && c[1] === 'scheduled_services')).toBe(true);
+    expect(propertyPredicates(lookup)).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
+
+    jest.clearAllMocks(); global.__SCOPE__ = CLOSED;
+    res = await fetch(`${base}/satisfaction`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceRecordId: 'rec-1', rating: 9 }) });
+    expect(res.status).toBe(404);
     expect(db).not.toHaveBeenCalled();
   });
   test('gate off / single home: today\'s query, no predicate', async () => {

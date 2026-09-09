@@ -85,12 +85,23 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ error: 'Valid serviceRecordId and rating (1-10) required' });
     }
 
-    // Verify the service belongs to this customer
-    const service = await db('service_records')
+    // Verify the service belongs to this customer — and, under the saved-
+    // property scope, to the SELECTED house: the same predicate GET /pending
+    // applies, so a stale prompt (the visit moved to another house after it
+    // loaded) or a replayed record id cannot rate house A's visit from house
+    // B's session (GitHub codex r12 P2). Every property retired: nothing to
+    // rate. Mismatch = 404, like the scoped schedule actions.
+    const scope = await resolveSessionScope(req);
+    if (scope.enabled && scope.scoped && (scope.closed || !scope.property)) {
+      return res.status(404).json({ error: 'Service record not found' });
+    }
+    let serviceQuery = db('service_records')
       .where({ 'service_records.id': serviceRecordId, 'service_records.customer_id': req.customerId })
+      .leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.*', 'technicians.name as technician_name')
-      .first();
+      .select('service_records.*', 'technicians.name as technician_name');
+    serviceQuery = applyPropertyPredicate(serviceQuery, scope, 'scheduled_services');
+    const service = await serviceQuery.first();
 
     if (!service) {
       return res.status(404).json({ error: 'Service record not found' });

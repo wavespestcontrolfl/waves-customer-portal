@@ -2639,7 +2639,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // A next visit scoped to a different house than Home shows is stale (the
   // office retired the shown house, or the gate flipped): re-read the
   // property list and withhold the card's actions until the label follows.
-  const dashboardSelectionNamed = !!(selectedProperty && selectedProperty.propertyId);
+  const dashboardSelectionNamed = (selectedProperty && selectedProperty.propertyId) || null;
   // Read by the satisfaction load below (a one-shot effect): the scope Home
   // showed when the response arrives, not when the effect was declared.
   const pendingScopeRef = useRef({ entry: null, saved: false, named: false, refresh: null });
@@ -4203,12 +4203,15 @@ function formatTime(t) {
 // means the office retired the shown house, or the gate flipped, while the
 // tab was open: the tab re-reads the property list and withholds actions on
 // these visits until the label follows (codex #4207 r1j).
-export function scopeEchoMismatch(propertyScope, currentEntry, savedScope, selectionNamed = false) {
+export function scopeEchoMismatch(propertyScope, currentEntry, savedScope, selectedPropertyId = null) {
   if (!propertyScope) return false;
+  const named = selectedPropertyId ? String(selectedPropertyId) : null;
   // The server is NOT scoping any more (gate off, cancelled) while this tab
-  // still dresses reads as one house: those reads are customer-wide, so they
-  // are withheld until the client adopts profile mode (uncapped codex r1m).
-  if (!propertyScope.enabled) return !!savedScope;
+  // still dresses reads as one house — a saved list, or a selection naming
+  // a house even when the list read failed: those reads are customer-wide,
+  // so they are withheld until the client adopts profile mode (uncapped
+  // codex r1m; the selection case uncapped codex r2c P1).
+  if (!propertyScope.enabled) return !!savedScope || !!named;
   // Every property retired (closed): no house to show anything under — stale
   // in EVERY client state, entry or not (GitHub codex r5 P1): the list is
   // re-read (it lists no entry for this profile) and property-facing
@@ -4217,16 +4220,20 @@ export function scopeEchoMismatch(propertyScope, currentEntry, savedScope, selec
   // The RESOLVED selection (what the read was scoped to, fallbacks included):
   // null = no property predicate (single home / profile-keyed entry).
   const honored = propertyScope.propertyId ? String(propertyScope.propertyId) : null;
-  // Server scoped to a house while this client is in profile mode (the gate
-  // came back after a rollback): stale until the list is re-read.
-  if (!savedScope) return !!honored;
+  // No saved list (profile mode, or the list read failed on a fresh session
+  // while /auth/me resolved a house): a selection naming a house is the only
+  // binding there is — the echo must name that house (uncapped codex r2c
+  // P1). No selection: a server scoped to a house while this client is in
+  // profile mode (the gate came back after a rollback) is stale until the
+  // list is re-read.
+  if (!savedScope) return named ? honored !== named : !!honored;
   // A house is SELECTED but the retained list has no entry for it (another
   // tab switched to a newly added house and the list reload failed): the
   // server may have fallen back to a different house, and there is no entry
   // to compare the echo against — stale until the entry resolves, so no
   // fallback house's visits, tracker or ticket is accepted under the named
   // selection (uncapped codex r2a P1). No selection named = profile/primary.
-  if (!currentEntry) return !!selectionNamed;
+  if (!currentEntry) return !!named;
   if (honored) return honored !== String(currentEntry.propertyId || '');
   return currentEntry.isPrimaryProperty !== true;
 }
@@ -4363,7 +4370,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
   );
 }
 
-function ScheduleTab({ customer, properties = [], activePropertyId: activePropertyIdProp, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
+function ScheduleTab({ customer, properties = [], activePropertyId: activePropertyIdProp, selectedProperty = null, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   // The entry this session is scoped to (saved-property key, else the profile
   // id). Falls back to the profile for callers that do not pass one.
   const activePropertyId = activePropertyIdProp || customer?.id;
@@ -4384,7 +4391,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const { loading, error: loadError } = scheduleRead;
   // A read scoped to a different house than this tab shows is stale: re-read
   // the property list and show nothing actionable until the label follows.
-  const scopeStale = scopeEchoMismatch(scheduleRead.data?.propertyScope, currentEntry, savedScope, scopedWithoutEntry);
+  const scopeStale = scopeEchoMismatch(scheduleRead.data?.propertyScope, currentEntry, savedScope, selectedProperty?.propertyId || null);
   useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
   const upcoming = scopeStale ? [] : (scheduleRead.data?.upcoming || []);
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
@@ -11757,7 +11764,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   // (uncapped codex r1m P1) — drop it and re-read the property list, exactly
   // like the schedule reads. Refs: the poll callback is stable.
   const scopeRef = useRef({ entry: null, saved: false, named: false, refresh: null });
-  scopeRef.current = { entry: currentEntry, saved: savedScope, named: !!(selectedProperty && selectedProperty.propertyId), refresh: onSavedScopeUnavailable };
+  scopeRef.current = { entry: currentEntry, saved: savedScope, named: (selectedProperty && selectedProperty.propertyId) || null, refresh: onSavedScopeUnavailable };
   // The arrival checklist's gate-code and pet-plan rows come from
   // /property/preferences, which is keyed by the CUSTOMER — they describe the
   // profile's PRIMARY address. Under a NON-primary saved selection they are
@@ -14085,7 +14092,7 @@ function PropertyProfileScopedNotice({ primaryEntry, onSwitch }) {
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddress: propertyAddressProp, currentEntry = null, savedScope = false, selectedProperty = null, scopeUnavailable = false, onSavedScopeUnavailable = null }) {
   // A house is selected (a saved-property id on the selection) whether or
   // not the retained list has an entry for it — see scopeEchoMismatch.
-  const selectionNamed = !!(selectedProperty && selectedProperty.propertyId);
+  const selectionNamed = (selectedProperty && selectedProperty.propertyId) || null;
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
   const viewport = useSheetViewport(open, dialogRef);
@@ -14382,8 +14389,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         // when its resolved scope names another (uncapped codex r1o P1).
         // Pinned to the SELECTION when the list has no entry for it yet — the
         // entry's id and the selection's id are the same house whenever both
-        // exist (uncapped codex r2a P1).
-        ...(savedScope && (currentEntry?.propertyId || selectedProperty?.propertyId)
+        // exist (uncapped codex r2a P1) — and independently of the list: a
+        // fresh session whose /auth/properties read failed while /auth/me
+        // resolved a house still binds its ticket to that house (uncapped
+        // codex r2c P1); the server answers 409 on a mismatch.
+        ...(currentEntry?.propertyId || selectedProperty?.propertyId
           ? { expectedPropertyId: String(currentEntry?.propertyId || selectedProperty.propertyId) } : {}),
       });
       // The server's 60s dedupe path returns success against the EARLIER
@@ -15393,7 +15403,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
-function VisitsTab({ customer, properties = [], activePropertyId, subTab, onSubTabChange, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
+function VisitsTab({ customer, properties = [], activePropertyId, selectedProperty = null, subTab, onSubTabChange, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   const compact = useIsMobile(760);
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
   const card = {
@@ -15460,7 +15470,7 @@ function VisitsTab({ customer, properties = [], activePropertyId, subTab, onSubT
           </div>
         </div>
       </section>
-      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : (
+      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : (
         <>
           {/* Completed visits and reports read /services, which is
               customer-wide (per-property history is PR 4 of the lane): under
@@ -16576,7 +16586,7 @@ export default function PortalPage() {
           onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
-        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
+        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the
           // same sub-tab; replace (not push) so pill toggles don't stack

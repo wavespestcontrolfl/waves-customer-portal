@@ -68,4 +68,25 @@ describe('ReportIssueOverlay mount safety', () => {
     await waitFor(() => expect(refresh).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: /submit request/i })).toBeDisabled();
   });
+  // Fresh session: /auth/me resolved house B but /auth/properties failed, so
+  // there is no saved list. The ticket still pins B (uncapped codex r2c P1).
+  it('pins the ticket to the selected house even when no property list is available', async () => {
+    echo.value = { enabled: true, propertyId: 'pb', closed: false };
+    const api = (await import('../utils/api')).default;
+    const { fireEvent } = await import('@testing-library/react');
+    render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="" currentEntry={null} savedScope={false} selectedProperty={{ customerId: 'c1', propertyId: 'pb' }} />);
+    const submit = await screen.findByRole('button', { name: /submit request/i });
+    const categoryButton = document.querySelector('button[aria-pressed]');
+    fireEvent.click(categoryButton);
+    fireEvent.change(screen.getByLabelText("Describe what's happening"), { target: { value: 'Ants along the lanai door' } });
+    await waitFor(() => expect(submit).not.toBeDisabled());
+    fireEvent.click(submit);
+    await waitFor(() => expect(api.createRequest).toHaveBeenCalledWith(expect.objectContaining({ expectedPropertyId: 'pb' })));
+  });
+  it('a rolled-back gate (echo disabled) under a named selection with no list withholds the ticket', async () => {
+    echo.value = { enabled: false };
+    render(<ReportIssueOverlay open onClose={() => {}} customer={customer} propertyAddress="" currentEntry={null} savedScope={false} selectedProperty={{ customerId: 'c1', propertyId: 'pb' }} />);
+    expect(await screen.findByText('Refreshing your property selection…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /submit request/i })).toBeDisabled();
+  });
 });
