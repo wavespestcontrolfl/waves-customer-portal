@@ -1,3 +1,4 @@
+const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
@@ -117,7 +118,7 @@ function normalizeContactInput(contact = {}) {
 const CHANNEL_VALUES = ['sms', 'email', 'both'];
 const APP_CHANNEL_KEYS = new Set([
   'appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel',
-  'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel',
+  'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel', 'requestChannel',
 ]);
 
 function appPreferencesAvailable(req) {
@@ -232,6 +233,7 @@ function preferencePayload(prefs = {}, { includeChannels = true, appPreferences 
         serviceCompleteChannel: channelValue(prefs.service_complete_channel, true),
         invoiceChannel: channelValue(prefs.invoice_channel, true),
         paymentIssueChannel: channelValue(prefs.payment_issue_channel, true),
+        requestChannel: prefs.request_channel === 'push' ? 'push' : 'email',
       } : {}),
     } : {}),
   };
@@ -280,6 +282,11 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
     // flips is exactly the opt-out this exists to honor.
     dbUpdates.service_reminder_72h_channel_explicit = true;
   }
+  // A full preference round trip may echo the default Email value. Only a
+  // changed request channel proves a choice; unrelated saves keep provenance.
+  if (updates.requestChannel !== undefined && updates.requestChannel !== (existing.request_channel || 'email')) {
+    dbUpdates.request_channel_explicit = true;
+  }
   return dbUpdates;
 }
 
@@ -309,6 +316,7 @@ const ACCOUNT_PREF_LABELS = {
   serviceCompleteChannel: 'Service Complete Report — Delivery',
   invoiceChannel: 'Invoices — Delivery',
   paymentIssueChannel: 'Payment Problems — Delivery',
+  requestChannel: 'Request Updates — Delivery',
   billingReminderChannel: 'Billing Reminder — Delivery',
   paymentConfirmationChannel: 'Payment Confirmation — Delivery',
 };
@@ -324,6 +332,7 @@ const CHANNEL_PREF_KEYS = new Set([
   'serviceCompleteChannel',
   'invoiceChannel',
   'paymentIssueChannel',
+  'requestChannel',
   'billingReminderChannel',
   'paymentConfirmationChannel',
 ]);
@@ -356,6 +365,7 @@ const DB_FIELD_BY_PREF = {
   serviceCompleteChannel: 'service_complete_channel',
   invoiceChannel: 'invoice_channel',
   paymentIssueChannel: 'payment_issue_channel',
+  requestChannel: 'request_channel',
   billingReminderChannel: 'billing_channel',
   paymentConfirmationChannel: 'payment_receipt_channel',
 };
@@ -564,6 +574,7 @@ router.put('/preferences', async (req, res, next) => {
       serviceCompleteChannel: Joi.string().valid('sms', 'push'),
       invoiceChannel: Joi.string().valid('sms', 'push'),
       paymentIssueChannel: Joi.string().valid('sms', 'push'),
+      requestChannel: Joi.string().valid('email', 'push'),
       billingReminderChannel: Joi.string().valid(...CHANNEL_VALUES),
       paymentConfirmationChannel: Joi.string().valid(...CHANNEL_VALUES, 'push'),
     }).min(1);
@@ -601,6 +612,7 @@ router.put('/preferences', async (req, res, next) => {
         if (owner?.[col] === 'push') {
           delete channelDbUpdates[col];
           delete propertyDbUpdates[col];
+          if (key === 'requestChannel') delete propertyDbUpdates.request_channel_explicit;
           delete updates[key];
         }
       }
@@ -614,6 +626,7 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     await db.transaction(async (trx) => {
+      for (const id of [...new Set([req.customerId, primaryId])].sort()) await lockCustomerComms(trx, id);
       if (Object.keys(propertyDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: req.customerId })
           .update({ ...propertyDbUpdates, updated_at: new Date() });
@@ -842,7 +855,8 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     // (marketing flags NULL), so this is always an update — a bare insert
     // here would take the legacy true defaults and mint marketing consent.
     const existing = await ensurePrefs(req.params.customerId);
-    await db('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
+    await withCustomerCommsLock(db, req.params.customerId, trx =>
+      trx('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates));
     if (pendingOptinDispatch) {
       const { dispatchRecipientOptins } = require('../services/recipient-optin');
       void dispatchRecipientOptins(pendingOptinDispatch.claims, pendingOptinDispatch.customer)

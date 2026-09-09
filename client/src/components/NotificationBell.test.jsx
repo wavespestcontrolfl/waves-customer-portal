@@ -289,3 +289,20 @@ describe('NotificationBell panel', () => {
     expect(screen.queryByText('Visit completed')).toBeNull();
   });
 });
+
+describe('NotificationBell admin mobile panel offsets (UI audit F0034)', () => {
+  it('sits flush under the 52px admin top bar and above the 56px tab bar', async () => {
+    const original = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const panel = await screen.findByRole('dialog', { name: 'Notifications' });
+      // jsdom re-serialises env() oddly, so assert the constant term only.
+      expect(panel.style.top).toMatch(/^calc\(52px \+ env\(/);
+      expect(panel.style.bottom).toMatch(/^calc\(56px \+ env\(/);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
+    }
+  });
+});

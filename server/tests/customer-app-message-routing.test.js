@@ -113,6 +113,18 @@ test('an unavailable invoice guard keeps a retry without falling back around the
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
 });
 
+test('temporary native failures retain their delay and never invoke a Text fallback', async () => {
+  prefs.invoice_channel = 'push';
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, error: 'native_provider_retryable', retryAfterMs: 900000 });
+  const startedAt = Date.now();
+  const result = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
+  expect(result).toMatchObject({ sent: false, blocked: false, code: 'APP_PROVIDER_RETRY',
+    retryable: true, deferred: true, retryAfterMs: 900000 });
+  expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(startedAt + 900000);
+  expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+});
+
 test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc', 'non_mobile'])('hard suppression %s still blocks app delivery', async (reason) => {
   suppression = { reason, active: true };
   const result = await sendCustomerMessage(input);
@@ -418,4 +430,25 @@ test('an emoji-bearing supported notice keeps its allowed SMS fallback and recor
   expect(Twilio.sendSMS.mock.calls[0][2]).toMatchObject({ explicitPushOnly: false, skipPushRouting: true });
   prefs.sms_enabled = false;
   expect(await sendCustomerMessage({ ...input, body: 'Your receipt is ready ✅' })).toMatchObject({ sent: false, code: 'SMS_OPTED_OUT' });
+});
+
+
+test.each(['no_fresh_device', 'preference_changed', 'app_gate_off'])('App-only request updates never become a text on %s', async (reason) => {
+  prefs.sms_enabled = false;
+  Twilio.sendSMS.mockResolvedValueOnce({ success: false, appUnavailable: true, error: reason });
+  const result = await sendCustomerMessage({ ...input, purpose: 'support_resolution',
+    metadata: { appOnly: true, original_message_type: 'service_request_updated' } });
+  expect(result).toMatchObject({ sent: false, blocked: true, code: 'APP_UNAVAILABLE' });
+  expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+});
+
+test('request delivery forwards the queued status and transition identity to the final App guard', async () => {
+  const notificationEventKey = 'request:request-1:updated:transition-1';
+  expect(await sendCustomerMessage({ ...input, purpose: 'support_resolution', metadata: {
+    appOnly: true, original_message_type: 'service_request_updated',
+    service_request_id: 'request-1', request_status: 'acknowledged', request_status_version: 1, notificationEventKey,
+  } })).toMatchObject({ sent: true, channel: 'push' });
+  expect(Twilio.sendSMS.mock.calls[0][2]).toMatchObject({ explicitPushOnly: true,
+    requestNotification: { id: 'request-1', status: 'acknowledged', version: 1 }, notificationEventKey });
 });

@@ -500,7 +500,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 14, padding: '0 5px', background: '#DCFCE7', color: '#166534', fontSize: 9 }}
+            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
             title="Prepaid"
           >$</span>
         )}
@@ -511,7 +511,10 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         {service.visit && Number(service.visit.serviceCount) > 1 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium bg-zinc-200 text-zinc-800"
-            style={{ height: 14, padding: '0 5px', fontSize: 9 }}
+            // One-slot (30 min) blocks are 32px with overflow-hidden: keep the
+            // compact pill there so the chip is not clipped; grow it when the
+            // block has a second row of room.
+            style={effectiveHeight >= SLOT_HEIGHT * 2 ? { height: 18, padding: '0 6px', fontSize: 11 } : { height: 14, padding: '0 5px', fontSize: 11, lineHeight: 1 }}
             title={`Visit of ${service.visit.serviceCount} services: ${(service.visit.serviceTypes || []).join(' + ')}`}
             data-testid="visit-chip"
           >Visit · {service.visit.serviceCount}</span>
