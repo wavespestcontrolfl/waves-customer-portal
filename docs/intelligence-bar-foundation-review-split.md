@@ -59,6 +59,27 @@ write-gate scanner now recognizes `action-registry.js` as a non-tool helper;
 catalog, coverage, and write-gate suites pass all 46 tests. These resolve the
 first CI run's exact failures (new upstream sites and the helper allowlist).
 
+Part C persists request identity, runner leases, action-step deduplication and
+actor/session-bound recovery through the existing confirmation store. It adds
+the `ib_tasks` migration and extends the existing daily Eastern retention tick;
+it does not add a worker/job system or authorize background writes. The platform
+gate defaults off. Route and conversation-cursor integration remain in D.
+
+Before storage, the same target validator replaces full resolution context with
+IDs, an exact-action fingerprint, and a fingerprint of the freshly authorized
+records. Confirmation compares both again. This preserves raw-number SMS,
+vendor replies, explicit unlinked records, and approved bulk cohorts without
+retaining their names, addresses, candidates or request text in receipt params.
+The existing sweep strips old private context only after approval expiry,
+including receipts whose task FK is already null; results and receipt IDs stay.
+
+Part C validation: 79 unit/contract/scheduler tests passed and six tests passed
+against the already-migrated isolated Postgres database. The latter cover
+request replay, competing resumes, predecessor gating, privacy-preserving
+confirmation hashes, non-resumable reads/attachments, and legacy retention.
+Their recorded provider outcomes are synthetic ledger fixtures; no provider or
+domain send ran. Full natural-language/route/UI proof is required in D.
+
 Part B introduces the target-context reader for integration in D. Review IDs
 participate in the same parent/customer checks as other records; an unlinked
 review needs its native deep link or an explicit UUID, and cannot be substituted
@@ -116,6 +137,20 @@ preloads its own authorized estimate tools. Broader payload/helper dependency
 fingerprinting remains deferred alongside backend drift enforcement. Current
 fingerprints describe call expressions; changes outside those expressions still
 require manual review until final capability reconciliation.
+
+Part C after parent integration passes 110 unit/contract/scheduler tests and
+eight isolated Postgres tests (six recovery, two targeting). Registry, coverage
+and domain-rule gates pass. The new task schema remains the unchanged
+`20260906000061_ib_task_receipts` migration already tested on the dedicated
+dev database; no production migration or gate activation is authorized.
+
+### Deferred P2s in C
+
+- `server/services/intelligence-bar/task-context.js:231`: compact approval
+  proof adds decisions to the already-complex shared target validator. The
+  ordered relationship, recipient and proof checks remain together; extracting
+  one-use helpers would only move branches. Further simplification must keep
+  every tested authorization path.
 
 Main integration at `db70ae441` adds the three new prep-guide/Quick Links
 request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
@@ -199,6 +234,15 @@ screenshots were inspected; no JavaScript errors or horizontal overflow appeared
 The provider was stubbed in browser QA. Actual native-route tests and the real
 Google SDK with a controlled transporter separately cover outcome classification.
 The parent-integrated database suites pass 26 rollback-only cases.
+
+C normalizes UUID identity in scalar selectors, nested product fields and bulk
+sets while preserving exact approval parameters and hashes. Legacy keys must
+prove their original canonical input before semantic replay; preview-only
+bindings that cannot be reconstructed require reconciliation. New task actions
+record a hash-bound step-key version so a legitimate distinct successor is
+still possible. The final checks pass 155 unit cases and 33 isolated PostgreSQL
+cases, including pending, accepted and unknown legacy replay. Independent
+review found no actionable issue; no provider or domain send ran.
 
 The next B1 correction generalizes canonical name-selector guards to all
 classified writes, including lead status, and requires explicit current-request
