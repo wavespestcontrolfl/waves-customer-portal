@@ -11,6 +11,7 @@ jest.mock('../services/property-lookup/ai-property-lookup', () => ({
   lookupPropertyFromAITrio: jest.fn(),
 }));
 jest.mock('../services/new-recurring-welcome-sms', () => ({
+  queueOneTimeWelcomeEmail: jest.fn(async () => ({ queued: false })),
   sendNewRecurringWelcome: jest.fn(),
   isNewRecurringSignupCandidate: jest.fn(async () => false),
 }));
