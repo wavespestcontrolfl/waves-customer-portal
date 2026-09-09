@@ -1,4 +1,5 @@
 const { PROGRAM, ruleDefinition, allocatedCents, splitCents, production, outcomeBonus, commission, assessmentResult, schemas, validate } = require('../services/field-team-rules');
+const { execFileSync } = require('node:child_process');
 
 const rule = ruleDefinition({ service_rules: [{ service_key: 'pest_quarterly', credit_type: 'routine', rework_window_days: 30 }], rework_minimum: 10, handoff_minimum: 10, activation_share_bps: null });
 const allocation = { net_value_cents: 60000, planned_visits: 4, credit_type: 'routine' };
@@ -8,6 +9,10 @@ const evidence = (overrides = {}) => ({ service_key: 'pest_quarterly', service_d
 const cohort = (size, failures = 0, kind = 'rework') => Array.from({ length: size }, (_, i) => evidence(i < failures ? kind === 'rework' ? { ...linkedReturn, rework_outcome: 'technician_execution' } : { complete_at_cutoff: false } : {}));
 
 describe('Field Team Program revision 2b simulation contract', () => {
+  test.each(['UTC', 'America/New_York'])('preserves PostgreSQL DATE calendar values under %s', timezone => {
+    const result = execFileSync(process.execPath, ['-e', "const {dateOnly}=require(process.argv[1]); const parse=require('pg').types.getTypeParser(1082); process.stdout.write(JSON.stringify([dateOnly(parse('2026-09-09')), dateOnly('2026-09-09'), dateOnly(null)]));", require.resolve('../services/field-team-rules')], { env: { ...process.env, TZ: timezone }, encoding: 'utf8' });
+    expect(JSON.parse(result)).toEqual(['2026-09-09', '2026-09-09', null]);
+  });
   test('keeps Technician II as the highest field title and the modeled targets reconcile', () => {
     expect(PROGRAM.roles.map(role => role.title)).toEqual(['Trainee', 'Technician I', 'Technician II', 'Service Manager', 'General Manager']);
     expect(PROGRAM.roles.slice(1).map(role => role.annualBaseCents + role.targetIncentiveCents)).toEqual([6800000, 7960000, 9000000, 12000000]);
@@ -60,6 +65,8 @@ describe('Field Team Program revision 2b simulation contract', () => {
       expect(outcomeBonus(kind, [...cohort(10), { ...evidence(), service_key: null }], rule, '2026-04-01').status).toBe('unresolved');
       expect(outcomeBonus(kind, [...cohort(10), evidence({ exclusion: 'corrective', provenance: 'backfilled' })], rule, '2026-04-01').status).toBe('unresolved');
       expect(outcomeBonus(kind, [...cohort(10), { ...evidence({ exclusion: 'corrective' }), service_key: null }], rule, '2026-04-01').status).toBe('unresolved');
+      expect(outcomeBonus(kind, [...cohort(10), { ...evidence(), service_key: 'not_in_effective_rule' }], rule, '2026-04-01').status).toBe('unresolved');
+      expect(outcomeBonus(kind, [...cohort(10), { ...evidence({ exclusion: 'corrective' }), service_key: 'not_in_effective_rule' }], rule, '2026-04-01').status).toBe('unresolved');
     }
   });
   test.each([{ return_service_id: null }, { same_issue_confirmed: false }, { return_service_date: null }, { return_service_date: '2026-02-01' }])('keeps an unqualified return unresolved: %j', missing => {

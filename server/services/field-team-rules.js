@@ -44,6 +44,9 @@ function validate(schema, value) {
   return result.value;
 }
 function dateOnly(value) {
+  // PostgreSQL DATE only: pg represents it at host-local midnight, not as
+  // an event instant. UTC and Eastern hosts retain the same ISO calendar day.
+  // Timestamp callers use etDateString instead; converting a UTC DATE shifts it.
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return value == null ? null : String(value).slice(0, 10);
 }
@@ -161,10 +164,9 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
     // First matching reason owns the observation; excluded work and missing
     // evidence can never increment the observed denominator.
     const checks = [
-      [!row.service_key, 'unresolved'],
+      [!serviceRule, 'unresolved'],
       [facts.provenance !== 'verified', 'unresolved'],
       [facts.exclusion !== 'none', 'excluded'],
-      [!serviceRule, 'excluded'],
       ...(rework ? [
         [window == null, 'missing_window'],
         [asOfDate < mature, 'immature'],

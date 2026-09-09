@@ -15,6 +15,8 @@ A service can claim one original application ordinal. The accepted net value
 is divided by the original scheduled count, with deterministic cent remainders;
 cancellation never redistributes it. Crew shares total 100%. Database uniqueness
 also covers allocations without a property and one claiming row per service.
+Claims require a retained allocation and positive ordinal; absent or half-present
+allocation pairs cannot permanently consume a service's claim.
 
 Each new effective definition retains its monetary formula inputs. Already-stored
 revision 2b definitions resolve through a fixed legacy version definition;
@@ -22,7 +24,8 @@ unknown versions do not borrow current rates. Production uses the selected rule,
 commission its retained rate and milestone split, and outcomes its retained
 curves. Interpolation is explicitly a linear simulation assumption.
 
-Unverified or unmapped evidence stays unresolved, including claimed exclusions.
+Unverified evidence and service keys missing from the effective definition stay
+unresolved, including claimed exclusions.
 A rework finding needs a linked later return, same-issue confirmation and date.
 Missing cutoffs, minimum samples, observation windows and commission splits do
 not become passing results or implicit defaults. A premature no-return review
@@ -35,6 +38,7 @@ management qualification also requires paid development and a separate vacancy.
 
 Verification uses Node 20 and synthetic records in a worktree-owned development
 database. Run `npx jest --runInBand --coverage=false server/tests/field-team-rules.test.js server/tests/customer-dedupe.test.js` for formulas, historical versions,
-unresolved evidence and merge behavior. Both migrations were verified on real
+unresolved evidence and merge behavior. All three migrations were verified on real
 Postgres with repeated up/down execution inside rollback; duplicate null-scope
-allocations and second service claims were rejected by their database indexes.
+allocations and second service claims were rejected by their database indexes,
+and malformed allocation/ordinal pairs were rejected by the claim-shape check.
